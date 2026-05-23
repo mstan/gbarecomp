@@ -294,12 +294,13 @@ int main(int argc, char** argv) {
             uint32_t word = bus.read32(pc);
             insn = armv4t::ArmDecoder::decode(word, pc);
         }
-        auto r = armv4t::Interpreter::step(cpu, bus, insn);
-        // Advance hardware time. ARM7TDMI instructions on the GBA
-        // BIOS region average ~1 cycle each (BIOS is in zero-waitstate
-        // ROM, plus the prefetch buffer hides most pipeline cost).
-        // Real cycle accuracy lands with the scheduler in Phase 3.
-        pump_ppu(1);
+        uint32_t insn_cycles = 1;
+        auto r = armv4t::Interpreter::step(cpu, bus, insn, &insn_cycles);
+        // Advance hardware time by what the instruction actually
+        // cost on real ARM7TDMI. cycle_cost_base in interpreter.cpp
+        // captures BIOS-region S/N/I cycles; pipeline refill is
+        // folded in for ops that write PC.
+        pump_ppu(insn_cycles);
         if (!args.quiet) {
             const char* r_name = "?";
             switch (r) {

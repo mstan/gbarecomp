@@ -54,7 +54,11 @@ public:
         NotImplemented, // op shape not yet handled
     };
 
-    static Result step(CPUState& cpu, Bus& bus, const Instr& i);
+    // `cycles_out` (optional) receives the number of host cycles this
+    // instruction consumed. Approximation only — see interpreter.cpp's
+    // `cycle_cost` table for the model. Pass nullptr to ignore.
+    static Result step(CPUState& cpu, Bus& bus, const Instr& i,
+                       uint32_t* cycles_out = nullptr);
 
     // Read a register with PC-pipeline adjustment baked in. Public so
     // tests can verify the rule directly.

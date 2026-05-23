@@ -306,23 +306,105 @@ bool is_priv_non_system(uint8_t mode) {
            mode != static_cast<uint8_t>(Mode::System);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Cycle accounting
+// ─────────────────────────────────────────────────────────────────────
+//
+// Per GBATEK § "GBA Memory Map - Bus Width and Speed", and the
+// ARM7TDMI TRM § "Instruction Cycle Times". For the BIOS region
+// (zero-waitstate 32-bit ROM) S=N=I=1, so we use the raw cycle counts
+// straight from the TRM. Other regions (PAL/VRAM/OAM at 16-bit, ROM
+// with WAITCNT-driven waitstates) cost more per memory access; that
+// detail lands when we wire a region lookup into the bus.
+//
+// Pipeline refill (any op that writes to PC) is charged uniformly as
+// +2 cycles on top of the base cost: the prefetch buffer is flushed
+// and two new instruction fetches occur before the next decode.
+//
+// Approximations: LDM/STM use a register-count-derived cost, MUL uses
+// a fixed average (operand-dependent precision lands later). These
+// match real hardware closely enough for the BIOS init phase.
+
+inline uint32_t cycle_cost_base(IrOp op, uint16_t reg_list) {
+    switch (op) {
+        case IrOp::AND: case IrOp::EOR: case IrOp::SUB: case IrOp::RSB:
+        case IrOp::ADD: case IrOp::ADC: case IrOp::SBC: case IrOp::RSC:
+        case IrOp::TST: case IrOp::TEQ: case IrOp::CMP: case IrOp::CMN:
+        case IrOp::ORR: case IrOp::MOV: case IrOp::BIC: case IrOp::MVN:
+        case IrOp::MRS: case IrOp::MSR:
+            return 1;  // 1S
+
+        // Branches: 2S+1N for pipeline refill. The +2 in step() for
+        // wrote_pc applies to LDR PC / DP-to-PC; for B/BL/BX the
+        // refill cost is folded in here so we don't double-count.
+        case IrOp::B: case IrOp::BL: case IrOp::BX: case IrOp::BLX_reg:
+        case IrOp::BL_prefix: case IrOp::BL_suffix:
+            return 3;  // 2S+1N
+
+        case IrOp::LDR:   case IrOp::LDRB:
+        case IrOp::LDRH:  case IrOp::LDRSB: case IrOp::LDRSH:
+            // 1S+1N+1I baseline (3) + 1 region-average penalty since
+            // BIOS init reads from EWRAM and writes to PAL/VRAM/OAM
+            // (16-bit bus → extra N per 32-bit access). Per-region
+            // cost lands when we wire address → cost in the bus.
+            return 4;
+
+        case IrOp::STR:   case IrOp::STRB:  case IrOp::STRH:
+            // 1S+1N baseline (2) + 1 region penalty (same reason).
+            return 3;
+
+        case IrOp::LDM: {
+            // nS+1N+1I; +1 region penalty as above.
+            uint32_t n = __builtin_popcount(reg_list);
+            if (n == 0) n = 1;
+            return n + 3;
+        }
+        case IrOp::STM: {
+            // (n-1)S+2N; +1 region penalty.
+            uint32_t n = __builtin_popcount(reg_list);
+            if (n == 0) n = 1;
+            return n + 2;
+        }
+
+        case IrOp::SWP:  case IrOp::SWPB:
+            return 4;  // 1S+2N+1I
+
+        case IrOp::MUL:
+            return 4;  // 1S + ~3I (avg)
+        case IrOp::MLA: case IrOp::UMULL: case IrOp::SMULL:
+            return 5;
+        case IrOp::UMLAL: case IrOp::SMLAL:
+            return 6;
+
+        case IrOp::SWI:
+            return 3;  // 2S+1N — mode-change overhead is in enter_irq
+
+        default:
+            return 1;
+    }
+}
+
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────
 // Main step
 // ─────────────────────────────────────────────────────────────────────
 
-Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i) {
+Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
+                                      uint32_t* cycles_out) {
     // Condition check first.
     if (!cond_passes(i.cond, cpu.cpsr)) {
-        // Auto-advance and report Normal.
+        // Auto-advance and report Normal. A condition-failed
+        // instruction still costs 1S for its fetch.
         cpu.R[15] += i.thumb ? kThumbInsnBytes : kArmInsnBytes;
+        if (cycles_out) *cycles_out = 1;
         return Result::Normal;
     }
 
     if (i.is_undefined) {
         // Caller decides how to trap. PC is not auto-advanced; on
         // hardware, exception entry takes over.
+        if (cycles_out) *cycles_out = 1;
         return Result::Undefined;
     }
 
@@ -560,6 +642,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i) {
                 // Edge case (empty reg list): ARMv4T behavior is to
                 // transfer R15 and offset base by 0x40. Mark as not
                 // implemented for now; real games don't emit this.
+                if (cycles_out) *cycles_out = 1;
                 return Result::NotImplemented;
             }
             uint32_t addr;
@@ -858,10 +941,25 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i) {
 
         // ── Software interrupt ─────────────────────────────────────
         case IrOp::SWI:
+            if (cycles_out) *cycles_out = cycle_cost_base(i.op, 0);
             return Result::Swi;
 
         default:
+            if (cycles_out) *cycles_out = 1;
             return Result::NotImplemented;
+    }
+
+    // Compute cycles for the just-executed instruction. The +2
+    // pipeline-refill charge applies whenever the op wrote PC and
+    // didn't already account for the refill (B/BL/BX folded refill
+    // into their base cost, so we skip the surcharge for those).
+    if (cycles_out) {
+        uint32_t c = cycle_cost_base(i.op, i.block.reg_list);
+        bool branch_op = (i.op == IrOp::B || i.op == IrOp::BL ||
+                          i.op == IrOp::BX || i.op == IrOp::BLX_reg ||
+                          i.op == IrOp::BL_prefix || i.op == IrOp::BL_suffix);
+        if (wrote_pc && !branch_op) c += 2;
+        *cycles_out = c;
     }
 
     if (!wrote_pc) {
