@@ -312,12 +312,32 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         return;
     }
     if (starts("\"emu_registers\"")) {
-        // Pull R0..R15 + CPSR via the bus's CPU view. For mGBA the
-        // current ARM7TDMI registers live in core->cpu — but the
-        // public API doesn't expose them directly. Plumbing this
-        // properly needs the GBA-specific cast; do that in the full
-        // spec pass (task #19).
-        emit_error(out, "emu_registers not implemented yet");
+        // mGBA exposes registers via readRegister(name, &out). ARM7TDMI
+        // names: "r0".."r15" and "cpsr". Anything missing comes back
+        // as 0 with ok=false on the underlying call.
+        std::string body = "{\"ok\":true";
+        for (int r = 0; r <= 15; ++r) {
+            char name[8]; std::snprintf(name, sizeof(name), "r%d", r);
+            int32_t v = 0;
+            o.core->readRegister(o.core, name, &v);
+            char field[64];
+            std::snprintf(field, sizeof(field), ",\"r%d\":%u",
+                          r, static_cast<unsigned>(v));
+            body += field;
+        }
+        int32_t cpsr = 0;
+        o.core->readRegister(o.core, "cpsr", &cpsr);
+        char fb[64];
+        std::snprintf(fb, sizeof(fb), ",\"cpsr\":%u}",
+                      static_cast<unsigned>(cpsr));
+        body += fb;
+        out = body;
+        return;
+    }
+    if (starts("\"emu_pc\"")) {
+        int32_t pc = 0;
+        o.core->readRegister(o.core, "r15", &pc);
+        emit_ok_int(out, "pc", static_cast<uint32_t>(pc));
         return;
     }
     if (starts("\"quit\"")) {

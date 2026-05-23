@@ -171,6 +171,49 @@ void Interpreter::enter_irq(CPUState& cpu, uint32_t return_address) {
     cpu.R[15] = 0x00000018u;
 }
 
+void Interpreter::enter_swi(CPUState& cpu, uint32_t return_address,
+                            bool /*from_thumb*/) {
+    // Pack CPSR for SPSR_svc.
+    uint32_t cpsr_u32 = 0;
+    if (cpu.cpsr.n) cpsr_u32 |= 1u << 31;
+    if (cpu.cpsr.z) cpsr_u32 |= 1u << 30;
+    if (cpu.cpsr.c) cpsr_u32 |= 1u << 29;
+    if (cpu.cpsr.v) cpsr_u32 |= 1u << 28;
+    if (cpu.cpsr.i) cpsr_u32 |= 1u << 7;
+    if (cpu.cpsr.f) cpsr_u32 |= 1u << 6;
+    if (cpu.cpsr.t) cpsr_u32 |= 1u << 5;
+    cpsr_u32 |= cpu.cpsr.mode & 0x1Fu;
+
+    // Bank out current mode's R13/R14.
+    auto mode_to_bank = [](uint8_t m) -> BankedSlot {
+        switch (static_cast<Mode>(m)) {
+            case Mode::FIQ:        return Bank_FIQ;
+            case Mode::IRQ:        return Bank_IRQ;
+            case Mode::Supervisor: return Bank_Supervisor;
+            case Mode::Abort:      return Bank_Abort;
+            case Mode::Undefined:  return Bank_Undefined;
+            default:               return Bank_User;
+        }
+    };
+    auto old_bank = mode_to_bank(cpu.cpsr.mode);
+    cpu.banked_sp[old_bank] = cpu.R[13];
+    cpu.banked_lr[old_bank] = cpu.R[14];
+
+    cpu.banked_spsr[Bank_Supervisor] = cpsr_u32;
+
+    cpu.cpsr.mode = static_cast<uint8_t>(Mode::Supervisor);
+    cpu.R[13]     = cpu.banked_sp[Bank_Supervisor];
+    // LR_svc = address of next instruction. The caller adjusts for
+    // ARM/THUMB instruction width before passing in.
+    cpu.R[14]     = return_address;
+
+    cpu.cpsr.t = false;
+    cpu.cpsr.i = true;
+    cpu.thumb  = false;
+
+    cpu.R[15] = 0x00000008u;
+}
+
 bool Interpreter::cond_passes(Cond c, const CPSR& cpsr) {
     switch (c) {
         case Cond::EQ: return  cpsr.z;

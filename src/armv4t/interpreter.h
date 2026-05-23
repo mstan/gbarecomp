@@ -83,6 +83,21 @@ public:
     // have executed if the IRQ hadn't fired. For IRQs taken between
     // instructions, that's `cpu.R[15]` at the call site.
     static void enter_irq(CPUState& cpu, uint32_t return_address);
+
+    // Take a Software Interrupt (SWI) exception. Called when step()
+    // returns Result::Swi. Mirrors ARM ARM A2.6.4 SWI entry:
+    //   SPSR_svc ← CPSR
+    //   CPSR.mode ← Supervisor
+    //   CPSR.T ← 0           (handler always runs in ARM state)
+    //   CPSR.I ← 1           (mask IRQs while in SWI handler)
+    //   LR_svc ← address of next instruction (PC of SWI + 4 ARM, +2 THUMB)
+    //   PC ← 0x00000008
+    //
+    // `return_address` is the PC immediately AFTER the SWI instruction
+    // (already adjusted by the caller for ARM/THUMB instruction width).
+    // The BIOS's standard `MOVS PC, R14` epilogue then returns to it.
+    static void enter_swi(CPUState& cpu, uint32_t return_address,
+                          bool from_thumb);
 };
 
 }  // namespace armv4t

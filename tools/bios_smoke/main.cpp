@@ -236,6 +236,7 @@ int main(int argc, char** argv) {
     int taken = 0;
     uint64_t irq_entries = 0;
     uint64_t halt_steps  = 0;
+    uint64_t swi_entries = 0;
     int frames_presented = 0;
     bool host_quit = false;
     // When --window or --frames is set without an explicit --steps,
@@ -296,6 +297,16 @@ int main(int argc, char** argv) {
         }
         uint32_t insn_cycles = 1;
         auto r = armv4t::Interpreter::step(cpu, bus, insn, &insn_cycles);
+
+        // SWI dispatch: the BIOS implements Halt / VBlankIntrWait /
+        // CpuSet / etc. behind these. The interpreter returns Swi
+        // without modifying CPU state; we mode-switch + jump to
+        // 0x00000008 so the real BIOS handler runs.
+        if (r == armv4t::Interpreter::Result::Swi) {
+            uint32_t next_pc = pc + (cpu.thumb ? 2u : 4u);
+            armv4t::Interpreter::enter_swi(cpu, next_pc, cpu.thumb);
+            ++swi_entries;
+        }
         // Advance hardware time by what the instruction actually
         // cost on real ARM7TDMI. cycle_cost_base in interpreter.cpp
         // captures BIOS-region S/N/I cycles; pipeline refill is
@@ -414,10 +425,11 @@ int main(int argc, char** argv) {
                 static_cast<unsigned>(bus.io().ie()),
                 static_cast<unsigned>(bus.io().if_reg()),
                 static_cast<unsigned>(bus.io().ime() ? 1 : 0));
-    std::printf("irq_entries=%llu halt_steps=%llu vblank_irqs_raised=%llu\n",
+    std::printf("irq_entries=%llu halt_steps=%llu vblank_irqs_raised=%llu swi_entries=%llu\n",
                 static_cast<unsigned long long>(irq_entries),
                 static_cast<unsigned long long>(halt_steps),
-                static_cast<unsigned long long>(vblank_irqs_raised));
+                static_cast<unsigned long long>(vblank_irqs_raised),
+                static_cast<unsigned long long>(swi_entries));
     std::printf("DMA runs: ch0=%zu(%zu w)  ch1=%zu(%zu w)  ch2=%zu(%zu w)  ch3=%zu(%zu w)\n",
                 bus.io().dma_runs(0), bus.io().dma_words(0),
                 bus.io().dma_runs(1), bus.io().dma_words(1),
