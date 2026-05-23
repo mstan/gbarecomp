@@ -1,0 +1,26 @@
+# BIOS image (copyrighted; user provides their own dump). The .toml /
+# .md / .sym files in bios/ ARE tracked.
+bios/*.bin
+bios/*.BIN
+
+# Build output
+build/
+build-*/
+
+# Generated code (derivative of copyrighted BIOS / ROM; regenerate locally)
+**/generated/*.c
+**/generated/*.cpp
+**/generated/*.h
+**/generated/*.json
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Per-frame debug captures from bios_smoke / ppu probes. These are
+# diagnostic artifacts, not source; regenerate as needed.
+*.bmp
+*.png

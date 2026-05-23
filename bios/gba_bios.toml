@@ -1,0 +1,71 @@
+# gba_bios.toml — BIOS audit / recompile config.
+#
+# Mirrors the shape of a game's game.toml so the generic recompiler
+# tools (gba_scan, gba_recompile, audit scripts) can consume the
+# BIOS as just another program. Paths are relative to the gbarecomp
+# project root.
+#
+# NB: per docs/ARCHITECTURE.md, the BIOS is currently INTERPRETED at
+# runtime, not statically recompiled. This file exists so the same
+# tools can audit BIOS bytes when needed, and so static recompilation
+# can be turned on later without changing the interface.
+
+[program]
+name           = "GBA BIOS"
+id             = "gba_bios"
+rom            = "bios/gba_bios.bin"
+load_address   = "0x00000000"
+size           = "0x00004000"        # 16 KB
+entry_pc       = "0x00000000"
+
+# ── Identity ────────────────────────────────────────────────────────
+[identity]
+sha1 = "300c20df6731a33952ded8c436f7f186d25d3492"
+md5  = "a860e8c0b6d573d191e4ec7db1b1e4f6"
+
+# ── Recompiler config ──────────────────────────────────────────────
+#
+# Currently unused (BIOS is interpreted). Reserved for the future
+# pass that lifts BIOS code statically.
+[recompiler]
+strict     = true
+out_dir    = "generated"
+
+# ── Audit-specific config ──────────────────────────────────────────
+#
+# Code regions in the BIOS. Boot path runs from 0x00000000.
+# SWI handlers are entered from the SWI vector at 0x00000008.
+# IRQ handlers are entered from the IRQ vector at 0x00000018.
+
+[[audit.regions]]
+name        = "ResetVector"
+rom_start   = "0x0000"
+rom_end     = "0x0008"        # branch to reset handler
+vaddr_base  = "0x00000000"
+
+[[audit.regions]]
+name        = "SwiVector"
+rom_start   = "0x0008"
+rom_end     = "0x000C"
+vaddr_base  = "0x00000008"
+
+[[audit.regions]]
+name        = "IrqVector"
+rom_start   = "0x0018"
+rom_end     = "0x001C"
+vaddr_base  = "0x00000018"
+
+# The remaining ~16 KB is a mix of code and data (Nintendo logo
+# pattern, ARM/THUMB SWI handlers, intro animation code, IRQ
+# dispatcher). The full region list will be filled in as the BIOS
+# walk identifies code vs data.
+[[audit.regions]]
+name        = "Body"
+rom_start   = "0x0020"
+rom_end     = "0x4000"
+vaddr_base  = "0x00000020"
+
+[audit.normalize]
+# No mirroring for BIOS reads from the BIOS region itself; reads
+# from outside 0x00000000..0x00003FFF that happen to fall in the
+# 0x00 page return open-bus values. See gba_memory.cpp.

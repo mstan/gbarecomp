@@ -1,0 +1,69 @@
+# runtime.cmake — included by game repos (e.g. MinishCapRecomp).
+#
+# Configured by gbarecomp's top-level CMakeLists into the build directory.
+# Game CMakeLists do:
+#
+#   set(GBARECOMP_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../gbarecomp"
+#       CACHE PATH "Path to gbarecomp core")
+#   include("${GBARECOMP_ROOT}/build/runtime.cmake")
+#   gbarecomp_add_runtime_target(my-game
+#       GAME_GENERATED_C "${CMAKE_CURRENT_SOURCE_DIR}/generated/foo.c"
+#       DEBUG_PORT 19842
+#       WINDOW_TITLE "MyGameRecomp"
+#       DEFAULT_GAME_CONFIG_PATH "game.toml"
+#   )
+#
+# This file is intentionally minimal until the runtime stabilizes — game
+# repos add custom build steps directly until then.
+
+set(GBARECOMP_CORE_DIR "@CMAKE_CURRENT_SOURCE_DIR@" CACHE PATH "")
+set(GBARECOMP_CORE_BIN_DIR "@CMAKE_CURRENT_BINARY_DIR@" CACHE PATH "")
+
+function(gbarecomp_add_runtime_target target_name)
+    cmake_parse_arguments(GR
+        ""
+        "DEBUG_PORT;WINDOW_TITLE;DEFAULT_GAME_CONFIG_PATH"
+        "GAME_GENERATED_C"
+        ${ARGN}
+    )
+
+    if(NOT GR_GAME_GENERATED_C)
+        message(FATAL_ERROR "gbarecomp_add_runtime_target(${target_name}): "
+            "missing GAME_GENERATED_C")
+    endif()
+
+    add_executable(${target_name}
+        ${GR_GAME_GENERATED_C}
+    )
+
+    target_include_directories(${target_name} PRIVATE
+        "${GBARECOMP_CORE_DIR}/src/armv4t"
+        "${GBARECOMP_CORE_DIR}/src/gba"
+        "${GBARECOMP_CORE_DIR}/src/runtime"
+        "${GBARECOMP_CORE_DIR}/src/debug"
+    )
+
+    target_link_libraries(${target_name} PRIVATE
+        gbarecomp_runtime
+        gbarecomp_debug
+    )
+
+    if(GR_DEBUG_PORT)
+        target_compile_definitions(${target_name} PRIVATE
+            GBARECOMP_DEFAULT_DEBUG_PORT=${GR_DEBUG_PORT})
+    endif()
+    if(GR_WINDOW_TITLE)
+        target_compile_definitions(${target_name} PRIVATE
+            GBARECOMP_WINDOW_TITLE="${GR_WINDOW_TITLE}")
+    endif()
+    if(GR_DEFAULT_GAME_CONFIG_PATH)
+        target_compile_definitions(${target_name} PRIVATE
+            GBARECOMP_DEFAULT_GAME_CONFIG="${GR_DEFAULT_GAME_CONFIG_PATH}")
+    endif()
+
+    if(MSVC)
+        target_link_options(${target_name} PRIVATE /STACK:16777216)
+    elseif(MINGW OR WIN32)
+        target_link_options(${target_name} PRIVATE -Wl,--stack,16777216)
+    endif()
+endfunction()
