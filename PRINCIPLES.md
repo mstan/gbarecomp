@@ -18,6 +18,40 @@ Platform-agnostic rules still apply; this file adds GBA detail.
   and linker knowledge. They are **not** an execution oracle. The
   emulator is.
 
+## BIOS intro must be flawless before ROM (HARD GATE)
+
+No ROM, cartridge, game, or "Phase 5" work happens until the GBA
+BIOS intro is **flawless** on three axes simultaneously:
+
+1. **Visually** — the rendered framebuffer matches the mGBA oracle
+   pixel-for-pixel at every PPU frame from boot through the
+   post-intro idle state.
+2. **Audibly** — the startup chime plays correctly. The native
+   audio sample stream matches the oracle's sample stream over the
+   intro duration.
+3. **In-memory** — OAM, VRAM, PAL, IWRAM byte-identical to the
+   oracle at every PPU frame checkpoint. IO is allowed open-bus
+   jitter on documented write-only fields, nothing else.
+
+**Why:** The BIOS intro is the simplest piece of code the
+emulator runs. It requires no cartridge, no game-specific symbols,
+no per-ROM config. If it doesn't render correctly, every higher
+layer is built on a foundation we don't trust. Every cycle of
+"close enough" intro compounds into invisible bugs the moment we
+load a cart.
+
+**How to apply:**
+- Treat any OAM / PAL / VRAM / IWRAM drift between native and
+  oracle as a P0 bug. Do not paper over with "we'll come back."
+- The "intro looks close" or "it sort of works" answer is
+  unacceptable. The acceptance criterion is byte equality, not
+  visual approximation.
+- The audio subsystem is part of the gate. `src/gba/gba_audio.cpp`
+  must stand up before the gate closes.
+- The `bios_intro_flawless` ctest must run green for the gate to
+  stay closed. CI failure = gate re-opens.
+- See `docs/ROADMAP.md` Phase 2.7 for the work breakdown.
+
 ## BIOS is sacred
 
 The GBA BIOS is **executed**, not stubbed, not HLE'd, not "fast-

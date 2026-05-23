@@ -10,10 +10,19 @@ sacred"). The current ordering reflects that:
 
 - Phase 0: scaffold + repo skeleton
 - Phase 1: ARM7TDMI / ARMv4T decoder + IR + interpreter
-- **Phase 2: BIOS bring-up** (new first render target = GBA BIOS intro)
+- Phase 2: BIOS bring-up (first render target = GBA BIOS intro)
+- **Phase 2.7: BIOS intro flawlessness** (HARD GATE — must complete
+  before Phase 3 or anything ROM-related)
 - Phase 3: full GBA hardware runner (DMA, timers, IO, audio FIFO bookkeeping)
 - Phase 4: oracle / debug workflow
 - Phase 5: Minish Cap target (boots through the real BIOS)
+
+> **HARD GATE** — Phase 2.7 is a stop sign. No ROM / cart / game work
+> happens until the BIOS intro is **visually + audibly + in-memory
+> flawless** against the mGBA oracle. See `PRINCIPLES.md` "BIOS intro
+> must be flawless before ROM". The simplest piece of software the
+> emulator runs is the foundation for everything else; if it isn't
+> right, nothing built on top of it is trustworthy.
 
 ---
 
@@ -147,6 +156,86 @@ function boundaries that disagree with the public disassemblies
 specific SWI's entry signature can't be resolved from public sources,
 **Ghidra is mandated** to disambiguate. We will not guess. Set up
 under `bios/ghidra/` (gitignored) only when this trigger fires.
+
+---
+
+## Phase 2.7 — BIOS intro flawlessness  *(HARD GATE)*
+
+This phase is a stop sign between BIOS bring-up and everything that
+comes after. The deliverable is a flawless GBA BIOS intro on three
+axes — visual, audible, in-memory. See `PRINCIPLES.md` "BIOS intro
+must be flawless before ROM."
+
+### Acceptance criteria (all three must pass)
+
+1. **In-memory.** `python oracle/diff_frame.py --scan 1 240 1`
+   reports **IDENTICAL** for OAM, PAL, VRAM, IWRAM at every PPU
+   frame from boot through the post-intro idle state.
+2. **Visual.** A per-frame framebuffer diff between our PPU's
+   rendered output and `emu_screenshot` from the mGBA oracle shows
+   0 pixel-level differences for every PPU frame in the same range.
+3. **Audible.** The native audio output sample stream matches the
+   oracle's `emu_audio_samples` byte-for-byte (or within an agreed
+   perceptual tolerance — TBD) across the chime duration.
+
+### Work breakdown
+
+#### 2.7.A Reset alignment
+
+mGBA's `GBAReset` pre-bakes SP banks and leaves the CPU in System
+mode. Our reset starts in SVC mode at PC=0 per ARM ARM A2.6.5. Pick
+one convention and apply it on both sides so per-instruction
+lockstep (`oracle/find_first_diverge.py`) can start from instruction
+1. Recommended: keep native correct-to-hardware, drive mGBA's reset
+state to match via `writeRegister` after `core->reset(core)`.
+
+#### 2.7.B Memory drift → zero
+
+Using `diff_frame.py`, walk every PPU frame through the intro and
+identify each byte that differs. For each: root-cause in the
+recompiler infrastructure (interpreter, bus, IO, cycle accounting,
+IRQ entry/return). No symptom patches. Until this is green, no
+audio / framebuffer work — they will mask the underlying memory
+issues.
+
+#### 2.7.C Audio subsystem
+
+`src/gba/gba_audio.cpp` is a stub. Stand it up:
+- SOUND1..4 (DMG square/wave/noise) channels per GBATEK § "GBA Sound
+  Channels 1-4."
+- SOUNDA/SOUNDB FIFO sound channels driven by DMA1/2 + timer
+  overflow per GBATEK § "GBA Sound Channels A,B (DMA Sound)."
+- 32 kHz mixer output sufficient for the BIOS chime.
+
+#### 2.7.D Audio diff
+
+Extend the oracle with `emu_audio_samples` (read mGBA's mixed
+output). Extend native to expose its own `audio_samples`. The diff
+harness compares sample streams over the intro window.
+
+#### 2.7.E Framebuffer diff
+
+Use the existing `emu_screenshot` (oracle) and native `ppu.render()`
+output. Wire both into the diff harness with a per-frame
+framebuffer-equality assertion. Identify each pixel-level mismatch
+and fix at the source (PPU compositing path).
+
+#### 2.7.F Regression test
+
+`bios_intro_flawless` ctest case spins up native + oracle, drives
+both through the full intro, asserts memory + framebuffer + audio
+equality at every PPU frame. CI green = gate closed; CI red = gate
+re-opens automatically.
+
+### What's explicitly NOT allowed during Phase 2.7
+
+- No `--rom` work on `bios_smoke`.
+- No cartridge / cart header / save chip work.
+- No `gba_recompile` improvements toward generating game code.
+- No `MinishCapRecomp/` work.
+- No "let me just check one thing on a ROM" detours.
+
+When the gate is closed, Phase 3 unblocks.
 
 ---
 

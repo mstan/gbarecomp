@@ -70,6 +70,29 @@ fast-forward through them.
 
 ---
 
+# PHASE 2.7 GATE — BIOS INTRO MUST BE FLAWLESS BEFORE ROM
+
+No `--rom`, no `gba_recompile` toward game generation, no
+`MinishCapRecomp` work, no Phase 5 — until the BIOS intro is
+**visually + audibly + in-memory flawless** against the mGBA oracle.
+
+Acceptance:
+- `python oracle/diff_frame.py --scan 1 240 1` → IDENTICAL for
+  OAM, PAL, VRAM, IWRAM at every frame.
+- Per-frame framebuffer pixel-equality vs `emu_screenshot`.
+- Audio sample-stream equality (or agreed perceptual tolerance)
+  across the chime duration.
+- `bios_intro_flawless` ctest green.
+
+See `PRINCIPLES.md` "BIOS intro must be flawless before ROM" and
+`docs/ROADMAP.md` Phase 2.7 for the work breakdown.
+
+If you're tempted to "just try loading a ROM real quick" or
+"check what happens with --rom" — DON'T. The gate exists because
+shortcuts here propagate into invisible bugs everywhere else.
+
+---
+
 # DISPATCH MISS RULE
 
 After EVERY game run — manual, scripted, or test — check

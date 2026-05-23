@@ -51,6 +51,26 @@ downstream divergence will be polluted by it.
 
 ---
 
+# RULE 0d — BIOS INTRO DRIFT IS P0
+
+Any OAM / PAL / VRAM / IWRAM byte that differs between native and
+the mGBA oracle during the BIOS intro is a **P0 bug**. No
+deferral, no "close enough," no triage to a later phase.
+
+Symptoms that mean RULE 0d is violated:
+- `diff_frame.py` reports any byte diff in OAM/PAL/VRAM/IWRAM for
+  any frame between boot and the post-intro idle state.
+- The live BIOS window shows a visibly different intro animation
+  than mGBA renders.
+- The startup chime sounds different than mGBA's chime, or is
+  silent on native.
+
+The Phase 2.7 gate (`PRINCIPLES.md` "BIOS intro must be flawless
+before ROM") stays open while any of these are true. ROM / cart /
+game / generator work is blocked.
+
+---
+
 # RULE 0b — RING-BUFFER FIRST
 
 Probes **query** the always-on ring buffer for the window of
