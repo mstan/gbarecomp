@@ -24,3 +24,8 @@ Thumbs.db
 # diagnostic artifacts, not source; regenerate as needed.
 *.bmp
 *.png
+
+# Vendored oracle dependency (mGBA upstream source). Cloned locally
+# at a pinned tag; never committed back to gbarecomp's history. The
+# license obligations live with the produced oracle binary.
+third_party/mgba/

@@ -179,6 +179,19 @@ target_link_libraries(ppu_smoke_tests PRIVATE gbarecomp_gba)
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Oracle binary — opt-in (-DGBARECOMP_BUILD_ORACLE=ON). Embeds libmgba
+# (MPL-2.0). Per PRINCIPLES.md the native build has zero copyleft deps;
+# the oracle binary is the ONLY place libmgba may be linked, and it
+# runs as a SEPARATE PROCESS over TCP.
+# ─────────────────────────────────────────────────────────────────────────────
+option(GBARECOMP_BUILD_ORACLE
+       "Build the mGBA-backed oracle (requires third_party/mgba/build/libmgba.a)"
+       OFF)
+if(GBARECOMP_BUILD_ORACLE)
+    add_subdirectory(oracle)
+endif()
+
+# ─────────────────────────────────────────────────────────────────────────────
 # runtime.cmake — game projects (e.g. MinishCapRecomp) include this to add
 # a runnable target that links generated C against the runtime libs.
 # ─────────────────────────────────────────────────────────────────────────────

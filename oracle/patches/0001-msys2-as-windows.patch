@@ -1,0 +1,19 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 4cad4b8..48ef99b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -208,6 +208,14 @@ elseif(BUILD_PGO AND PGO_STAGE_2)
+ endif()
+ 
+ # Platform support
++# MSYS2's CMake reports UNIX=1 MSYS=1 WIN32= when invoked through
++# /mingw64/bin/cmake, which sends mGBA down its POSIX branch and
++# triggers compile failures on sys/mman.h, sigemptyset, etc.
++# Treat MSYS as a Windows target so we use the windows/* sources.
++if(MSYS)
++	set(WIN32 ON)
++	set(UNIX OFF)
++endif()
+ if(WIN32)
+ 	set(WIN32_VERSION "${LIB_VERSION_MAJOR},${LIB_VERSION_MINOR},${LIB_VERSION_PATCH}")
+ 	add_definitions(-D_WIN32_WINNT=0x0600)
