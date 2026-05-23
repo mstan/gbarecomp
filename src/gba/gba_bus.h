@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "gba_audio.h"
 #include "gba_bios.h"
 #include "gba_io.h"
 #include "gba_memory.h"
@@ -43,6 +44,9 @@ public:
     // before running code.
     GbaIo&       io()       { return io_dispatch_; }
     const GbaIo& io() const { return io_dispatch_; }
+
+    GbaAudio&       audio()       { return audio_; }
+    const GbaAudio& audio() const { return audio_; }
 
     // Region accessors — useful for tests, debug snapshots, and the
     // PPU (which reads VRAM/OAM/PAL directly to render).
@@ -99,6 +103,7 @@ private:
     std::array<uint8_t,        1024> oam_{};
 
     GbaIo       io_dispatch_;
+    GbaAudio    audio_;
 
     uint32_t    last_fetched_   = 0;
     std::size_t unmapped_count_ = 0;

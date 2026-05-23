@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace gbarecomp {
@@ -36,6 +37,11 @@ public:
 
     // Upload a 240x160 RGB888 frame and present.
     void present(const uint8_t* rgb888);
+
+    // Push `count` int16_t mono samples (32.768 kHz) into the audio
+    // output queue. Backend converts to the host device's format.
+    // No-op if audio init failed or this build has no SDL2.
+    void push_audio_samples(const int16_t* samples, std::size_t count);
 
     struct Events {
         bool     quit = false;

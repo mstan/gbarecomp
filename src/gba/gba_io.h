@@ -35,6 +35,7 @@ namespace gba {
 
 class GbaPpu;
 class GbaIrq;
+class GbaAudio;
 
 // Documented IO register addresses (all relative to 0x04000000).
 namespace IoReg {
@@ -73,6 +74,7 @@ public:
     // to DMAxCNT_H silently store the register without copying any
     // bytes and the BIOS's VRAM/PAL/OAM uploads vanish.
     void set_bus(armv4t::Bus* b) { bus_ = b; }
+    void set_audio(GbaAudio* a) { audio_ = a; }
 
     // Bus-side entry points. `off` is the offset into the IO region
     // (0x00..0x3FF). Out-of-range offsets are filtered by the bus.
@@ -141,9 +143,10 @@ public:
     void set_keyinput(uint16_t keys);
 
 private:
-    GbaPpu*       ppu_ = nullptr;
-    GbaIrq*       irq_ = nullptr;
-    armv4t::Bus*  bus_ = nullptr;
+    GbaPpu*       ppu_   = nullptr;
+    GbaIrq*       irq_   = nullptr;
+    armv4t::Bus*  bus_   = nullptr;
+    GbaAudio*     audio_ = nullptr;
 
     // Flat backing for the 1 KB IO region. Anything not specially
     // handled is just read/written here.

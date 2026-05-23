@@ -204,6 +204,10 @@ int main(int argc, char** argv) {
     uint64_t vblank_irqs_raised = 0;
     bool frame_just_completed = false;
     auto pump_ppu = [&](uint32_t cycles) {
+        // Audio advances on the same wall clock as the PPU. Phase
+        // 2.7.C: minimal SOUND2 implementation so the BIOS chime
+        // can be heard / diffed against mGBA.
+        bus.audio().tick(cycles);
         // VCount-match value lives in DISPSTAT[15:8].
         uint16_t vc_compare = static_cast<uint16_t>((bus.io().dispstat() >> 8) & 0xFFu);
         auto events = ppu.tick(cycles, vc_compare);
@@ -352,6 +356,9 @@ int main(int argc, char** argv) {
                            bus.io().raw(),
                            bus.vram_ptr(), bus.oam_ptr(), bus.pal_ptr());
                 win.present(live_fb.data());
+                int16_t audio_buf[2048];
+                std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
+                if (n > 0) win.push_audio_samples(audio_buf, n);
                 auto ev = win.pump();
                 bus.io().set_keyinput(ev.keyinput);
                 if (ev.quit) host_quit = true;
@@ -427,6 +434,11 @@ int main(int argc, char** argv) {
                        bus.io().raw(),
                        bus.vram_ptr(), bus.oam_ptr(), bus.pal_ptr());
             win.present(live_fb.data());
+            // Drain any audio samples generated this frame and feed
+            // them to the host. ~547 samples per frame at 32768 Hz.
+            int16_t audio_buf[2048];
+            std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
+            if (n > 0) win.push_audio_samples(audio_buf, n);
             auto ev = win.pump();
             bus.io().set_keyinput(ev.keyinput);
             if (ev.quit) host_quit = true;

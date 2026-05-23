@@ -13,7 +13,9 @@
 
 namespace gba {
 
-GbaBus::GbaBus()  = default;
+GbaBus::GbaBus() {
+    io_dispatch_.set_audio(&audio_);
+}
 GbaBus::~GbaBus() = default;
 
 namespace {

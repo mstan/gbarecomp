@@ -6,6 +6,7 @@
 #include <cstring>
 #include <unordered_set>
 
+#include "gba_audio.h"
 #include "gba_ppu.h"
 
 namespace gba {
@@ -228,6 +229,12 @@ uint32_t GbaIo::read32(uint32_t off) {
 
 void GbaIo::write8(uint32_t off, uint8_t v) {
     if (off >= kIoSize) { warn_unhandled(off, v, true, 1); return; }
+    // Audio registers (0x060..0x0AF) go to the audio subsystem on
+    // top of the backing-array store, so the channel state machines
+    // see triggers / envelope reloads / length resets.
+    if (audio_ && off >= 0x060 && off <= 0x0AF) {
+        audio_->write_io8(off, v);
+    }
     switch (off) {
         case IoReg::HALTCNT:
             // 0x00 → HALT (CPU stops until next IRQ).
@@ -257,6 +264,9 @@ void GbaIo::write8(uint32_t off, uint8_t v) {
 
 void GbaIo::write16(uint32_t off, uint16_t v) {
     if (off + 1 >= kIoSize) { warn_unhandled(off, v, true, 2); return; }
+    if (audio_ && off >= 0x060 && off <= 0x0AF) {
+        audio_->write_io16(off, v);
+    }
     switch (off) {
         case IoReg::VCOUNT:
             // Read-only on hardware.

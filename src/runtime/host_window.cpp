@@ -16,6 +16,7 @@ struct Backend {
     SDL_Window*   window   = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_Texture*  texture  = nullptr;
+    SDL_AudioDeviceID audio_dev = 0;
 };
 
 // Map an SDL_Scancode to a GBA KEYINPUT bit index, or -1 if unmapped.
@@ -62,9 +63,16 @@ bool HostWindow::open(int scale, const char* title) {
 
     if (SDL_WasInit(SDL_INIT_VIDEO) == 0) {
         if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
-            std::fprintf(stderr, "host_window: SDL_InitSubSystem failed: %s\n",
+            std::fprintf(stderr, "host_window: SDL_InitSubSystem(VIDEO) failed: %s\n",
                          SDL_GetError());
             return false;
+        }
+    }
+    if (SDL_WasInit(SDL_INIT_AUDIO) == 0) {
+        // Non-fatal if audio fails — keep video working.
+        if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+            std::fprintf(stderr, "host_window: SDL_InitSubSystem(AUDIO) failed: %s\n",
+                         SDL_GetError());
         }
     }
 
@@ -112,17 +120,51 @@ bool HostWindow::open(int scale, const char* title) {
         return false;
     }
 
+    // Open the audio device at 32768 Hz mono 16-bit signed (matches
+    // GbaAudio::kSampleRate). The desired format may differ from the
+    // obtained; we let SDL2 convert via SDL_AUDIO_ALLOW_*. Failure is
+    // non-fatal — silent video still works.
+    SDL_AudioSpec want{};
+    want.freq     = 32768;
+    want.format   = AUDIO_S16SYS;
+    want.channels = 1;
+    want.samples  = 1024;  // ~31 ms buffer at 32 kHz
+    want.callback = nullptr;  // queue mode
+    SDL_AudioSpec got{};
+    b->audio_dev = SDL_OpenAudioDevice(nullptr, /*iscapture=*/0,
+                                       &want, &got,
+                                       SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+    if (b->audio_dev != 0) {
+        SDL_PauseAudioDevice(b->audio_dev, 0);  // start playback
+    }
+
     impl_ = b;
     open_ = true;
     return true;
 }
 
+void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
+    if (!open_ || !impl_ || !samples || count == 0) return;
+    auto* b = static_cast<Backend*>(impl_);
+    if (b->audio_dev == 0) return;
+    // Don't let the queue grow unbounded — past ~250 ms of latency
+    // the host falls behind the GBA's perceived audio.
+    constexpr Uint32 kMaxQueuedBytes = 32768 * 2 / 4;  // ~250 ms
+    if (SDL_GetQueuedAudioSize(b->audio_dev) > kMaxQueuedBytes) {
+        SDL_ClearQueuedAudio(b->audio_dev);
+    }
+    SDL_QueueAudio(b->audio_dev,
+                   samples,
+                   static_cast<Uint32>(count * sizeof(int16_t)));
+}
+
 void HostWindow::close() {
     if (!impl_) { open_ = false; return; }
     auto* b = static_cast<Backend*>(impl_);
-    if (b->texture)  SDL_DestroyTexture(b->texture);
-    if (b->renderer) SDL_DestroyRenderer(b->renderer);
-    if (b->window)   SDL_DestroyWindow(b->window);
+    if (b->audio_dev) SDL_CloseAudioDevice(b->audio_dev);
+    if (b->texture)   SDL_DestroyTexture(b->texture);
+    if (b->renderer)  SDL_DestroyRenderer(b->renderer);
+    if (b->window)    SDL_DestroyWindow(b->window);
     delete b;
     impl_ = nullptr;
     open_ = false;
@@ -185,6 +227,9 @@ bool HostWindow::open(int /*scale*/, const char* /*title*/) {
 void HostWindow::close() { open_ = false; }
 
 void HostWindow::present(const uint8_t* /*rgb888*/) {}
+
+void HostWindow::push_audio_samples(const int16_t* /*samples*/,
+                                    std::size_t /*count*/) {}
 
 HostWindow::Events HostWindow::pump() {
     Events ev{};
