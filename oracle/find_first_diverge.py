@@ -101,7 +101,10 @@ def main() -> int:
         oracle = JsonClient("127.0.0.1", args.oracle_port)
         try:
             print("Lockstepping...")
-            history: list[tuple[int, int, int]] = []  # (step, n_pc, o_pc)
+            # Track (step, n_pc, o_pc) for the recent history window.
+            history: list[tuple[int, int, int]] = []
+            # Register fields we compare each step.
+            REG_FIELDS = [f"r{i}" for i in range(15)] + ["cpsr"]
             for i in range(1, args.max_steps + 1):
                 n = native.call(cmd="step_inst")
                 o = oracle.call(cmd="emu_step_inst")
@@ -110,37 +113,45 @@ def main() -> int:
                           f"oracle_ok={o.get('ok')})")
                     return 2
                 n_pc = int(n["pc"])
-                # mGBA's r15 includes the pipeline prefetch offset: in
-                # ARM state, R15 reads as PC+8; in THUMB, PC+4. Our
-                # native stores the raw next-instruction PC. To diff
-                # at the same logical PC, normalize mGBA's value
-                # downward by the prefetch ahead. We can't tell ARM
-                # vs THUMB from the raw int, so we read CPSR's T bit
-                # from the oracle response (added to the cmd below).
+                # mGBA's gprs[15] = executing_PC + 4 (ARM) or +2 (THUMB).
                 o_pc_raw = int(o["pc"])
                 o_thumb = bool(o.get("thumb", False))
-                o_pc = o_pc_raw - (4 if o_thumb else 8)
+                o_pc = o_pc_raw - (2 if o_thumb else 4)
                 history.append((i, n_pc, o_pc))
-                if n_pc != o_pc:
-                    print(f"\n*** PC DIVERGED at instruction #{i} ***")
-                    print(f"    native pc = 0x{n_pc:08x}")
-                    print(f"    oracle pc = 0x{o_pc:08x}")
-                    print("\nLast 16 instructions before divergence:")
+
+                # Compare PC + R0..R14 + CPSR. CPSR diff is often the
+                # earliest signal because flag-setting ops happen many
+                # instructions before the branch that consumes them.
+                pc_diff = (n_pc != o_pc)
+                reg_diffs = []
+                for f in REG_FIELDS:
+                    nv = n.get(f, 0)
+                    ov = o.get(f, 0)
+                    if nv != ov:
+                        reg_diffs.append((f, nv, ov))
+
+                if pc_diff or reg_diffs:
+                    label = ("PC + regs" if pc_diff and reg_diffs
+                             else "PC" if pc_diff else "regs")
+                    print(f"\n*** STATE DIVERGED at instruction #{i} ({label}) ***")
+                    if pc_diff:
+                        print(f"    PC: native=0x{n_pc:08x} oracle=0x{o_pc:08x}")
+                    for f, nv, ov in reg_diffs:
+                        print(f"    {f}: native=0x{nv:08x} oracle=0x{ov:08x}")
+                    print(f"\nFull native register state after step {i}:")
+                    print(f"  pc=0x{n_pc:08x}", end="")
+                    for j in range(15):
+                        print(f" r{j}=0x{int(n.get(f'r{j}', 0)):08x}", end="")
+                    print(f" cpsr=0x{int(n.get('cpsr', 0)):08x}")
+                    print(f"\nFull oracle register state after step {i}:")
+                    print(f"  pc=0x{o_pc:08x}", end="")
+                    for j in range(15):
+                        print(f" r{j}=0x{int(o.get(f'r{j}', 0)):08x}", end="")
+                    print(f" cpsr=0x{int(o.get('cpsr', 0)):08x}")
+                    print("\nLast 16 PCs:")
                     for s, npc, opc in history[-16:]:
                         marker = " " if npc == opc else "*"
                         print(f"  {marker} #{s:>6}  n=0x{npc:08x}  o=0x{opc:08x}")
-                    print("\nRegisters at divergence:")
-                    nr = native.call(cmd="registers")
-                    oR = oracle.call(cmd="emu_registers")
-                    print(f"  native: {regs_to_str(nr)}")
-                    print(f"  oracle: {regs_to_str(oR)}")
-                    # Print field-by-field diff.
-                    print("\nRegister differences:")
-                    for k in [f"r{j}" for j in range(16)] + ["cpsr"]:
-                        nv = nr.get(k, 0)
-                        ov = oR.get(k, 0)
-                        if nv != ov:
-                            print(f"  {k}: native=0x{nv:08x} oracle=0x{ov:08x}")
                     return 0
                 if i % 10000 == 0:
                     print(f"  step {i}: pc=0x{n_pc:08x} (still in sync)", flush=True)

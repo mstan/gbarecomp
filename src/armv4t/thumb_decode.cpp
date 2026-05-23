@@ -106,14 +106,26 @@ Instr ThumbDecoder::fmt3_alu_imm(uint16_t hw, uint32_t pc) {
 }
 
 // Format 4: 010000 OP4 Rs Rd  (ALU register-register)
+//
+// THUMB Format-4 has 16 ALU op codes. Most are straight ARM data-
+// processing ops where the second operand is Rs. The four shift-by-
+// register variants (LSL/LSR/ASR/ROR) are special: they encode as
+// "Rd = Rd <SHIFT> Rs[7:0]" — the shift TYPE is the op, the COUNT
+// is in Rs. In ARM-IR terms they map to `MOVS Rd, Rd <SHIFT> Rs`,
+// with the shift type selected by op and `by_register = true` so
+// the shifter pulls the count from Rs[7:0] at execute time.
+//
+// Previously these four ops mapped to a plain LSL-by-0, which is
+// just a copy from Rs to Rd and produces the wrong result for any
+// non-zero shift. Found via the mGBA oracle lockstep harness at
+// BIOS instruction #38209 (`ROR R3, R4` with R3=0x18, R4=3 → real
+// ROR result 3, but our decoder produced R3 = R4 = 3 via the wrong
+// MOV path, with completely wrong flags).
 Instr ThumbDecoder::fmt4_alu_reg(uint16_t hw, uint32_t pc) {
     Instr i; zero_instr(i, hw, pc);
     uint32_t op = bits(hw, 9, 6);
     uint8_t rs  = static_cast<uint8_t>(bits(hw, 5, 3));
     uint8_t rd  = static_cast<uint8_t>(bits(hw, 2, 0));
-    // Map to ARM ops. Many of these are register shifts; for the
-    // smoke-test scaffold we only need the common arithmetic / logic
-    // shapes; rare ops fall through with mnemonic only.
     static constexpr IrOp ops[16] = {
         IrOp::AND, IrOp::EOR, IrOp::MOV, IrOp::MOV,  // 0=AND 1=EOR 2=LSL 3=LSR
         IrOp::MOV, IrOp::ADC, IrOp::SBC, IrOp::MOV,  // 4=ASR 5=ADC 6=SBC 7=ROR
@@ -127,12 +139,31 @@ Instr ThumbDecoder::fmt4_alu_reg(uint16_t hw, uint32_t pc) {
     if (i.op == IrOp::MUL) {
         i.rm = rd;
         i.rs = rs;
-    } else {
-        i.op2.kind = Op2::Kind::Shifted;
-        i.op2.shifted.rm = rs;
-        i.op2.shifted.type = ShiftType::LSL;
-        i.op2.shifted.imm_or_rs = 0;
+        return i;
     }
+    // Shift-by-register variants (op 2/3/4/7): encode Rd as the
+    // shifted operand and Rs as the shift count.
+    if (op == 2 || op == 3 || op == 4 || op == 7) {
+        ShiftType st = ShiftType::LSL;
+        switch (op) {
+            case 2: st = ShiftType::LSL; break;
+            case 3: st = ShiftType::LSR; break;
+            case 4: st = ShiftType::ASR; break;
+            case 7: st = ShiftType::ROR; break;
+        }
+        i.op2.kind = Op2::Kind::Shifted;
+        i.op2.shifted.rm          = rd;   // value to shift = Rd
+        i.op2.shifted.type        = st;
+        i.op2.shifted.by_register = true;
+        i.op2.shifted.imm_or_rs   = rs;   // count from Rs[7:0]
+        return i;
+    }
+    // Everything else: second operand is Rs (no shift).
+    i.op2.kind = Op2::Kind::Shifted;
+    i.op2.shifted.rm          = rs;
+    i.op2.shifted.type        = ShiftType::LSL;
+    i.op2.shifted.by_register = false;
+    i.op2.shifted.imm_or_rs   = 0;
     return i;
 }
 

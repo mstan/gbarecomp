@@ -55,8 +55,18 @@ uint8_t GbaBus::read8(uint32_t addr) {
         case Region::Pal:   return pal_[off];
         case Region::Vram:  if (off < vram_.size()) return vram_[off]; break;
         case Region::Oam:   return oam_[off];
-        case Region::Rom:
-            return (rom_ && off < rom_size_) ? rom_[off] : 0;
+        case Region::Rom: {
+            if (rom_ && off < rom_size_) return rom_[off];
+            // No-cart open-bus: ROM reads return the cart-address-bus
+            // value (per GBATEK § "GBA Cartridge ROM" — when no cart
+            // asserts data, the 16-bit address drives the data lines).
+            // read16(0x08000000 + 2N) = N. Byte reads pick the right
+            // half. Native must match mGBA here for BIOS-only diff.
+            uint32_t halfword_index = static_cast<uint32_t>(off >> 1);
+            uint16_t hw = static_cast<uint16_t>(halfword_index & 0xFFFFu);
+            return (off & 1) ? static_cast<uint8_t>(hw >> 8)
+                             : static_cast<uint8_t>(hw & 0xFFu);
+        }
         case Region::Io:
             return io_dispatch_.read8(static_cast<uint32_t>(off));
         case Region::Save:
@@ -81,9 +91,11 @@ uint16_t GbaBus::read16(uint32_t addr) {
             if (off + 1 < vram_.size()) return load_u16(&vram_[off]);
             break;
         case Region::Oam:   return load_u16(&oam_[off]);
-        case Region::Rom:
-            return (rom_ && off + 1 < rom_size_)
-                ? load_u16(&rom_[off]) : 0;
+        case Region::Rom: {
+            if (rom_ && off + 1 < rom_size_) return load_u16(&rom_[off]);
+            // No-cart open-bus: read16 returns the halfword index.
+            return static_cast<uint16_t>((off >> 1) & 0xFFFFu);
+        }
         case Region::Io:
             return io_dispatch_.read16(static_cast<uint32_t>(off));
         case Region::Save:
@@ -111,9 +123,13 @@ uint32_t GbaBus::read32(uint32_t addr) {
             if (off + 3 < vram_.size()) return load_u32(&vram_[off]);
             break;
         case Region::Oam:   return load_u32(&oam_[off]);
-        case Region::Rom:
-            return (rom_ && off + 3 < rom_size_)
-                ? load_u32(&rom_[off]) : 0;
+        case Region::Rom: {
+            if (rom_ && off + 3 < rom_size_) return load_u32(&rom_[off]);
+            // No-cart open-bus: two consecutive halfwords.
+            uint32_t hw_lo = (off >> 1) & 0xFFFFu;
+            uint32_t hw_hi = ((off >> 1) + 1) & 0xFFFFu;
+            return hw_lo | (hw_hi << 16);
+        }
         case Region::Io:
             return io_dispatch_.read32(static_cast<uint32_t>(off));
         case Region::Save:

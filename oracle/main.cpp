@@ -107,6 +107,26 @@ struct Oracle {
     // 240*160 pixels at BYTES_PER_PIXEL (default 4 = 32-bit ARGB).
     std::vector<uint32_t> video_buf;
 
+    // Drive mGBA's post-reset CPU state to match real ARM7TDMI
+    // hardware conventions (ARM ARM A2.6.5): PC=0, mode=Supervisor,
+    // I=F=1, T=0. mGBA's GBAReset pre-bakes the SP banks then leaves
+    // the CPU in System mode with I=F=0 — that mismatch skips the
+    // first several BIOS instructions, breaking per-instruction
+    // lockstep against our native runtime.
+    //
+    // The banked SP values mGBA programs (IRQ=0x03007FA0,
+    // SVC=0x03007FE0, System=0x03007F00) already match our native
+    // make_reset_cpu(); writing CPSR triggers _ARMReadCPSR which
+    // re-applies the bank-swap, so the active R13 becomes the
+    // mode's banked value automatically.
+    void apply_real_hw_reset() {
+        if (!core) return;
+        int32_t cpsr = 0x000000D3;  // SVC=0x13, T=0, F=1, I=1, NZCV=0
+        int32_t pc   = 0;
+        core->writeRegister(core, "cpsr", &cpsr);
+        core->writeRegister(core, "r15",  &pc);
+    }
+
     // GBA-specific regions. Sizes per GBATEK § "GBA Memory Map".
     static constexpr uint32_t kBaseBIOS  = 0x00000000;
     static constexpr uint32_t kBaseEWRAM = 0x02000000;
@@ -169,7 +189,9 @@ struct Oracle {
         core->setVideoBuffer(core, video_buf.data(), w);
 
         core->reset(core);
-        std::printf("oracle: mGBA core ready (bios=%s rom=%s video=%ux%u)\n",
+        apply_real_hw_reset();
+        std::printf("oracle: mGBA core ready (bios=%s rom=%s video=%ux%u) "
+                    "[reset state forced to real ARM7TDMI: PC=0 SVC I=F=1]\n",
                     bios_path ? bios_path : "(none)",
                     rom_path  ? rom_path  : "(none)", w, h);
         return true;
@@ -287,13 +309,29 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         o.core->readRegister(o.core, "r15",  &pc);
         o.core->readRegister(o.core, "cpsr", &cpsr);
         bool thumb = (cpsr & (1u << 5)) != 0;
-        char buf[160];
-        std::snprintf(buf, sizeof(buf),
-                      "{\"ok\":true,\"pc\":%u,\"thumb\":%s,\"frame\":%llu}",
-                      static_cast<unsigned>(pc),
-                      thumb ? "true" : "false",
-                      static_cast<unsigned long long>(o.frame));
-        out = buf;
+        std::string body;
+        body.reserve(512);
+        char hdr[160];
+        std::snprintf(hdr, sizeof(hdr),
+            "{\"ok\":true,\"pc\":%u,\"thumb\":%s,\"frame\":%llu",
+            static_cast<unsigned>(pc),
+            thumb ? "true" : "false",
+            static_cast<unsigned long long>(o.frame));
+        body = hdr;
+        for (int i = 0; i < 15; ++i) {
+            char name[8]; std::snprintf(name, sizeof(name), "r%d", i);
+            int32_t v = 0;
+            o.core->readRegister(o.core, name, &v);
+            char f[48];
+            std::snprintf(f, sizeof(f), ",\"r%d\":%u",
+                          i, static_cast<unsigned>(v));
+            body += f;
+        }
+        char cf[48];
+        std::snprintf(cf, sizeof(cf), ",\"cpsr\":%u}",
+                      static_cast<unsigned>(cpsr));
+        body += cf;
+        out = body;
         return;
     }
     if (starts("\"emu_step\"") || starts("\"emu_step_to_vblank\"")) {
@@ -302,7 +340,10 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         return;
     }
     if (starts("\"emu_reset\"")) {
-        if (o.core) o.core->reset(o.core);
+        if (o.core) {
+            o.core->reset(o.core);
+            o.apply_real_hw_reset();
+        }
         o.vblanks = 0;
         o.frame   = 0;
         out = "{\"ok\":true}";

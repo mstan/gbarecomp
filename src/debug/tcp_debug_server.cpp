@@ -154,15 +154,43 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         }
         bool ok = ctx.step_inst();
         if (!ok) step_failed = true;
+        // Return PC + CPSR + R0..R14 so the lockstep harness can
+        // catch register-level divergence at its true origin (not
+        // wait for the cascade into a branch decision).
         uint32_t pc = ctx.cpu ? ctx.cpu->R[15] : 0u;
         uint64_t f  = ctx.ppu ? ctx.ppu->frame_count() : 0u;
-        char buf[128];
-        std::snprintf(buf, sizeof(buf),
-                      "{\"ok\":%s,\"pc\":%u,\"frame\":%llu}",
+        std::string body;
+        body.reserve(512);
+        char hdr[96];
+        std::snprintf(hdr, sizeof(hdr),
+                      "{\"ok\":%s,\"pc\":%u,\"frame\":%llu",
                       ok ? "true" : "false",
                       static_cast<unsigned>(pc),
                       static_cast<unsigned long long>(f));
-        out = buf;
+        body = hdr;
+        if (ctx.cpu) {
+            for (int i = 0; i < 15; ++i) {
+                char f[48];
+                std::snprintf(f, sizeof(f), ",\"r%d\":%u",
+                              i, static_cast<unsigned>(ctx.cpu->R[i]));
+                body += f;
+            }
+            uint32_t cpsr = 0;
+            if (ctx.cpu->cpsr.n) cpsr |= 1u << 31;
+            if (ctx.cpu->cpsr.z) cpsr |= 1u << 30;
+            if (ctx.cpu->cpsr.c) cpsr |= 1u << 29;
+            if (ctx.cpu->cpsr.v) cpsr |= 1u << 28;
+            if (ctx.cpu->cpsr.i) cpsr |= 1u << 7;
+            if (ctx.cpu->cpsr.f) cpsr |= 1u << 6;
+            if (ctx.cpu->cpsr.t) cpsr |= 1u << 5;
+            cpsr |= ctx.cpu->cpsr.mode & 0x1Fu;
+            char cpsr_field[48];
+            std::snprintf(cpsr_field, sizeof(cpsr_field), ",\"cpsr\":%u",
+                          static_cast<unsigned>(cpsr));
+            body += cpsr_field;
+        }
+        body += "}";
+        out = body;
         return;
     }
     if (contains("\"step\"") || contains("\"step_to_vblank\"")) {

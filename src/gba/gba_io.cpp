@@ -16,6 +16,13 @@ GbaIo::GbaIo() {
     // upper bits 10..15 read as 1 on hardware.
     io_[0x130] = 0xFF;
     io_[0x131] = 0xFF;
+    // SOUNDBIAS (0x088): default 0x0200 at power-on per GBATEK §
+    // "GBA Sound Channel A, B (DMA Sound) — SOUNDBIAS". The BIOS
+    // reads this value during init (it computes audio offsets from
+    // it); leaving it as 0 made our run drift from real hardware at
+    // BIOS instruction #743 (LDRH from 0x04000088).
+    io_[0x088] = 0x00;
+    io_[0x089] = 0x02;
 }
 GbaIo::~GbaIo() = default;
 
