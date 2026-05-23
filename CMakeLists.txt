@@ -13,6 +13,38 @@ else()
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SDL2 — soft dependency. When present we build host_window.cpp with the
+# real SDL backend; otherwise it compiles as a no-op stub. CI and headless
+# environments stay buildable either way.
+#
+# Avoid `find_package(SDL2 CONFIG)` on MSYS2: that target's
+# INTERFACE_INCLUDE_DIRECTORIES is `-isystem /mingw64/include`, which
+# breaks libstdc++'s `#include_next <stdlib.h>` chain.
+# Avoid `C:/...` HINTS too: CMake-on-MSYS records them but mangles the
+# emitted -I flag with the build dir prefix.
+# ─────────────────────────────────────────────────────────────────────────────
+set(GBARECOMP_SDL2_OK FALSE)
+set(GBARECOMP_MINGW_PREFIX_UNIX "/c/msys64/mingw64" CACHE PATH
+    "MSYS2 mingw64 install root, in Unix form, used for finding SDL2")
+find_path(SDL2_INCLUDE_DIR
+    NAMES SDL.h
+    PATH_SUFFIXES SDL2 SDL2/include
+    HINTS ${GBARECOMP_MINGW_PREFIX_UNIX}/include
+)
+find_library(SDL2_LIBRARY
+    NAMES SDL2
+    HINTS ${GBARECOMP_MINGW_PREFIX_UNIX}/lib
+)
+if(SDL2_INCLUDE_DIR AND SDL2_LIBRARY)
+    set(GBARECOMP_SDL2_OK TRUE)
+    set(SDL2_INCLUDE_DIRS ${SDL2_INCLUDE_DIR})
+    set(SDL2_LIBRARIES   ${SDL2_LIBRARY})
+    message(STATUS "gbarecomp: SDL2 found — inc=${SDL2_INCLUDE_DIR} lib=${SDL2_LIBRARY}")
+else()
+    message(STATUS "gbarecomp: SDL2 NOT found — host_window will stub out (inc=${SDL2_INCLUDE_DIR} lib=${SDL2_LIBRARY})")
+endif()
+
+# ─────────────────────────────────────────────────────────────────────────────
 # armv4t — portable ARM7TDMI decoder, IR, codegen. Reusable for ARM9 later.
 # Must NOT depend on src/gba or src/runtime.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -57,10 +89,19 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/runtime.cpp
     src/runtime/generated_dispatch.cpp
     src/runtime/host_platform.cpp
+    src/runtime/host_window.cpp
 )
 target_include_directories(gbarecomp_runtime PUBLIC src/runtime)
 target_link_libraries(gbarecomp_runtime PUBLIC gbarecomp_gba)
 set_property(TARGET gbarecomp_runtime PROPERTY POSITION_INDEPENDENT_CODE ON)
+if(GBARECOMP_SDL2_OK)
+    target_compile_definitions(gbarecomp_runtime PUBLIC GBARECOMP_HAVE_SDL2)
+    # Use plain -I (not -isystem) for SDL2 headers. -isystem on a path
+    # that overlaps libstdc++'s search ordering breaks
+    # `#include_next <stdlib.h>`.
+    target_include_directories(gbarecomp_runtime PUBLIC ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(gbarecomp_runtime PUBLIC ${SDL2_LIBRARIES})
+endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # debug — TCP server + always-on ring buffers + snapshot. Always built.
@@ -94,7 +135,7 @@ target_link_libraries(test_rom_runner PRIVATE
 # interpreter from PC=0 for N instructions, prints a trace.
 add_executable(bios_smoke tools/bios_smoke/main.cpp)
 target_link_libraries(bios_smoke PRIVATE
-    gbarecomp_armv4t gbarecomp_gba)
+    gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # tests — per-subsystem. Run with ctest.

@@ -135,6 +135,11 @@ public:
     // Called internally when CNT_H is written with enable+mode=0.
     void run_immediate_dma(int channel);
 
+    // Host-side input update. The low 10 bits are GBA KEYINPUT
+    // (active-low: 1 = released, 0 = pressed). Stored directly into
+    // the IO backing so the next CPU read sees the current state.
+    void set_keyinput(uint16_t keys);
+
 private:
     GbaPpu*       ppu_ = nullptr;
     GbaIrq*       irq_ = nullptr;

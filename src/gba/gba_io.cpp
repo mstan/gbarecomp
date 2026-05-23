@@ -10,7 +10,13 @@
 
 namespace gba {
 
-GbaIo::GbaIo()  = default;
+GbaIo::GbaIo() {
+    // KEYINPUT default: all keys released. The register is active-low,
+    // so 0x03FF (low 10 bits set) means "nothing pressed". Reserved
+    // upper bits 10..15 read as 1 on hardware.
+    io_[0x130] = 0xFF;
+    io_[0x131] = 0xFF;
+}
 GbaIo::~GbaIo() = default;
 
 namespace {
@@ -122,6 +128,13 @@ void GbaIo::run_immediate_dma(int channel) {
 void GbaIo::request_irq(uint16_t bit) {
     uint16_t old = load_u16(&io_[IoReg::IF]);
     store_u16(&io_[IoReg::IF], static_cast<uint16_t>(old | bit));
+}
+
+void GbaIo::set_keyinput(uint16_t keys) {
+    // Force unused upper bits to 1 so a CPU read sees the documented
+    // bit-15..10 = 1 reserved state (matches hardware default).
+    store_u16(&io_[IoReg::KEYINPUT],
+              static_cast<uint16_t>((keys & 0x03FFu) | 0xFC00u));
 }
 
 bool GbaIo::irq_pending() const {

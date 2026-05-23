@@ -27,6 +27,7 @@
 #include "gba_bios.h"
 #include "gba_bus.h"
 #include "gba_ppu.h"
+#include "host_window.h"
 #include "interpreter.h"
 #include "thumb_decode.h"
 
@@ -39,6 +40,9 @@ struct Args {
     int  steps   = 16;
     bool quiet   = false;
     std::string dump_bmp;  // optional path for final framebuffer dump
+    bool window  = false;
+    int  scale   = 3;
+    int  frames  = -1;     // when >=0, cap by completed frames not steps
 };
 
 // Minimal 24-bit BMP writer for a 240x160 RGB888 framebuffer (row 0
@@ -111,6 +115,13 @@ Args parse_args(int argc, char** argv) {
         if (s == "--dump-bmp" && i + 1 < argc) {
             a.dump_bmp = argv[++i]; continue;
         }
+        if (s == "--window") { a.window = true; a.quiet = true; continue; }
+        if (s == "--scale" && i + 1 < argc) {
+            a.scale = std::atoi(argv[++i]); continue;
+        }
+        if (s == "--frames" && i + 1 < argc) {
+            a.frames = std::atoi(argv[++i]); continue;
+        }
         std::fprintf(stderr, "bios_smoke: unknown arg %s\n", s.c_str());
     }
     return a;
@@ -180,6 +191,7 @@ int main(int argc, char** argv) {
     }
 
     uint64_t vblank_irqs_raised = 0;
+    bool frame_just_completed = false;
     auto pump_ppu = [&](uint32_t cycles) {
         // VCount-match value lives in DISPSTAT[15:8].
         uint16_t vc_compare = static_cast<uint16_t>((bus.io().dispstat() >> 8) & 0xFFu);
@@ -195,12 +207,39 @@ int main(int argc, char** argv) {
         if (events.vcount_matched && (ds & 0x0020u)) {
             bus.io().request_irq(gba::GbaIo::IrqVCount);
         }
+        if (events.frame_completed) frame_just_completed = true;
     };
+
+    // Live window setup (optional). When --window is given we open an
+    // SDL2 surface, present at every PPU frame boundary, and let the
+    // host close the window or press Escape to terminate. The window
+    // path also pulls KEYINPUT from the host keyboard so future ROMs
+    // can read input naturally.
+    gbarecomp::HostWindow win;
+    std::vector<uint8_t> live_fb;
+    if (args.window) {
+        if (!gbarecomp::HostWindow::is_available()) {
+            std::fprintf(stderr,
+                         "bios_smoke: --window requested but this build has no SDL2\n");
+            return 1;
+        }
+        if (!win.open(args.scale, "gbarecomp — BIOS")) {
+            return 1;
+        }
+        live_fb.assign(gba::GbaPpu::kFramebufferBytes, 0);
+    }
 
     int taken = 0;
     uint64_t irq_entries = 0;
     uint64_t halt_steps  = 0;
-    for (int i = 0; i < args.steps; ++i) {
+    int frames_presented = 0;
+    bool host_quit = false;
+    // When --window is set without --steps we run open-ended.
+    // INT_MAX/2 keeps the existing `i < steps` form usable.
+    const int step_budget = args.window
+        ? (args.steps > 16 ? args.steps : 0x7FFFFFFF / 2)
+        : args.steps;
+    for (int i = 0; i < step_budget && !host_quit; ++i) {
         // Check pending IRQ before fetching. A pending IRQ also wakes
         // the CPU out of HALT.
         if (bus.io().irq_pending() && !cpu.cpsr.i) {
@@ -217,6 +256,21 @@ int main(int argc, char** argv) {
             pump_ppu(64);
             ++halt_steps;
             ++taken;
+            if (args.window && frame_just_completed) {
+                frame_just_completed = false;
+                uint16_t live_dispcnt = bus.io().read16(0x000);
+                ppu.render(live_fb.data(), live_dispcnt,
+                           bus.io().raw(),
+                           bus.vram_ptr(), bus.oam_ptr(), bus.pal_ptr());
+                win.present(live_fb.data());
+                auto ev = win.pump();
+                bus.io().set_keyinput(ev.keyinput);
+                if (ev.quit) host_quit = true;
+                ++frames_presented;
+                if (args.frames >= 0 && frames_presented >= args.frames) {
+                    host_quit = true;
+                }
+            }
             continue;
         }
 
@@ -258,17 +312,37 @@ int main(int argc, char** argv) {
             r == armv4t::Interpreter::Result::NotImplemented) {
             break;
         }
+
+        if (args.window && frame_just_completed) {
+            frame_just_completed = false;
+            // Render the current PPU snapshot into the live buffer and
+            // upload to the host texture.
+            uint16_t live_dispcnt = bus.io().read16(0x000);
+            ppu.render(live_fb.data(), live_dispcnt,
+                       bus.io().raw(),
+                       bus.vram_ptr(), bus.oam_ptr(), bus.pal_ptr());
+            win.present(live_fb.data());
+            auto ev = win.pump();
+            bus.io().set_keyinput(ev.keyinput);
+            if (ev.quit) host_quit = true;
+            ++frames_presented;
+            if (args.frames >= 0 && frames_presented >= args.frames) {
+                host_quit = true;
+            }
+        }
     }
+    if (args.window) win.close();
 
     // Final-state summary always prints, including under --quiet, so
     // long runs can be benchmarked / regression-checked without
     // dumping per-step traces.
     std::printf("\nfinal_pc=0x%08x thumb=%d unmapped=%zu io_unhandled=%zu "
-                "steps=%d ppu_vcount=%u ppu_frames=%llu\n",
+                "steps=%d ppu_vcount=%u ppu_frames=%llu frames_presented=%d\n",
                 cpu.R[15], cpu.thumb ? 1 : 0,
                 bus.unmapped_count(), bus.io().unmapped_count(), taken,
                 static_cast<unsigned>(ppu.vcount()),
-                static_cast<unsigned long long>(ppu.frame_count()));
+                static_cast<unsigned long long>(ppu.frame_count()),
+                frames_presented);
 
     // Sanity probes — count non-zero bytes in PAL, VRAM, OAM. If the
     // BIOS rendered anything, PAL will have palette entries; VRAM
