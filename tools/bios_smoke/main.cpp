@@ -43,6 +43,7 @@ struct Args {
     bool window  = false;
     int  scale   = 3;
     int  frames  = -1;     // when >=0, cap by completed frames not steps
+    std::string snapshot;  // optional path prefix for OAM/VRAM/PAL/IWRAM dump
 };
 
 // Minimal 24-bit BMP writer for a 240x160 RGB888 framebuffer (row 0
@@ -121,6 +122,9 @@ Args parse_args(int argc, char** argv) {
         }
         if (s == "--frames" && i + 1 < argc) {
             a.frames = std::atoi(argv[++i]); continue;
+        }
+        if (s == "--snapshot" && i + 1 < argc) {
+            a.snapshot = argv[++i]; continue;
         }
         std::fprintf(stderr, "bios_smoke: unknown arg %s\n", s.c_str());
     }
@@ -555,6 +559,26 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "bios_smoke: failed to write %s\n",
                          args.dump_bmp.c_str());
         }
+    }
+
+    // Raw memory snapshot for oracle diffing. Writes <prefix>.oam,
+    // .pal, .vram, .iwram, .io as little-endian byte blobs sized to
+    // their hardware region. The oracle (via TCP) returns matching
+    // shapes so a single byte-for-byte diff finds the first
+    // divergence.
+    if (!args.snapshot.empty()) {
+        auto write_blob = [&](const std::string& path, const uint8_t* p, std::size_t n) {
+            std::ofstream f(path, std::ios::binary);
+            if (!f) { std::fprintf(stderr, "bios_smoke: open %s failed\n", path.c_str()); return; }
+            f.write(reinterpret_cast<const char*>(p), n);
+        };
+        write_blob(args.snapshot + ".oam",   bus.oam_ptr(),   1024);
+        write_blob(args.snapshot + ".pal",   bus.pal_ptr(),   1024);
+        write_blob(args.snapshot + ".vram",  bus.vram_ptr(),  96 * 1024);
+        write_blob(args.snapshot + ".iwram", bus.iwram_ptr(), 32 * 1024);
+        write_blob(args.snapshot + ".io",    bus.io().raw(),  0x400);
+        std::printf("wrote snapshot to %s.{oam,pal,vram,iwram,io}\n",
+                    args.snapshot.c_str());
     }
     return 0;
 }
