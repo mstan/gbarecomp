@@ -280,6 +280,22 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         emit_ok_int(out, "vblanks", o.vblanks);
         return;
     }
+    if (starts("\"emu_step_inst\"")) {
+        if (!o.core) { emit_error(out, "no core"); return; }
+        o.core->step(o.core);
+        int32_t pc = 0, cpsr = 0;
+        o.core->readRegister(o.core, "r15",  &pc);
+        o.core->readRegister(o.core, "cpsr", &cpsr);
+        bool thumb = (cpsr & (1u << 5)) != 0;
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+                      "{\"ok\":true,\"pc\":%u,\"thumb\":%s,\"frame\":%llu}",
+                      static_cast<unsigned>(pc),
+                      thumb ? "true" : "false",
+                      static_cast<unsigned long long>(o.frame));
+        out = buf;
+        return;
+    }
     if (starts("\"emu_step\"") || starts("\"emu_step_to_vblank\"")) {
         o.step_frame();
         emit_ok_int(out, "frame", o.frame);

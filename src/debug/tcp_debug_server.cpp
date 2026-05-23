@@ -147,6 +147,24 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         emit_ok_int(out, "frame", f);
         return;
     }
+    if (contains("\"step_inst\"")) {
+        if (!ctx.step_inst) {
+            emit_error(out, "step_inst callback not wired");
+            return;
+        }
+        bool ok = ctx.step_inst();
+        if (!ok) step_failed = true;
+        uint32_t pc = ctx.cpu ? ctx.cpu->R[15] : 0u;
+        uint64_t f  = ctx.ppu ? ctx.ppu->frame_count() : 0u;
+        char buf[128];
+        std::snprintf(buf, sizeof(buf),
+                      "{\"ok\":%s,\"pc\":%u,\"frame\":%llu}",
+                      ok ? "true" : "false",
+                      static_cast<unsigned>(pc),
+                      static_cast<unsigned long long>(f));
+        out = buf;
+        return;
+    }
     if (contains("\"step\"") || contains("\"step_to_vblank\"")) {
         if (!ctx.step) {
             emit_error(out, "step callback not wired");

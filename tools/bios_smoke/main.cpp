@@ -310,7 +310,8 @@ int main(int argc, char** argv) {
         srv_ctx.cpu = &cpu;
         srv_ctx.bus = &bus;
         srv_ctx.ppu = &ppu;
-        srv_ctx.step = step_one_frame;
+        srv_ctx.step      = step_one_frame;
+        srv_ctx.step_inst = run_one_cpu_step;
         srv_ctx.irq_entries        = &irq_entries;
         srv_ctx.swi_entries        = &swi_entries;
         srv_ctx.halt_steps         = &halt_steps;

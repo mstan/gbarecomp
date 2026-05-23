@@ -41,7 +41,8 @@ public:
         armv4t::CPUState* cpu = nullptr;
         gba::GbaBus*      bus = nullptr;   // owns the regions
         gba::GbaPpu*      ppu = nullptr;
-        StepFn            step;
+        StepFn            step;       // advances one PPU frame
+        StepFn            step_inst;  // advances one CPU instruction
         // Mirror of the host's counters so `counters` queries can
         // report them. Host updates these between commands.
         uint64_t* irq_entries        = nullptr;
