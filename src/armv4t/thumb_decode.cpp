@@ -141,6 +141,19 @@ Instr ThumbDecoder::fmt4_alu_reg(uint16_t hw, uint32_t pc) {
         i.rs = rs;
         return i;
     }
+    // NEG Rd, Rs (op 9): Rd = -Rs. ARM equivalent is
+    // `RSB Rd, Rs, #0` — Rn = Rs (subtraction source), Op2 = 0
+    // (immediate). The default "Rn = Rd, Op2 = Rs" path computes
+    // Rs - Rd instead, which is wrong (e.g., NEG R0,R0 with R0=0x7E
+    // gives 0 instead of 0xFFFFFF82). Found via oracle lockstep at
+    // BIOS instruction #570503.
+    if (op == 9) {
+        i.rn = rs;
+        i.op2.kind = Op2::Kind::Imm;
+        i.op2.imm_value     = 0;
+        i.op2.imm_carry_out = 2;  // "carry unchanged" sentinel
+        return i;
+    }
     // Shift-by-register variants (op 2/3/4/7): encode Rd as the
     // shifted operand and Rs as the shift count.
     if (op == 2 || op == 3 || op == 4 || op == 7) {
