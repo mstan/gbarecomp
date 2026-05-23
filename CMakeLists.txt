@@ -135,7 +135,10 @@ target_link_libraries(test_rom_runner PRIVATE
 # interpreter from PC=0 for N instructions, prints a trace.
 add_executable(bios_smoke tools/bios_smoke/main.cpp)
 target_link_libraries(bios_smoke PRIVATE
-    gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime)
+    gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
+if(WIN32 OR MSYS)
+    target_link_libraries(bios_smoke PRIVATE ws2_32)
+endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # tests — per-subsystem. Run with ctest.

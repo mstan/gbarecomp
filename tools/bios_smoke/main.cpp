@@ -29,6 +29,7 @@
 #include "gba_ppu.h"
 #include "host_window.h"
 #include "interpreter.h"
+#include "tcp_debug_server.h"
 #include "thumb_decode.h"
 
 namespace {
@@ -44,6 +45,7 @@ struct Args {
     int  scale   = 3;
     int  frames  = -1;     // when >=0, cap by completed frames not steps
     std::string snapshot;  // optional path prefix for OAM/VRAM/PAL/IWRAM dump
+    int tcp_port = 0;      // when >0, run as TCP debug server
 };
 
 // Minimal 24-bit BMP writer for a 240x160 RGB888 framebuffer (row 0
@@ -125,6 +127,11 @@ Args parse_args(int argc, char** argv) {
         }
         if (s == "--snapshot" && i + 1 < argc) {
             a.snapshot = argv[++i]; continue;
+        }
+        if (s == "--tcp" && i + 1 < argc) {
+            a.tcp_port = std::atoi(argv[++i]);
+            a.quiet = true;
+            continue;
         }
         std::fprintf(stderr, "bios_smoke: unknown arg %s\n", s.c_str());
     }
@@ -233,12 +240,86 @@ int main(int argc, char** argv) {
         live_fb.assign(gba::GbaPpu::kFramebufferBytes, 0);
     }
 
-    int taken = 0;
+    uint64_t taken = 0;
     uint64_t irq_entries = 0;
     uint64_t halt_steps  = 0;
     uint64_t swi_entries = 0;
     int frames_presented = 0;
     bool host_quit = false;
+
+    // Per-CPU-step body, factored out so both the N-frame / N-steps
+    // loop AND the TCP server's `step` callback drive the same
+    // execution path. Returns false on Undefined / NotImplemented;
+    // the caller terminates in that case.
+    auto run_one_cpu_step = [&]() -> bool {
+        if (bus.io().irq_pending() && !cpu.cpsr.i) {
+            if (bus.io().halted()) bus.io().clear_halt();
+            armv4t::Interpreter::enter_irq(cpu, cpu.R[15]);
+            ++irq_entries;
+        }
+        if (bus.io().halted()) {
+            pump_ppu(64);
+            ++halt_steps;
+            ++taken;
+            return true;
+        }
+        uint32_t pc = cpu.R[15];
+        armv4t::Instr insn{};
+        if (cpu.thumb) {
+            uint16_t hw = bus.read16(pc);
+            insn = armv4t::ThumbDecoder::decode(hw, pc);
+        } else {
+            uint32_t word = bus.read32(pc);
+            insn = armv4t::ArmDecoder::decode(word, pc);
+        }
+        uint32_t insn_cycles = 1;
+        auto r = armv4t::Interpreter::step(cpu, bus, insn, &insn_cycles);
+        if (r == armv4t::Interpreter::Result::Swi) {
+            uint32_t next_pc = pc + (cpu.thumb ? 2u : 4u);
+            armv4t::Interpreter::enter_swi(cpu, next_pc, cpu.thumb);
+            ++swi_entries;
+        }
+        pump_ppu(insn_cycles);
+        ++taken;
+        if (r == armv4t::Interpreter::Result::Undefined ||
+            r == armv4t::Interpreter::Result::NotImplemented) {
+            return false;
+        }
+        return true;
+    };
+
+    // Step until the PPU completes one frame. Used by the TCP step
+    // callback so each `step` command advances the runtime by exactly
+    // one PPU frame — matches the oracle's emu_step semantics.
+    auto step_one_frame = [&]() -> bool {
+        frame_just_completed = false;
+        uint64_t start = ppu.frame_count();
+        while (ppu.frame_count() == start) {
+            if (!run_one_cpu_step()) return false;
+        }
+        return true;
+    };
+
+    // TCP debug server mode. Open the listener, hand it the live
+    // CPU/bus/PPU plus the step callback, block until the client
+    // disconnects. No --frames / --window logic in this path; the
+    // client drives execution explicitly via `step` commands.
+    if (args.tcp_port > 0) {
+        gbarecomp::debug::TcpDebugServer server;
+        gbarecomp::debug::TcpDebugServer::Context srv_ctx;
+        srv_ctx.cpu = &cpu;
+        srv_ctx.bus = &bus;
+        srv_ctx.ppu = &ppu;
+        srv_ctx.step = step_one_frame;
+        srv_ctx.irq_entries        = &irq_entries;
+        srv_ctx.swi_entries        = &swi_entries;
+        srv_ctx.halt_steps         = &halt_steps;
+        srv_ctx.vblank_irqs_raised = &vblank_irqs_raised;
+        srv_ctx.steps              = &taken;
+        server.run(args.tcp_port, srv_ctx);
+        return 0;
+    }
+
     // When --window or --frames is set without an explicit --steps,
     // run open-ended (capped at INT_MAX/2) and let the frame cap or
     // window quit terminate the loop instead.
@@ -362,9 +443,10 @@ int main(int argc, char** argv) {
     // long runs can be benchmarked / regression-checked without
     // dumping per-step traces.
     std::printf("\nfinal_pc=0x%08x thumb=%d unmapped=%zu io_unhandled=%zu "
-                "steps=%d ppu_vcount=%u ppu_frames=%llu frames_presented=%d\n",
+                "steps=%llu ppu_vcount=%u ppu_frames=%llu frames_presented=%d\n",
                 cpu.R[15], cpu.thumb ? 1 : 0,
-                bus.unmapped_count(), bus.io().unmapped_count(), taken,
+                bus.unmapped_count(), bus.io().unmapped_count(),
+                static_cast<unsigned long long>(taken),
                 static_cast<unsigned>(ppu.vcount()),
                 static_cast<unsigned long long>(ppu.frame_count()),
                 frames_presented);
