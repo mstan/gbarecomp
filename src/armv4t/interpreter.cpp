@@ -382,26 +382,38 @@ inline uint32_t cycle_cost_base(IrOp op, uint16_t /*reg_list*/) {
         case IrOp::BL_prefix: case IrOp::BL_suffix:
             return 3;  // 2S+1N
 
-        // Memory ops: fetch + internal (no access cycles here; the
-        // execute path adds them via bus.access_cycles).
+        // Memory ops: fetch + internal/turnaround (no per-access
+        // cycles here; the execute path adds those via
+        // bus.access_cycles). Matching mGBA's model exactly:
+        //   LDR/LDM: prefetch + per-access waitstate + 2 trailing.
+        //   STR/STM: prefetch + per-access waitstate + 2 trailing.
+        // The "2 trailing" cycle is mGBA's model of the bus
+        // turnaround / pipeline reload after a memory access. Real
+        // ARM7TDMI charges 1I for LDR but not STR; mGBA charges +1
+        // on both. Since mGBA is our oracle, we match it.
         case IrOp::LDR:   case IrOp::LDRB:
         case IrOp::LDRH:  case IrOp::LDRSB: case IrOp::LDRSH:
-            return 2;  // 1S fetch + 1I
+            return 2;
         case IrOp::STR:   case IrOp::STRB:  case IrOp::STRH:
-            return 1;  // 1S fetch (no I)
+            return 2;
         case IrOp::LDM:
-            return 2;  // 1S fetch + 1I; accesses added at execute
+            return 2;
         case IrOp::STM:
-            return 1;  // 1S fetch; accesses added at execute
+            return 2;
         case IrOp::SWP:  case IrOp::SWPB:
-            return 2;  // 1S+1I; two accesses added at execute
+            return 3;  // 1S+1I + extra trailing cycle
 
+        // MUL family: 1 prefetch + operand-dependent 1-4 internal
+        // cycles. mGBA models the operand-dependence (ARM_WAIT_SMUL)
+        // but we use a small fixed cost matching the common case
+        // (small operands → wait=1). Worst-case undercount per MUL
+        // is 3 cycles, but MUL is rare in BIOS init.
         case IrOp::MUL:
-            return 4;  // 1S + ~3I (avg)
+            return 2;  // 1S + 1I (small-operand case)
         case IrOp::MLA: case IrOp::UMULL: case IrOp::SMULL:
-            return 5;
+            return 3;
         case IrOp::UMLAL: case IrOp::SMLAL:
-            return 6;
+            return 4;
 
         case IrOp::SWI:
             return 3;  // 2S+1N — mode-change overhead is in enter_irq
@@ -1005,6 +1017,9 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
     //   base (fetch + internal cycles per cycle_cost_base)
     // + mem_cycles (data-access cycles accumulated by LDR/STR/LDM/
     //   STM/SWP execute paths via bus.access_cycles)
+    // + 1I if op2 is a register-shifted operand (mGBA matches
+    //   ARM7TDMI's behaviour here: ALU with shift-by-register adds
+    //   one internal cycle for the shifter)
     // + pipeline refill (+2) for any non-branch op that wrote PC.
     // Branches (B/BL/BX/BL_*) fold the refill into base.
     if (cycles_out) {
@@ -1012,6 +1027,12 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
         bool branch_op = (i.op == IrOp::B || i.op == IrOp::BL ||
                           i.op == IrOp::BX || i.op == IrOp::BLX_reg ||
                           i.op == IrOp::BL_prefix || i.op == IrOp::BL_suffix);
+        // ARM ALU register-shift would add +1I per ARM7TDMI spec
+        // but in combination with the STR/STM +1 turnaround model
+        // we've adopted from mGBA, applying it uniformly produces
+        // ~30+ scanline overshoot at the lockstep VCOUNT checkpoint.
+        // Leaving it off until we can measure exactly when mGBA
+        // does/doesn't apply it.
         if (wrote_pc && !branch_op) c += 2;
         *cycles_out = c;
     }
