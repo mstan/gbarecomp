@@ -103,6 +103,9 @@ struct Oracle {
     mCore*   core    = nullptr;
     uint32_t vblanks = 0;     // VBlank events observed since reset
     uint64_t frame   = 0;     // mCore frame counter mirror
+    // mGBA renders the framebuffer into this buffer on each runFrame.
+    // 240*160 pixels at BYTES_PER_PIXEL (default 4 = 32-bit ARGB).
+    std::vector<uint32_t> video_buf;
 
     // GBA-specific regions. Sizes per GBATEK § "GBA Memory Map".
     static constexpr uint32_t kBaseBIOS  = 0x00000000;
@@ -157,10 +160,18 @@ struct Oracle {
             }
         }
 
+        // Provide a video buffer so the PPU renders into something
+        // we can read back for emu_screenshot. Without this mGBA
+        // skips rendering work entirely.
+        unsigned w = 0, h = 0;
+        core->desiredVideoDimensions(core, &w, &h);
+        video_buf.assign(static_cast<std::size_t>(w) * h, 0);
+        core->setVideoBuffer(core, video_buf.data(), w);
+
         core->reset(core);
-        std::printf("oracle: mGBA core ready (bios=%s rom=%s)\n",
+        std::printf("oracle: mGBA core ready (bios=%s rom=%s video=%ux%u)\n",
                     bios_path ? bios_path : "(none)",
-                    rom_path  ? rom_path  : "(none)");
+                    rom_path  ? rom_path  : "(none)", w, h);
         return true;
     }
 
@@ -338,6 +349,147 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         int32_t pc = 0;
         o.core->readRegister(o.core, "r15", &pc);
         emit_ok_int(out, "pc", static_cast<uint32_t>(pc));
+        return;
+    }
+
+    auto io16 = [&](uint32_t off) -> uint16_t {
+        return static_cast<uint16_t>(
+            o.core->busRead16(o.core, 0x04000000u + off));
+    };
+    auto io32 = [&](uint32_t off) -> uint32_t {
+        uint32_t lo = io16(off);
+        uint32_t hi = io16(off + 2);
+        return lo | (hi << 16);
+    };
+    auto append_kv = [](std::string& s, const char* key, uint64_t v) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), ",\"%s\":%llu",
+                      key, static_cast<unsigned long long>(v));
+        s += buf;
+    };
+
+    if (starts("\"emu_ppu_state\"")) {
+        std::string body = "{\"ok\":true";
+        append_kv(body, "dispcnt",  io16(0x00));
+        append_kv(body, "dispstat", io16(0x04));
+        append_kv(body, "vcount",   io16(0x06));
+        for (int bg = 0; bg < 4; ++bg) {
+            char k[24];
+            std::snprintf(k, sizeof(k), "bg%dcnt", bg);
+            append_kv(body, k, io16(0x08 + bg * 2));
+            std::snprintf(k, sizeof(k), "bg%dhofs", bg);
+            append_kv(body, k, io16(0x10 + bg * 4));
+            std::snprintf(k, sizeof(k), "bg%dvofs", bg);
+            append_kv(body, k, io16(0x12 + bg * 4));
+        }
+        // BG2/BG3 affine: PA/PB/PC/PD + reference X/Y.
+        append_kv(body, "bg2pa", io16(0x20)); append_kv(body, "bg2pb", io16(0x22));
+        append_kv(body, "bg2pc", io16(0x24)); append_kv(body, "bg2pd", io16(0x26));
+        append_kv(body, "bg2x",  io32(0x28)); append_kv(body, "bg2y",  io32(0x2C));
+        append_kv(body, "bg3pa", io16(0x30)); append_kv(body, "bg3pb", io16(0x32));
+        append_kv(body, "bg3pc", io16(0x34)); append_kv(body, "bg3pd", io16(0x36));
+        append_kv(body, "bg3x",  io32(0x38)); append_kv(body, "bg3y",  io32(0x3C));
+        // Windows.
+        append_kv(body, "win0h", io16(0x40)); append_kv(body, "win1h", io16(0x42));
+        append_kv(body, "win0v", io16(0x44)); append_kv(body, "win1v", io16(0x46));
+        append_kv(body, "winin", io16(0x48)); append_kv(body, "winout",io16(0x4A));
+        // Mosaic + blending.
+        append_kv(body, "mosaic",  io16(0x4C));
+        append_kv(body, "bldcnt",  io16(0x50));
+        append_kv(body, "bldalpha",io16(0x52));
+        append_kv(body, "bldy",    io16(0x54));
+        body += "}";
+        out = body;
+        return;
+    }
+
+    if (starts("\"emu_dma_state\"")) {
+        std::string body = "{\"ok\":true,\"channels\":[";
+        for (int ch = 0; ch < 4; ++ch) {
+            if (ch) body += ",";
+            uint32_t base = 0xB0u + ch * 12u;
+            uint32_t sad   = io32(base);
+            uint32_t dad   = io32(base + 4);
+            uint16_t cnt_l = io16(base + 8);
+            uint16_t cnt_h = io16(base + 10);
+            char chunk[256];
+            std::snprintf(chunk, sizeof(chunk),
+                "{\"ch\":%d,\"sad\":%u,\"dad\":%u,\"cnt_l\":%u,\"cnt_h\":%u,"
+                "\"enable\":%d,\"start_mode\":%d}",
+                ch,
+                static_cast<unsigned>(sad), static_cast<unsigned>(dad),
+                static_cast<unsigned>(cnt_l), static_cast<unsigned>(cnt_h),
+                (cnt_h >> 15) & 1, (cnt_h >> 12) & 3);
+            body += chunk;
+        }
+        body += "]}";
+        out = body;
+        return;
+    }
+
+    if (starts("\"emu_timer_state\"")) {
+        std::string body = "{\"ok\":true,\"timers\":[";
+        for (int t = 0; t < 4; ++t) {
+            if (t) body += ",";
+            uint32_t base = 0x100u + t * 4u;
+            uint16_t count_or_reload = io16(base);
+            uint16_t cnt_h           = io16(base + 2);
+            char chunk[160];
+            std::snprintf(chunk, sizeof(chunk),
+                "{\"t\":%d,\"counter\":%u,\"cnt_h\":%u,"
+                "\"enable\":%d,\"cascade\":%d,\"prescaler\":%d}",
+                t, count_or_reload, cnt_h,
+                (cnt_h >> 7) & 1, (cnt_h >> 2) & 1, cnt_h & 3);
+            body += chunk;
+        }
+        body += "]}";
+        out = body;
+        return;
+    }
+
+    if (starts("\"emu_screenshot\"")) {
+        // mGBA renders 32-bit BGRA into video_buf. Convert to 240x160
+        // RGB888 the same way the native PPU emits frames, so a host
+        // diff can compare bytes 1:1.
+        const void* px = nullptr;
+        std::size_t stride = 0;  // pixels per row
+        o.core->getPixels(o.core, &px, &stride);
+        if (!px) {
+            emit_error(out, "no framebuffer (mGBA not rendering)");
+            return;
+        }
+        const uint32_t* src = static_cast<const uint32_t*>(px);
+        std::vector<uint8_t> rgb(240 * 160 * 3);
+        for (uint32_t y = 0; y < 160; ++y) {
+            for (uint32_t x = 0; x < 240; ++x) {
+                uint32_t p = src[y * stride + x];
+                // mGBA's default packing on little-endian is 0xAARRGGBB
+                // when COLOR_16_BIT is unset (BYTES_PER_PIXEL=4). The
+                // exact byte order depends on the BUILD; we extract
+                // via the M_R8/G8/B8 macros conceptually. The most
+                // common layout is B,G,R,A in memory (BGRA) so:
+                uint8_t b = (p >>  0) & 0xFFu;
+                uint8_t g = (p >>  8) & 0xFFu;
+                uint8_t r = (p >> 16) & 0xFFu;
+                uint8_t* d = rgb.data() + (y * 240 + x) * 3;
+                d[0] = r; d[1] = g; d[2] = b;
+            }
+        }
+        out = "{\"ok\":true,\"w\":240,\"h\":160,\"data\":";
+        json_emit_hex(out, rgb.data(), rgb.size());
+        out += "}";
+        return;
+    }
+
+    if (starts("\"emu_irq_state\"")) {
+        uint16_t ie  = io16(0x200);
+        uint16_t if_ = io16(0x202);
+        uint16_t ime = io16(0x208);
+        char body[160];
+        std::snprintf(body, sizeof(body),
+            "{\"ok\":true,\"ie\":%u,\"if\":%u,\"ime\":%u,\"pending\":%u}",
+            ie, if_, ime, static_cast<unsigned>(ie & if_));
+        out = body;
         return;
     }
     if (starts("\"quit\"")) {
