@@ -18,6 +18,8 @@ void GbaPpu::reset() {
     cycle_in_dot_ = 0;
     vcount_ = 0;
     frame_count_ = 0;
+    has_latched_fb_ = false;
+    std::memset(latched_fb_.data(), 0xFF, latched_fb_.size());
 }
 
 GbaPpu::TickEvents GbaPpu::tick(uint32_t cycles, uint16_t vcount_compare) {
@@ -53,6 +55,16 @@ GbaPpu::TickEvents GbaPpu::tick(uint32_t cycles, uint16_t vcount_compare) {
         }
     }
     return ev;
+}
+
+uint32_t GbaPpu::cycles_until_next_event() const {
+    uint32_t target_dot = (dot_in_scanline_ < kDotsVisible)
+        ? kDotsVisible
+        : kDotsPerScanline;
+    uint32_t cycles = (target_dot - dot_in_scanline_) * kCyclesPerDot;
+    if (cycles > cycle_in_dot_) cycles -= cycle_in_dot_;
+    else cycles = 1;
+    return cycles ? cycles : 1;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -91,6 +103,21 @@ inline void to_rgb888(uint16_t c, uint8_t* out) {
     out[2] = static_cast<uint8_t>((b << 3) | (b >> 2));
 }
 
+inline void blend_alpha_rgb888(const uint8_t* top,
+                               const uint8_t* bottom,
+                               uint32_t eva,
+                               uint32_t evb,
+                               uint8_t* out) {
+    if (eva > 16) eva = 16;
+    if (evb > 16) evb = 16;
+    for (int i = 0; i < 3; ++i) {
+        uint32_t v = (static_cast<uint32_t>(top[i]) * eva +
+                      static_cast<uint32_t>(bottom[i]) * evb) >> 4;
+        if (v > 255) v = 255;
+        out[i] = static_cast<uint8_t>(v);
+    }
+}
+
 inline uint16_t load_u16_le(const uint8_t* p) {
     return static_cast<uint16_t>(p[0] | (p[1] << 8));
 }
@@ -112,55 +139,264 @@ static inline int32_t read_s28_ref(const uint8_t* io, uint32_t off) {
                  (static_cast<uint32_t>(io[off + 2]) << 16) |
                  (static_cast<uint32_t>(io[off + 3]) << 24);
     v &= 0x0FFFFFFFu;
-    if (v & 0x08000000u) v |= 0xF0000000u;  // sign-extend bit 27
+    if (v & 0x08000000u) v |= 0xF0000000u;
     return static_cast<int32_t>(v);
 }
 
-// Render one affine BG (BG2 or BG3) into the framebuffer. Pixels at
-// palette index 0 are skipped (transparent). `bgcnt_off` is the IO
-// offset of BGxCNT (0x0C for BG3, 0x0A for BG2). `bg_params_off` is
-// the offset of BGxPA (0x20 for BG2, 0x30 for BG3).
 namespace {
 
-void render_affine_bg(uint8_t* rgb,
-                      const uint8_t* io,
-                      const uint8_t* vram,
-                      const uint8_t* pal,
-                      uint32_t bgcnt_off,
-                      uint32_t bg_params_off,
-                      uint32_t kScreenWidth,
-                      uint32_t kScreenHeight) {
-    uint16_t bgcnt = static_cast<uint16_t>(
-        io[bgcnt_off] | (io[bgcnt_off + 1] << 8));
-    uint32_t char_base   = ((bgcnt >> 2) & 0x3u) * 0x4000u;  // 16 KB blocks
-    uint32_t screen_base = ((bgcnt >> 8) & 0x1Fu) * 0x800u;  // 2 KB blocks
-    bool wrap            = (bgcnt & 0x2000u) != 0;
-    uint32_t size_code   = (bgcnt >> 14) & 0x3u;
-    int bg_pixels = 128 << size_code;   // 128, 256, 512, 1024
-    int bg_tiles  = bg_pixels / 8;
+bool obj_texel_opaque(const uint8_t* vram,
+                      uint32_t obj_tile_base,
+                      bool obj_1d_mapping,
+                      uint32_t tile_num,
+                      int tiles_w,
+                      bool color256,
+                      int tex_x,
+                      int tex_y) {
+    int tile_x_in_sprite = tex_x >> 3;
+    int tile_y_in_sprite = tex_y >> 3;
+    int px_in_tile       = tex_x & 7;
+    int py_in_tile       = tex_y & 7;
 
-    // Affine matrix and reference (PA at bg_params_off, then PB, PC,
-    // PD, X, Y).
-    int32_t pa = read_s16(io, bg_params_off + 0);
-    int32_t pb = read_s16(io, bg_params_off + 2);
-    int32_t pc = read_s16(io, bg_params_off + 4);
-    int32_t pd = read_s16(io, bg_params_off + 6);
-    int32_t refx = read_s28_ref(io, bg_params_off + 8);
-    int32_t refy = read_s28_ref(io, bg_params_off + 12);
+    uint32_t this_tile;
+    if (obj_1d_mapping) {
+        this_tile = tile_num + (tile_y_in_sprite * tiles_w + tile_x_in_sprite) *
+                                (color256 ? 2u : 1u);
+    } else {
+        this_tile = tile_num + (tile_y_in_sprite * 32u) +
+                    tile_x_in_sprite * (color256 ? 2u : 1u);
+    }
+    uint32_t tile_off = obj_tile_base + this_tile * 32u;
+    if (color256) {
+        uint32_t off = tile_off + py_in_tile * 8 + px_in_tile;
+        if (off + 1 > 96u * 1024u) return false;
+        return vram[off] != 0;
+    }
+    uint32_t off = tile_off + py_in_tile * 4 + (px_in_tile / 2);
+    if (off + 1 > 96u * 1024u) return false;
+    uint8_t b = vram[off];
+    uint8_t pal_index = (px_in_tile & 1) ? (b >> 4) : (b & 0x0F);
+    return pal_index != 0;
+}
 
-    for (uint32_t y = 0; y < kScreenHeight; ++y) {
-        // Per-scanline affine: (rx, ry) = ref + (0,y) projected.
-        // Actually per GBATEK: at scanline y, base = ref + (y * PB, y * PD).
-        // Then per pixel x: pos = base + (x * PA, x * PC).
-        // X is added per dx; we start with (refx + y*PB) and step PA per pixel.
+void mark_obj_window_scanline(bool* mask,
+                              uint32_t y,
+                              uint16_t dispcnt,
+                              const uint8_t* vram,
+                              const uint8_t* oam,
+                              uint32_t kScreenWidth,
+                              uint32_t kScreenHeight) {
+    if (y >= kScreenHeight) return;
+    if ((dispcnt & 0x8000u) == 0) return;
+
+    uint32_t bg_mode = dispcnt & 0x07u;
+    uint32_t obj_tile_base = (bg_mode >= 3) ? 0x14000u : 0x10000u;
+    bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
+
+    for (int idx = 127; idx >= 0; --idx) {
+        const uint8_t* entry = oam + idx * 8;
+        uint16_t attr0 = load_u16_le(&entry[0]);
+        uint16_t attr1 = load_u16_le(&entry[2]);
+        uint16_t attr2 = load_u16_le(&entry[4]);
+
+        bool rot_scale = (attr0 & 0x0100u) != 0;
+        bool disable_or_double = (attr0 & 0x0200u) != 0;
+        if (!rot_scale && disable_or_double) continue;
+        uint32_t obj_mode = (attr0 >> 10) & 0x3u;
+        if (obj_mode != 2) continue;
+
+        uint32_t shape = (attr0 >> 14) & 0x3u;
+        if (shape >= 3) continue;
+        uint32_t size  = (attr1 >> 14) & 0x3u;
+        int sw = kSpriteWH[shape][size][0];
+        int sh = kSpriteWH[shape][size][1];
+
+        int sy = static_cast<int>(attr0 & 0xFFu);
+        int sx = static_cast<int>(attr1 & 0x1FFu);
+        if (sy >= 160) sy -= 256;
+        if (sx & 0x100) sx -= 0x200;
+
+        bool color256 = (attr0 & 0x2000u) != 0;
+        uint32_t tile_num = attr2 & 0x3FFu;
+        int tiles_w = sw / 8;
+        int tiles_h = sh / 8;
+
+        if (rot_scale) {
+            int bw = disable_or_double ? sw * 2 : sw;
+            int bh = disable_or_double ? sh * 2 : sh;
+            int j = static_cast<int>(y) - sy;
+            if (j < 0 || j >= bh) continue;
+
+            int affine_group = (attr1 >> 9) & 0x1Fu;
+            const uint8_t* ag = oam + affine_group * 0x20u;
+            int32_t pa = read_s16(ag, 0x06);
+            int32_t pb = read_s16(ag, 0x0E);
+            int32_t pc = read_s16(ag, 0x16);
+            int32_t pd = read_s16(ag, 0x1E);
+
+            int half_bw = bw >> 1;
+            int half_bh = bh >> 1;
+            int half_sw = sw >> 1;
+            int half_sh = sh >> 1;
+            int dy = j - half_bh;
+            for (int i = 0; i < bw; ++i) {
+                int screen_x = sx + i;
+                if (screen_x < 0 || screen_x >= static_cast<int>(kScreenWidth)) continue;
+                int dx = i - half_bw;
+                int tex_x = ((pa * dx + pb * dy) >> 8) + half_sw;
+                int tex_y = ((pc * dx + pd * dy) >> 8) + half_sh;
+                if (tex_x < 0 || tex_x >= sw) continue;
+                if (tex_y < 0 || tex_y >= sh) continue;
+                if (obj_texel_opaque(vram, obj_tile_base, obj_1d_mapping,
+                                     tile_num, tiles_w, color256,
+                                     tex_x, tex_y)) {
+                    mask[screen_x] = true;
+                }
+            }
+            continue;
+        }
+
+        int line = static_cast<int>(y) - sy;
+        if (line < 0 || line >= sh) continue;
+        bool hflip = (attr1 & 0x1000u) != 0;
+        bool vflip = (attr1 & 0x2000u) != 0;
+        int ty = line >> 3;
+        int py = line & 7;
+        int src_ty = vflip ? (tiles_h - 1 - ty) : ty;
+        int src_py = vflip ? (7 - py) : py;
+        for (int tx = 0; tx < tiles_w; ++tx) {
+            int src_tx = hflip ? (tiles_w - 1 - tx) : tx;
+            for (int px = 0; px < 8; ++px) {
+                int screen_x = sx + tx * 8 + px;
+                if (screen_x < 0 || screen_x >= static_cast<int>(kScreenWidth)) continue;
+                int src_px = hflip ? (7 - px) : px;
+                int tex_x = src_tx * 8 + src_px;
+                int tex_y = src_ty * 8 + src_py;
+                if (obj_texel_opaque(vram, obj_tile_base, obj_1d_mapping,
+                                     tile_num, tiles_w, color256,
+                                     tex_x, tex_y)) {
+                    mask[screen_x] = true;
+                }
+            }
+        }
+    }
+}
+
+void render_scanline_internal(uint8_t* rgb,
+                              uint32_t y,
+                              uint16_t dispcnt,
+                              const uint8_t* io,
+                              const uint8_t* vram,
+                              const uint8_t* oam,
+                              const uint8_t* pal,
+                              uint32_t kScreenWidth,
+                              uint32_t kScreenHeight) {
+    if (y >= kScreenHeight) return;
+
+    uint8_t* row = rgb + y * kScreenWidth * 3;
+    if (dispcnt & 0x0080u) {
+        std::memset(row, 0xFF, kScreenWidth * 3);
+        return;
+    }
+
+    struct PixelCandidate {
+        uint8_t rgb[3] = {0, 0, 0};
+        int key = 0x7FFFFFFF;
+        uint8_t layer = 5;
+        bool target1 = false;
+        bool target2 = false;
+        bool valid = false;
+    };
+
+    uint16_t winout = static_cast<uint16_t>(io[0x4A] | (io[0x4B] << 8));
+    bool obj_window_storage[GbaPpu::kScreenWidth] = {};
+    bool* obj_window_mask = nullptr;
+    if (dispcnt & 0x8000u) {
+        mark_obj_window_scanline(obj_window_storage, y, dispcnt, vram, oam,
+                                 kScreenWidth, kScreenHeight);
+        obj_window_mask = obj_window_storage;
+    }
+    auto window_control = [&](uint32_t x) -> uint16_t {
+        if (!obj_window_mask) return 0x3Fu;
+        return obj_window_mask[x]
+            ? static_cast<uint16_t>((winout >> 8) & 0x3Fu)
+            : static_cast<uint16_t>(winout & 0x3Fu);
+    };
+    auto layer_enabled = [&](uint32_t x, uint32_t layer_bit) -> bool {
+        return (window_control(x) & (1u << layer_bit)) != 0;
+    };
+    auto blend_enabled = [&](uint32_t x) -> bool {
+        return (window_control(x) & (1u << 5)) != 0;
+    };
+
+    uint16_t bldcnt = static_cast<uint16_t>(io[0x50] | (io[0x51] << 8));
+    uint16_t bldalpha = static_cast<uint16_t>(io[0x52] | (io[0x53] << 8));
+    uint32_t first_targets = bldcnt & 0x3Fu;
+    uint32_t second_targets = (bldcnt >> 8) & 0x3Fu;
+    uint32_t effect = (bldcnt >> 6) & 0x3u;
+
+    PixelCandidate top[GbaPpu::kScreenWidth];
+    PixelCandidate second[GbaPpu::kScreenWidth];
+    uint8_t backdrop_rgb[3];
+    to_rgb888(load_u16_le(&pal[0]), backdrop_rgb);
+    for (uint32_t x = 0; x < kScreenWidth; ++x) {
+        top[x].rgb[0] = backdrop_rgb[0];
+        top[x].rgb[1] = backdrop_rgb[1];
+        top[x].rgb[2] = backdrop_rgb[2];
+        top[x].key = 0x70000000;
+        top[x].layer = 5;
+        top[x].target1 = blend_enabled(x) && ((first_targets & (1u << 5)) != 0);
+        top[x].target2 = (second_targets & (1u << 5)) != 0;
+        top[x].valid = true;
+    }
+    auto submit = [&](uint32_t x,
+                      const uint8_t* rgbv,
+                      int key,
+                      uint8_t layer,
+                      bool target1,
+                      bool target2) {
+        PixelCandidate cand;
+        cand.rgb[0] = rgbv[0];
+        cand.rgb[1] = rgbv[1];
+        cand.rgb[2] = rgbv[2];
+        cand.key = key;
+        cand.layer = layer;
+        cand.target1 = target1;
+        cand.target2 = target2;
+        cand.valid = true;
+        if (key < top[x].key) {
+            second[x] = top[x];
+            top[x] = cand;
+        } else if (key < second[x].key) {
+            second[x] = cand;
+        }
+    };
+
+    uint32_t bg_mode = dispcnt & 0x07u;
+    if ((dispcnt & 0x0800u) && (bg_mode == 1 || bg_mode == 2)) {
+        uint16_t bgcnt = static_cast<uint16_t>(io[0x0E] | (io[0x0F] << 8));
+        uint32_t char_base   = ((bgcnt >> 2) & 0x3u) * 0x4000u;
+        uint32_t screen_base = ((bgcnt >> 8) & 0x1Fu) * 0x800u;
+        bool wrap            = (bgcnt & 0x2000u) != 0;
+        uint32_t size_code   = (bgcnt >> 14) & 0x3u;
+        int bg_pixels = 128 << size_code;
+        int bg_tiles  = bg_pixels / 8;
+        int bg_priority = static_cast<int>(bgcnt & 0x3u);
+
+        int32_t pa = read_s16(io, 0x30);
+        int32_t pb = read_s16(io, 0x32);
+        int32_t pc = read_s16(io, 0x34);
+        int32_t pd = read_s16(io, 0x36);
+        int32_t refx = read_s28_ref(io, 0x38);
+        int32_t refy = read_s28_ref(io, 0x3C);
         int32_t xt = refx + static_cast<int32_t>(y) * pb;
         int32_t yt = refy + static_cast<int32_t>(y) * pd;
         for (uint32_t x = 0; x < kScreenWidth; ++x) {
-            int32_t tex_x = xt >> 8;  // .8 fraction → integer
+            int32_t tex_x = xt >> 8;
             int32_t tex_y = yt >> 8;
             xt += pa;
             yt += pc;
-
+            if (!layer_enabled(x, 3)) continue;
             if (wrap) {
                 tex_x &= (bg_pixels - 1);
                 tex_y &= (bg_pixels - 1);
@@ -168,36 +404,151 @@ void render_affine_bg(uint8_t* rgb,
                        tex_y < 0 || tex_y >= bg_pixels) {
                 continue;
             }
-
-            int tile_x = tex_x >> 3;
-            int tile_y = tex_y >> 3;
-            int px_in_tile_x = tex_x & 7;
-            int px_in_tile_y = tex_y & 7;
-
-            // Affine BG tilemap is 1 byte per entry (8bpp tile index).
-            uint32_t map_off = screen_base + tile_y * bg_tiles + tile_x;
+            uint32_t map_off = screen_base + (tex_y >> 3) * bg_tiles + (tex_x >> 3);
             if (map_off >= 96u * 1024u) continue;
             uint8_t tile_index = vram[map_off];
-
-            // 8bpp tile: 64 bytes (8x8 pixels, 1 byte each).
             uint32_t tile_addr = char_base + tile_index * 64u +
-                                 px_in_tile_y * 8 + px_in_tile_x;
+                                 (tex_y & 7) * 8 + (tex_x & 7);
             if (tile_addr >= 96u * 1024u) continue;
             uint8_t pal_idx = vram[tile_addr];
-            if (pal_idx == 0) continue;  // transparent
-
-            uint16_t color = static_cast<uint16_t>(
-                pal[pal_idx * 2] | (pal[pal_idx * 2 + 1] << 8));
-            uint8_t* dst = rgb + (y * kScreenWidth + x) * 3;
-            // Convert BGR555 → RGB888 inline.
-            uint8_t r5 = color & 0x1F;
-            uint8_t g5 = (color >> 5) & 0x1F;
-            uint8_t b5 = (color >> 10) & 0x1F;
-            dst[0] = static_cast<uint8_t>((r5 << 3) | (r5 >> 2));
-            dst[1] = static_cast<uint8_t>((g5 << 3) | (g5 >> 2));
-            dst[2] = static_cast<uint8_t>((b5 << 3) | (b5 >> 2));
+            if (pal_idx == 0) continue;
+            uint8_t rgbv[3];
+            to_rgb888(load_u16_le(&pal[pal_idx * 2]), rgbv);
+            submit(x, rgbv, bg_priority * 128 + 128, 3,
+                   blend_enabled(x) && ((first_targets & (1u << 3)) != 0),
+                   (second_targets & (1u << 3)) != 0);
         }
     }
+
+    if (dispcnt & 0x1000u) {
+        uint32_t obj_tile_base = (bg_mode >= 3) ? 0x14000u : 0x10000u;
+        bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
+        const uint8_t* obj_pal = pal + 0x200;
+        for (int idx = 127; idx >= 0; --idx) {
+            const uint8_t* entry = oam + idx * 8;
+            uint16_t attr0 = load_u16_le(&entry[0]);
+            uint16_t attr1 = load_u16_le(&entry[2]);
+            uint16_t attr2 = load_u16_le(&entry[4]);
+            bool rot_scale = (attr0 & 0x0100u) != 0;
+            bool disable_or_double = (attr0 & 0x0200u) != 0;
+            if (!rot_scale && disable_or_double) continue;
+            uint32_t obj_mode = (attr0 >> 10) & 0x3u;
+            if (obj_mode == 2 || obj_mode == 3) continue;
+            uint32_t shape = (attr0 >> 14) & 0x3u;
+            if (shape >= 3) continue;
+            uint32_t size  = (attr1 >> 14) & 0x3u;
+            int sw = kSpriteWH[shape][size][0];
+            int sh = kSpriteWH[shape][size][1];
+            int sy = static_cast<int>(attr0 & 0xFFu);
+            int sx = static_cast<int>(attr1 & 0x1FFu);
+            if (sy >= 160) sy -= 256;
+            if (sx & 0x100) sx -= 0x200;
+            bool color256 = (attr0 & 0x2000u) != 0;
+            uint32_t tile_num = attr2 & 0x3FFu;
+            uint32_t palette_bank = (attr2 >> 12) & 0xFu;
+            int tiles_w = sw / 8;
+            int tiles_h = sh / 8;
+            int priority = static_cast<int>((attr2 >> 10) & 0x3u);
+            int key = priority * 128 + idx;
+            bool obj_target2 = (second_targets & (1u << 4)) != 0;
+            auto emit_obj = [&](int tex_x, int tex_y, int screen_x) {
+                if (screen_x < 0 || screen_x >= static_cast<int>(kScreenWidth)) return;
+                if (!layer_enabled(static_cast<uint32_t>(screen_x), 4)) return;
+                int tile_x_in_sprite = tex_x >> 3;
+                int tile_y_in_sprite = tex_y >> 3;
+                int px_in_tile = tex_x & 7;
+                int py_in_tile = tex_y & 7;
+                uint32_t this_tile;
+                if (obj_1d_mapping) {
+                    this_tile = tile_num + (tile_y_in_sprite * tiles_w + tile_x_in_sprite) *
+                                            (color256 ? 2u : 1u);
+                } else {
+                    this_tile = tile_num + (tile_y_in_sprite * 32u) +
+                                tile_x_in_sprite * (color256 ? 2u : 1u);
+                }
+                uint32_t tile_off = obj_tile_base + this_tile * 32u;
+                uint8_t pal_index;
+                if (color256) {
+                    uint32_t off = tile_off + py_in_tile * 8 + px_in_tile;
+                    if (off + 1 > 96u * 1024u) return;
+                    pal_index = vram[off];
+                    if (pal_index == 0) return;
+                } else {
+                    uint32_t off = tile_off + py_in_tile * 4 + (px_in_tile / 2);
+                    if (off + 1 > 96u * 1024u) return;
+                    uint8_t b = vram[off];
+                    pal_index = (px_in_tile & 1) ? (b >> 4) : (b & 0x0F);
+                    if (pal_index == 0) return;
+                    pal_index = static_cast<uint8_t>(pal_index | (palette_bank << 4));
+                }
+                uint8_t rgbv[3];
+                to_rgb888(load_u16_le(&obj_pal[pal_index * 2]), rgbv);
+                uint32_t ux = static_cast<uint32_t>(screen_x);
+                bool t1 = blend_enabled(ux) &&
+                    obj_mode == 1;
+                submit(ux, rgbv, key, 4, t1, obj_target2);
+            };
+            if (rot_scale) {
+                int bw = disable_or_double ? sw * 2 : sw;
+                int bh = disable_or_double ? sh * 2 : sh;
+                int j = static_cast<int>(y) - sy;
+                if (j < 0 || j >= bh) continue;
+                int affine_group = (attr1 >> 9) & 0x1Fu;
+                const uint8_t* ag = oam + affine_group * 0x20u;
+                int32_t pa = read_s16(ag, 0x06);
+                int32_t pb = read_s16(ag, 0x0E);
+                int32_t pc = read_s16(ag, 0x16);
+                int32_t pd = read_s16(ag, 0x1E);
+                int half_bw = bw >> 1;
+                int half_bh = bh >> 1;
+                int half_sw = sw >> 1;
+                int half_sh = sh >> 1;
+                int dy = j - half_bh;
+                for (int i = 0; i < bw; ++i) {
+                    int dx = i - half_bw;
+                    int tex_x = ((pa * dx + pb * dy) >> 8) + half_sw;
+                    int tex_y = ((pc * dx + pd * dy) >> 8) + half_sh;
+                    if (tex_x < 0 || tex_x >= sw) continue;
+                    if (tex_y < 0 || tex_y >= sh) continue;
+                    emit_obj(tex_x, tex_y, sx + i);
+                }
+                continue;
+            }
+            int line = static_cast<int>(y) - sy;
+            if (line < 0 || line >= sh) continue;
+            bool hflip = (attr1 & 0x1000u) != 0;
+            bool vflip = (attr1 & 0x2000u) != 0;
+            int ty = line >> 3;
+            int py = line & 7;
+            int src_ty = vflip ? (tiles_h - 1 - ty) : ty;
+            int src_py = vflip ? (7 - py) : py;
+            for (int tx = 0; tx < tiles_w; ++tx) {
+                int src_tx = hflip ? (tiles_w - 1 - tx) : tx;
+                for (int px = 0; px < 8; ++px) {
+                    int src_px = hflip ? (7 - px) : px;
+                    emit_obj(src_tx * 8 + src_px, src_ty * 8 + src_py,
+                             sx + tx * 8 + px);
+                }
+            }
+        }
+    }
+
+    for (uint32_t x = 0; x < kScreenWidth; ++x) {
+        uint8_t* dst = row + x * 3;
+        if (effect == 1 && (bldalpha & 0x1Fu) != 0 &&
+            top[x].target1 && second[x].valid && second[x].target2 &&
+            !(top[x].layer == 4 && second[x].layer == 4)) {
+            blend_alpha_rgb888(top[x].rgb, second[x].rgb,
+                               bldalpha & 0x1Fu,
+                               (bldalpha >> 8) & 0x1Fu,
+                               dst);
+        } else {
+            dst[0] = top[x].rgb[0];
+            dst[1] = top[x].rgb[1];
+            dst[2] = top[x].rgb[2];
+        }
+    }
+    return;
 }
 
 }  // namespace
@@ -208,6 +559,13 @@ void GbaPpu::render(uint8_t* rgb,
                     const uint8_t* vram,
                     const uint8_t* oam,
                     const uint8_t* pal) const {
+    for (uint32_t y = 0; y < kScreenHeight; ++y) {
+        render_scanline_internal(rgb, y, dispcnt, io, vram, oam, pal,
+                                 kScreenWidth, kScreenHeight);
+    }
+}
+
+#if 0
     (void)oam;  // referenced below
     // Start with backdrop (palette entry 0) for every pixel. Backdrop
     // is the BG palette index 0, at PAL[0..1].
@@ -455,6 +813,31 @@ void GbaPpu::render(uint8_t* rgb,
             }
         }
     }
+}
+
+#endif
+
+void GbaPpu::render_scanline(uint32_t y,
+                             uint16_t dispcnt,
+                             const uint8_t* io,
+                             const uint8_t* vram,
+                             const uint8_t* oam,
+                             const uint8_t* pal) {
+    render_scanline_internal(latched_fb_.data(), y, dispcnt, io, vram, oam, pal,
+                             kScreenWidth, kScreenHeight);
+}
+
+void GbaPpu::latch_framebuffer(uint16_t dispcnt,
+                               const uint8_t* io,
+                               const uint8_t* vram,
+                               const uint8_t* oam,
+                               const uint8_t* pal) {
+    render(latched_fb_.data(), dispcnt, io, vram, oam, pal);
+    has_latched_fb_ = true;
+}
+
+void GbaPpu::mark_framebuffer_latched() {
+    has_latched_fb_ = true;
 }
 
 }  // namespace gba

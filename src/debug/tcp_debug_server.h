@@ -50,6 +50,9 @@ public:
         uint64_t* halt_steps         = nullptr;
         uint64_t* vblank_irqs_raised = nullptr;
         uint64_t* steps              = nullptr;
+        uint64_t* cycles_elapsed     = nullptr;
+        uint32_t* last_step_cycles   = nullptr;
+        uint64_t* sync_frames        = nullptr;
     };
 
     TcpDebugServer();

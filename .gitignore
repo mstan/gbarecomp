@@ -24,6 +24,13 @@ Thumbs.db
 # diagnostic artifacts, not source; regenerate as needed.
 *.bmp
 *.png
+*.rgb
+*.log
+
+# Local Ghidra project artifacts. The real Ghidra project for
+# the BIOS + Minish Cap lives at MinishCapRecomp/ghidra/ (outside
+# this inner repo). Anything that lands here is incidental.
+ghidra/
 
 # Vendored oracle dependency (mGBA upstream source). Cloned locally
 # at a pinned tag; never committed back to gbarecomp's history. The

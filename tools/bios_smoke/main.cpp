@@ -35,6 +35,7 @@
 namespace {
 
 constexpr const char* kDefaultBios = "bios/gba_bios.bin";
+constexpr uint32_t kGbaIrqDelayCycles = 7;
 
 struct Args {
     std::string bios = kDefaultBios;
@@ -202,27 +203,54 @@ int main(int argc, char** argv) {
     }
 
     uint64_t vblank_irqs_raised = 0;
+    uint64_t vblank_count = 0;
+    uint64_t cycles_elapsed = 0;
+    uint32_t last_step_cycles = 0;
     bool frame_just_completed = false;
     auto pump_ppu = [&](uint32_t cycles) {
-        // Audio advances on the same wall clock as the PPU. Phase
-        // 2.7.C: minimal SOUND2 implementation so the BIOS chime
-        // can be heard / diffed against mGBA.
-        bus.audio().tick(cycles);
-        // VCount-match value lives in DISPSTAT[15:8].
-        uint16_t vc_compare = static_cast<uint16_t>((bus.io().dispstat() >> 8) & 0xFFu);
-        auto events = ppu.tick(cycles, vc_compare);
-        uint16_t ds = bus.io().dispstat();
-        if (events.vblank_started && (ds & 0x0008u)) {
-            bus.io().request_irq(gba::GbaIo::IrqVBlank);
-            ++vblank_irqs_raised;
+        uint32_t remaining = cycles;
+        while (remaining != 0) {
+            uint32_t chunk = remaining;
+            uint32_t until_sample = bus.audio().cycles_until_next_sample();
+            uint32_t until_timer = bus.io().cycles_until_next_timer_event();
+            if (until_sample < chunk) chunk = until_sample;
+            if (until_timer < chunk) chunk = until_timer;
+            if (chunk == 0) chunk = 1;
+
+            cycles_elapsed += chunk;
+            bus.audio().tick(chunk);
+            bus.io().tick_timers(chunk);
+            // VCount-match value lives in DISPSTAT[15:8].
+            uint16_t vc_compare = static_cast<uint16_t>(
+                (bus.io().dispstat() >> 8) & 0xFFu);
+            auto events = ppu.tick(chunk, vc_compare);
+            uint16_t ds = bus.io().dispstat();
+            if (events.hblank_started &&
+                ppu.vcount() < gba::GbaPpu::kLinesVisible) {
+                ppu.render_scanline(ppu.vcount(),
+                                    bus.io().read16(0x000),
+                                    bus.io().raw(),
+                                    bus.vram_ptr(),
+                                    bus.oam_ptr(),
+                                    bus.pal_ptr());
+            }
+            if (events.vblank_started) {
+                ++vblank_count;
+                ppu.mark_framebuffer_latched();
+            }
+            if (events.vblank_started && (ds & 0x0008u)) {
+                bus.io().request_irq(gba::GbaIo::IrqVBlank);
+                ++vblank_irqs_raised;
+            }
+            if (events.hblank_started && (ds & 0x0010u)) {
+                bus.io().request_irq(gba::GbaIo::IrqHBlank);
+            }
+            if (events.vcount_matched && (ds & 0x0020u)) {
+                bus.io().request_irq(gba::GbaIo::IrqVCount);
+            }
+            if (events.frame_completed) frame_just_completed = true;
+            remaining -= chunk;
         }
-        if (events.hblank_started && (ds & 0x0010u)) {
-            bus.io().request_irq(gba::GbaIo::IrqHBlank);
-        }
-        if (events.vcount_matched && (ds & 0x0020u)) {
-            bus.io().request_irq(gba::GbaIo::IrqVCount);
-        }
-        if (events.frame_completed) frame_just_completed = true;
     };
 
     // Live window setup (optional). When --window is given we open an
@@ -251,22 +279,38 @@ int main(int argc, char** argv) {
     int frames_presented = 0;
     bool host_quit = false;
 
-    // Per-CPU-step body, factored out so both the N-frame / N-steps
-    // loop AND the TCP server's `step` callback drive the same
-    // execution path. Returns false on Undefined / NotImplemented;
-    // the caller terminates in that case.
-    auto run_one_cpu_step = [&]() -> bool {
+    auto run_cpu_step = [&](int trace_index) -> bool {
+        uint32_t step_cycles = 0;
+        auto pump_step = [&](uint32_t cycles) {
+            pump_ppu(cycles);
+            step_cycles += cycles;
+        };
+
         if (bus.io().irq_pending() && !cpu.cpsr.i) {
             if (bus.io().halted()) bus.io().clear_halt();
             armv4t::Interpreter::enter_irq(cpu, cpu.R[15]);
             ++irq_entries;
         }
+
         if (bus.io().halted()) {
-            pump_ppu(64);
             ++halt_steps;
-            ++taken;
-            return true;
+            while (bus.io().halted() && !bus.io().irq_pending()) {
+                uint32_t chunk = ppu.cycles_until_next_event();
+                if (chunk == 0) chunk = 1;
+                pump_step(chunk);
+            }
+            if (bus.io().irq_pending() && !cpu.cpsr.i) {
+                pump_step(kGbaIrqDelayCycles);
+                bus.io().clear_halt();
+                armv4t::Interpreter::enter_irq(cpu, cpu.R[15]);
+                ++irq_entries;
+            } else {
+                last_step_cycles = step_cycles;
+                ++taken;
+                return true;
+            }
         }
+
         uint32_t pc = cpu.R[15];
         armv4t::Instr insn{};
         if (cpu.thumb) {
@@ -283,7 +327,28 @@ int main(int argc, char** argv) {
             armv4t::Interpreter::enter_swi(cpu, next_pc, cpu.thumb);
             ++swi_entries;
         }
-        pump_ppu(insn_cycles);
+        pump_step(insn_cycles);
+        last_step_cycles = step_cycles;
+
+        if (!args.quiet && trace_index >= 0) {
+            const char* r_name = "?";
+            switch (r) {
+                case armv4t::Interpreter::Result::Normal:         r_name = "Normal";    break;
+                case armv4t::Interpreter::Result::Branched:       r_name = "Branched";  break;
+                case armv4t::Interpreter::Result::Swi:            r_name = "Swi";       break;
+                case armv4t::Interpreter::Result::Undefined:      r_name = "Undefined"; break;
+                case armv4t::Interpreter::Result::NotImplemented: r_name = "NotImpl";   break;
+            }
+            std::printf("%6d %08x  %s   %-32s %08x %08x %08x %08x %08x %08x %08x %d%d%d%d %s\n",
+                        trace_index, pc, cpu.thumb ? "T" : "A",
+                        armv4t::format_ir(insn).c_str(),
+                        cpu.R[0], cpu.R[1], cpu.R[2], cpu.R[3],
+                        cpu.R[12], cpu.R[14], cpu.R[13],
+                        cpu.cpsr.n ? 1 : 0, cpu.cpsr.z ? 1 : 0,
+                        cpu.cpsr.c ? 1 : 0, cpu.cpsr.v ? 1 : 0,
+                        r_name);
+        }
+
         ++taken;
         if (r == armv4t::Interpreter::Result::Undefined ||
             r == armv4t::Interpreter::Result::NotImplemented) {
@@ -292,13 +357,19 @@ int main(int argc, char** argv) {
         return true;
     };
 
-    // Step until the PPU completes one frame. Used by the TCP step
-    // callback so each `step` command advances the runtime by exactly
-    // one PPU frame — matches the oracle's emu_step semantics.
+    // Per-CPU-step body used by the TCP server. Returns false on
+    // Undefined / NotImplemented; the caller terminates in that case.
+    auto run_one_cpu_step = [&]() -> bool {
+        return run_cpu_step(-1);
+    };
+
+    // Step until the PPU reaches the next VBlank start. mGBA's
+    // runFrame returns at this boundary, so the TCP frame clock uses
+    // VBlank starts rather than scanline wrap.
     auto step_one_frame = [&]() -> bool {
         frame_just_completed = false;
-        uint64_t start = ppu.frame_count();
-        while (ppu.frame_count() == start) {
+        uint64_t start = vblank_count;
+        while (vblank_count == start) {
             if (!run_one_cpu_step()) return false;
         }
         return true;
@@ -321,6 +392,9 @@ int main(int argc, char** argv) {
         srv_ctx.halt_steps         = &halt_steps;
         srv_ctx.vblank_irqs_raised = &vblank_irqs_raised;
         srv_ctx.steps              = &taken;
+        srv_ctx.cycles_elapsed     = &cycles_elapsed;
+        srv_ctx.last_step_cycles   = &last_step_cycles;
+        srv_ctx.sync_frames        = &vblank_count;
         server.run(args.tcp_port, srv_ctx);
         return 0;
     }
@@ -333,106 +407,18 @@ int main(int argc, char** argv) {
         ? (args.steps > 16 ? args.steps : 0x7FFFFFFF / 2)
         : args.steps;
     for (int i = 0; i < step_budget && !host_quit; ++i) {
-        // Check pending IRQ before fetching. A pending IRQ also wakes
-        // the CPU out of HALT.
-        if (bus.io().irq_pending() && !cpu.cpsr.i) {
-            if (bus.io().halted()) bus.io().clear_halt();
-            armv4t::Interpreter::enter_irq(cpu, cpu.R[15]);
-            ++irq_entries;
-        }
-
-        // HALT: skip instruction execution but keep advancing time
-        // until an IRQ becomes pending and CPSR.I allows entry. Tick
-        // a chunk of cycles at once so HALT doesn't burn 1 step per
-        // cycle of real time.
-        if (bus.io().halted()) {
-            pump_ppu(64);
-            ++halt_steps;
-            ++taken;
-            if (args.window && frame_just_completed) {
-                frame_just_completed = false;
+        if (!run_cpu_step(i)) break;
+        if (args.window && frame_just_completed) {
+            frame_just_completed = false;
+            if (ppu.has_latched_framebuffer()) {
+                std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
+                            gba::GbaPpu::kFramebufferBytes);
+            } else {
                 uint16_t live_dispcnt = bus.io().read16(0x000);
                 ppu.render(live_fb.data(), live_dispcnt,
                            bus.io().raw(),
                            bus.vram_ptr(), bus.oam_ptr(), bus.pal_ptr());
-                win.present(live_fb.data());
-                int16_t audio_buf[2048];
-                std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
-                if (n > 0) win.push_audio_samples(audio_buf, n);
-                auto ev = win.pump();
-                bus.io().set_keyinput(ev.keyinput);
-                if (ev.quit) host_quit = true;
-                ++frames_presented;
-                if (args.frames >= 0 && frames_presented >= args.frames) {
-                    host_quit = true;
-                }
             }
-            // Headless frame cap: stop once the PPU has completed
-            // args.frames frames. Lets --dump-bmp target a specific
-            // PPU frame regardless of HALT/instruction step ratio.
-            if (!args.window && args.frames >= 0 &&
-                ppu.frame_count() >= static_cast<uint64_t>(args.frames)) break;
-            continue;
-        }
-
-        uint32_t pc = cpu.R[15];
-        armv4t::Instr insn{};
-        if (cpu.thumb) {
-            uint16_t hw = bus.read16(pc);
-            insn = armv4t::ThumbDecoder::decode(hw, pc);
-        } else {
-            uint32_t word = bus.read32(pc);
-            insn = armv4t::ArmDecoder::decode(word, pc);
-        }
-        uint32_t insn_cycles = 1;
-        auto r = armv4t::Interpreter::step(cpu, bus, insn, &insn_cycles);
-
-        // SWI dispatch: the BIOS implements Halt / VBlankIntrWait /
-        // CpuSet / etc. behind these. The interpreter returns Swi
-        // without modifying CPU state; we mode-switch + jump to
-        // 0x00000008 so the real BIOS handler runs.
-        if (r == armv4t::Interpreter::Result::Swi) {
-            uint32_t next_pc = pc + (cpu.thumb ? 2u : 4u);
-            armv4t::Interpreter::enter_swi(cpu, next_pc, cpu.thumb);
-            ++swi_entries;
-        }
-        // Advance hardware time by what the instruction actually
-        // cost on real ARM7TDMI. cycle_cost_base in interpreter.cpp
-        // captures BIOS-region S/N/I cycles; pipeline refill is
-        // folded in for ops that write PC.
-        pump_ppu(insn_cycles);
-        if (!args.quiet) {
-            const char* r_name = "?";
-            switch (r) {
-                case armv4t::Interpreter::Result::Normal:         r_name = "Normal";    break;
-                case armv4t::Interpreter::Result::Branched:       r_name = "Branched";  break;
-                case armv4t::Interpreter::Result::Swi:            r_name = "Swi";       break;
-                case armv4t::Interpreter::Result::Undefined:      r_name = "Undefined"; break;
-                case armv4t::Interpreter::Result::NotImplemented: r_name = "NotImpl";   break;
-            }
-            std::printf("%6d %08x  %s   %-32s %08x %08x %08x %08x %08x %08x %08x %d%d%d%d %s\n",
-                        i, pc, cpu.thumb ? "T" : "A",
-                        armv4t::format_ir(insn).c_str(),
-                        cpu.R[0], cpu.R[1], cpu.R[2], cpu.R[3],
-                        cpu.R[12], cpu.R[14], cpu.R[13],
-                        cpu.cpsr.n ? 1 : 0, cpu.cpsr.z ? 1 : 0,
-                        cpu.cpsr.c ? 1 : 0, cpu.cpsr.v ? 1 : 0,
-                        r_name);
-        }
-        ++taken;
-        if (r == armv4t::Interpreter::Result::Undefined ||
-            r == armv4t::Interpreter::Result::NotImplemented) {
-            break;
-        }
-
-        if (args.window && frame_just_completed) {
-            frame_just_completed = false;
-            // Render the current PPU snapshot into the live buffer and
-            // upload to the host texture.
-            uint16_t live_dispcnt = bus.io().read16(0x000);
-            ppu.render(live_fb.data(), live_dispcnt,
-                       bus.io().raw(),
-                       bus.vram_ptr(), bus.oam_ptr(), bus.pal_ptr());
             win.present(live_fb.data());
             // Drain any audio samples generated this frame and feed
             // them to the host. ~547 samples per frame at 32768 Hz.
@@ -656,9 +642,14 @@ int main(int argc, char** argv) {
 
     if (!args.dump_bmp.empty()) {
         std::vector<uint8_t> fb(gba::GbaPpu::kFramebufferBytes, 0);
-        ppu.render(fb.data(), final_dispcnt,
-                   bus.io().raw(),
-                   bus.vram_ptr(), bus.oam_ptr(), bus.pal_ptr());
+        if (ppu.has_latched_framebuffer()) {
+            std::memcpy(fb.data(), ppu.latched_framebuffer(),
+                        gba::GbaPpu::kFramebufferBytes);
+        } else {
+            ppu.render(fb.data(), final_dispcnt,
+                       bus.io().raw(),
+                       bus.vram_ptr(), bus.oam_ptr(), bus.pal_ptr());
+        }
         if (write_bmp(args.dump_bmp, fb.data(),
                       gba::GbaPpu::kScreenWidth,
                       gba::GbaPpu::kScreenHeight)) {

@@ -265,12 +265,12 @@ uint32_t GbaBus::access_cycles(uint32_t addr, uint8_t width,
         case 0x8: case 0x9:  // ROM WS0
         case 0xA: case 0xB:  // ROM WS1
         case 0xC: case 0xD:  // ROM WS2
-            // Default WAITCNT 0x0000: N=4 cycles, S=2 cycles per
-            // 16-bit access. 32-bit access does (N+S) on first /
-            // (S+S) on sequential. We approximate at the 16-bit
-            // access level and pay double for 32-bit.
-            if (w == 4) return sequential ? 4u : 6u;
-            return sequential ? 2u : 4u;
+            // Default WAITCNT 0x0000. mGBA's waitstate tables store
+            // the external wait component (N16=4, S16=2, N32=7,
+            // S32=5); the data-access helper needs the full bus
+            // access cost, so add the one base bus cycle here.
+            if (w == 4) return sequential ? 6u : 8u;
+            return sequential ? 3u : 5u;
         case 0xE:  // SRAM / Flash region — 8-bit bus, ~5 cycles
             return 5;
         default:

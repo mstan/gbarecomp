@@ -6,18 +6,19 @@
 //
 // Cycle accounting per GBATEK § "GBA Picture Processing Unit":
 //   1 dot           = 4 cycles
-//   visible window  = 240 dots (960 cycles) per scanline
-//   HBlank window   = 68 dots  (272 cycles) per scanline
+//   HDraw window    = 252 dots (1008 cycles) per scanline
+//   HBlank window   = 56 dots  (224 cycles) per scanline
 //   scanline total  = 308 dots / 1232 cycles
 //   visible lines   = 160
 //   VBlank lines    = 68 (scanlines 160..227)
 //   frame total     = 228 scanlines = 280896 cycles
 //
 // VCOUNT increments at the start of each scanline. HBlank flag sets
-// at dot 240 (cycle 960 of the line), clears at start of next line.
+// at dot 252 (cycle 1008 of the line), clears at start of next line.
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <cstddef>
 
@@ -26,8 +27,8 @@ namespace gba {
 class GbaPpu {
 public:
     // Hardware constants.
-    static constexpr uint32_t kDotsVisible      = 240;
-    static constexpr uint32_t kDotsHBlank       = 68;
+    static constexpr uint32_t kDotsVisible      = 252;
+    static constexpr uint32_t kDotsHBlank       = 56;
     static constexpr uint32_t kDotsPerScanline  = kDotsVisible + kDotsHBlank;  // 308
     static constexpr uint32_t kCyclesPerDot     = 4;
     static constexpr uint32_t kCyclesPerScanline =
@@ -63,6 +64,7 @@ public:
     uint16_t vcount() const { return static_cast<uint16_t>(vcount_); }
     bool     in_vblank() const { return scanline_ >= kLinesVisible; }
     bool     in_hblank() const { return dot_in_scanline_ >= kDotsVisible; }
+    uint32_t cycles_until_next_event() const;
 
     // VCount-match: returns true when current VCOUNT equals the value
     // configured in DISPSTAT bits 8..15 (the IO layer holds that
@@ -89,6 +91,24 @@ public:
                 const uint8_t* vram,
                 const uint8_t* oam,
                 const uint8_t* pal) const;
+    void render_scanline(uint32_t y,
+                         uint16_t dispcnt,
+                         const uint8_t* io,
+                         const uint8_t* vram,
+                         const uint8_t* oam,
+                         const uint8_t* pal);
+
+    // Latch the just-finished visible frame. The BIOS mutates OAM/PAL
+    // during VBlank; screenshots must therefore use the frame captured
+    // at VBlank start, not whatever live memory contains later.
+    void latch_framebuffer(uint16_t dispcnt,
+                           const uint8_t* io,
+                           const uint8_t* vram,
+                           const uint8_t* oam,
+                           const uint8_t* pal);
+    void mark_framebuffer_latched();
+    const uint8_t* latched_framebuffer() const { return latched_fb_.data(); }
+    bool has_latched_framebuffer() const { return has_latched_fb_; }
 
 private:
     uint32_t scanline_        = 0;   // 0..227
@@ -96,6 +116,8 @@ private:
     uint32_t cycle_in_dot_    = 0;   // 0..3
     uint16_t vcount_          = 0;
     uint64_t frame_count_     = 0;
+    std::array<uint8_t, kFramebufferBytes> latched_fb_{};
+    bool has_latched_fb_ = false;
 };
 
 }  // namespace gba

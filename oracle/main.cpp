@@ -9,6 +9,7 @@
 // PRINCIPLES.md, the native build has zero copyleft emulator deps.
 
 #include <cstdint>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,7 +39,11 @@
 extern "C" {
 #include <mgba/core/core.h>
 #include <mgba/core/config.h>
+#include <mgba/core/interface.h>
 #include <mgba/core/log.h>
+#include <mgba/core/timing.h>
+#include <mgba/internal/gba/dma.h>
+#include <mgba/internal/gba/gba.h>
 #include <mgba-util/vfs.h>
 }
 
@@ -99,6 +104,55 @@ bool extract_uint(std::string_view req, std::string_view key, uint64_t& out) {
 // mGBA driver
 // ─────────────────────────────────────────────────────────────────────
 
+struct OracleAudioTap {
+    mAVStream stream{};
+    std::vector<int16_t> mono;
+    std::size_t read_index = 0;
+    uint64_t samples_generated = 0;
+    unsigned sample_rate = 32768;
+
+    OracleAudioTap() {
+        stream.audioRateChanged = &OracleAudioTap::rate_changed;
+        stream.postAudioFrame = &OracleAudioTap::post_audio_frame;
+    }
+
+    void clear_samples() {
+        mono.clear();
+        read_index = 0;
+        samples_generated = 0;
+    }
+
+    std::vector<int16_t> drain(std::size_t max) {
+        std::size_t available = mono.size() - read_index;
+        std::size_t n = available < max ? available : max;
+        std::vector<int16_t> out;
+        out.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            out.push_back(mono[read_index + i]);
+        }
+        read_index += n;
+        if (read_index > 65536 && read_index * 2 > mono.size()) {
+            mono.erase(mono.begin(), mono.begin() +
+                       static_cast<std::ptrdiff_t>(read_index));
+            read_index = 0;
+        }
+        return out;
+    }
+
+    static void rate_changed(mAVStream* stream, unsigned rate) {
+        auto* self = reinterpret_cast<OracleAudioTap*>(stream);
+        self->sample_rate = rate;
+    }
+
+    static void post_audio_frame(mAVStream* stream, int16_t left, int16_t right) {
+        auto* self = reinterpret_cast<OracleAudioTap*>(stream);
+        int32_t mixed = (static_cast<int32_t>(left) +
+                         static_cast<int32_t>(right)) / 2;
+        self->mono.push_back(static_cast<int16_t>(mixed));
+        ++self->samples_generated;
+    }
+};
+
 struct Oracle {
     mCore*   core    = nullptr;
     uint32_t vblanks = 0;     // VBlank events observed since reset
@@ -107,6 +161,7 @@ struct Oracle {
     // mGBA renders the framebuffer into this buffer on each runFrame.
     // 240*160 pixels at BYTES_PER_PIXEL (default 4 = 32-bit ARGB).
     std::vector<uint32_t> video_buf;
+    OracleAudioTap audio;
 
     // Drive mGBA's post-reset CPU state to match real ARM7TDMI
     // hardware conventions (ARM ARM A2.6.5): PC=0, mode=Supervisor,
@@ -191,6 +246,8 @@ struct Oracle {
 
         core->reset(core);
         apply_real_hw_reset();
+        core->setAVStream(core, &audio.stream);
+        audio.clear_samples();
         std::printf("oracle: mGBA core ready (bios=%s rom=%s video=%ux%u) "
                     "[reset state forced to real ARM7TDMI: PC=0 SVC I=F=1]\n",
                     bios_path ? bios_path : "(none)",
@@ -284,6 +341,38 @@ void cmd_read_region(Oracle& o, std::string_view req,
     out += "}";
 }
 
+void cmd_audio_samples(Oracle& o, std::string_view req, std::string& out) {
+    uint64_t max_samples = 4096;
+    uint64_t parsed = 0;
+    if (extract_uint(req, "\"max\"", parsed) ||
+        extract_uint(req, "\"count\"", parsed) ||
+        extract_uint(req, "\"samples\"", parsed)) {
+        max_samples = parsed;
+    }
+    if (max_samples > 16384) max_samples = 16384;
+
+    std::vector<int16_t> samples =
+        o.audio.drain(static_cast<std::size_t>(max_samples));
+    std::vector<uint8_t> bytes(samples.size() * 2);
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        uint16_t u = static_cast<uint16_t>(samples[i]);
+        bytes[i * 2 + 0] = static_cast<uint8_t>(u & 0xFFu);
+        bytes[i * 2 + 1] = static_cast<uint8_t>((u >> 8) & 0xFFu);
+    }
+
+    char hdr[160];
+    std::snprintf(hdr, sizeof(hdr),
+                  "{\"ok\":true,\"rate\":%u,\"count\":%llu,"
+                  "\"samples_generated\":%llu,\"data\":",
+                  static_cast<unsigned>(o.audio.sample_rate),
+                  static_cast<unsigned long long>(samples.size()),
+                  static_cast<unsigned long long>(
+                      o.audio.samples_generated));
+    out = hdr;
+    json_emit_hex(out, bytes.data(), bytes.size());
+    out += "}";
+}
+
 void dispatch(Oracle& o, std::string_view req, std::string& out) {
     out.clear();
 
@@ -305,7 +394,12 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
     }
     if (starts("\"emu_step_inst\"")) {
         if (!o.core) { emit_error(out, "no core"); return; }
+        uint64_t before_cycles =
+            o.core->timing ? mTimingCurrentTime(o.core->timing) : 0;
         o.core->step(o.core);
+        uint64_t after_cycles =
+            o.core->timing ? mTimingCurrentTime(o.core->timing) : 0;
+        uint64_t step_cycles = after_cycles - before_cycles;
         ++o.inst_count;
         int32_t pc = 0, cpsr = 0;
         o.core->readRegister(o.core, "r15",  &pc);
@@ -315,10 +409,13 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         body.reserve(512);
         char hdr[160];
         std::snprintf(hdr, sizeof(hdr),
-            "{\"ok\":true,\"pc\":%u,\"thumb\":%s,\"frame\":%llu",
+            "{\"ok\":true,\"pc\":%u,\"thumb\":%s,\"frame\":%llu,"
+            "\"cycles\":%llu,\"cycles_elapsed\":%llu",
             static_cast<unsigned>(pc),
             thumb ? "true" : "false",
-            static_cast<unsigned long long>(o.frame));
+            static_cast<unsigned long long>(o.frame),
+            static_cast<unsigned long long>(step_cycles),
+            static_cast<unsigned long long>(after_cycles));
         body = hdr;
         for (int i = 0; i < 15; ++i) {
             char name[8]; std::snprintf(name, sizeof(name), "r%d", i);
@@ -349,6 +446,7 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         o.vblanks    = 0;
         o.frame      = 0;
         o.inst_count = 0;
+        o.audio.clear_samples();
         out = "{\"ok\":true}";
         return;
     }
@@ -491,6 +589,33 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         return;
     }
 
+    if (starts("\"emu_dma_internal\"")) {
+        auto* gba = static_cast<GBA*>(o.core->board);
+        std::string body = "{\"ok\":true,\"channels\":[";
+        for (int ch = 0; ch < 4; ++ch) {
+            if (ch) body += ",";
+            const GBADMA& dma = gba->memory.dma[ch];
+            char chunk[320];
+            std::snprintf(chunk, sizeof(chunk),
+                "{\"ch\":%d,\"reg\":%u,\"source\":%u,\"dest\":%u,"
+                "\"count\":%d,\"nextSource\":%u,\"nextDest\":%u,"
+                "\"nextCount\":%d,\"when\":%u}",
+                ch,
+                static_cast<unsigned>(dma.reg),
+                static_cast<unsigned>(dma.source),
+                static_cast<unsigned>(dma.dest),
+                static_cast<int>(dma.count),
+                static_cast<unsigned>(dma.nextSource),
+                static_cast<unsigned>(dma.nextDest),
+                static_cast<int>(dma.nextCount),
+                static_cast<unsigned>(dma.when));
+            body += chunk;
+        }
+        body += "]}";
+        out = body;
+        return;
+    }
+
     if (starts("\"emu_timer_state\"")) {
         std::string body = "{\"ok\":true,\"timers\":[";
         for (int t = 0; t < 4; ++t) {
@@ -511,10 +636,60 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         return;
     }
 
+    if (starts("\"emu_audio_state\"")) {
+        auto* gba = static_cast<GBA*>(o.core->board);
+        const GBAAudio& audio = gba->audio;
+        std::string body;
+        char hdr[320];
+        std::snprintf(hdr, sizeof(hdr),
+            "{\"ok\":true,\"time\":%u,\"rate\":%u,"
+            "\"samples_generated\":%llu,\"soundbias\":%u,"
+            "\"sampleInterval\":%d,\"sampleIndex\":%d,"
+            "\"lastSample\":%d,\"nextSample\":%d",
+            static_cast<unsigned>(mTimingCurrentTime(&gba->timing)),
+            static_cast<unsigned>(o.audio.sample_rate),
+            static_cast<unsigned long long>(o.audio.samples_generated),
+            static_cast<unsigned>(audio.soundbias),
+            static_cast<int>(audio.sampleInterval),
+            static_cast<int>(audio.sampleIndex),
+            static_cast<int>(audio.lastSample),
+            static_cast<int>(
+                mTimingUntil(&gba->timing, &audio.sampleEvent)));
+        body = hdr;
+        auto append_fifo = [&](const char* name, const GBAAudioFIFO& fifo) {
+            char fh[192];
+            int fifo_size = fifo.fifoWrite >= fifo.fifoRead
+                ? fifo.fifoWrite - fifo.fifoRead
+                : GBA_AUDIO_FIFO_SIZE - fifo.fifoRead + fifo.fifoWrite;
+            std::snprintf(fh, sizeof(fh),
+                ",\"%s\":{\"write\":%d,\"read\":%d,\"count\":%d,"
+                "\"internalSample\":%u,\"internalRemaining\":%d,"
+                "\"samples\":[",
+                name, fifo.fifoWrite, fifo.fifoRead, fifo_size,
+                static_cast<unsigned>(fifo.internalSample),
+                fifo.internalRemaining);
+            body += fh;
+            for (int i = 0; i < GBA_MAX_SAMPLES; ++i) {
+                if (i) body += ",";
+                char b[16];
+                std::snprintf(b, sizeof(b), "%d",
+                              static_cast<int>(fifo.samples[i]));
+                body += b;
+            }
+            body += "]}";
+        };
+        append_fifo("fifo_a", audio.chA);
+        append_fifo("fifo_b", audio.chB);
+        body += "}";
+        out = body;
+        return;
+    }
+
     if (starts("\"emu_screenshot\"")) {
-        // mGBA renders 32-bit BGRA into video_buf. Convert to 240x160
-        // RGB888 the same way the native PPU emits frames, so a host
-        // diff can compare bytes 1:1.
+        // mGBA renders 32-bit color_t into video_buf. In the default
+        // 32-bit build, mGBA's native color layout is 0x00BBGGRR
+        // (M_COLOR_RED = 0x000000FF). Convert to RGB888 so native and
+        // oracle screenshots can be compared byte-for-byte.
         const void* px = nullptr;
         std::size_t stride = 0;  // pixels per row
         o.core->getPixels(o.core, &px, &stride);
@@ -527,14 +702,9 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         for (uint32_t y = 0; y < 160; ++y) {
             for (uint32_t x = 0; x < 240; ++x) {
                 uint32_t p = src[y * stride + x];
-                // mGBA's default packing on little-endian is 0xAARRGGBB
-                // when COLOR_16_BIT is unset (BYTES_PER_PIXEL=4). The
-                // exact byte order depends on the BUILD; we extract
-                // via the M_R8/G8/B8 macros conceptually. The most
-                // common layout is B,G,R,A in memory (BGRA) so:
-                uint8_t b = (p >>  0) & 0xFFu;
+                uint8_t r = (p >>  0) & 0xFFu;
                 uint8_t g = (p >>  8) & 0xFFu;
-                uint8_t r = (p >> 16) & 0xFFu;
+                uint8_t b = (p >> 16) & 0xFFu;
                 uint8_t* d = rgb.data() + (y * 240 + x) * 3;
                 d[0] = r; d[1] = g; d[2] = b;
             }
@@ -542,6 +712,11 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         out = "{\"ok\":true,\"w\":240,\"h\":160,\"data\":";
         json_emit_hex(out, rgb.data(), rgb.size());
         out += "}";
+        return;
+    }
+
+    if (starts("\"emu_audio_samples\"")) {
+        cmd_audio_samples(o, req, out);
         return;
     }
 

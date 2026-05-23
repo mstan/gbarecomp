@@ -142,6 +142,11 @@ public:
     // the IO backing so the next CPU read sees the current state.
     void set_keyinput(uint16_t keys);
 
+    // Advance hardware timers by CPU cycles. Timer overflows raise IRQs
+    // and clock direct-sound FIFOs.
+    void tick_timers(uint32_t cycles);
+    uint32_t cycles_until_next_timer_event() const;
+
 private:
     GbaPpu*       ppu_   = nullptr;
     GbaIrq*       irq_   = nullptr;
@@ -156,11 +161,18 @@ private:
     std::size_t unmapped_count_ = 0;
     std::size_t dma_runs_[4]  = {0, 0, 0, 0};
     std::size_t dma_words_[4] = {0, 0, 0, 0};
+    uint16_t timer_reload_[4] = {0, 0, 0, 0};
+    uint16_t timer_counter_[4] = {0, 0, 0, 0};
+    uint16_t timer_control_[4] = {0, 0, 0, 0};
+    uint32_t timer_accum_[4] = {0, 0, 0, 0};
+    uint32_t dma_next_source_[4] = {0, 0, 0, 0};
+    uint32_t dma_next_dest_[4] = {0, 0, 0, 0};
 
     // Log an unknown / unhandled IO access. Logs once per (offset,
     // direction, width) tuple to keep the output bounded under the
     // BIOS's setup phase (which touches hundreds of registers).
     void warn_unhandled(uint32_t off, uint32_t value, bool is_write, uint8_t width);
+    void run_sound_fifo_dma(int channel);
 };
 
 }  // namespace gba

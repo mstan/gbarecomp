@@ -131,6 +131,25 @@ def diff_one_frame(frame: int, native: JsonClient, oracle: JsonClient) -> None:
     while of < frame:
         of = oracle.call(cmd="emu_step")["frame"]
 
+    native_fb = native.call(cmd="screenshot")
+    oracle_fb = oracle.call(cmd="emu_screenshot")
+    if not native_fb.get("ok"):
+        raise RuntimeError(f"native screenshot failed: {native_fb}")
+    if not oracle_fb.get("ok"):
+        raise RuntimeError(f"oracle screenshot failed: {oracle_fb}")
+    nfb = bytes.fromhex(native_fb["data"])
+    ofb = bytes.fromhex(oracle_fb["data"])
+    first_fb = find_first_diff(nfb, ofb)
+    if first_fb is None:
+        print("    FRAMEBUFFER: identical")
+    else:
+        pixel = first_fb // 3
+        chan = first_fb % 3
+        x = pixel % 240
+        y = pixel // 240
+        print(f"    FRAMEBUFFER: first diff @({x},{y}) channel={chan} "
+              f"native=0x{nfb[first_fb]:02x} oracle=0x{ofb[first_fb]:02x}")
+
     for key, name, size, ncmd, ocmd in REGIONS:
         native_blob = native.read_region_chunked(ncmd, size)
         oracle_blob = oracle.read_region_chunked(ocmd, size)

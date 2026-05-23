@@ -27,6 +27,7 @@
 #endif
 
 #include "cpu_state.h"
+#include "gba_audio.h"
 #include "gba_bus.h"
 #include "gba_io.h"
 #include "gba_ppu.h"
@@ -95,6 +96,11 @@ void emit_ok_int(std::string& out, const char* key, uint64_t v) {
     out = buf;
 }
 
+uint64_t frame_counter(const TcpDebugServer::Context& ctx) {
+    if (ctx.sync_frames) return *ctx.sync_frames;
+    return ctx.ppu ? ctx.ppu->frame_count() : 0u;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Region readers — pull bytes directly from the bus's backing arrays
 // rather than going through bus.read8(), which would mask side effects
@@ -130,6 +136,152 @@ void cmd_read_region(const uint8_t* base, std::size_t size,
     out += "}";
 }
 
+void cmd_read_io_dynamic(gba::GbaBus& bus, std::string_view req,
+                         std::string& out) {
+    uint64_t addr = 0, len = 0;
+    if (!extract_uint(req, "\"addr\"", addr) ||
+        !extract_uint(req, "\"len\"", len)) {
+        emit_error(out, "missing addr/len");
+        return;
+    }
+    uint64_t off = (addr >= 0x04000000u) ? addr - 0x04000000u : addr;
+    if (off > gba::GbaIo::kIoSize || len > gba::GbaIo::kIoSize ||
+        off + len > gba::GbaIo::kIoSize) {
+        emit_error(out, "out of range");
+        return;
+    }
+    std::vector<uint8_t> bytes(static_cast<std::size_t>(len));
+    for (uint64_t i = 0; i < len; ++i) {
+        bytes[static_cast<std::size_t>(i)] =
+            bus.io().read8(static_cast<uint32_t>(off + i));
+    }
+    out  = "{\"ok\":true,\"base\":";
+    char ab[32];
+    std::snprintf(ab, sizeof(ab), "%u",
+                  static_cast<unsigned>(0x04000000u + off));
+    out += ab;
+    out += ",\"len\":";
+    char lb[32];
+    std::snprintf(lb, sizeof(lb), "%llu",
+                  static_cast<unsigned long long>(len));
+    out += lb;
+    out += ",\"data\":";
+    json_emit_hex(out, bytes.data(), bytes.size());
+    out += "}";
+}
+
+void cmd_audio_samples(gba::GbaBus& bus, std::string_view req,
+                       std::string& out) {
+    uint64_t max_samples = 4096;
+    uint64_t parsed = 0;
+    if (extract_uint(req, "\"max\"", parsed) ||
+        extract_uint(req, "\"count\"", parsed) ||
+        extract_uint(req, "\"samples\"", parsed)) {
+        max_samples = parsed;
+    }
+    if (max_samples > 16384) max_samples = 16384;
+
+    std::vector<int16_t> samples(static_cast<std::size_t>(max_samples));
+    std::size_t n = bus.audio().drain_samples(samples.data(), samples.size());
+    std::vector<uint8_t> bytes(n * 2);
+    for (std::size_t i = 0; i < n; ++i) {
+        uint16_t u = static_cast<uint16_t>(samples[i]);
+        bytes[i * 2 + 0] = static_cast<uint8_t>(u & 0xFFu);
+        bytes[i * 2 + 1] = static_cast<uint8_t>((u >> 8) & 0xFFu);
+    }
+
+    char hdr[160];
+    std::snprintf(hdr, sizeof(hdr),
+                  "{\"ok\":true,\"rate\":%u,\"count\":%llu,"
+                  "\"samples_generated\":%llu,\"data\":",
+                  static_cast<unsigned>(bus.audio().sample_rate()),
+                  static_cast<unsigned long long>(n),
+                  static_cast<unsigned long long>(
+                      bus.audio().samples_generated()));
+    out = hdr;
+    json_emit_hex(out, bytes.data(), bytes.size());
+    out += "}";
+}
+
+void append_fifo_state(std::string& out, const char* name,
+                       const gba::GbaAudio::FifoDebugState& fifo) {
+    char hdr[160];
+    std::snprintf(hdr, sizeof(hdr),
+                  ",\"%s\":{\"write\":%u,\"read\":%u,\"count\":%u,"
+                  "\"shift_word\":%u,\"bytes_remaining\":%u,\"samples\":[",
+                  name,
+                  static_cast<unsigned>(fifo.write),
+                  static_cast<unsigned>(fifo.read),
+                  static_cast<unsigned>(fifo.count),
+                  static_cast<unsigned>(fifo.shift_word),
+                  static_cast<unsigned>(fifo.bytes_remaining));
+    out += hdr;
+    for (uint32_t i = 0; i < gba::GbaAudio::kMaxSamplesPerEvent; ++i) {
+        if (i) out += ",";
+        char b[16];
+        std::snprintf(b, sizeof(b), "%d", static_cast<int>(fifo.samples[i]));
+        out += b;
+    }
+    out += "]}";
+}
+
+void cmd_audio_state(gba::GbaBus& bus, std::string& out) {
+    const auto& audio = bus.audio();
+    char hdr[240];
+    std::snprintf(hdr, sizeof(hdr),
+                  "{\"ok\":true,\"rate\":%u,\"samples_generated\":%llu,"
+                  "\"soundbias\":%u,\"cycles_per_sample\":%u,"
+                  "\"samples_per_event\":%u,\"cycle_accumulator\":%u,"
+                  "\"cycles_until_event\":%u",
+                  static_cast<unsigned>(audio.sample_rate()),
+                  static_cast<unsigned long long>(audio.samples_generated()),
+                  static_cast<unsigned>(audio.debug_soundbias()),
+                  static_cast<unsigned>(
+                      gba::GbaAudio::kSystemHz / audio.sample_rate()),
+                  static_cast<unsigned>(audio.debug_samples_per_event()),
+                  static_cast<unsigned>(audio.debug_cycle_accumulator()),
+                  static_cast<unsigned>(audio.debug_cycles_until_event()));
+    out = hdr;
+    append_fifo_state(out, "fifo_a", audio.debug_fifo_state(0));
+    append_fifo_state(out, "fifo_b", audio.debug_fifo_state(1));
+    out += "}";
+}
+
+void cmd_audio_trace(gba::GbaBus& bus, std::string_view req,
+                     std::string& out) {
+    uint64_t max_entries = 128;
+    uint64_t parsed = 0;
+    if (extract_uint(req, "\"max\"", parsed) ||
+        extract_uint(req, "\"count\"", parsed)) {
+        max_entries = parsed;
+    }
+    uint32_t available = bus.audio().debug_trace_count();
+    if (max_entries > available) max_entries = available;
+    if (max_entries > gba::GbaAudio::kFifoTraceSize) {
+        max_entries = gba::GbaAudio::kFifoTraceSize;
+    }
+    uint32_t start = available - static_cast<uint32_t>(max_entries);
+    out = "{\"ok\":true,\"entries\":[";
+    for (uint32_t i = 0; i < max_entries; ++i) {
+        auto tr = bus.audio().debug_trace_entry(start + i);
+        if (i) out += ",";
+        char item[240];
+        std::snprintf(item, sizeof(item),
+            "{\"base\":%llu,\"fifo\":%u,\"until\":%u,\"start\":%u,"
+            "\"slots\":%u,\"count\":%u,\"remaining\":%u,\"sample\":%d}",
+            static_cast<unsigned long long>(tr.sample_base),
+            static_cast<unsigned>(tr.fifo_id),
+            static_cast<unsigned>(tr.until_cycles),
+            static_cast<unsigned>(tr.start_slot),
+            static_cast<unsigned>(tr.slots),
+            static_cast<unsigned>(tr.count),
+            static_cast<unsigned>(tr.bytes_remaining),
+            static_cast<int>(tr.sample));
+        out += item;
+    }
+    out += "]}";
+}
+
 void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
               std::string& out, bool& want_quit, bool& step_failed) {
     out.clear();
@@ -143,8 +295,7 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         return;
     }
     if (contains("\"frame\"") && !contains("\"emu_")) {
-        uint64_t f = ctx.ppu ? ctx.ppu->frame_count() : 0;
-        emit_ok_int(out, "frame", f);
+        emit_ok_int(out, "frame", frame_counter(ctx));
         return;
     }
     if (contains("\"step_inst\"")) {
@@ -158,15 +309,20 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         // catch register-level divergence at its true origin (not
         // wait for the cascade into a branch decision).
         uint32_t pc = ctx.cpu ? ctx.cpu->R[15] : 0u;
-        uint64_t f  = ctx.ppu ? ctx.ppu->frame_count() : 0u;
+        uint64_t f  = frame_counter(ctx);
         std::string body;
         body.reserve(512);
-        char hdr[96];
+        char hdr[160];
         std::snprintf(hdr, sizeof(hdr),
-                      "{\"ok\":%s,\"pc\":%u,\"frame\":%llu",
+                      "{\"ok\":%s,\"pc\":%u,\"frame\":%llu,"
+                      "\"cycles\":%u,\"cycles_elapsed\":%llu",
                       ok ? "true" : "false",
                       static_cast<unsigned>(pc),
-                      static_cast<unsigned long long>(f));
+                      static_cast<unsigned long long>(f),
+                      static_cast<unsigned>(ctx.last_step_cycles ?
+                          *ctx.last_step_cycles : 0u),
+                      static_cast<unsigned long long>(ctx.cycles_elapsed ?
+                          *ctx.cycles_elapsed : 0u));
         body = hdr;
         if (ctx.cpu) {
             for (int i = 0; i < 15; ++i) {
@@ -200,7 +356,7 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         }
         bool ok = ctx.step();
         if (!ok) step_failed = true;
-        uint64_t f = ctx.ppu ? ctx.ppu->frame_count() : 0;
+        uint64_t f = frame_counter(ctx);
         char buf[96];
         std::snprintf(buf, sizeof(buf),
                       "{\"ok\":%s,\"frame\":%llu}",
@@ -231,7 +387,90 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
     }
     if (contains("\"read_io\"")) {
         if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
-        cmd_read_region(ctx.bus->io().raw(), 0x400, req, out, 0x04000000u);
+        cmd_read_io_dynamic(*ctx.bus, req, out);
+        return;
+    }
+    if (contains("\"ppu_state\"")) {
+        if (!ctx.bus || !ctx.ppu) { emit_error(out, "ppu unavailable"); return; }
+        auto io16 = [&](uint32_t off) -> uint16_t {
+            return ctx.bus->io().read16(off);
+        };
+        auto io32 = [&](uint32_t off) -> uint32_t {
+            uint32_t lo = io16(off);
+            uint32_t hi = io16(off + 2);
+            return lo | (hi << 16);
+        };
+        auto append_kv = [](std::string& s, const char* key, uint64_t v) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), ",\"%s\":%llu",
+                          key, static_cast<unsigned long long>(v));
+            s += buf;
+        };
+        std::string body = "{\"ok\":true";
+        append_kv(body, "frame", ctx.ppu->frame_count());
+        append_kv(body, "dispcnt",  io16(0x00));
+        append_kv(body, "dispstat", io16(0x04));
+        append_kv(body, "vcount",   io16(0x06));
+        for (int bg = 0; bg < 4; ++bg) {
+            char k[24];
+            std::snprintf(k, sizeof(k), "bg%dcnt", bg);
+            append_kv(body, k, io16(0x08 + bg * 2));
+            std::snprintf(k, sizeof(k), "bg%dhofs", bg);
+            append_kv(body, k, io16(0x10 + bg * 4));
+            std::snprintf(k, sizeof(k), "bg%dvofs", bg);
+            append_kv(body, k, io16(0x12 + bg * 4));
+        }
+        append_kv(body, "bg2pa", io16(0x20)); append_kv(body, "bg2pb", io16(0x22));
+        append_kv(body, "bg2pc", io16(0x24)); append_kv(body, "bg2pd", io16(0x26));
+        append_kv(body, "bg2x",  io32(0x28)); append_kv(body, "bg2y",  io32(0x2C));
+        append_kv(body, "bg3pa", io16(0x30)); append_kv(body, "bg3pb", io16(0x32));
+        append_kv(body, "bg3pc", io16(0x34)); append_kv(body, "bg3pd", io16(0x36));
+        append_kv(body, "bg3x",  io32(0x38)); append_kv(body, "bg3y",  io32(0x3C));
+        append_kv(body, "win0h", io16(0x40)); append_kv(body, "win1h", io16(0x42));
+        append_kv(body, "win0v", io16(0x44)); append_kv(body, "win1v", io16(0x46));
+        append_kv(body, "winin", io16(0x48)); append_kv(body, "winout",io16(0x4A));
+        append_kv(body, "mosaic",  io16(0x4C));
+        append_kv(body, "bldcnt",  io16(0x50));
+        append_kv(body, "bldalpha",io16(0x52));
+        append_kv(body, "bldy",    io16(0x54));
+        body += "}";
+        out = body;
+        return;
+    }
+    if (contains("\"screenshot\"")) {
+        if (!ctx.bus || !ctx.ppu) { emit_error(out, "ppu unavailable"); return; }
+        const uint8_t* rgb = nullptr;
+        std::vector<uint8_t> live;
+        if (ctx.ppu->has_latched_framebuffer()) {
+            rgb = ctx.ppu->latched_framebuffer();
+        } else {
+            live.assign(gba::GbaPpu::kFramebufferBytes, 0);
+            ctx.ppu->render(live.data(),
+                            ctx.bus->io().read16(0x000),
+                            ctx.bus->io().raw(),
+                            ctx.bus->vram_ptr(),
+                            ctx.bus->oam_ptr(),
+                            ctx.bus->pal_ptr());
+            rgb = live.data();
+        }
+        out = "{\"ok\":true,\"w\":240,\"h\":160,\"data\":";
+        json_emit_hex(out, rgb, gba::GbaPpu::kFramebufferBytes);
+        out += "}";
+        return;
+    }
+    if (contains("\"audio_samples\"")) {
+        if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
+        cmd_audio_samples(*ctx.bus, req, out);
+        return;
+    }
+    if (contains("\"audio_state\"")) {
+        if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
+        cmd_audio_state(*ctx.bus, out);
+        return;
+    }
+    if (contains("\"audio_trace\"")) {
+        if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
+        cmd_audio_trace(*ctx.bus, req, out);
         return;
     }
     if (contains("\"registers\"")) {
@@ -266,12 +505,17 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         std::snprintf(buf, sizeof(buf),
             "{\"ok\":true,\"steps\":%llu,\"irq_entries\":%llu,"
             "\"swi_entries\":%llu,\"halt_steps\":%llu,"
-            "\"vblank_irqs_raised\":%llu}",
+            "\"vblank_irqs_raised\":%llu,\"cycles_elapsed\":%llu,"
+            "\"last_step_cycles\":%u,\"sync_frames\":%llu}",
             static_cast<unsigned long long>(val(ctx.steps)),
             static_cast<unsigned long long>(val(ctx.irq_entries)),
             static_cast<unsigned long long>(val(ctx.swi_entries)),
             static_cast<unsigned long long>(val(ctx.halt_steps)),
-            static_cast<unsigned long long>(val(ctx.vblank_irqs_raised)));
+            static_cast<unsigned long long>(val(ctx.vblank_irqs_raised)),
+            static_cast<unsigned long long>(val(ctx.cycles_elapsed)),
+            static_cast<unsigned>(ctx.last_step_cycles ?
+                *ctx.last_step_cycles : 0u),
+            static_cast<unsigned long long>(val(ctx.sync_frames)));
         out = buf;
         return;
     }

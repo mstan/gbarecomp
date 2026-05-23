@@ -15,6 +15,11 @@ if(NOT EXISTS ${MGBA_LIB})
         "Configure + build third_party/mgba/ first.")
 endif()
 
+# MSYS GCC emits Windows absolute include paths (`C:/...`) in depfiles.
+# In this subdirectory Make then sees them as `oracle/C:/...`, which
+# contains multiple target separators. Let CMake scan oracle deps.
+set(CMAKE_DEPENDS_USE_COMPILER FALSE)
+
 add_executable(gbarecomp_oracle main.cpp)
 target_include_directories(gbarecomp_oracle PRIVATE
     ${MGBA_ROOT}/include
