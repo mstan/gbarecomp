@@ -353,22 +353,22 @@ bool is_priv_non_system(uint8_t mode) {
 // Cycle accounting
 // ─────────────────────────────────────────────────────────────────────
 //
-// Per GBATEK § "GBA Memory Map - Bus Width and Speed", and the
-// ARM7TDMI TRM § "Instruction Cycle Times". For the BIOS region
-// (zero-waitstate 32-bit ROM) S=N=I=1, so we use the raw cycle counts
-// straight from the TRM. Other regions (PAL/VRAM/OAM at 16-bit, ROM
-// with WAITCNT-driven waitstates) cost more per memory access; that
-// detail lands when we wire a region lookup into the bus.
+// `cycle_cost_base` returns the FIXED part of the instruction's cost —
+// the fetch (1S) and any internal (I) cycles. Memory-access cycles
+// (N for the data access, S for sequential accesses in LDM/STM) are
+// added at execute time via `bus.access_cycles(addr, width, seq)` so
+// they reflect the actual target region's bus width + waitstates.
 //
 // Pipeline refill (any op that writes to PC) is charged uniformly as
 // +2 cycles on top of the base cost: the prefetch buffer is flushed
-// and two new instruction fetches occur before the next decode.
+// and two new instruction fetches occur before the next decode. For
+// branches the refill is folded into `cycle_cost_base` so we don't
+// double-count.
 //
-// Approximations: LDM/STM use a register-count-derived cost, MUL uses
-// a fixed average (operand-dependent precision lands later). These
-// match real hardware closely enough for the BIOS init phase.
+// Reference: GBATEK § "GBA Memory Map - Bus Width and Speed",
+// ARM7TDMI TRM § "Instruction Cycle Times", and `GbaBus::access_cycles`.
 
-inline uint32_t cycle_cost_base(IrOp op, uint16_t reg_list) {
+inline uint32_t cycle_cost_base(IrOp op, uint16_t /*reg_list*/) {
     switch (op) {
         case IrOp::AND: case IrOp::EOR: case IrOp::SUB: case IrOp::RSB:
         case IrOp::ADD: case IrOp::ADC: case IrOp::SBC: case IrOp::RSC:
@@ -377,40 +377,24 @@ inline uint32_t cycle_cost_base(IrOp op, uint16_t reg_list) {
         case IrOp::MRS: case IrOp::MSR:
             return 1;  // 1S
 
-        // Branches: 2S+1N for pipeline refill. The +2 in step() for
-        // wrote_pc applies to LDR PC / DP-to-PC; for B/BL/BX the
-        // refill cost is folded in here so we don't double-count.
+        // Branches: 2S+1N pipeline refill folded in here.
         case IrOp::B: case IrOp::BL: case IrOp::BX: case IrOp::BLX_reg:
         case IrOp::BL_prefix: case IrOp::BL_suffix:
             return 3;  // 2S+1N
 
+        // Memory ops: fetch + internal (no access cycles here; the
+        // execute path adds them via bus.access_cycles).
         case IrOp::LDR:   case IrOp::LDRB:
         case IrOp::LDRH:  case IrOp::LDRSB: case IrOp::LDRSH:
-            // 1S+1N+1I baseline (3) + 1 region-average penalty since
-            // BIOS init reads from EWRAM and writes to PAL/VRAM/OAM
-            // (16-bit bus → extra N per 32-bit access). Per-region
-            // cost lands when we wire address → cost in the bus.
-            return 4;
-
+            return 2;  // 1S fetch + 1I
         case IrOp::STR:   case IrOp::STRB:  case IrOp::STRH:
-            // 1S+1N baseline (2) + 1 region penalty (same reason).
-            return 3;
-
-        case IrOp::LDM: {
-            // nS+1N+1I; +1 region penalty as above.
-            uint32_t n = __builtin_popcount(reg_list);
-            if (n == 0) n = 1;
-            return n + 3;
-        }
-        case IrOp::STM: {
-            // (n-1)S+2N; +1 region penalty.
-            uint32_t n = __builtin_popcount(reg_list);
-            if (n == 0) n = 1;
-            return n + 2;
-        }
-
+            return 1;  // 1S fetch (no I)
+        case IrOp::LDM:
+            return 2;  // 1S fetch + 1I; accesses added at execute
+        case IrOp::STM:
+            return 1;  // 1S fetch; accesses added at execute
         case IrOp::SWP:  case IrOp::SWPB:
-            return 4;  // 1S+2N+1I
+            return 2;  // 1S+1I; two accesses added at execute
 
         case IrOp::MUL:
             return 4;  // 1S + ~3I (avg)
@@ -452,6 +436,10 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
     }
 
     bool wrote_pc = false;
+    // Memory-access cycles accumulated by LDR/STR/LDM/STM/SWP during
+    // execute. Final cycles_out = cycle_cost_base + mem_cycles + any
+    // pipeline-refill surcharge for PC-writing non-branch ops.
+    uint32_t mem_cycles = 0;
 
     switch (i.op) {
         // ── Data processing ────────────────────────────────────────
@@ -607,6 +595,18 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             uint32_t post_addr =
                 i.mem.add ? base + offset : base - offset;
 
+            // Region-aware access cost. Width follows the IR op.
+            uint8_t access_w = 4;
+            switch (i.op) {
+                case IrOp::LDRB: case IrOp::STRB: case IrOp::LDRSB:
+                    access_w = 1; break;
+                case IrOp::LDRH: case IrOp::STRH: case IrOp::LDRSH:
+                    access_w = 2; break;
+                default:
+                    access_w = 4; break;
+            }
+            mem_cycles += bus.access_cycles(effective_addr, access_w, false);
+
             // Load form.
             if (i.op == IrOp::LDR || i.op == IrOp::LDRB ||
                 i.op == IrOp::LDRH || i.op == IrOp::LDRSB ||
@@ -706,8 +706,17 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             // Hardware semantics: store in ascending register order
             // to ascending addresses.
             uint32_t cursor = lowest;
+            // First access is non-sequential (N), each subsequent
+            // access is sequential (S). The region-aware cost model
+            // makes this important for LDM/STM over slow regions
+            // (e.g., EWRAM at 6 cycles per N + 3 cycles per S for
+            // 32-bit). LDM keeps the 1I cycle from cycle_cost_base.
+            bool first_access = true;
             for (int reg = 0; reg < 16; ++reg) {
                 if (!(list & (1u << reg))) continue;
+                mem_cycles += bus.access_cycles(cursor & ~3u, 4,
+                                                /*sequential=*/!first_access);
+                first_access = false;
                 if (i.block.load) {
                     uint32_t v = bus.read32(cursor & ~3u);
                     if (reg == 15) {
@@ -992,12 +1001,14 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             return Result::NotImplemented;
     }
 
-    // Compute cycles for the just-executed instruction. The +2
-    // pipeline-refill charge applies whenever the op wrote PC and
-    // didn't already account for the refill (B/BL/BX folded refill
-    // into their base cost, so we skip the surcharge for those).
+    // Compute cycles for the just-executed instruction. Final cost:
+    //   base (fetch + internal cycles per cycle_cost_base)
+    // + mem_cycles (data-access cycles accumulated by LDR/STR/LDM/
+    //   STM/SWP execute paths via bus.access_cycles)
+    // + pipeline refill (+2) for any non-branch op that wrote PC.
+    // Branches (B/BL/BX/BL_*) fold the refill into base.
     if (cycles_out) {
-        uint32_t c = cycle_cost_base(i.op, i.block.reg_list);
+        uint32_t c = cycle_cost_base(i.op, i.block.reg_list) + mem_cycles;
         bool branch_op = (i.op == IrOp::B || i.op == IrOp::BL ||
                           i.op == IrOp::BX || i.op == IrOp::BLX_reg ||
                           i.op == IrOp::BL_prefix || i.op == IrOp::BL_suffix);

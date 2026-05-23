@@ -225,6 +225,57 @@ void GbaBus::write32(uint32_t addr, uint32_t v) {
     }
 }
 
+// Per-region access-cycle table. Sources:
+//   * GBATEK § "GBA Memory Map"
+//   * GBATEK § "GBA Cycle Times"
+//   * ARM7TDMI TRM § "Memory Access Cycles"
+//
+// Cycle counts assume default WAITCNT (0x0000). Bus width and
+// waitstate combine: every 16-bit-bus region costs 2 cycles per
+// 32-bit access (two consecutive halfword bus cycles); EWRAM adds
+// 2 waitstates on top of that.
+//
+// `sequential` is the ARM7TDMI "S" cycle (an access immediately
+// following another in the same area). For ARM/THUMB on the GBA
+// most regions have S=N=1 for 16-bit and 1S=1N=1 / 2S=2N=2 for
+// 32-bit, but ROM with WAITCNT > 0 gets a faster S than N. We use
+// the same value for S/N in regions where they match and split
+// only where they don't (ROM).
+uint32_t GbaBus::access_cycles(uint32_t addr, uint8_t width,
+                               bool sequential) const {
+    // 8-bit accesses use the same cycle count as 16-bit on hardware
+    // (regions with 16-bit data buses still complete a single
+    // halfword cycle for either width).
+    uint8_t w = (width == 4) ? 4 : 2;
+    uint32_t region = (addr >> 24) & 0xFu;
+    switch (region) {
+        case 0x0:  // BIOS  (32-bit bus, 0 wait)
+        case 0x3:  // IWRAM (32-bit bus, 0 wait)
+        case 0x7:  // OAM   (32-bit bus, 0 wait)
+            return 1;
+        case 0x4:  // IO (32-bit bus, 0 wait)
+            return 1;
+        case 0x5:  // PAL   (16-bit bus, 0 wait)
+        case 0x6:  // VRAM  (16-bit bus, 0 wait)
+            return (w == 4) ? 2u : 1u;
+        case 0x2:  // EWRAM (16-bit bus, 2 wait states)
+            return (w == 4) ? 6u : 3u;
+        case 0x8: case 0x9:  // ROM WS0
+        case 0xA: case 0xB:  // ROM WS1
+        case 0xC: case 0xD:  // ROM WS2
+            // Default WAITCNT 0x0000: N=4 cycles, S=2 cycles per
+            // 16-bit access. 32-bit access does (N+S) on first /
+            // (S+S) on sequential. We approximate at the 16-bit
+            // access level and pay double for 32-bit.
+            if (w == 4) return sequential ? 4u : 6u;
+            return sequential ? 2u : 4u;
+        case 0xE:  // SRAM / Flash region — 8-bit bus, ~5 cycles
+            return 5;
+        default:
+            return 1;
+    }
+}
+
 void GbaBus::log_unmapped(uint32_t addr, uint32_t value, bool is_write, uint8_t width) {
     ++unmapped_count_;
     // Phase 2 will route this to the always-on TraceRing. For now,

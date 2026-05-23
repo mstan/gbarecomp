@@ -269,6 +269,21 @@ void GbaPpu::render(uint8_t* rgb,
         // by setting these bits.
         if (!rot_scale && disable_or_double) continue;
 
+        // OBJ Mode (attr0 bits 10-11) per GBATEK § "GBA OBJs — OAM
+        // Attribute 0":
+        //   0 = Normal  (visible pixel)
+        //   1 = Semi-Transparent (alpha-blend with BLDALPHA)
+        //   2 = OBJ Window (the sprite's opaque pixels define a
+        //       window region; sprite itself is NOT drawn)
+        //   3 = Prohibited
+        // Without this check the BIOS intro's OBJ-Window stencil
+        // sprites leak into the visible frame as garbage pink pixels.
+        uint32_t obj_mode = (attr0 >> 10) & 0x3u;
+        if (obj_mode == 2) continue;            // window stencil — invisible
+        if (obj_mode == 3) continue;            // prohibited
+        // Semi-transparent (mode 1) renders as normal for now; proper
+        // alpha blending lands when we wire BLDCNT / BLDALPHA.
+
         uint32_t shape = (attr0 >> 14) & 0x3u;
         if (shape >= 3) continue;
         uint32_t size  = (attr1 >> 14) & 0x3u;

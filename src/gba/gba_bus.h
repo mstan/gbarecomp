@@ -66,6 +66,12 @@ public:
     void write16(uint32_t addr, uint16_t v) override;
     void write32(uint32_t addr, uint32_t v) override;
 
+    // Per-region S/N-cycle table per GBATEK § "GBA Memory Map" and
+    // "GBA Cycle Times". Drives interpreter cycle accounting so our
+    // PPU/animation timing matches mGBA's after every CPU step.
+    uint32_t access_cycles(uint32_t addr, uint8_t width,
+                           bool sequential) const override;
+
     void log_unmapped(uint32_t addr,
                       uint32_t value,
                       bool is_write,

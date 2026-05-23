@@ -103,6 +103,7 @@ struct Oracle {
     mCore*   core    = nullptr;
     uint32_t vblanks = 0;     // VBlank events observed since reset
     uint64_t frame   = 0;     // mCore frame counter mirror
+    uint64_t inst_count = 0;  // emu_step_inst calls since reset
     // mGBA renders the framebuffer into this buffer on each runFrame.
     // 240*160 pixels at BYTES_PER_PIXEL (default 4 = 32-bit ARGB).
     std::vector<uint32_t> video_buf;
@@ -305,6 +306,7 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
     if (starts("\"emu_step_inst\"")) {
         if (!o.core) { emit_error(out, "no core"); return; }
         o.core->step(o.core);
+        ++o.inst_count;
         int32_t pc = 0, cpsr = 0;
         o.core->readRegister(o.core, "r15",  &pc);
         o.core->readRegister(o.core, "cpsr", &cpsr);
@@ -344,8 +346,9 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
             o.core->reset(o.core);
             o.apply_real_hw_reset();
         }
-        o.vblanks = 0;
-        o.frame   = 0;
+        o.vblanks    = 0;
+        o.frame      = 0;
+        o.inst_count = 0;
         out = "{\"ok\":true}";
         return;
     }
@@ -406,6 +409,10 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         int32_t pc = 0;
         o.core->readRegister(o.core, "r15", &pc);
         emit_ok_int(out, "pc", static_cast<uint32_t>(pc));
+        return;
+    }
+    if (starts("\"emu_inst_count\"")) {
+        emit_ok_int(out, "inst_count", o.inst_count);
         return;
     }
 
