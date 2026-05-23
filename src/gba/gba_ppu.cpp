@@ -262,15 +262,12 @@ void GbaPpu::render(uint8_t* rgb,
 
         bool rot_scale = (attr0 & 0x0100u) != 0;
         bool disable_or_double = (attr0 & 0x0200u) != 0;
-        // DEBUG: render disabled sprites too to surface intro state.
-        // The BIOS leaves the Nintendo logo sprites in OAM with the
-        // disable flag set after the intro animation completes.
-        // For Phase 2 visualization we ignore that flag — proper
-        // gating returns in Phase 2.6.
-        (void)disable_or_double;
-
-        // Skip rot/scale sprites in this pass (TODO Phase 2.5).
-        if (rot_scale) continue;
+        // For non-affine sprites bit 9 is the disable bit; for affine
+        // sprites it's the double-size flag (handled in the affine
+        // pass). Skip disabled non-affine sprites so the BIOS intro
+        // screen blanks correctly once the BIOS clears the wordmark
+        // by setting these bits.
+        if (!rot_scale && disable_or_double) continue;
 
         uint32_t shape = (attr0 >> 14) & 0x3u;
         if (shape >= 3) continue;
@@ -285,10 +282,7 @@ void GbaPpu::render(uint8_t* rgb,
         // X is 9 bits signed.
         if (sx & 0x100) sx -= 0x200;
 
-        bool hflip = (attr1 & 0x1000u) != 0;
-        bool vflip = (attr1 & 0x2000u) != 0;
         bool color256 = (attr0 & 0x2000u) != 0;
-
         uint32_t tile_num = attr2 & 0x3FFu;
         uint32_t palette_bank = (attr2 >> 12) & 0xFu;
 
@@ -296,6 +290,92 @@ void GbaPpu::render(uint8_t* rgb,
         // For 2D mapping each row of OBJ tiles is 32 tiles wide.
         int tiles_w = sw / 8;
         int tiles_h = sh / 8;
+
+        // Texel sampler shared by affine + non-affine paths. Returns
+        // false on transparent / out-of-VRAM, otherwise writes the
+        // RGB888 pixel at (screen_x, screen_y).
+        auto sample_and_emit = [&](int tex_x, int tex_y,
+                                   int screen_x, int screen_y) {
+            int tile_x_in_sprite = tex_x >> 3;
+            int tile_y_in_sprite = tex_y >> 3;
+            int px_in_tile       = tex_x & 7;
+            int py_in_tile       = tex_y & 7;
+
+            uint32_t this_tile;
+            if (obj_1d_mapping) {
+                this_tile = tile_num + (tile_y_in_sprite * tiles_w + tile_x_in_sprite) *
+                                            (color256 ? 2u : 1u);
+            } else {
+                this_tile = tile_num + (tile_y_in_sprite * 32u) +
+                            tile_x_in_sprite * (color256 ? 2u : 1u);
+            }
+            uint32_t tile_off = obj_tile_base + this_tile * 32u;
+
+            uint8_t pal_index;
+            if (color256) {
+                uint32_t off = tile_off + py_in_tile * 8 + px_in_tile;
+                if (off + 1 > 96u * 1024u) return;
+                pal_index = vram[off];
+                if (pal_index == 0) return;  // transparent
+            } else {
+                uint32_t off = tile_off + py_in_tile * 4 + (px_in_tile / 2);
+                if (off + 1 > 96u * 1024u) return;
+                uint8_t b = vram[off];
+                pal_index = (px_in_tile & 1) ? (b >> 4) : (b & 0x0F);
+                if (pal_index == 0) return;  // transparent
+                pal_index = static_cast<uint8_t>(pal_index | (palette_bank << 4));
+            }
+
+            uint16_t color = load_u16_le(&obj_pal[pal_index * 2]);
+            uint8_t* dst = rgb + (screen_y * kScreenWidth + screen_x) * 3;
+            to_rgb888(color, dst);
+        };
+
+        if (rot_scale) {
+            // Affine sprite. Bounding box is 2x the sprite size when
+            // the double-size flag is set, otherwise = sprite size.
+            int bw = disable_or_double ? sw * 2 : sw;
+            int bh = disable_or_double ? sh * 2 : sh;
+
+            int affine_group = (attr1 >> 9) & 0x1Fu;
+            const uint8_t* ag = oam + affine_group * 0x20u;
+            // PA/PB/PC/PD live at offsets 0x06, 0x0E, 0x16, 0x1E within
+            // the 32-byte affine block (the other bytes belong to OBJ
+            // attr0/1/2 entries that share the same 8-byte slots).
+            int32_t pa = read_s16(ag, 0x06);
+            int32_t pb = read_s16(ag, 0x0E);
+            int32_t pc = read_s16(ag, 0x16);
+            int32_t pd = read_s16(ag, 0x1E);
+
+            int half_bw = bw >> 1;
+            int half_bh = bh >> 1;
+            int half_sw = sw >> 1;
+            int half_sh = sh >> 1;
+
+            for (int j = 0; j < bh; ++j) {
+                int screen_y = sy + j;
+                if (screen_y < 0 || screen_y >= static_cast<int>(kScreenHeight)) continue;
+                int dy = j - half_bh;
+                for (int i = 0; i < bw; ++i) {
+                    int screen_x = sx + i;
+                    if (screen_x < 0 || screen_x >= static_cast<int>(kScreenWidth)) continue;
+                    int dx = i - half_bw;
+
+                    // (tex_x, tex_y) = matrix * (dx, dy) + sprite_center.
+                    int tex_x = ((pa * dx + pb * dy) >> 8) + half_sw;
+                    int tex_y = ((pc * dx + pd * dy) >> 8) + half_sh;
+                    if (tex_x < 0 || tex_x >= sw) continue;
+                    if (tex_y < 0 || tex_y >= sh) continue;
+
+                    sample_and_emit(tex_x, tex_y, screen_x, screen_y);
+                }
+            }
+            continue;
+        }
+
+        // Non-affine sprite from here on.
+        bool hflip = (attr1 & 0x1000u) != 0;
+        bool vflip = (attr1 & 0x2000u) != 0;
 
         for (int ty = 0; ty < tiles_h; ++ty) {
             for (int tx = 0; tx < tiles_w; ++tx) {

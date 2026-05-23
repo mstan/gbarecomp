@@ -234,9 +234,11 @@ int main(int argc, char** argv) {
     uint64_t halt_steps  = 0;
     int frames_presented = 0;
     bool host_quit = false;
-    // When --window is set without --steps we run open-ended.
-    // INT_MAX/2 keeps the existing `i < steps` form usable.
-    const int step_budget = args.window
+    // When --window or --frames is set without an explicit --steps,
+    // run open-ended (capped at INT_MAX/2) and let the frame cap or
+    // window quit terminate the loop instead.
+    const bool open_ended = (args.window || args.frames >= 0);
+    const int step_budget = open_ended
         ? (args.steps > 16 ? args.steps : 0x7FFFFFFF / 2)
         : args.steps;
     for (int i = 0; i < step_budget && !host_quit; ++i) {
@@ -271,6 +273,11 @@ int main(int argc, char** argv) {
                     host_quit = true;
                 }
             }
+            // Headless frame cap: stop once the PPU has completed
+            // args.frames frames. Lets --dump-bmp target a specific
+            // PPU frame regardless of HALT/instruction step ratio.
+            if (!args.window && args.frames >= 0 &&
+                ppu.frame_count() >= static_cast<uint64_t>(args.frames)) break;
             continue;
         }
 
@@ -330,6 +337,8 @@ int main(int argc, char** argv) {
                 host_quit = true;
             }
         }
+        if (!args.window && args.frames >= 0 &&
+            ppu.frame_count() >= static_cast<uint64_t>(args.frames)) break;
     }
     if (args.window) win.close();
 
