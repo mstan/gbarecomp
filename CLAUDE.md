@@ -24,6 +24,12 @@ If you:
 - add HLE behavior to make a game work by accident
 - stub a BIOS SWI, skip the BIOS intro, or otherwise bypass the
   real BIOS execution path
+- **make any runtime exec path depend on the interpreter** (BIOS,
+  cart, SWI fallback, "temporary scaffold," "until codegen catches
+  up" — all forbidden; see PRINCIPLES.md "Interpreter is informative,
+  never load-bearing")
+- ship a "hybrid" runtime where some PCs are recompiled and others
+  are interpreted
 
 → your response is INVALID
 → restart from `DEBUG.md`
@@ -58,15 +64,24 @@ Fixes belong in:
 A dispatch miss is a silent game-breaking bug. Resolve all misses
 before debugging anything else.
 
-# BIOS RULE
+# BIOS RULE — RECOMPILED, NOT INTERPRETED
 
-The GBA BIOS at `bios/gba_bios.bin` is **executed**, not stubbed.
-SWIs and IRQs run through the real BIOS bytes via our interpreter.
-There is no HLE path. See `PRINCIPLES.md` "BIOS is sacred" and
-`docs/ARCHITECTURE.md` "BIOS as the boot path."
+The GBA BIOS at `bios/gba_bios.bin` is **recompiled and executed
+via the dispatch table**, not stubbed, not HLE'd, **not interpreted
+on any runtime hot path**. SWIs and IRQs run through the recompiled
+BIOS bytes via `runtime_dispatch`. There is no HLE path. There is
+no interpreter fallback.
 
-Every game's first render frames are BIOS frames. We do not
-fast-forward through them.
+See `PRINCIPLES.md`:
+- "BIOS is sacred — and recompiled, not interpreted (SHOWSTOPPER)"
+- "Interpreter is informative, never load-bearing (SHOWSTOPPER)"
+
+Every game's first render frames are BIOS frames, produced by
+recompiled BIOS code. We do not fast-forward, stub, or interpret
+through them.
+
+If the runtime exec loop calls `Interpreter::step` for ANY PC, the
+recompiler is broken. Fix the recompiler.
 
 ---
 

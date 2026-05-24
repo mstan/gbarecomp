@@ -52,44 +52,107 @@ load a cart.
   stay closed. CI failure = gate re-opens.
 - See `docs/ROADMAP.md` Phase 2.7 for the work breakdown.
 
-## BIOS is sacred
+## BIOS is sacred — and recompiled, not interpreted (SHOWSTOPPER)
 
-The GBA BIOS is **executed**, not stubbed, not HLE'd, not "fast-
-forwarded." Every game boot path on real hardware enters the BIOS at
-power-on, runs the Nintendo logo intro, then hands control to the
-cartridge at `0x08000000`. Our recompiled builds do the same thing.
+The GBA BIOS is **recompiled and executed via the dispatch table**,
+not stubbed, not HLE'd, not "fast-forwarded," and **not interpreted
+on any runtime hot path**. Every game boot path on real hardware
+enters the BIOS at power-on, runs the Nintendo logo intro, then
+hands control to the cartridge at `0x08000000`. Our recompiled
+builds do the same thing — through recompiled code, from the very
+first PC.
 
 - The BIOS image is the user's own dump (`bios/gba_bios.bin`); see
   `bios/README.md` for hash/policy.
 - The runtime loads the BIOS, refuses to start if the hash is
-  unrecognized, and **interprets** its ARM/THUMB code via the same
-  `armv4t::Interpreter` we built in Phase 1.
-- SWIs land at `0x00000008` and the interpreter handles them like any
-  other BIOS code path. There is no `if (swi == 0x05) hle_vblank_wait()`.
-- IRQs land at `0x00000018` and the BIOS IRQ dispatcher does its
-  real work: read `IF`, route to the registered handler at
+  unrecognized, and dispatches every PC < `0x4000` through the
+  BIOS dispatch table emitted by `gba_recompile --bios`.
+- SWIs land at `0x00000008` and the recompiled BIOS code handles
+  them. There is no `if (swi == 0x05) hle_vblank_wait()`, and there
+  is no `interpreter.step(swi_handler_pc)` fallback either.
+- IRQs land at `0x00000018` and the recompiled BIOS IRQ dispatcher
+  does its real work: read `IF`, route to the registered handler at
   `0x03007FFC`, return through the real exception epilogue.
 - The Nintendo logo check in the BIOS runs against the cartridge's
   logo bytes at `0x08000004..0x080000A0`. We do not bypass it.
 
-**Why:** Stubbed SWIs and skipped BIOS intros are precisely the
-"HLE-by-accident" that the cross-project principles forbid. Every
-quirk a real GBA game depends on — including timing of BIOS-driven
-DMA, exact behavior of CpuFastSet on misaligned buffers, the
-specific cycle cost of an SWI handler — is correct *by construction*
-when we run the real BIOS.
+**Why:** Stubbed SWIs and skipped BIOS intros are "HLE-by-accident."
+**A load-bearing interpreter is the same problem in disguise.**
+Every quirk a real GBA game depends on — timing of BIOS-driven DMA,
+exact behavior of `CpuFastSet` on misaligned buffers, the specific
+cycle cost of an SWI handler — must be correct *by construction* in
+the recompiler. If the interpreter is propping up correctness on the
+hot path, every IrOp lowering bug is invisible until the day we cut
+over, at which point the entire dependency stack collapses at once.
+We refuse to incur that debt. PSXRecomp / snesrecomp use the same
+model.
 
 **How to apply:**
-- Adding a new SWI behavior to the runtime is forbidden. The behavior
-  is in the BIOS bytes; we either execute them correctly or we have
-  a CPU / bus / memory bug.
-- If something looks wrong "around an SWI," the divergence is in our
-  interpreter / bus / IRQ scheduler — not in the BIOS. Fix the
-  recompiler infrastructure, never the BIOS image.
+- The runtime exec loop calls `runtime_dispatch(pc)` for every PC.
+  There is no `if (pc < 0x4000) interpreter.step()` branch, ever.
+  There is no `if (pc not in dispatch table) interpreter.step()`
+  fallback either — a missing function is a P0 bug to be fixed in
+  discovery / codegen, not papered over.
+- Adding a new SWI behavior to the runtime is forbidden. The
+  behavior is in the recompiled BIOS bytes.
+- If something looks wrong "around an SWI," the divergence is in
+  the codegen / runtime ABI / bus / IRQ scheduler — not in the BIOS.
+  Fix the recompiler infrastructure, never the BIOS image.
 - Symbol annotations from public BIOS disassemblies (see
   `docs/GBA_REFERENCE_NOTES.md` § "GBA BIOS references") are
   reference material only; the BIOS bytes themselves are the
   authoritative behavior.
+
+## Interpreter is informative, never load-bearing (SHOWSTOPPER)
+
+The `armv4t::Interpreter` exists in this tree for **one purpose**:
+serve as an offline oracle that we can diff the recompiled output
+against. It is debug reference material, never runtime truth.
+
+**INFORMED ✅** — Things the interpreter is good for, and which we
+do use:
+- Decode trace dumps for a recompiler-vs-interpreter diff harness.
+- Per-IrOp semantic reference when writing or fixing codegen.
+- `armv4t_tests` unit-test harness for instruction semantics.
+- Stand-alone tools (e.g., `interpreter_smoke`, `bios_smoke` in
+  oracle-only mode) used to verify the recompiler.
+
+**RELIED-UPON ❌** — Things that mean the recompiler is broken and
+must be fixed before any further work:
+- Any runtime executable (`MinishCapRecomp.exe`, future games, even
+  `bios_smoke` when used as a runner) calling `Interpreter::step`
+  on the live CPU state during normal execution.
+- Any "fall back to interpreter on unrecognized op" branch.
+- Any "interpret BIOS for now, recomp it later" milestone.
+- Any "hybrid execution" runtime where some PCs are recompiled and
+  others are interpreted.
+- Linking `gbarecomp_armv4t` (or any interpreter symbol) into a
+  game-runner binary outside diff-oracle tooling.
+
+**Why this is a showstopper, not a preference:** A load-bearing
+interpreter silently props up the recompiler's correctness. Bugs
+in IrOp codegen, register allocation, flag updates, exception entry
+— none of them surface as long as the interpreter is filling in.
+The day the interpreter comes out, every one of those latent bugs
+fires at once and we can't disentangle them. We pay the cost up
+front, instance by instance, while the bugs are diff-isolated and
+fixable. This is the recompiler-discipline rule applied to its
+hardest case.
+
+**How to apply:**
+- The runtime's `run_game()` exec loop never calls into the
+  interpreter. Period.
+- If the recompiler can't lower an IrOp yet, the generated function
+  calls `runtime_unimplemented_op(...)` which aborts with a clear
+  PC + opcode. That abort is a P0 bug, addressed by writing the
+  lowering, not by routing to the interpreter.
+- New diff harnesses are encouraged: any tool that runs the
+  recompiler and the interpreter in parallel and diffs the result
+  is good engineering. Any tool that runs one as a fallback for the
+  other is forbidden.
+- This rule applies to **every** console in this ecosystem (NES,
+  SNES, PSX, Genesis, Xbox-HLE, future). The interpreter is an
+  oracle, never an engine.
 
 ## Tool Skepticism
 
@@ -138,9 +201,11 @@ changes, and exception entry. Treat it as one CPU, not two.
 - **LDM/STM edge cases.** Empty register list, base in register list,
   `^` bit (user-mode bank or SPSR-restore), and write-back interact
   in non-trivial ways. Don't simplify.
-- **SWI entry & BIOS handoff.** SWI traps to BIOS at 0x00000008. The
-  BIOS is executed as real ARM/THUMB code through our interpreter
-  (see "BIOS is sacred" below). There is no HLE path.
+- **SWI entry & BIOS handoff.** SWI traps to BIOS at 0x00000008.
+  The recompiled BIOS code handles it via `runtime_dispatch`. There
+  is no HLE path and no interpreter fallback (see "BIOS is sacred —
+  and recompiled, not interpreted" and "Interpreter is informative,
+  never load-bearing" above).
 - **IRQ entry / return.** The GBA IRQ vector model (BIOS-mediated)
   must match hardware ordering of `IE`/`IF`/`IME` and the BIOS IRQ
   return sequence. Save / restore CPSR via SPSR_irq.
