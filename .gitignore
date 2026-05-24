@@ -39,3 +39,19 @@ ghidra/
 # at a pinned tag; never committed back to gbarecomp's history. The
 # license obligations live with the produced oracle binary.
 third_party/mgba/
+
+# camthesaxman/gba_bios — disassembly of Nintendo's GBA BIOS.
+# Our tooling imports labels + addresses (metadata), never source
+# text. The clone stays local; only the importer's output enters
+# this tree (gbarecomp/bios/gba_bios.toml).
+third_party/gba_bios_disasm/
+
+# toml++ single-header library. Vendored shallow clone; we only
+# need toml.hpp at the top level. License is MIT; full source
+# tree stays out of version control to keep diffs small.
+third_party/tomlpp/
+
+# jsmolka/gba-suite test ROMs (correctness benchmark). Cloned
+# locally; pre-built .gba files are the test fixtures. Sources
+# stay out of version control — re-clone to update.
+third_party/gba_suite/

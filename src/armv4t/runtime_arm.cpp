@@ -12,6 +12,19 @@
 #include <cstdio>
 #include <cstdlib>
 
+// runtime_dispatch_miss / runtime_unimplemented_op default-abort
+// implementations live in src/runtime/runtime_arm_default_aborts.cpp
+// (part of gbarecomp_runtime), NOT here. The split exists because
+// MinGW PE-COFF weak symbols don't reliably resolve from static
+// archives, so we can't use weak overrides for those. Splitting
+// puts the abort versions in the runtime library that production
+// builds link, while tests/codegen/ links only gbarecomp_armv4t
+// and supplies its own non-aborting stubs.
+//
+// runtime_swi STAYS here — its production behavior is exactly the
+// exception-entry shape every consumer needs; tests verify that
+// shape rather than override it.
+
 // Forward decls of the per-game dispatch table. Each game's
 // generated/dispatch_table.cpp defines these.
 struct DispatchEntry {
@@ -20,6 +33,12 @@ struct DispatchEntry {
 };
 extern "C" const DispatchEntry kDispatchTable[];
 extern "C" const unsigned kDispatchTableLen;
+
+// BIOS dispatch table. Lives in src/runtime/generated_bios/
+// bios_dispatch_table.cpp — placeholder until `gba_recompile --bios`
+// is run. runtime_dispatch consults this FIRST for PC < 0x4000.
+extern "C" const DispatchEntry kBiosDispatchTable[];
+extern "C" const unsigned kBiosDispatchTableLen;
 
 // ── CPU state ──────────────────────────────────────────────────────
 
@@ -234,32 +253,39 @@ extern "C" void arm_set_nzcv_sbc(uint32_t a, uint32_t b, uint32_t c_in,
 
 namespace {
 
-// Binary search the dispatch table for `pc`. Returns the entry
-// index, or kDispatchTableLen if not found.
-unsigned dispatch_lookup(uint32_t pc) {
-    unsigned lo = 0;
-    unsigned hi = kDispatchTableLen;
+// Binary-search a sorted DispatchEntry table for `pc`. Returns
+// the matching `fn`, or nullptr if not found.
+void (*lookup_in(const DispatchEntry* table, unsigned len,
+                 uint32_t pc))(void) {
+    unsigned lo = 0, hi = len;
     while (lo < hi) {
         unsigned mid = (lo + hi) >> 1u;
-        if (kDispatchTable[mid].addr < pc) lo = mid + 1u;
-        else                                hi = mid;
+        if (table[mid].addr < pc) lo = mid + 1u;
+        else                       hi = mid;
     }
-    if (lo < kDispatchTableLen && kDispatchTable[lo].addr == pc) {
-        return lo;
-    }
-    return kDispatchTableLen;
+    if (lo < len && table[lo].addr == pc) return table[lo].fn;
+    return nullptr;
 }
+
+// PC range covered by the BIOS region (16 KB at 0x0). Anything in
+// this range consults the BIOS table; anything else consults the
+// cart table. The two ranges don't overlap so the order is just
+// "BIOS for <4000, cart otherwise" — no merged search needed.
+constexpr uint32_t kBiosRegionEnd = 0x00004000u;
 
 }  // namespace
 
 extern "C" void runtime_dispatch(uint32_t target_pc) {
     // Strip THUMB bit; codegen handles the mode via cpsr_T already.
     uint32_t pc = target_pc & ~1u;
-    unsigned idx = dispatch_lookup(pc);
-    if (idx < kDispatchTableLen) {
-        kDispatchTable[idx].fn();
-        return;
+
+    void (*fn)(void) = nullptr;
+    if (pc < kBiosRegionEnd) {
+        fn = lookup_in(kBiosDispatchTable, kBiosDispatchTableLen, pc);
+    } else {
+        fn = lookup_in(kDispatchTable, kDispatchTableLen, pc);
     }
+    if (fn) { fn(); return; }
     runtime_dispatch_miss(target_pc);
 }
 
@@ -270,31 +296,8 @@ extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
     runtime_dispatch(target_pc);
 }
 
-extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
-    std::fprintf(stderr,
-                 "runtime_arm: dispatch miss for pc=0x%08X "
-                 "(no generated function; not recompiled, "
-                 "or function-finder didn't reach it). "
-                 "Add to game.toml [functions] and regen.\n",
-                 target_pc);
-    std::abort();
-}
-
-// ── BIOS / SWI ─────────────────────────────────────────────────────
-// Dispatches to the recompiled BIOS at 0x00000008. NO interpreter
-// fallback (PRINCIPLES.md "Interpreter is informative, never
-// load-bearing"). Until the BIOS dispatch table exists this aborts
-// — that abort is a P0 BIOS-recompilation gate.
-
-extern "C" void runtime_swi(uint32_t swi_imm) {
-    std::fprintf(stderr,
-                 "runtime_arm: runtime_swi(0x%X) called — BIOS "
-                 "dispatch table not yet populated. Recompile the "
-                 "BIOS and register entries; no interpreter "
-                 "fallback is permitted.\n",
-                 swi_imm);
-    std::abort();
-}
+// runtime_dispatch_miss is defined in src/runtime/runtime_arm_default_aborts.cpp
+// for production builds, or by test stubs for codegen tests.
 
 // ── PSR transfer + bank machinery ──────────────────────────────────
 
@@ -418,15 +421,57 @@ extern "C" void runtime_exception_return(uint32_t new_pc) {
     g_cpu.R[15] = new_pc;
 }
 
-// ── Fallback ───────────────────────────────────────────────────────
+// ── BIOS / SWI ─────────────────────────────────────────────────────
+// Mirror ARM ARM A2.6.4 SWI entry. The recompiled SWI instruction's
+// codegen already set g_cpu.R[15] = pc_of_swi + 4 (ARM) or +2 (THUMB)
+// before calling this, so R[15] is the return address.
+//
+// Steps (ARM ARM A2.6.4):
+//   LR_svc      ← return_address
+//   SPSR_svc    ← CPSR
+//   CPSR.mode   ← SVC (0x13)
+//   CPSR.T      ← 0           (handler always runs in ARM state)
+//   CPSR.I      ← 1           (mask IRQs while in SWI handler)
+//   PC          ← 0x00000008
+//
+// Then we runtime_dispatch(0x08) into the recompiled BIOS SWI
+// vector. NO interpreter fallback (PRINCIPLES.md "Interpreter is
+// informative, never load-bearing"). If the BIOS dispatch table is
+// empty, the dispatch falls through to runtime_dispatch_miss; the
+// strong (production) version aborts there — that abort is the
+// "BIOS not recompiled" gate.
 
-extern "C" void runtime_unimplemented_op(
-    const char* op_name, uint32_t pc) {
-    std::fprintf(stderr,
-                 "runtime_arm: unimplemented op %s at pc=0x%08X\n",
-                 op_name ? op_name : "(null)", pc);
-    std::abort();
+extern "C" void runtime_swi(uint32_t swi_imm) {
+    (void)swi_imm;  // recompiled BIOS reads it from [LR-4]/[LR-2].
+
+    uint32_t return_address = g_cpu.R[15];
+    uint32_t saved_cpsr     = g_cpu.cpsr;
+
+    // Switch to SVC mode. SPSR_svc gets the pre-SWI CPSR. LR_svc gets
+    // the return address. R8..R12 don't change unless leaving FIQ.
+    uint32_t new_cpsr =
+        (saved_cpsr & ~(0x1Fu | CPSR_T_BIT))  // clear mode + T
+        | 0x13u                                // SVC
+        | CPSR_I_BIT;                          // mask IRQs
+
+    unsigned old_bank = mode_to_bank(saved_cpsr);
+    unsigned new_bank = mode_to_bank(new_cpsr);
+    if (old_bank != new_bank) {
+        bank_out(old_bank, saved_cpsr);
+        bank_in(new_bank, new_cpsr);
+    }
+
+    g_cpu.cpsr                  = new_cpsr;
+    g_cpu.banked_spsr[new_bank] = saved_cpsr;
+    g_cpu.R[14]                 = return_address;  // LR_svc
+    g_cpu.R[15]                 = 0x00000008u;
+
+    runtime_dispatch(0x00000008u);
 }
+
+// runtime_unimplemented_op is defined in
+// src/runtime/runtime_arm_default_aborts.cpp for production builds,
+// or by test stubs for codegen tests.
 
 // ── Lifecycle ──────────────────────────────────────────────────────
 

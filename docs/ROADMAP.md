@@ -299,7 +299,22 @@ for every ARM IrOp:
 Mirror the semantics in `src/armv4t/interpreter.cpp` op-by-op;
 that file is the in-tree reference. Each lowered op gets a diff
 test (recompiled output vs interpreter output on a synthesized
-input) added to `tests/armv4t/test_codegen.cpp`.
+input) added to the L1 corpus at `tests/codegen/test_cases.cpp`.
+
+**L1 harness** *(landed 2026-05-24)*: `tests/codegen/` is the
+per-IrOp diff backbone. `gen_codegen_tests` reads
+`test_cases.cpp`, runs the production `ArmCodegen::emit_instr`
+over each case, and emits one C function per case into
+`${build}/codegen_tests/test_funcs.cpp`. The `codegen_tests`
+binary then runs each case through both `Interpreter::step` and
+the generated function, diffing the resulting `g_cpu` /
+memory / `CPSR`. Adding a new test is a one-line append to
+`kTestCases[]`; the architecture exists so failures show up at
+the per-IrOp level instead of compounding into a BIOS-scale
+divergence. The initial corpus is 77 cases covering DP imm /
+shifted-reg / reg-shifted-by-reg, LDR/STR/LDRB/STRB/LDRH/STRH/
+LDRSB/LDRSH, LDM/STM IA/IB/DA/DB, MUL/MLA/UMULL/SMULL, SWP/SWPB,
+MRS/MSR, B/BL/BX, THUMB DP/LDR/STR/PUSH/Bcc/BL-prefix.
 
 ### 2.8.B Per-IrOp THUMB codegen
 
@@ -325,27 +340,51 @@ relevant formats:
 - [ ] Format 18: unconditional branch.
 - [ ] Format 19: long branch with link (BL/BLX pair).
 
-### 2.8.C BIOS recompilation
+### 2.8.C BIOS recompilation  *(landed 2026-05-24)*
 
-The BIOS is currently absent from any dispatch table. Add the
-tooling that produces a recompiled BIOS as a shared engine
-component.
+The BIOS is now recompiled and linked into the runtime exec path.
 
-- [ ] `gba_recompile --bios <path>` mode that decodes the 16 KB
-      BIOS via the same ARM/THUMB function-finder + codegen as
-      cart code.
-- [ ] Output goes to `gbarecomp/src/runtime/generated_bios/`
-      (gitignored, regenerated at build-time): `bios_recompiled.cpp`
-      + `bios_dispatch_table.cpp` + `bios_recompiled.h`.
-- [ ] CMake target `gbarecomp_bios_recomp` static lib, linked into
-      `gbarecomp_runtime`. Every game-runner gets the BIOS table
-      for free.
-- [ ] `runtime_dispatch` consults BOTH the BIOS table (for PCs
-      `< 0x4000`) and the per-game cart table; the entries don't
-      overlap, so a single merged binary-search is fine.
-- [ ] BIOS function discovery seeds: SWI vector at 0x8, IRQ vector
-      at 0x18, `__BiosReset` at 0x0, plus published BIOS disasm
-      function entries from `docs/GBA_REFERENCE_NOTES.md`.
+- [x] `gba_recompile --bios <path>` mode decodes the 16 KB BIOS via
+      the same ARM/THUMB function-finder + codegen as cart code.
+      `rom_base=0x00000000`. Default `--out` is
+      `src/runtime/generated_bios/`.
+- [x] Output: `bios_recompiled.{cpp,h}` (gitignored — derivative of
+      copyrighted BIOS bytes) + `bios_dispatch_table.cpp`
+      (placeholder tracked; regenerated to populate
+      `kBiosDispatchTable` / `kBiosDispatchTableLen`).
+- [x] `gbarecomp_runtime` includes the placeholder unconditionally
+      and the generated BIOS body when present; CMake reports
+      `BIOS recompiled output present — linking` after regen.
+- [x] `runtime_dispatch` consults `kBiosDispatchTable` first for PC
+      `< 0x4000`, falls through to `kDispatchTable` (cart) otherwise.
+      Non-overlapping ranges; no merged search needed.
+- [x] BIOS function discovery seeds: reset (0x00 ARM),
+      SWI (0x08 ARM), IRQ (0x18 ARM). 6 additional functions
+      discovered by following direct branches (9 total).
+- [x] `runtime_swi` performs SVC exception entry
+      (LR_svc/SPSR_svc/mode=SVC/T=0/I=1/PC=0x8) and dispatches into
+      the recompiled BIOS — no abort, no HLE shim.
+
+**Verified** by launching `MinishCapRecomp.exe --frames 1
+--no-window`: BIOS+ROM hash-verified, runtime_dispatch(0) lands in
+`bios_reset_vector`, control flows through `afunc_00000068` and
+into deeper BIOS code until reaching PC=0x0000011D (a THUMB BX
+target the function-finder didn't reach statically). That residual
+dispatch miss is the iterative coverage work for 2.8.D —
+expanding the function-finder to follow LDR-PC + BX-with-known-Rm
+constant patterns, or seeding from gbatek BIOS disassembly.
+
+Restructuring done as part of 2.8.C: `runtime_dispatch_miss` +
+`runtime_unimplemented_op` moved from `gbarecomp_armv4t` into
+`gbarecomp_runtime` (file:
+`src/runtime/runtime_arm_default_aborts.cpp`) because MinGW
+PE-COFF doesn't resolve weak symbols out of static archives.
+Production builds get the aborting versions; tests
+(`tests/codegen/stubs.cpp`) link only `gbarecomp_armv4t` and
+supply non-aborting strong overrides. MinishCapRecomp's
+`target_link_libraries` now wraps the gbarecomp libs in
+`-Wl,--start-group`/`--end-group` to let ld re-iterate the
+mutual-reference chain.
 
 ### 2.8.D Runtime dispatch wire-up
 

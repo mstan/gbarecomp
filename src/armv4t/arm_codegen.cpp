@@ -292,7 +292,15 @@ std::string emit_direct_branch(uint32_t target, bool is_link,
     } else {
         s << indent << "runtime_dispatch(" << fmt_hex32(target) << ");\n";
     }
-    s << indent << "return;\n";
+    // B is a tail-call: never return to this caller, so emit
+    // `return;`. BL is a call: after the callee returns (its `bx lr`
+    // sets PC=LR, then C-returns), control must resume in this
+    // function's body at the next instruction. So DO NOT emit
+    // `return;` for BL — let C control fall through to the next
+    // decoded instruction.
+    if (!is_link) {
+        s << indent << "return;\n";
+    }
     return s.str();
 }
 
@@ -487,10 +495,24 @@ bool emit_data_processing(std::ostringstream& body, const Instr& ins,
     if (!is_test) {
         if (ins.rd == 15) {
             // PC writeback: not an exception return (already handled
-            // above). Just set R15 and dispatch.
+            // above). Detect the `mov pc, lr` return idiom (DP-MOV
+            // with Op2 = plain R14, no shift) and emit a C-return
+            // — that's the AAPCS return for THUMB-callable code and
+            // for older ARM ABIs that used MOV instead of BX. Any
+            // other PC write is a computed jump → dispatch.
+            const bool is_lr_return =
+                (ins.op == IrOp::MOV &&
+                 ins.op2.kind == Op2::Kind::Shifted &&
+                 ins.op2.shifted.rm == 14 &&
+                 !ins.op2.shifted.by_register &&
+                 ins.op2.shifted.imm_or_rs == 0);
             body << indent << "g_cpu.R[15] = " << r_var << ";\n";
-            body << indent << "runtime_dispatch(" << r_var << ");\n";
-            body << indent << "return;\n";
+            if (is_lr_return) {
+                body << indent << "return;\n";
+            } else {
+                body << indent << "runtime_dispatch(" << r_var << ");\n";
+                body << indent << "return;\n";
+            }
         } else {
             body << indent << "g_cpu.R[" << static_cast<unsigned>(ins.rd)
                  << "] = " << r_var << ";\n";
@@ -518,9 +540,23 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
             body << indent << "uint32_t " << target_var << " = "
                  << read_reg_expr(ins.rm, ins) << ";\n";
             body << indent << "g_cpu.R[15] = " << target_var << " & ~1u;\n";
-            body << indent << "runtime_dispatch_with_exchange("
-                 << target_var << ");\n";
-            body << indent << "return;\n";
+            if (ins.rm == 14) {
+                // `bx lr` — the AAPCS function-return idiom. In the
+                // direct-C-call dispatch model, BL emits a real C
+                // call to the target; the target's `bx lr` is the
+                // matching C return. No dispatch — just set PC and
+                // let C unwind one frame, resuming the caller's
+                // body at the instruction after the BL.
+                //
+                // Non-return BX (computed jump, trampoline, BX to a
+                // non-caller via BL/BLX from a different source)
+                // is handled by the dispatch path below.
+                body << indent << "return;\n";
+            } else {
+                body << indent << "runtime_dispatch_with_exchange("
+                     << target_var << ");\n";
+                body << indent << "return;\n";
+            }
             return true;
         }
         case IrOp::BL_prefix:
@@ -531,6 +567,9 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
         case IrOp::BL_suffix: {
             // Lower half: target = LR + (imm11 << 1).
             // New LR = (PC_lower + 2) | 1 so BX LR resumes in THUMB.
+            // Like ARM BL, this is a CALL — control resumes in this
+            // function after the callee's `bx lr` returns. No
+            // trailing `return;` (see emit_direct_branch comment).
             std::string sfx = uniq_suffix(ins);
             std::string target_var = "_blt" + sfx;
             body << indent << "uint32_t " << target_var << " = "
@@ -539,7 +578,6 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
             body << indent << "g_cpu.R[14] = " << fmt_hex32(new_lr) << ";\n";
             body << indent << "g_cpu.R[15] = " << target_var << ";\n";
             body << indent << "runtime_dispatch(" << target_var << ");\n";
-            body << indent << "return;\n";
             return true;
         }
         default:
@@ -739,8 +777,22 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
     }
 
     if (blk.load && pc_in_list) {
-        body << indent << "runtime_dispatch(g_cpu.R[15]);\n";
-        body << indent << "return;\n";
+        // LDM with PC in the list is the AAPCS "function return"
+        // idiom when the base register is the stack pointer (R13):
+        // a matching prior STMFD/PUSH stored LR onto the stack, so
+        // popping into R15 is restoring the return address. Treat
+        // this exactly like `bx lr` — C-return so the caller's body
+        // continues at the instruction after the call.
+        //
+        // When the base is NOT SP, the popped PC is a computed
+        // jump (state-machine dispatch, jump tables popped from
+        // arbitrary memory). Those still need runtime_dispatch.
+        if (blk.rn == 13) {
+            body << indent << "return;\n";
+        } else {
+            body << indent << "runtime_dispatch(g_cpu.R[15]);\n";
+            body << indent << "return;\n";
+        }
     }
     return true;
 }

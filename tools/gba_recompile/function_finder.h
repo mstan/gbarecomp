@@ -68,6 +68,34 @@ struct FinderStats {
     std::size_t indirect_transfer_count = 0;
     std::size_t branch_targets_discovered = 0;
     std::size_t undefined_instr_count = 0;
+    // Discovery-source breakdown — populated by run() against the
+    // set of (addr, mode) keys seen across seeds vs walks.
+    std::size_t manual_seeds_total = 0;     // # of seeds the caller added
+    std::size_t discovered_by_walk_only = 0;
+    std::size_t redundant_manual = 0;       // in both seeds AND walk-discovered
+    std::size_t manual_seeds_only = 0;      // would be lost without seeds
+    std::size_t excluded_count = 0;         // # removed by exclude_func
+};
+
+// A byte range the finder must not decode as code. See
+// docs/TOML_SCHEMA.md "[[data_range]]".
+struct DataRange {
+    uint32_t    start;
+    uint32_t    end;        // [start, end)
+    std::string note;
+};
+
+// Diagnostic for the hard error: control flow entered a data_range.
+// The collision names BOTH the offending branch (origin) AND the
+// range, so the operator can decide which to fix.
+struct DataRangeCollision {
+    uint32_t    flow_target_addr;   // address that landed in the range
+    uint32_t    flow_origin_addr;   // function containing the offending branch
+    std::string flow_origin_name;
+    std::string flow_origin_kind;   // "branch", "seed", "jump_table"
+    uint32_t    range_start;
+    uint32_t    range_end;
+    std::string range_note;
 };
 
 class FunctionFinder {
@@ -82,6 +110,18 @@ public:
     // seed's mode + name wins.
     void add_seed(const FunctionSeed& seed);
 
+    // Register a byte range as data — the finder will hard-error
+    // if control flow ever enters it. Caller supplies `note` for
+    // the diagnostic; `origin_kind` is "data_range" for explicit
+    // [[data_range]] entries or "jump_table" for auto-excluded
+    // jump-table bytes.
+    void add_data_range(uint32_t start, uint32_t end,
+                         const std::string& note);
+
+    // Register a post-discovery exclusion. After discovery, any
+    // function whose address matches is dropped from the output.
+    void add_exclude(uint32_t addr, const std::string& reason);
+
     // Run discovery starting from all seeds. Bounded by
     // `max_functions` to avoid runaways during bring-up.
     void run(std::size_t max_functions = 4096);
@@ -89,6 +129,18 @@ public:
     // Sorted-by-address output.
     const std::vector<Function>& functions() const { return functions_; }
     const FinderStats& stats() const { return stats_; }
+
+    // Non-empty when the recompile must abort. See
+    // docs/TOML_SCHEMA.md "[[data_range]]" — control flow into
+    // a data_range is a hard error.
+    const std::vector<DataRangeCollision>& collisions() const {
+        return collisions_;
+    }
+
+    // Read a 32-bit little-endian word at `addr` (interpreted as a
+    // guest address; translated to rom buffer offset internally).
+    // Returns 0 if out of bounds.
+    uint32_t read_u32_public(uint32_t addr) const;
 
 private:
     const uint8_t* rom_;
@@ -100,10 +152,27 @@ private:
     std::unordered_map<uint64_t, std::size_t> visited_;  // key=(addr<<1)|mode
     FinderStats stats_{};
 
+    std::vector<DataRange>           data_ranges_;
+    std::vector<DataRangeCollision>  collisions_;
+    std::unordered_set<uint32_t>     excluded_;
+    std::unordered_map<uint32_t, std::string> exclude_reasons_;
+
+    // Mode-switching seeds discovered DURING a walk (e.g. BX Rm
+    // where the constant tracker resolved Rm to a THUMB target
+    // while walking ARM code). Drained by run() into the worklist
+    // after each function's body is processed.
+    std::vector<FunctionSeed>        mode_switch_seeds_;
+
     bool addr_in_rom(uint32_t addr) const {
         return addr >= rom_base_ &&
                (addr - rom_base_) < rom_size_;
     }
+    bool addr_in_data_range(uint32_t addr) const;
+    const DataRange* find_data_range(uint32_t addr) const;
+    void record_collision(uint32_t target,
+                          uint32_t origin_addr,
+                          const std::string& origin_name,
+                          const std::string& origin_kind);
 
     uint32_t read_u32(uint32_t addr) const;
     uint16_t read_u16(uint32_t addr) const;

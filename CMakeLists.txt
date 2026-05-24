@@ -92,7 +92,31 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/runtime_bus_bridge.cpp
     src/runtime/host_platform.cpp
     src/runtime/host_window.cpp
+    # Production abort stubs for runtime_dispatch_miss +
+    # runtime_unimplemented_op. Test binaries that link only
+    # gbarecomp_armv4t (not gbarecomp_runtime) supply their own.
+    src/runtime/runtime_arm_default_aborts.cpp
+    # BIOS dispatch table — placeholder until `gba_recompile --bios`
+    # is run, real bios_recompiled.cpp is gitignored and linked
+    # opt-in via GBARECOMP_HAVE_BIOS_RECOMP below.
+    src/runtime/generated_bios/bios_dispatch_table.cpp
 )
+
+# When the user has run `gba_recompile --bios`, the recompiled BIOS
+# functions live in src/runtime/generated_bios/bios_recompiled.cpp.
+# We can't list it unconditionally because the placeholder build
+# doesn't have it. Pull it in if present.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/generated_bios/bios_recompiled.cpp")
+    target_sources(gbarecomp_runtime PRIVATE
+        src/runtime/generated_bios/bios_recompiled.cpp)
+    target_compile_definitions(gbarecomp_runtime PUBLIC
+        GBARECOMP_HAVE_BIOS_RECOMP=1)
+    message(STATUS "gbarecomp: BIOS recompiled output present — linking")
+else()
+    message(STATUS "gbarecomp: BIOS recompiled output absent — placeholder dispatch only. "
+                   "Run `build/gba_recompile.exe --bios bios/gba_bios.bin` "
+                   "to populate.")
+endif()
 target_include_directories(gbarecomp_runtime PUBLIC src/runtime)
 target_link_libraries(gbarecomp_runtime PUBLIC gbarecomp_gba gbarecomp_debug)
 set_property(TARGET gbarecomp_runtime PROPERTY POSITION_INDEPENDENT_CODE ON)
@@ -128,18 +152,100 @@ target_link_libraries(gba_scan PRIVATE gbarecomp_armv4t gbarecomp_gba)
 
 add_executable(gba_recompile
     tools/gba_recompile/main.cpp
-    tools/gba_recompile/function_finder.cpp)
+    tools/gba_recompile/function_finder.cpp
+    tools/gba_recompile/config.cpp)
 target_include_directories(gba_recompile PRIVATE
     tools/gba_recompile
-    src/armv4t)
+    src/armv4t
+    third_party/tomlpp)
 target_link_libraries(gba_recompile PRIVATE gbarecomp_armv4t gbarecomp_gba)
 
 add_executable(symbol_import tools/symbol_import/main.cpp)
 target_link_libraries(symbol_import PRIVATE gbarecomp_armv4t)
 
-add_executable(test_rom_runner tools/test_rom_runner/main.cpp)
-target_link_libraries(test_rom_runner PRIVATE
-    gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
+# test_rom_runner — direct-boots a recompiled jsmolka gba-suite test
+# ROM and reports r12 at exit. Two targets per ROM (ARM + THUMB):
+# each ROM is recompiled at build time via gba_recompile and linked
+# into its own runner exe. Output is the test_rom_runner main
+# (shared) + the per-ROM generated body.
+
+set(GBA_SUITE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/gba_suite)
+
+# Recompile arm.gba at build time.
+set(TEST_ROM_ARM_OUTDIR ${CMAKE_CURRENT_BINARY_DIR}/test_rom_arm_gen)
+set(TEST_ROM_ARM_DISPATCH ${TEST_ROM_ARM_OUTDIR}/dispatch_table.cpp)
+set(TEST_ROM_ARM_BODY     ${TEST_ROM_ARM_OUTDIR}/recompiled.cpp)
+set(TEST_ROM_ARM_HEADER   ${TEST_ROM_ARM_OUTDIR}/recompiled.h)
+file(MAKE_DIRECTORY ${TEST_ROM_ARM_OUTDIR})
+
+if(EXISTS ${GBA_SUITE_ROOT}/arm/arm.gba)
+    add_custom_command(
+        OUTPUT  ${TEST_ROM_ARM_DISPATCH} ${TEST_ROM_ARM_BODY}
+                ${TEST_ROM_ARM_HEADER}
+        COMMAND $<TARGET_FILE:gba_recompile>
+                --rom ${GBA_SUITE_ROOT}/arm/arm.gba
+                --entry 0x080000C0
+                --out ${TEST_ROM_ARM_OUTDIR}
+        DEPENDS gba_recompile
+                ${GBA_SUITE_ROOT}/arm/arm.gba
+        COMMENT "Recompiling gba-suite arm.gba"
+        VERBATIM
+    )
+
+    add_executable(test_rom_arm
+        tools/test_rom_runner/main.cpp
+        ${TEST_ROM_ARM_DISPATCH}
+        ${TEST_ROM_ARM_BODY}
+    )
+    target_include_directories(test_rom_arm PRIVATE
+        ${TEST_ROM_ARM_OUTDIR}
+        src/armv4t)
+    target_link_libraries(test_rom_arm PRIVATE
+        gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
+    add_test(NAME test_rom_arm COMMAND test_rom_arm
+        ${GBA_SUITE_ROOT}/arm/arm.gba)
+else()
+    message(STATUS "gbarecomp: gba-suite arm.gba not found; "
+                   "skipping test_rom_arm target")
+endif()
+
+# Recompile thumb.gba at build time.
+set(TEST_ROM_THUMB_OUTDIR ${CMAKE_CURRENT_BINARY_DIR}/test_rom_thumb_gen)
+set(TEST_ROM_THUMB_DISPATCH ${TEST_ROM_THUMB_OUTDIR}/dispatch_table.cpp)
+set(TEST_ROM_THUMB_BODY     ${TEST_ROM_THUMB_OUTDIR}/recompiled.cpp)
+set(TEST_ROM_THUMB_HEADER   ${TEST_ROM_THUMB_OUTDIR}/recompiled.h)
+file(MAKE_DIRECTORY ${TEST_ROM_THUMB_OUTDIR})
+
+if(EXISTS ${GBA_SUITE_ROOT}/thumb/thumb.gba)
+    add_custom_command(
+        OUTPUT  ${TEST_ROM_THUMB_DISPATCH} ${TEST_ROM_THUMB_BODY}
+                ${TEST_ROM_THUMB_HEADER}
+        COMMAND $<TARGET_FILE:gba_recompile>
+                --rom ${GBA_SUITE_ROOT}/thumb/thumb.gba
+                --entry 0x080000C0
+                --out ${TEST_ROM_THUMB_OUTDIR}
+        DEPENDS gba_recompile
+                ${GBA_SUITE_ROOT}/thumb/thumb.gba
+        COMMENT "Recompiling gba-suite thumb.gba"
+        VERBATIM
+    )
+
+    add_executable(test_rom_thumb
+        tools/test_rom_runner/main.cpp
+        ${TEST_ROM_THUMB_DISPATCH}
+        ${TEST_ROM_THUMB_BODY}
+    )
+    target_include_directories(test_rom_thumb PRIVATE
+        ${TEST_ROM_THUMB_OUTDIR}
+        src/armv4t)
+    target_link_libraries(test_rom_thumb PRIVATE
+        gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
+    add_test(NAME test_rom_thumb COMMAND test_rom_thumb
+        ${GBA_SUITE_ROOT}/thumb/thumb.gba)
+else()
+    message(STATUS "gbarecomp: gba-suite thumb.gba not found; "
+                   "skipping test_rom_thumb target")
+endif()
 
 # bios_smoke — Phase 2.1 canary. Loads bios/gba_bios.bin, runs the
 # interpreter from PC=0 for N instructions, prints a trace.
@@ -190,6 +296,62 @@ add_test(NAME irq_tests COMMAND irq_tests)
 add_executable(ppu_smoke_tests tests/ppu_smoke/test_main.cpp)
 target_link_libraries(ppu_smoke_tests PRIVATE gbarecomp_gba)
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
+
+# ─────────────────────────────────────────────────────────────────────
+# codegen_tests — L1 per-IrOp diff harness.
+#
+# Architecture:
+#   1. tests/codegen/test_cases.cpp lists per-IrOp test cases.
+#   2. gen_codegen_tests.exe reads that list, invokes the same
+#      ArmCodegen used by tools/gba_recompile, and emits one C
+#      function per case into ${CMAKE_BINARY_DIR}/codegen_tests/
+#      test_funcs.cpp.
+#   3. codegen_tests.exe links test_main.cpp + test_cases.cpp +
+#      stubs.cpp + the generated test_funcs.cpp against
+#      gbarecomp_armv4t. It runs both the interpreter and the
+#      generated function per case and diffs the resulting state.
+#
+# Per PRINCIPLES.md "Interpreter is informative, never load-bearing":
+# the interpreter is the diff-oracle, never a runtime fallback. Any
+# divergence is a real codegen bug to fix in arm_codegen.cpp.
+# ─────────────────────────────────────────────────────────────────────
+add_executable(gen_codegen_tests
+    tests/codegen/gen_codegen_tests.cpp
+    tests/codegen/test_cases.cpp
+)
+target_include_directories(gen_codegen_tests PRIVATE
+    tests/codegen
+    src/armv4t)
+target_link_libraries(gen_codegen_tests PRIVATE gbarecomp_armv4t)
+
+set(CODEGEN_TESTS_OUTDIR
+    ${CMAKE_CURRENT_BINARY_DIR}/codegen_tests)
+set(CODEGEN_TESTS_GENFILE
+    ${CODEGEN_TESTS_OUTDIR}/test_funcs.cpp)
+
+file(MAKE_DIRECTORY ${CODEGEN_TESTS_OUTDIR})
+
+add_custom_command(
+    OUTPUT  ${CODEGEN_TESTS_GENFILE}
+    COMMAND gen_codegen_tests ${CODEGEN_TESTS_GENFILE}
+    DEPENDS gen_codegen_tests
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/codegen/test_cases.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/codegen/test_cases.h
+    COMMENT "Emitting L1 codegen test functions"
+    VERBATIM
+)
+
+add_executable(codegen_tests
+    tests/codegen/test_main.cpp
+    tests/codegen/test_cases.cpp
+    tests/codegen/stubs.cpp
+    ${CODEGEN_TESTS_GENFILE}
+)
+target_include_directories(codegen_tests PRIVATE
+    tests/codegen
+    src/armv4t)
+target_link_libraries(codegen_tests PRIVATE gbarecomp_armv4t)
+add_test(NAME codegen_tests COMMAND codegen_tests)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Oracle binary — opt-in (-DGBARECOMP_BUILD_ORACLE=ON). Embeds libmgba
