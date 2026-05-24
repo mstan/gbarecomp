@@ -13,12 +13,43 @@
 
 #pragma once
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
 namespace gba {
 
 class GbaSave {
 public:
     GbaSave();
     ~GbaSave();
+
+    void configure_eeprom(std::size_t bytes);
+    bool eeprom_enabled() const { return eeprom_enabled_; }
+
+    void eeprom_write_bit(uint16_t value);
+    uint16_t eeprom_read_bit();
+
+    std::size_t eeprom_size() const { return eeprom_size_; }
+
+private:
+    static constexpr std::size_t kMaxEepromSize = 8 * 1024;
+
+    bool eeprom_enabled_ = false;
+    std::size_t eeprom_size_ = 0;
+    uint32_t eeprom_addr_bits_ = 0;
+    uint32_t eeprom_block_mask_ = 0;
+    std::array<uint8_t, kMaxEepromSize> eeprom_{};
+
+    std::vector<uint8_t> command_bits_;
+    bool read_active_ = false;
+    uint32_t read_byte_offset_ = 0;
+    uint32_t read_bit_index_ = 0;
+
+    uint32_t command_address() const;
+    void finish_eeprom_read();
+    void finish_eeprom_write();
 };
 
 }  // namespace gba

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "gba_rom_header.h"
+#include "gba_save.h"
 
 namespace {
 
@@ -157,6 +158,56 @@ void test_flash1m_beats_flash() {
                static_cast<int>(gba::SaveType::Flash1M));
 }
 
+void eeprom_send_bits(gba::GbaSave& save, uint32_t value, int count) {
+    for (int bit = count - 1; bit >= 0; --bit) {
+        save.eeprom_write_bit(static_cast<uint16_t>((value >> bit) & 1u));
+    }
+}
+
+void eeprom_send_read(gba::GbaSave& save, uint32_t block) {
+    eeprom_send_bits(save, 0b11, 2);
+    eeprom_send_bits(save, block, 14);
+    eeprom_send_bits(save, 0, 1);
+}
+
+void eeprom_send_write(gba::GbaSave& save, uint32_t block,
+                       const uint8_t bytes[8]) {
+    eeprom_send_bits(save, 0b10, 2);
+    eeprom_send_bits(save, block, 14);
+    for (int i = 0; i < 8; ++i) {
+        eeprom_send_bits(save, bytes[i], 8);
+    }
+    eeprom_send_bits(save, 0, 1);
+}
+
+void test_eeprom_8k_read_write() {
+    gba::GbaSave save;
+    save.configure_eeprom(8 * 1024);
+
+    eeprom_send_read(save, 3);
+    for (int i = 0; i < 4; ++i) {
+        check_eq("eeprom_8k", "blank_dummy", save.eeprom_read_bit(), 0u);
+    }
+    for (int i = 0; i < 64; ++i) {
+        check_eq("eeprom_8k", "blank_data", save.eeprom_read_bit(), 1u);
+    }
+
+    const uint8_t pattern[8] = {0x12, 0x34, 0x56, 0x78,
+                                0x9a, 0xbc, 0xde, 0xf0};
+    eeprom_send_write(save, 3, pattern);
+    eeprom_send_read(save, 3);
+    for (int i = 0; i < 4; ++i) {
+        (void)save.eeprom_read_bit();
+    }
+    for (int i = 0; i < 8; ++i) {
+        uint8_t got = 0;
+        for (int bit = 0; bit < 8; ++bit) {
+            got = static_cast<uint8_t>((got << 1) | save.eeprom_read_bit());
+        }
+        check_eq("eeprom_8k", "written_byte", got, pattern[i]);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -165,6 +216,7 @@ int main() {
     test_no_save_signature();
     test_sram_signature();
     test_flash1m_beats_flash();
+    test_eeprom_8k_read_write();
     if (failures) {
         std::printf("\n%d failure(s)\n", failures);
         return 1;

@@ -385,9 +385,25 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         cmd_read_region(ctx.bus->iwram_ptr(), 32 * 1024, req, out, 0x03000000u);
         return;
     }
+    if (contains("\"read_ewram\"")) {
+        if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
+        cmd_read_region(ctx.bus->ewram_ptr(), 256 * 1024, req, out, 0x02000000u);
+        return;
+    }
     if (contains("\"read_io\"")) {
         if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
         cmd_read_io_dynamic(*ctx.bus, req, out);
+        return;
+    }
+    if (contains("\"set_keyinput\"")) {
+        if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
+        uint64_t value = 0x03FFu;
+        if (!extract_uint(req, "\"value\"", value)) {
+            emit_error(out, "missing value");
+            return;
+        }
+        ctx.bus->io().set_keyinput(static_cast<uint16_t>(value & 0x03FFu));
+        out = "{\"ok\":true}";
         return;
     }
     if (contains("\"ppu_state\"")) {

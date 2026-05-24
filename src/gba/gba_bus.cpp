@@ -40,6 +40,10 @@ void store_u32(uint8_t* p, uint32_t v) {
     p[3] = static_cast<uint8_t>((v >> 24) & 0xFF);
 }
 
+bool is_eeprom_addr(uint32_t addr, const GbaSave& save) {
+    return save.eeprom_enabled() && ((addr >> 24) == 0x0Du);
+}
+
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────
@@ -58,6 +62,9 @@ uint8_t GbaBus::read8(uint32_t addr) {
         case Region::Vram:  if (off < vram_.size()) return vram_[off]; break;
         case Region::Oam:   return oam_[off];
         case Region::Rom: {
+            if (is_eeprom_addr(addr, save_)) {
+                return static_cast<uint8_t>(save_.eeprom_read_bit());
+            }
             if (rom_ && off < rom_size_) return rom_[off];
             // No-cart open-bus: ROM reads return the cart-address-bus
             // value (per GBATEK § "GBA Cartridge ROM" — when no cart
@@ -94,6 +101,9 @@ uint16_t GbaBus::read16(uint32_t addr) {
             break;
         case Region::Oam:   return load_u16(&oam_[off]);
         case Region::Rom: {
+            if (is_eeprom_addr(addr, save_)) {
+                return save_.eeprom_read_bit();
+            }
             if (rom_ && off + 1 < rom_size_) return load_u16(&rom_[off]);
             // No-cart open-bus: read16 returns the halfword index.
             return static_cast<uint16_t>((off >> 1) & 0xFFFFu);
@@ -126,6 +136,9 @@ uint32_t GbaBus::read32(uint32_t addr) {
             break;
         case Region::Oam:   return load_u32(&oam_[off]);
         case Region::Rom: {
+            if (is_eeprom_addr(addr, save_)) {
+                return save_.eeprom_read_bit();
+            }
             if (rom_ && off + 3 < rom_size_) return load_u32(&rom_[off]);
             // No-cart open-bus: two consecutive halfwords.
             uint32_t hw_lo = (off >> 1) & 0xFFFFu;
@@ -163,6 +176,10 @@ void GbaBus::write8(uint32_t addr, uint8_t v) {
             log_unmapped(addr, v, true, 1);
             return;
         case Region::Rom:
+            if (is_eeprom_addr(addr, save_)) {
+                save_.eeprom_write_bit(v);
+                return;
+            }
             // Cartridge ROM is read-only at write time (writes to ROM
             // are used by some save-chip protocols, but that's the
             // SAVE region, not the ROM region itself).
@@ -192,6 +209,12 @@ void GbaBus::write16(uint32_t addr, uint16_t v) {
         case Region::Oam:   store_u16(&oam_[off], v); return;
         case Region::Bios:
         case Region::Rom:
+            if (region == Region::Rom && is_eeprom_addr(addr, save_)) {
+                save_.eeprom_write_bit(v);
+                return;
+            }
+            log_unmapped(addr, v, true, 2);
+            return;
         case Region::Io:
             io_dispatch_.write16(static_cast<uint32_t>(off), v);
             return;
@@ -216,6 +239,12 @@ void GbaBus::write32(uint32_t addr, uint32_t v) {
         case Region::Oam:   store_u32(&oam_[off], v); return;
         case Region::Bios:
         case Region::Rom:
+            if (region == Region::Rom && is_eeprom_addr(addr, save_)) {
+                save_.eeprom_write_bit(static_cast<uint16_t>(v));
+                return;
+            }
+            log_unmapped(addr, v, true, 4);
+            return;
         case Region::Io:
             io_dispatch_.write32(static_cast<uint32_t>(off), v);
             return;

@@ -94,7 +94,7 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/host_window.cpp
 )
 target_include_directories(gbarecomp_runtime PUBLIC src/runtime)
-target_link_libraries(gbarecomp_runtime PUBLIC gbarecomp_gba)
+target_link_libraries(gbarecomp_runtime PUBLIC gbarecomp_gba gbarecomp_debug)
 set_property(TARGET gbarecomp_runtime PROPERTY POSITION_INDEPENDENT_CODE ON)
 if(GBARECOMP_SDL2_OK)
     target_compile_definitions(gbarecomp_runtime PUBLIC GBARECOMP_HAVE_SDL2)
@@ -114,8 +114,11 @@ add_library(gbarecomp_debug STATIC
     src/debug/snapshot.cpp
 )
 target_include_directories(gbarecomp_debug PUBLIC src/debug)
-target_link_libraries(gbarecomp_debug PUBLIC gbarecomp_runtime)
+target_link_libraries(gbarecomp_debug PUBLIC gbarecomp_gba)
 set_property(TARGET gbarecomp_debug PROPERTY POSITION_INDEPENDENT_CODE ON)
+if(WIN32 OR MSYS)
+    target_link_libraries(gbarecomp_debug PUBLIC ws2_32)
+endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # tools — small CLI utilities. Each is a separate executable.

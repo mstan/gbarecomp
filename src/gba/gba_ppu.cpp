@@ -373,8 +373,83 @@ void render_scanline_internal(uint8_t* rgb,
     };
 
     uint32_t bg_mode = dispcnt & 0x07u;
-    if ((dispcnt & 0x0800u) && (bg_mode == 1 || bg_mode == 2)) {
-        uint16_t bgcnt = static_cast<uint16_t>(io[0x0E] | (io[0x0F] << 8));
+    auto render_regular_bg = [&](uint32_t layer,
+                                 uint32_t cnt_off,
+                                 uint32_t scroll_off) {
+        if ((dispcnt & (0x0100u << layer)) == 0) return;
+
+        uint16_t bgcnt = static_cast<uint16_t>(
+            io[cnt_off] | (io[cnt_off + 1] << 8));
+        uint32_t char_base = ((bgcnt >> 2) & 0x3u) * 0x4000u;
+        uint32_t screen_base = ((bgcnt >> 8) & 0x1Fu) * 0x800u;
+        bool color256 = (bgcnt & 0x0080u) != 0;
+        uint32_t size_code = (bgcnt >> 14) & 0x3u;
+        uint32_t bg_priority = bgcnt & 0x3u;
+        uint32_t hofs = static_cast<uint16_t>(
+            io[scroll_off] | (io[scroll_off + 1] << 8)) & 0x01FFu;
+        uint32_t vofs = static_cast<uint16_t>(
+            io[scroll_off + 2] | (io[scroll_off + 3] << 8)) & 0x01FFu;
+
+        uint32_t width_tiles = (size_code & 1u) ? 64u : 32u;
+        uint32_t height_tiles = (size_code & 2u) ? 64u : 32u;
+        uint32_t width_px = width_tiles * 8u;
+        uint32_t height_px = height_tiles * 8u;
+        uint32_t block_cols = width_tiles / 32u;
+
+        for (uint32_t x = 0; x < kScreenWidth; ++x) {
+            if (!layer_enabled(x, layer)) continue;
+            uint32_t tex_x = (x + hofs) & (width_px - 1u);
+            uint32_t tex_y = (y + vofs) & (height_px - 1u);
+            uint32_t tile_x = tex_x >> 3;
+            uint32_t tile_y = tex_y >> 3;
+            uint32_t block = (tile_x >> 5) + (tile_y >> 5) * block_cols;
+            uint32_t map_off = screen_base + block * 0x800u +
+                ((tile_y & 31u) * 32u + (tile_x & 31u)) * 2u;
+            if (map_off + 1 >= 96u * 1024u) continue;
+
+            uint16_t entry = load_u16_le(&vram[map_off]);
+            uint32_t tile_num = entry & 0x03FFu;
+            bool hflip = (entry & 0x0400u) != 0;
+            bool vflip = (entry & 0x0800u) != 0;
+            uint32_t palette_bank = (entry >> 12) & 0x0Fu;
+            uint32_t px = tex_x & 7u;
+            uint32_t py = tex_y & 7u;
+            if (hflip) px = 7u - px;
+            if (vflip) py = 7u - py;
+
+            uint8_t pal_idx = 0;
+            if (color256) {
+                uint32_t tile_addr = char_base + tile_num * 64u + py * 8u + px;
+                if (tile_addr >= 96u * 1024u) continue;
+                pal_idx = vram[tile_addr];
+            } else {
+                uint32_t tile_addr = char_base + tile_num * 32u +
+                    py * 4u + (px >> 1);
+                if (tile_addr >= 96u * 1024u) continue;
+                uint8_t packed = vram[tile_addr];
+                pal_idx = (px & 1u) ? (packed >> 4) : (packed & 0x0Fu);
+                pal_idx = static_cast<uint8_t>(
+                    pal_idx | static_cast<uint8_t>(palette_bank << 4));
+            }
+            if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
+
+            uint8_t rgbv[3];
+            to_rgb888(load_u16_le(&pal[pal_idx * 2]), rgbv);
+            submit(x, rgbv,
+                   static_cast<int>(bg_priority * 128u + 128u + layer),
+                   static_cast<uint8_t>(layer),
+                   blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
+                   (second_targets & (1u << layer)) != 0);
+        }
+    };
+
+    auto render_affine_bg = [&](uint32_t layer,
+                                uint32_t cnt_off,
+                                uint32_t param_off) {
+        if ((dispcnt & (0x0100u << layer)) == 0) return;
+
+        uint16_t bgcnt = static_cast<uint16_t>(io[cnt_off] |
+                                               (io[cnt_off + 1] << 8));
         uint32_t char_base   = ((bgcnt >> 2) & 0x3u) * 0x4000u;
         uint32_t screen_base = ((bgcnt >> 8) & 0x1Fu) * 0x800u;
         bool wrap            = (bgcnt & 0x2000u) != 0;
@@ -383,12 +458,12 @@ void render_scanline_internal(uint8_t* rgb,
         int bg_tiles  = bg_pixels / 8;
         int bg_priority = static_cast<int>(bgcnt & 0x3u);
 
-        int32_t pa = read_s16(io, 0x30);
-        int32_t pb = read_s16(io, 0x32);
-        int32_t pc = read_s16(io, 0x34);
-        int32_t pd = read_s16(io, 0x36);
-        int32_t refx = read_s28_ref(io, 0x38);
-        int32_t refy = read_s28_ref(io, 0x3C);
+        int32_t pa = read_s16(io, param_off + 0x00);
+        int32_t pb = read_s16(io, param_off + 0x02);
+        int32_t pc = read_s16(io, param_off + 0x04);
+        int32_t pd = read_s16(io, param_off + 0x06);
+        int32_t refx = read_s28_ref(io, param_off + 0x08);
+        int32_t refy = read_s28_ref(io, param_off + 0x0C);
         int32_t xt = refx + static_cast<int32_t>(y) * pb;
         int32_t yt = refy + static_cast<int32_t>(y) * pd;
         for (uint32_t x = 0; x < kScreenWidth; ++x) {
@@ -396,7 +471,7 @@ void render_scanline_internal(uint8_t* rgb,
             int32_t tex_y = yt >> 8;
             xt += pa;
             yt += pc;
-            if (!layer_enabled(x, 3)) continue;
+            if (!layer_enabled(x, layer)) continue;
             if (wrap) {
                 tex_x &= (bg_pixels - 1);
                 tex_y &= (bg_pixels - 1);
@@ -414,10 +489,26 @@ void render_scanline_internal(uint8_t* rgb,
             if (pal_idx == 0) continue;
             uint8_t rgbv[3];
             to_rgb888(load_u16_le(&pal[pal_idx * 2]), rgbv);
-            submit(x, rgbv, bg_priority * 128 + 128, 3,
-                   blend_enabled(x) && ((first_targets & (1u << 3)) != 0),
-                   (second_targets & (1u << 3)) != 0);
+            submit(x, rgbv,
+                   static_cast<int>(bg_priority * 128 + 128 + layer),
+                   static_cast<uint8_t>(layer),
+                   blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
+                   (second_targets & (1u << layer)) != 0);
         }
+    };
+
+    if (bg_mode == 0) {
+        render_regular_bg(3, 0x0E, 0x1C);
+        render_regular_bg(2, 0x0C, 0x18);
+        render_regular_bg(1, 0x0A, 0x14);
+        render_regular_bg(0, 0x08, 0x10);
+    } else if (bg_mode == 1) {
+        render_affine_bg(2, 0x0C, 0x20);
+        render_regular_bg(1, 0x0A, 0x14);
+        render_regular_bg(0, 0x08, 0x10);
+    } else if (bg_mode == 2) {
+        render_affine_bg(3, 0x0E, 0x30);
+        render_affine_bg(2, 0x0C, 0x20);
     }
 
     if (dispcnt & 0x1000u) {

@@ -20,6 +20,7 @@
 #include "gba_bios.h"
 #include "gba_io.h"
 #include "gba_memory.h"
+#include "gba_save.h"
 
 namespace gba {
 
@@ -47,6 +48,9 @@ public:
 
     GbaAudio&       audio()       { return audio_; }
     const GbaAudio& audio() const { return audio_; }
+
+    GbaSave&       save()       { return save_; }
+    const GbaSave& save() const { return save_; }
 
     // Region accessors — useful for tests, debug snapshots, and the
     // PPU (which reads VRAM/OAM/PAL directly to render).
@@ -104,6 +108,7 @@ private:
 
     GbaIo       io_dispatch_;
     GbaAudio    audio_;
+    GbaSave     save_;
 
     uint32_t    last_fetched_   = 0;
     std::size_t unmapped_count_ = 0;
