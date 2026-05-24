@@ -120,20 +120,24 @@ bool HostWindow::open(int scale, const char* title) {
         return false;
     }
 
-    // Open the audio device at 32768 Hz mono 16-bit signed (matches
-    // GbaAudio::kSampleRate). The desired format may differ from the
-    // obtained; we let SDL2 convert via SDL_AUDIO_ALLOW_*. Failure is
-    // non-fatal — silent video still works.
+    // Open the audio device at 65536 Hz mono 16-bit signed. The
+    // running BIOS sets SOUNDBIAS resolution=1 which raises the
+    // mixer's effective sample rate from 32768 to 65536; opening
+    // the device at 32768 (the power-on default) caused SDL to play
+    // back at half speed, hit the 250 ms queue cap, and flush —
+    // audible as muffled / watery chime artifacts. SDL2 resamples
+    // internally if the host hardware doesn't natively support
+    // 65536, so this rate is portable. Failure is non-fatal —
+    // silent video still works.
     SDL_AudioSpec want{};
-    want.freq     = 32768;
+    want.freq     = 65536;
     want.format   = AUDIO_S16SYS;
     want.channels = 1;
-    want.samples  = 1024;  // ~31 ms buffer at 32 kHz
+    want.samples  = 1024;  // ~15 ms buffer at 65 kHz
     want.callback = nullptr;  // queue mode
     SDL_AudioSpec got{};
     b->audio_dev = SDL_OpenAudioDevice(nullptr, /*iscapture=*/0,
-                                       &want, &got,
-                                       SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+                                       &want, &got, /*allowed_changes=*/0);
     if (b->audio_dev != 0) {
         SDL_PauseAudioDevice(b->audio_dev, 0);  // start playback
     }
@@ -149,7 +153,7 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
     if (b->audio_dev == 0) return;
     // Don't let the queue grow unbounded — past ~250 ms of latency
     // the host falls behind the GBA's perceived audio.
-    constexpr Uint32 kMaxQueuedBytes = 32768 * 2 / 4;  // ~250 ms
+    constexpr Uint32 kMaxQueuedBytes = 65536 * 2 / 4;  // ~250 ms at 65 kHz
     if (SDL_GetQueuedAudioSize(b->audio_dev) > kMaxQueuedBytes) {
         SDL_ClearQueuedAudio(b->audio_dev);
     }
