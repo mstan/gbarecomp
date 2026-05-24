@@ -121,7 +121,12 @@ set_property(TARGET gbarecomp_debug PROPERTY POSITION_INDEPENDENT_CODE ON)
 add_executable(gba_scan tools/gba_scan/main.cpp)
 target_link_libraries(gba_scan PRIVATE gbarecomp_armv4t gbarecomp_gba)
 
-add_executable(gba_recompile tools/gba_recompile/main.cpp)
+add_executable(gba_recompile
+    tools/gba_recompile/main.cpp
+    tools/gba_recompile/function_finder.cpp)
+target_include_directories(gba_recompile PRIVATE
+    tools/gba_recompile
+    src/armv4t)
 target_link_libraries(gba_recompile PRIVATE gbarecomp_armv4t gbarecomp_gba)
 
 add_executable(symbol_import tools/symbol_import/main.cpp)
