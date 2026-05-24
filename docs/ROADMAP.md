@@ -11,18 +11,21 @@ sacred"). The current ordering reflects that:
 - Phase 0: scaffold + repo skeleton
 - Phase 1: ARM7TDMI / ARMv4T decoder + IR + interpreter
 - Phase 2: BIOS bring-up (first render target = GBA BIOS intro)
-- **Phase 2.7: BIOS intro flawlessness** (HARD GATE — must complete
-  before Phase 3 or anything ROM-related)
+- **Phase 2.7: BIOS intro flawlessness** (HARD GATE)
+- **Phase 2.8: recompiler-only execution** (HARD GATE — REOPENS 2.7)
 - Phase 3: full GBA hardware runner (DMA, timers, IO, audio FIFO bookkeeping)
 - Phase 4: oracle / debug workflow
-- Phase 5: Minish Cap target (boots through the real BIOS)
+- Phase 5: Minish Cap target (boots through the recompiled BIOS)
 
-> **HARD GATE** — Phase 2.7 is a stop sign. No ROM / cart / game work
-> happens until the BIOS intro is **visually + audibly + in-memory
-> flawless** against the mGBA oracle. See `PRINCIPLES.md` "BIOS intro
-> must be flawless before ROM". The simplest piece of software the
-> emulator runs is the foundation for everything else; if it isn't
-> right, nothing built on top of it is trustworthy.
+> **HARD GATE** — Phases 2.7 + 2.8 together are a stop sign. The
+> BIOS intro must be **visually + audibly + in-memory flawless**
+> against the mGBA oracle AND must be produced by the recompiler,
+> not the interpreter. The prior Phase 2.7 pass (2026-05-23) used
+> interpreter execution and has been invalidated by the
+> "Interpreter is informative, never load-bearing" rule in
+> `PRINCIPLES.md`. No ROM / cart / game / Phase 5 work resumes
+> until both 2.7 and 2.8 close together via recompiled-BIOS
+> execution.
 
 ---
 
@@ -159,12 +162,24 @@ under `bios/ghidra/` (gitignored) only when this trigger fires.
 
 ---
 
-## Phase 2.7 — BIOS intro flawlessness  *(HARD GATE)*
+## Phase 2.7 — BIOS intro flawlessness  *(HARD GATE — REOPENED 2026-05-23)*
 
 This phase is a stop sign between BIOS bring-up and everything that
 comes after. The deliverable is a flawless GBA BIOS intro on three
-axes — visual, audible, in-memory. See `PRINCIPLES.md` "BIOS intro
-must be flawless before ROM."
+axes — visual, audible, in-memory — produced by the **recompiler**,
+not the interpreter. See `PRINCIPLES.md` "BIOS intro must be
+flawless before ROM" and "Interpreter is informative, never
+load-bearing (SHOWSTOPPER)."
+
+**Status note (2026-05-23):** This phase was previously marked
+closed under interpreter execution. The new interpreter-not-
+load-bearing rule invalidates the prior pass. The gate is RE-OPENED
+and unblocks only after Phase 2.8 (per-IrOp codegen + BIOS
+recompilation + dispatch wire-up) lands and re-passes the three
+acceptance criteria with `runtime_dispatch` as the sole execution
+engine. The runtime's exec loop currently aborts on first
+instruction (`runtime_dispatch(0x00000000)` → dispatch miss) — that
+abort is the gate Phase 2.8 closes.
 
 ### Acceptance criteria (all three must pass)
 
@@ -234,8 +249,154 @@ re-opens automatically.
 - No `gba_recompile` improvements toward generating game code.
 - No `MinishCapRecomp/` work.
 - No "let me just check one thing on a ROM" detours.
+- **No interpreter-driven re-pass.** The acceptance criteria above
+  must be met with `runtime_dispatch` as the sole execution engine.
+  An interpreter pass does not close the gate (PRINCIPLES.md
+  "Interpreter is informative, never load-bearing").
 
 When the gate is closed, Phase 3 unblocks.
+
+---
+
+## Phase 2.8 — Recompiler-only execution  *(HARD GATE)*
+
+Closes the dispatch-miss abort that Phase 2.7's re-open left at the
+runtime entry. The deliverable is a `MinishCapRecomp.exe` (and any
+other game-runner) whose hot path is 100% `runtime_dispatch`, with
+the interpreter present only as offline diff oracle / unit-test
+backbone (PRINCIPLES.md "Interpreter is informative, never
+load-bearing").
+
+Order is **C then B**: build out per-IrOp codegen first, then flip
+the dispatch on. Doing B first would mean the runtime aborts on
+nearly every instruction with no useful progress signal.
+
+### 2.8.A Per-IrOp ARM codegen
+
+`src/armv4t/arm_codegen.cpp::ArmCodegen::emit_instr` is a stub that
+returns `not_implemented = true`. Implement real C-string emission
+for every ARM IrOp:
+
+- [ ] Data processing × 16 (AND, EOR, SUB, RSB, ADD, ADC, SBC, RSC,
+      TST, TEQ, CMP, CMN, ORR, MOV, BIC, MVN) — imm + shifted reg
+      + register-shifted-by-register operand2, S-bit flag updates
+      via `arm_set_nz` / `arm_set_nzc_logic` / `arm_set_nzcv_*`.
+- [ ] Memory load/store (LDR, STR, LDRB, STRB) — pre/post-indexed,
+      writeback, scaled register offset, byte/word.
+- [ ] Halfword/signed-byte loads (LDRH, STRH, LDRSB, LDRSH).
+- [ ] Block transfer (LDM/STM, all addressing modes, writeback,
+      register list with PC, S-bit user-mode / SPSR restore).
+- [ ] Branch / BL (with link).
+- [ ] BX, BLX (interworking — switch CPSR.T bit, dispatch).
+- [ ] Multiply: MUL, MLA, UMULL, UMLAL, SMULL, SMLAL.
+- [ ] PSR transfer: MRS, MSR (immediate and register forms, field
+      mask handling).
+- [ ] SWP / SWPB (atomic swap).
+- [ ] SWI (call `runtime_swi` → dispatches recompiled BIOS at 0x8).
+- [ ] Conditional execution wrapper: every op generates
+      `if (arm_cond_passes(cond)) { ... }` for non-AL conds.
+
+Mirror the semantics in `src/armv4t/interpreter.cpp` op-by-op;
+that file is the in-tree reference. Each lowered op gets a diff
+test (recompiled output vs interpreter output on a synthesized
+input) added to `tests/armv4t/test_codegen.cpp`.
+
+### 2.8.B Per-IrOp THUMB codegen
+
+`src/armv4t/thumb_codegen.cpp` — mirror 2.8.A for THUMB. All
+relevant formats:
+
+- [ ] Format 1: shifted register (LSL/LSR/ASR imm).
+- [ ] Format 2: add/subtract (register / 3-bit imm).
+- [ ] Format 3: move/compare/add/subtract imm.
+- [ ] Format 4: ALU operations (16 ops, low-reg only).
+- [ ] Format 5: Hi-register operations / BX.
+- [ ] Format 6: PC-relative load.
+- [ ] Format 7-8: load/store with register offset / sign-extended.
+- [ ] Format 9: load/store with imm offset.
+- [ ] Format 10: load/store halfword.
+- [ ] Format 11: SP-relative load/store.
+- [ ] Format 12: load address (ADR variants).
+- [ ] Format 13: add offset to SP.
+- [ ] Format 14: push/pop registers.
+- [ ] Format 15: multiple load/store.
+- [ ] Format 16: conditional branch.
+- [ ] Format 17: SWI.
+- [ ] Format 18: unconditional branch.
+- [ ] Format 19: long branch with link (BL/BLX pair).
+
+### 2.8.C BIOS recompilation
+
+The BIOS is currently absent from any dispatch table. Add the
+tooling that produces a recompiled BIOS as a shared engine
+component.
+
+- [ ] `gba_recompile --bios <path>` mode that decodes the 16 KB
+      BIOS via the same ARM/THUMB function-finder + codegen as
+      cart code.
+- [ ] Output goes to `gbarecomp/src/runtime/generated_bios/`
+      (gitignored, regenerated at build-time): `bios_recompiled.cpp`
+      + `bios_dispatch_table.cpp` + `bios_recompiled.h`.
+- [ ] CMake target `gbarecomp_bios_recomp` static lib, linked into
+      `gbarecomp_runtime`. Every game-runner gets the BIOS table
+      for free.
+- [ ] `runtime_dispatch` consults BOTH the BIOS table (for PCs
+      `< 0x4000`) and the per-game cart table; the entries don't
+      overlap, so a single merged binary-search is fine.
+- [ ] BIOS function discovery seeds: SWI vector at 0x8, IRQ vector
+      at 0x18, `__BiosReset` at 0x0, plus published BIOS disasm
+      function entries from `docs/GBA_REFERENCE_NOTES.md`.
+
+### 2.8.D Runtime dispatch wire-up
+
+With 2.8.A/B/C in place, light up the runtime exec loop.
+
+- [ ] `runtime.cpp::step_once()` already calls
+      `runtime_dispatch(g_cpu.R[15])`. Remove the placeholder
+      comment when it actually advances PC.
+- [ ] IRQ entry: when `bus.io().irq_pending() && !cpsr_I`, set
+      `LR_irq = PC + 4`, `SPSR_irq = CPSR`, switch to IRQ mode,
+      set `PC = 0x18`, set `I = 1`, then `runtime_dispatch(0x18)`.
+      Banked-reg storage lives in a C-ABI `ArmBankedRegs` extension
+      to `g_cpu` (sibling to `runtime_arm.h`).
+- [ ] SWI entry: `runtime_swi(imm)` sets up the SVC exception
+      frame and calls `runtime_dispatch(0x08)` — no interpreter
+      fallback.
+- [ ] PPU pump: re-enable `pump_ppu(cycles)` between dispatched
+      instructions; cycle counts come from a per-function metadata
+      table emitted by `gba_recompile`.
+- [ ] TCP `Context` refactor: replace `armv4t::CPUState* cpu` with
+      `ArmCpuState* cpu` (the recomp C-struct); update
+      `tcp_debug_server.cpp` accessors. `cpu_state` / PC queries
+      again return real data.
+
+### 2.8.E Phase 2.7 re-pass
+
+With 2.8.A–D landed, all three Phase 2.7 acceptance criteria must
+re-pass via recompiled-BIOS execution:
+
+- [ ] `python oracle/diff_frame.py --scan 1 240 1` IDENTICAL for
+      OAM, PAL, VRAM, IWRAM at every frame, with `runtime_dispatch`
+      as the only exec engine.
+- [ ] Per-frame framebuffer pixel-equality vs `emu_screenshot`.
+- [ ] Audio sample-stream equality (within LP-002 tolerance).
+- [ ] `bios_intro_flawless` ctest green (LP-003 lands here too).
+
+When the recompiled BIOS clears all three, Phase 2.7 + 2.8 close
+together and Phase 3 + Phase 5 unblock.
+
+### What's explicitly NOT allowed during Phase 2.8
+
+- No `MinishCapRecomp` title-screen / game-logic work.
+- No "let me wire the dispatcher up before codegen is done"
+  shortcut. C before B; B without C is a no-op stream of aborts.
+- **No interpreter as fallback for unfinished IrOps.** Hitting
+  `runtime_unimplemented_op` is the signal to write the lowering,
+  not to route to the interpreter.
+- No `--use-interpreter` flag added to the runtime, "for
+  comparison" or otherwise. The interpreter lives behind
+  `armv4t_tests` and diff harnesses, never in the runtime CLI
+  surface.
 
 ---
 
@@ -277,15 +438,19 @@ that real games will need.
 ## Phase 5 — Minish Cap target
 
 Strict ordering. Don't jump milestones. **Every milestone requires
-booting through the real BIOS first.** No milestone is met by
-shortcutting the BIOS.
+booting through the recompiled BIOS first** (via
+`runtime_dispatch`, not the interpreter). No milestone is met by
+shortcutting the BIOS or by routing any PC through
+`armv4t::Interpreter::step`. This phase does not begin until Phase
+2.7 + 2.8 are both closed.
 
 1. [ ] ROM hash verified; BIOS hash verified.
 2. [ ] Header / entrypoint decoded.
-3. [ ] BIOS validates the cartridge logo and jumps to entry; first
-      cartridge instruction at `0x08000000` executes.
+3. [ ] Recompiled BIOS validates the cartridge logo and jumps to
+      entry; first cartridge instruction at `0x08000000` executes
+      via `runtime_dispatch`.
 4. [ ] First executed game function identified by PC.
-5. [ ] First VBlank / IRQ path matches oracle (with real BIOS
+5. [ ] First VBlank / IRQ path matches oracle (recompiled BIOS
       dispatch).
 6. [ ] First meaningful VRAM / OAM / PAL writes match oracle.
 7. [ ] Title screen renders.

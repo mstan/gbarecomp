@@ -10,6 +10,33 @@ reproduced, and we chose not to fix immediately. Not a TODO list.
 
 ---
 
+## High priority
+
+### HP-001: Phase 2.7 pass invalidated by interpreter-not-load-bearing rule
+- **Observed:** 2026-05-23. The Phase 2.7 acceptance pass earlier in
+  the day relied on `armv4t::Interpreter::step` driving execution.
+  Subsequently the user clarified that the interpreter is forbidden
+  on any runtime hot path (PRINCIPLES.md "Interpreter is
+  informative, never load-bearing (SHOWSTOPPER)"). The prior pass
+  therefore does NOT satisfy the new gate.
+- **Detail:** Acceptance criteria for Phase 2.7 (memory equality,
+  framebuffer equality, audio sample-stream equality vs mGBA) all
+  green'd against an interpreter-driven `bios_smoke`. The
+  recompiled runtime (`MinishCapRecomp.exe`, future game-runners)
+  must reproduce those results with `runtime_dispatch` as the sole
+  execution engine before the gate re-closes.
+- **Current state:** `MinishCapRecomp.exe` aborts on first
+  instruction with `runtime_arm: dispatch miss for pc=0x00000000`
+  because (a) the BIOS isn't recompiled yet and (b) per-IrOp
+  codegen isn't written. That abort IS the open gate.
+- **Priority:** high — blocks Phase 5 and any game-runner work.
+- **Next step:** Phase 2.8 (per-IrOp ARM + THUMB codegen, BIOS
+  recompilation tooling, runtime dispatch wire-up) followed by the
+  Phase 2.7 re-pass via recompiled execution. See `docs/ROADMAP.md`
+  Phase 2.8.A–E.
+
+---
+
 ## Low priority
 
 ### LP-001: BIOS intro boot tempo plays slightly fast
