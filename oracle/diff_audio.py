@@ -155,21 +155,41 @@ def main() -> int:
         n = min(len(native_samples), len(oracle_samples))
         if n:
             max_abs = 0
+            max_abs_idx = -1
             sum_sq = 0
             nonzero_native = 0
             nonzero_oracle = 0
-            for a, b in zip(native_samples[:n], oracle_samples[:n]):
+            diff_indices_significant: list[int] = []
+            for i, (a, b) in enumerate(zip(native_samples[:n], oracle_samples[:n])):
                 d = a - b
                 if abs(d) > max_abs:
                     max_abs = abs(d)
+                    max_abs_idx = i
+                if abs(d) > 100:
+                    diff_indices_significant.append(i)
                 sum_sq += d * d
                 if a:
                     nonzero_native += 1
                 if b:
                     nonzero_oracle += 1
             rms = (sum_sq / n) ** 0.5
-            print(f"stats: compared={n} max_abs={max_abs} rms={rms:.2f} "
-                  f"nonzero={nonzero_native}/{nonzero_oracle}")
+            print(f"stats: compared={n} max_abs={max_abs}@idx{max_abs_idx} "
+                  f"rms={rms:.2f} nonzero={nonzero_native}/{nonzero_oracle}")
+            print(f"samples with |diff|>100: {len(diff_indices_significant)} of {n}")
+            if diff_indices_significant:
+                # Show first 20 of them
+                head = diff_indices_significant[:20]
+                print(f"  first significant diffs at: {head}")
+            # Sample window around first diff (10 before, 20 after).
+            lo = max(0, first - 10)
+            hi = min(n, first + 20)
+            print(f"window samples [{lo}..{hi}):")
+            print(f"  idx  native  oracle  diff")
+            for i in range(lo, hi):
+                d = native_samples[i] - oracle_samples[i]
+                marker = "  <-- first" if i == first else ""
+                print(f"  {i:6d} {native_samples[i]:7d} "
+                      f"{oracle_samples[i]:7d} {d:7d}{marker}")
         return 1
     finally:
         if native:
