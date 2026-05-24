@@ -53,6 +53,7 @@ add_library(gbarecomp_armv4t STATIC
     src/armv4t/thumb_decode.cpp
     src/armv4t/arm_ir.cpp
     src/armv4t/arm_codegen.cpp
+    src/armv4t/runtime_arm.cpp
     src/armv4t/interpreter.cpp
 )
 target_include_directories(gbarecomp_armv4t PUBLIC src/armv4t)
@@ -88,6 +89,7 @@ set_property(TARGET gbarecomp_gba PROPERTY POSITION_INDEPENDENT_CODE ON)
 add_library(gbarecomp_runtime STATIC
     src/runtime/runtime.cpp
     src/runtime/generated_dispatch.cpp
+    src/runtime/runtime_bus_bridge.cpp
     src/runtime/host_platform.cpp
     src/runtime/host_window.cpp
 )

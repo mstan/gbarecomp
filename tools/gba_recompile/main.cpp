@@ -217,8 +217,9 @@ void emit_function_body(std::FILE* f, const Function& fn,
         } else if (ins.is_return) {
             std::fprintf(f, "    return;  /* return-shaped */\n");
         } else {
-            std::fprintf(f, "    /* TODO lower %s */\n",
-                         armv4t::ir_op_name(ins.op));
+            std::fprintf(f,
+                "    runtime_unimplemented_op(\"%s\", 0x%08Xu);\n",
+                armv4t::ir_op_name(ins.op), pc);
         }
         pc += step;
     }
@@ -294,14 +295,11 @@ void write_body(const std::string& dir,
         "// First-cut scaffold output. Function bodies are decoded-\n"
         "// instruction comments + per-op TODOs; only direct calls\n"
         "// (BL) and direct unconditional branches (B) get real C.\n"
-        "// Everything else lowers to /* TODO lower OP */ until the\n"
-        "// codegen filler-in lands its per-op semantics.\n"
-        "//\n"
-        "// This file does NOT yet compile on its own — the runtime\n"
-        "// glue (runtime_dispatch, register file globals, bus\n"
-        "// accessors) is added in a follow-up step.\n\n"
-        "#include \"recompiled.h\"\n\n"
-        "extern \"C\" void runtime_dispatch(unsigned int target);\n\n");
+        "// Everything else lowers to runtime_unimplemented_op so\n"
+        "// the runner can route to interpreter fallback (or abort)\n"
+        "// until the per-op codegen lowering catches up.\n\n"
+        "#include \"runtime_arm.h\"\n"
+        "#include \"recompiled.h\"\n\n");
     for (const auto& fn : funcs) {
         std::fprintf(f,
             "/* 0x%08X  mode=%s  end=0x%08X  branches=%zu%s */\n"
