@@ -296,36 +296,126 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     std::abort();
 }
 
-// ── PSR transfer ───────────────────────────────────────────────────
+// ── PSR transfer + bank machinery ──────────────────────────────────
+
+namespace {
+
+// Map a 5-bit ARM mode to the bank index in g_cpu.banked_*.
+unsigned mode_to_bank(uint32_t mode) {
+    switch (mode & 0x1Fu) {
+        case 0x11u: return ARM_BANK_FIQ;
+        case 0x12u: return ARM_BANK_IRQ;
+        case 0x13u: return ARM_BANK_SUPERVISOR;
+        case 0x17u: return ARM_BANK_ABORT;
+        case 0x1Bu: return ARM_BANK_UNDEFINED;
+        default:    return ARM_BANK_USER;  // User (0x10) / System (0x1F)
+    }
+}
+
+// Save the active mode's R13/R14 into its bank; if leaving FIQ,
+// also pickle R8..R12 into r8_12_fiq.
+void bank_out(unsigned old_bank, uint32_t old_mode) {
+    g_cpu.banked_sp[old_bank] = g_cpu.R[13];
+    g_cpu.banked_lr[old_bank] = g_cpu.R[14];
+    if ((old_mode & 0x1Fu) == 0x11u) {
+        for (unsigned i = 0; i < 5; ++i) {
+            g_cpu.r8_12_fiq[i] = g_cpu.R[8 + i];
+        }
+    } else {
+        for (unsigned i = 0; i < 5; ++i) {
+            g_cpu.r8_12_user[i] = g_cpu.R[8 + i];
+        }
+    }
+}
+
+// Restore the incoming mode's R13/R14; if entering FIQ, also
+// pull R8..R12 from r8_12_fiq, else from r8_12_user.
+void bank_in(unsigned new_bank, uint32_t new_mode) {
+    g_cpu.R[13] = g_cpu.banked_sp[new_bank];
+    g_cpu.R[14] = g_cpu.banked_lr[new_bank];
+    if ((new_mode & 0x1Fu) == 0x11u) {
+        for (unsigned i = 0; i < 5; ++i) {
+            g_cpu.R[8 + i] = g_cpu.r8_12_fiq[i];
+        }
+    } else {
+        for (unsigned i = 0; i < 5; ++i) {
+            g_cpu.R[8 + i] = g_cpu.r8_12_user[i];
+        }
+    }
+}
+
+}  // namespace
 
 extern "C" uint32_t runtime_mrs_cpsr(void) {
     return g_cpu.cpsr;
 }
 
 extern "C" uint32_t runtime_mrs_spsr(void) {
-    // SPSR_<mode> lives in the C++ runtime's banked storage.
-    // Trampoline added in a sibling translation unit.
-    std::fprintf(stderr,
-                 "runtime_arm: runtime_mrs_spsr unbound\n");
-    return 0;
+    unsigned bank = mode_to_bank(g_cpu.cpsr);
+    return g_cpu.banked_spsr[bank];
 }
 
 extern "C" void runtime_msr_cpsr(uint32_t value, uint32_t mask) {
-    // mask is the 4-bit field-mask from the encoding; expand to
-    // a byte-wise bitmask over CPSR.
     uint32_t bytewise = 0;
-    if (mask & 1u) bytewise |= 0x000000FFu;   // control byte
-    if (mask & 2u) bytewise |= 0x0000FF00u;   // ext1 (reserved)
-    if (mask & 4u) bytewise |= 0x00FF0000u;   // ext2 (reserved)
-    if (mask & 8u) bytewise |= 0xFF000000u;   // flags
-    g_cpu.cpsr = (g_cpu.cpsr & ~bytewise) | (value & bytewise);
+    if (mask & 1u) bytewise |= 0x000000FFu;
+    if (mask & 2u) bytewise |= 0x0000FF00u;
+    if (mask & 4u) bytewise |= 0x00FF0000u;
+    if (mask & 8u) bytewise |= 0xFF000000u;
+
+    // User mode cannot touch the control byte (bits 7..0) — clamp.
+    if ((g_cpu.cpsr & 0x1Fu) == 0x10u) {
+        bytewise &= 0xFF000000u;
+    }
+
+    uint32_t old_cpsr = g_cpu.cpsr;
+    uint32_t new_cpsr = (old_cpsr & ~bytewise) | (value & bytewise);
+
+    unsigned old_bank = mode_to_bank(old_cpsr);
+    unsigned new_bank = mode_to_bank(new_cpsr);
+
+    g_cpu.cpsr = new_cpsr;
+
+    if (old_bank != new_bank) {
+        bank_out(old_bank, old_cpsr);
+        bank_in(new_bank, new_cpsr);
+    }
 }
 
-extern "C" void runtime_msr_spsr(uint32_t value,
-                                                         uint32_t mask) {
-    (void)value; (void)mask;
-    std::fprintf(stderr,
-                 "runtime_arm: runtime_msr_spsr unbound\n");
+extern "C" void runtime_msr_spsr(uint32_t value, uint32_t mask) {
+    unsigned bank = mode_to_bank(g_cpu.cpsr);
+    if (bank == ARM_BANK_USER) {
+        // SPSR is undefined in User / System modes — drop silently.
+        return;
+    }
+    uint32_t bytewise = 0;
+    if (mask & 1u) bytewise |= 0x000000FFu;
+    if (mask & 2u) bytewise |= 0x0000FF00u;
+    if (mask & 4u) bytewise |= 0x00FF0000u;
+    if (mask & 8u) bytewise |= 0xFF000000u;
+    uint32_t old = g_cpu.banked_spsr[bank];
+    g_cpu.banked_spsr[bank] = (old & ~bytewise) | (value & bytewise);
+}
+
+// ── Exception return ───────────────────────────────────────────────
+
+extern "C" void runtime_exception_return(uint32_t new_pc) {
+    uint32_t old_cpsr = g_cpu.cpsr;
+    uint32_t old_mode = old_cpsr & 0x1Fu;
+    if (old_mode == 0x10u || old_mode == 0x1Fu) {
+        // User / System have no SPSR; the exception-return form is
+        // architecturally undefined. Just set PC.
+        g_cpu.R[15] = new_pc;
+        return;
+    }
+    unsigned old_bank = mode_to_bank(old_cpsr);
+    uint32_t spsr = g_cpu.banked_spsr[old_bank];
+
+    bank_out(old_bank, old_cpsr);
+    g_cpu.cpsr = spsr;
+    unsigned new_bank = mode_to_bank(spsr);
+    bank_in(new_bank, spsr);
+
+    g_cpu.R[15] = new_pc;
 }
 
 // ── Fallback ───────────────────────────────────────────────────────

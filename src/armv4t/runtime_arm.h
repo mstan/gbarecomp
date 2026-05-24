@@ -35,9 +35,31 @@ extern "C" {
 // Banked registers + mode switching live in the C++ runtime; rare
 // events route through runtime_msr / runtime_mode_switch.
 
+// Bank indexes match armv4t::BankedSlot — User=0, FIQ=1, IRQ=2,
+// Supervisor=3, Abort=4, Undefined=5. The recomp ABI exposes these
+// as a 6-wide array so generated code (and runtime helpers) can
+// index by mode without dragging in the C++ enum.
+#define ARM_BANK_USER       0u
+#define ARM_BANK_FIQ        1u
+#define ARM_BANK_IRQ        2u
+#define ARM_BANK_SUPERVISOR 3u
+#define ARM_BANK_ABORT      4u
+#define ARM_BANK_UNDEFINED  5u
+#define ARM_BANK_COUNT      6u
+
 typedef struct ArmCpuState {
     uint32_t R[16];
     uint32_t cpsr;
+
+    // Banked storage. SPSR for User/System is undefined and unused.
+    uint32_t banked_sp[ARM_BANK_COUNT];
+    uint32_t banked_lr[ARM_BANK_COUNT];
+    uint32_t banked_spsr[ARM_BANK_COUNT];
+
+    // R8..R12 have a parallel bank for FIQ. The active values live
+    // in R[8..12]; the inactive bank is mirrored here.
+    uint32_t r8_12_user[5];
+    uint32_t r8_12_fiq[5];
 } ArmCpuState;
 
 extern ArmCpuState g_cpu;
@@ -120,11 +142,24 @@ void runtime_swi(uint32_t swi_imm);
 // ── PSR transfer ───────────────────────────────────────────────────
 // MRS/MSR helpers. Routing through the runtime lets us validate mode
 // transitions and keep banked registers coherent.
+//
+// runtime_msr_cpsr handles bank-swap when CPSR.mode changes: the
+// outgoing mode's R13/R14 are saved into banked_sp/banked_lr, and
+// the incoming mode's are loaded into R[13]/R[14]. FIQ entry/exit
+// additionally swaps R8..R12 with r8_12_fiq.
 
 uint32_t runtime_mrs_cpsr(void);
 uint32_t runtime_mrs_spsr(void);
 void runtime_msr_cpsr(uint32_t value, uint32_t mask);
 void runtime_msr_spsr(uint32_t value, uint32_t mask);
+
+// ── Exception return ───────────────────────────────────────────────
+// Implements the DP-S/LDM-S "Rd=PC" exception return path:
+// SPSR_<current mode> → CPSR, bank-swap R13/R14 to the restored
+// mode, set PC to new_pc. Used by lowered MOVS PC, LR and LDM with
+// PC in list + S bit.
+
+void runtime_exception_return(uint32_t new_pc);
 
 // ── Fallback ───────────────────────────────────────────────────────
 // Emitted for IrOps codegen hasn't lowered yet. The runtime ALWAYS

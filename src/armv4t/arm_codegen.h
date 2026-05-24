@@ -1,14 +1,31 @@
 // arm_codegen.h — IR → C code emission.
 //
-// Stub for the scaffolding pass. The real codegen will lower each
-// `Instr` into one or more C statements that operate on a `CPUState`
-// and a bus interface. For now we only expose the entry point so the
-// library has the symbol; the implementation returns an empty string
-// and a `not_implemented` flag.
+// Lowers each decoded `Instr` to a sequence of C statements that
+// operate on the recomp ABI (g_cpu / bus_read_* / bus_write_* /
+// arm_shift_* / arm_set_* / runtime_dispatch — see runtime_arm.h).
+//
+// The output is meant to be dropped directly into a `void fname(void)`
+// body emitted by tools/gba_recompile/main.cpp. Each call to
+// emit_instr returns a block of C source that:
+//   - wraps in `if (arm_cond_passes(...))` for non-AL conditions,
+//   - reads operands from g_cpu (with PC = pc+8 / pc+4 baked in
+//     statically when R15 is read in operand position),
+//   - writes results to g_cpu and (when the instruction writes PC)
+//     emits a trailing `return;` so the runtime exec loop re-enters
+//     runtime_dispatch with the new PC.
+//
+// PRINCIPLES.md "Interpreter is informative, never load-bearing":
+// the interpreter is the semantic reference but is NEVER called from
+// generated code. If emit_instr can't lower an op yet it returns
+// `not_implemented = true` and the caller emits a
+// `runtime_unimplemented_op(...)` abort — never an interpreter
+// fallback.
 
 #pragma once
 
+#include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "arm_ir.h"
@@ -21,9 +38,27 @@ struct CodegenResult {
     std::size_t emitted_count;
 };
 
+// Context passed to per-instruction emission. The function-name map
+// lets direct B/BL targets lower to a C function call when the
+// target is known to be a recompiled function in the same dispatch
+// table; unknown targets fall back to runtime_dispatch.
+struct CodegenCtx {
+    const std::unordered_map<uint32_t, std::string>* names_by_addr = nullptr;
+};
+
 class ArmCodegen {
 public:
-    static CodegenResult emit_block(const std::vector<Instr>& block);
+    // Emit C source for one decoded instruction. `not_implemented`
+    // is set true if the IR shape is not yet lowered. The string
+    // ends in a newline; callers may indent it as they please.
+    static std::string emit_instr(const Instr& i, const CodegenCtx& ctx,
+                                  bool* not_implemented);
+
+    // Block-level helper: invoke emit_instr on every entry,
+    // concatenate the result, and report whether any instruction
+    // fell through.
+    static CodegenResult emit_block(const std::vector<Instr>& block,
+                                    const CodegenCtx& ctx);
 };
 
 }  // namespace armv4t
