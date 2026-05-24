@@ -109,9 +109,11 @@ void runtime_dispatch_miss(uint32_t target_pc);
 // ── BIOS / SWI ─────────────────────────────────────────────────────
 // SWI emits a call here. The runtime sets up the exception frame
 // (LR_svc = PC+4, SPSR_svc = CPSR, mode=SVC, I=1, T=0) and
-// re-enters the interpreter at 0x00000008 to execute the BIOS SWI
-// handler. Returns when the handler issues `movs pc, lr` and we
-// land back at the recompiled site.
+// dispatches to the recompiled BIOS at 0x00000008 via
+// runtime_dispatch. Returns when the recompiled handler issues
+// `movs pc, lr` and we land back at the recompiled site. There is
+// no interpreter fallback — see PRINCIPLES.md "Interpreter is
+// informative, never load-bearing (SHOWSTOPPER)".
 
 void runtime_swi(uint32_t swi_imm);
 
@@ -125,9 +127,10 @@ void runtime_msr_cpsr(uint32_t value, uint32_t mask);
 void runtime_msr_spsr(uint32_t value, uint32_t mask);
 
 // ── Fallback ───────────────────────────────────────────────────────
-// Emitted for IrOps codegen hasn't lowered yet. The runtime either
-// aborts (during bring-up) or re-interprets from `pc` (eventual
-// stable fallback).
+// Emitted for IrOps codegen hasn't lowered yet. The runtime ALWAYS
+// aborts here — there is no interpreter fallback (see PRINCIPLES.md
+// "Interpreter is informative, never load-bearing"). Every abort is
+// a P0 codegen-completion task.
 
 void runtime_unimplemented_op(const char* op_name, uint32_t pc);
 

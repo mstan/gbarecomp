@@ -281,11 +281,17 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
 }
 
 // ── BIOS / SWI ─────────────────────────────────────────────────────
+// Dispatches to the recompiled BIOS at 0x00000008. NO interpreter
+// fallback (PRINCIPLES.md "Interpreter is informative, never
+// load-bearing"). Until the BIOS dispatch table exists this aborts
+// — that abort is a P0 BIOS-recompilation gate.
 
 extern "C" void runtime_swi(uint32_t swi_imm) {
     std::fprintf(stderr,
-                 "runtime_arm: runtime_swi(0x%X) called — runtime "
-                 "not yet wired to BIOS dispatch. Aborting.\n",
+                 "runtime_arm: runtime_swi(0x%X) called — BIOS "
+                 "dispatch table not yet populated. Recompile the "
+                 "BIOS and register entries; no interpreter "
+                 "fallback is permitted.\n",
                  swi_imm);
     std::abort();
 }
