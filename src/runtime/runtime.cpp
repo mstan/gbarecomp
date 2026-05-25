@@ -72,6 +72,8 @@ struct Args {
     std::string rom;
     std::string rom_sha1;
     std::uint32_t rom_crc32 = 0;  // 0 = no CRC check (per-game TOML fills)
+    std::string save_path;
+    std::size_t save_size = 0;
     int steps = 16;
     int frames = -1;
     int scale = 3;
@@ -132,6 +134,15 @@ bool parse_int(std::string_view text, int* out) {
         return false;
     }
     *out = static_cast<int>(v);
+    return true;
+}
+
+bool parse_u64(std::string_view text, uint64_t* out) {
+    std::string s(text);
+    char* end = nullptr;
+    unsigned long long v = std::strtoull(s.c_str(), &end, 0);
+    if (end == s.c_str() || *end != '\0') return false;
+    *out = static_cast<uint64_t>(v);
     return true;
 }
 
@@ -238,6 +249,35 @@ bool write_bmp(const std::string& path, const uint8_t* rgb,
     return static_cast<bool>(f);
 }
 
+bool write_file(const std::string& path, const std::vector<uint8_t>& bytes,
+                std::string* err) {
+    std::filesystem::path p(path);
+    std::error_code ec;
+    if (p.has_parent_path()) {
+        std::filesystem::create_directories(p.parent_path(), ec);
+        if (ec) {
+            if (err) *err = "could not create save directory " +
+                            p.parent_path().string() + ": " + ec.message();
+            return false;
+        }
+    }
+
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) {
+        if (err) *err = "could not open save file for write " + path;
+        return false;
+    }
+    if (!bytes.empty()) {
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    }
+    if (!f) {
+        if (err) *err = "could not write save file " + path;
+        return false;
+    }
+    return true;
+}
+
 bool apply_toml_file(const std::filesystem::path& path, Args* args,
                      std::string* default_region, std::string* err) {
     std::ifstream f(path);
@@ -279,6 +319,16 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
             args->rom_sha1 = lower_ascii(val);
         } else if (section == "rom" && key == "crc32") {
             args->rom_crc32 = parse_hex_u32(val);
+        } else if (section == "save" && key == "path" && !val.empty()) {
+            args->save_path = resolve_config_path(base, val);
+        } else if (section == "save" && key == "size" && !val.empty()) {
+            uint64_t n = 0;
+            if (!parse_u64(val, &n) ||
+                n > static_cast<uint64_t>(std::numeric_limits<std::size_t>::max())) {
+                if (err) *err = "invalid [save].size value in " + path.string();
+                return false;
+            }
+            args->save_size = static_cast<std::size_t>(n);
         }
     }
     return true;
@@ -293,7 +343,8 @@ void find_config_arg(int argc, char** argv, Args* args) {
         }
         if ((s == "--bios" || s == "--rom" || s == "--bios-sha1" ||
              s == "--rom-sha1" || s == "--steps" || s == "--frames" ||
-             s == "--scale" || s == "--tcp" || s == "--dump-bmp") &&
+             s == "--scale" || s == "--tcp" || s == "--dump-bmp" ||
+             s == "--save" || s == "--save-path") &&
             i + 1 < argc) {
             ++i;
             continue;
@@ -426,6 +477,12 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             const char* v = need_value("--dump-bmp");
             if (!v) return false;
             args->dump_bmp = v;
+            continue;
+        }
+        if (s == "--save" || s == "--save-path") {
+            const char* v = need_value(s.c_str());
+            if (!v) return false;
+            args->save_path = v;
             continue;
         }
         if (s == "--quiet") {
@@ -637,10 +694,65 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     bus.set_bios(&bios);
     bus.set_rom(rom.data(), rom.size());
     if (header.save_type == gba::SaveType::EEPROM) {
-        bus.save().configure_eeprom(8 * 1024);
+        std::size_t eeprom_bytes = args.save_size ? args.save_size : (8 * 1024);
+        bus.save().configure_eeprom(eeprom_bytes);
+
+        if (args.save_path.empty()) {
+            std::filesystem::path save_path(args.rom);
+            save_path.replace_extension(".sav");
+            args.save_path = save_path.string();
+        }
+
+        std::error_code ec;
+        if (!args.save_path.empty() &&
+            std::filesystem::exists(args.save_path, ec)) {
+            std::vector<uint8_t> save_bytes;
+            if (!read_file(args.save_path, &save_bytes, &err)) {
+                std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
+                return 1;
+            }
+            if (save_bytes.size() > bus.save().eeprom_size()) {
+                std::fprintf(stderr,
+                             "[gbarecomp:runtime] save file too large: %s "
+                             "(%zu bytes, EEPROM is %zu bytes)\n",
+                             args.save_path.c_str(), save_bytes.size(),
+                             bus.save().eeprom_size());
+                return 1;
+            }
+            if (!bus.save().load_eeprom_bytes(save_bytes.data(),
+                                              save_bytes.size())) {
+                std::fprintf(stderr,
+                             "[gbarecomp:runtime] failed to load EEPROM save "
+                             "%s\n", args.save_path.c_str());
+                return 1;
+            }
+            if (!args.quiet) {
+                std::printf("save_loaded path=\"%s\" size=%zu/%zu\n",
+                            args.save_path.c_str(), save_bytes.size(),
+                            bus.save().eeprom_size());
+            }
+        }
     }
     bus.io().set_ppu(&ppu);
     bus.io().set_bus(&bus);
+
+    auto flush_save = [&]() -> bool {
+        if (!bus.save().eeprom_enabled() || args.save_path.empty() ||
+            !bus.save().dirty()) {
+            return true;
+        }
+        std::vector<uint8_t> save_bytes = bus.save().eeprom_bytes();
+        if (!write_file(args.save_path, save_bytes, &err)) {
+            std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
+            return false;
+        }
+        bus.save().clear_dirty();
+        if (!args.quiet) {
+            std::printf("save_flushed path=\"%s\" size=%zu\n",
+                        args.save_path.c_str(), save_bytes.size());
+        }
+        return true;
+    };
 
     set_active_bus(&bus);
     set_active_ppu(&ppu);
@@ -684,6 +796,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         return chunk;
     };
 
+    auto sync_frame_counter = [&]() {
+        vblank_count = ppu.frame_count();
+    };
+
     auto step_once = [&]() -> bool {
         last_step_cycles = 0;
         if (bus.io().halted()) {
@@ -694,23 +810,33 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 idle_budget -= chunk;
             }
             ++taken;
+            sync_frame_counter();
             return true;
         }
 
         runtime_dispatch(g_cpu.R[15]);
         ++taken;
+        sync_frame_counter();
         return true;
     };
-    auto step_frame = [&]() -> bool { return step_once(); };
+    auto step_frame = [&]() -> bool {
+        uint64_t start_frame = ppu.frame_count();
+        constexpr uint64_t kMaxDispatchesPerFrame = 2'000'000ull;
+        for (uint64_t i = 0; i < kMaxDispatchesPerFrame; ++i) {
+            if (!step_once()) return false;
+            if (ppu.frame_count() != start_frame) return true;
+        }
+        return false;
+    };
 
     if (args.tcp_port > 0) {
         debug::TcpDebugServer server;
         debug::TcpDebugServer::Context ctx;
         // ctx.cpu is the armv4t interpreter CPU type; the recomp
-        // runtime doesn't own one. CPU-state TCP queries will fall
-        // through to the !ctx.cpu branch in tcp_debug_server.cpp
-        // until Phase B reshapes the Context to point at g_cpu.
+        // runtime exposes g_cpu through recomp_cpu instead.
         ctx.cpu = nullptr;
+        ctx.recomp_cpu = &g_cpu;
+        ctx.runtime_trace_copy = runtime_trace_copy_recent;
         ctx.bus = &bus;
         ctx.ppu = &ppu;
         ctx.step = step_frame;
@@ -724,8 +850,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         ctx.last_step_cycles = &last_step_cycles;
         ctx.sync_frames = &vblank_count;
         bool ok = server.run(args.tcp_port, ctx);
+        bool save_ok = flush_save();
         runtime_shutdown();
-        return ok ? 0 : 1;
+        return (ok && save_ok) ? 0 : 1;
     }
 
     HostWindow win;
@@ -745,32 +872,51 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         live_fb.assign(gba::GbaPpu::kFramebufferBytes, 0);
     }
 
+    auto pump_host_input = [&]() {
+        if (!args.window) return;
+        auto ev = win.pump();
+        bus.io().set_keyinput(ev.keyinput);
+        if (ev.quit) host_quit = true;
+    };
+
     const bool open_ended = (args.window || args.frames >= 0);
     const int step_budget = open_ended
         ? (args.steps > 16 ? args.steps : std::numeric_limits<int>::max() / 2)
         : args.steps;
 
+    uint64_t last_presented_frame = ppu.frame_count();
+    int dispatches_since_pump = 0;
+    if (args.window) pump_host_input();
+
     for (int i = 0; i < step_budget && !host_quit; ++i) {
         if (!step_once()) break;
         if (args.window) {
-            if (ppu.has_latched_framebuffer()) {
-                std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
-                            gba::GbaPpu::kFramebufferBytes);
-            } else {
-                ppu.render(live_fb.data(), bus.io().read16(0x000),
-                           bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
-                           bus.pal_ptr());
+            ++dispatches_since_pump;
+            if (dispatches_since_pump >= 512) {
+                pump_host_input();
+                dispatches_since_pump = 0;
             }
-            win.present(live_fb.data());
-            int16_t audio_buf[2048];
-            std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
-            if (n > 0) win.push_audio_samples(audio_buf, n);
-            auto ev = win.pump();
-            bus.io().set_keyinput(ev.keyinput);
-            if (ev.quit) host_quit = true;
-            ++frames_presented;
-            if (args.frames >= 0 && frames_presented >= args.frames) {
-                host_quit = true;
+            uint64_t frame = ppu.frame_count();
+            if (frame != last_presented_frame) {
+                if (ppu.has_latched_framebuffer()) {
+                    std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
+                                gba::GbaPpu::kFramebufferBytes);
+                } else {
+                    ppu.render(live_fb.data(), bus.io().read16(0x000),
+                               bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
+                               bus.pal_ptr());
+                }
+                win.present(live_fb.data());
+                int16_t audio_buf[2048];
+                std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
+                if (n > 0) win.push_audio_samples(audio_buf, n);
+                pump_host_input();
+                dispatches_since_pump = 0;
+                last_presented_frame = frame;
+                ++frames_presented;
+                if (args.frames >= 0 && frames_presented >= args.frames) {
+                    host_quit = true;
+                }
             }
         }
         if (!args.window && args.frames >= 0 &&
@@ -779,6 +925,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     }
     if (args.window) win.close();
+
+    bool save_ok = flush_save();
 
     if (!args.dump_bmp.empty()) {
         std::vector<uint8_t> fb(gba::GbaPpu::kFramebufferBytes, 0);
@@ -813,7 +961,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 count_nonzero(bus.oam_ptr(), 1024));
 
     runtime_shutdown();
-    return 0;
+    return save_ok ? 0 : 1;
 }
 
 }  // namespace gbarecomp

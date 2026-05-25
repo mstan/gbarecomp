@@ -8,6 +8,7 @@
 
 #include "gba_bus.h"
 
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 
@@ -55,7 +56,8 @@ uint8_t GbaBus::read8(uint32_t addr) {
     auto off    = resolve_offset(addr, region);
     switch (region) {
         case Region::Bios:
-            return bios_ ? bios_->read8(static_cast<uint32_t>(off)) : 0;
+            return (bios_ && bios_access_enabled_)
+                ? bios_->read8(static_cast<uint32_t>(off)) : 0;
         case Region::Ewram: return ewram_[off];
         case Region::Iwram: return iwram_[off];
         case Region::Pal:   return pal_[off];
@@ -92,7 +94,8 @@ uint16_t GbaBus::read16(uint32_t addr) {
     auto off    = resolve_offset(addr, region);
     switch (region) {
         case Region::Bios:
-            return bios_ ? bios_->read16(static_cast<uint32_t>(off)) : 0;
+            return (bios_ && bios_access_enabled_)
+                ? bios_->read16(static_cast<uint32_t>(off)) : 0;
         case Region::Ewram: return load_u16(&ewram_[off]);
         case Region::Iwram: return load_u16(&iwram_[off]);
         case Region::Pal:   return load_u16(&pal_[off]);
@@ -125,9 +128,12 @@ uint32_t GbaBus::read32(uint32_t addr) {
     uint32_t v = 0;
     switch (region) {
         case Region::Bios:
-            v = bios_ ? bios_->read32(static_cast<uint32_t>(off)) : 0;
-            last_fetched_ = v;
-            return v;
+            if (bios_ && bios_access_enabled_) {
+                v = bios_->read32(static_cast<uint32_t>(off));
+                last_fetched_ = v;
+                return v;
+            }
+            return 0;
         case Region::Ewram: return load_u32(&ewram_[off]);
         case Region::Iwram: return load_u32(&iwram_[off]);
         case Region::Pal:   return load_u32(&pal_[off]);
@@ -309,9 +315,12 @@ uint32_t GbaBus::access_cycles(uint32_t addr, uint8_t width,
 
 void GbaBus::log_unmapped(uint32_t addr, uint32_t value, bool is_write, uint8_t width) {
     ++unmapped_count_;
-    // Phase 2 will route this to the always-on TraceRing. For now,
-    // emit a structured stderr line so it can't be confused with
-    // anything else.
+    // Keep the counter hot-path cheap by default. Full stderr logging is
+    // useful when chasing a specific bus issue, but gameplay can produce
+    // millions of open-bus-style reads and that makes TCP replays unusable.
+    if (!std::getenv("GBARECOMP_LOG_UNMAPPED")) {
+        return;
+    }
     std::fprintf(stderr,
                  "[gba:bus] UNMAPPED %s%u @ 0x%08x = 0x%x\n",
                  is_write ? "W" : "R", width, addr, value);

@@ -208,6 +208,40 @@ void test_eeprom_8k_read_write() {
     }
 }
 
+void test_eeprom_persistence_bytes_and_dirty() {
+    gba::GbaSave save;
+    std::array<uint8_t, 16> persisted{};
+    for (std::size_t i = 0; i < persisted.size(); ++i) {
+        persisted[i] = static_cast<uint8_t>(0xA0u + i);
+    }
+
+    check_bool("eeprom_persist", "load_before_config",
+               save.load_eeprom_bytes(persisted.data(), persisted.size()),
+               false);
+    save.configure_eeprom(8 * 1024);
+    check_bool("eeprom_persist", "blank_dirty", save.dirty(), false);
+    check_bool("eeprom_persist", "load",
+               save.load_eeprom_bytes(persisted.data(), persisted.size()),
+               true);
+    check_bool("eeprom_persist", "load_dirty", save.dirty(), false);
+
+    auto bytes = save.eeprom_bytes();
+    check_eq("eeprom_persist", "size", bytes.size(),
+             static_cast<std::size_t>(8 * 1024));
+    for (std::size_t i = 0; i < persisted.size(); ++i) {
+        check_eq("eeprom_persist", "loaded_prefix", bytes[i], persisted[i]);
+    }
+    check_eq("eeprom_persist", "loaded_fill", bytes[32], 0xFFu);
+
+    const uint8_t pattern[8] = {0x12, 0x34, 0x56, 0x78,
+                                0x9a, 0xbc, 0xde, 0xf0};
+    eeprom_send_write(save, 0, pattern);
+    check_bool("eeprom_persist", "write_dirty", save.dirty(), true);
+    save.clear_dirty();
+    eeprom_send_write(save, 0, pattern);
+    check_bool("eeprom_persist", "same_write_clean", save.dirty(), false);
+}
+
 }  // namespace
 
 int main() {
@@ -217,6 +251,7 @@ int main() {
     test_sram_signature();
     test_flash1m_beats_flash();
     test_eeprom_8k_read_write();
+    test_eeprom_persistence_bytes_and_dirty();
     if (failures) {
         std::printf("\n%d failure(s)\n", failures);
         return 1;

@@ -32,11 +32,16 @@ public:
     uint16_t eeprom_read_bit();
 
     std::size_t eeprom_size() const { return eeprom_size_; }
+    bool load_eeprom_bytes(const uint8_t* data, std::size_t bytes);
+    std::vector<uint8_t> eeprom_bytes() const;
+    bool dirty() const { return dirty_; }
+    void clear_dirty() { dirty_ = false; }
 
 private:
     static constexpr std::size_t kMaxEepromSize = 8 * 1024;
 
     bool eeprom_enabled_ = false;
+    bool dirty_ = false;
     std::size_t eeprom_size_ = 0;
     uint32_t eeprom_addr_bits_ = 0;
     uint32_t eeprom_block_mask_ = 0;

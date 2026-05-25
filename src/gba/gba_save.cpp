@@ -1,5 +1,7 @@
 #include "gba_save.h"
 
+#include <algorithm>
+
 namespace gba {
 
 GbaSave::GbaSave() {
@@ -11,6 +13,7 @@ GbaSave::~GbaSave() = default;
 void GbaSave::configure_eeprom(std::size_t bytes) {
     if (bytes == 0 || bytes > kMaxEepromSize) bytes = kMaxEepromSize;
     eeprom_enabled_ = true;
+    dirty_ = false;
     eeprom_size_ = bytes;
     eeprom_addr_bits_ = (bytes <= 512) ? 6u : 14u;
     eeprom_block_mask_ = static_cast<uint32_t>((bytes / 8u) - 1u);
@@ -19,6 +22,25 @@ void GbaSave::configure_eeprom(std::size_t bytes) {
     read_active_ = false;
     read_byte_offset_ = 0;
     read_bit_index_ = 0;
+}
+
+bool GbaSave::load_eeprom_bytes(const uint8_t* data, std::size_t bytes) {
+    if (!eeprom_enabled_ || (!data && bytes != 0) || bytes > eeprom_size_) {
+        return false;
+    }
+    eeprom_.fill(0xFF);
+    if (bytes != 0) std::copy(data, data + bytes, eeprom_.begin());
+    command_bits_.clear();
+    read_active_ = false;
+    read_byte_offset_ = 0;
+    read_bit_index_ = 0;
+    dirty_ = false;
+    return true;
+}
+
+std::vector<uint8_t> GbaSave::eeprom_bytes() const {
+    if (!eeprom_enabled_) return {};
+    return std::vector<uint8_t>(eeprom_.begin(), eeprom_.begin() + eeprom_size_);
 }
 
 uint32_t GbaSave::command_address() const {
@@ -48,6 +70,7 @@ void GbaSave::finish_eeprom_write() {
                 (v << 1) | command_bits_[data_start + byte * 8u + bit]);
         }
         if (byte_offset + byte < eeprom_size_) {
+            if (eeprom_[byte_offset + byte] != v) dirty_ = true;
             eeprom_[byte_offset + byte] = v;
         }
     }

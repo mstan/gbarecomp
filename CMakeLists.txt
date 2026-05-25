@@ -213,6 +213,18 @@ endif()
 # ─────────────────────────────────────────────────────────────────────────────
 # tools — small CLI utilities. Each is a separate executable.
 # ─────────────────────────────────────────────────────────────────────────────
+function(target_link_gbarecomp_runtime_stack target_name)
+    if(MINGW OR MSYS)
+        target_link_libraries(${target_name} PRIVATE
+            -Wl,--start-group
+            gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug
+            -Wl,--end-group)
+    else()
+        target_link_libraries(${target_name} PRIVATE
+            gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
+    endif()
+endfunction()
+
 add_executable(gba_scan tools/gba_scan/main.cpp)
 target_link_libraries(gba_scan PRIVATE gbarecomp_armv4t gbarecomp_gba)
 
@@ -266,8 +278,7 @@ if(EXISTS ${GBA_SUITE_ROOT}/arm/arm.gba)
     target_include_directories(test_rom_arm PRIVATE
         ${TEST_ROM_ARM_OUTDIR}
         src/armv4t)
-    target_link_libraries(test_rom_arm PRIVATE
-        gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
+    target_link_gbarecomp_runtime_stack(test_rom_arm)
     add_test(NAME test_rom_arm COMMAND test_rom_arm
         ${GBA_SUITE_ROOT}/arm/arm.gba)
 else()
@@ -304,8 +315,7 @@ if(EXISTS ${GBA_SUITE_ROOT}/thumb/thumb.gba)
     target_include_directories(test_rom_thumb PRIVATE
         ${TEST_ROM_THUMB_OUTDIR}
         src/armv4t)
-    target_link_libraries(test_rom_thumb PRIVATE
-        gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
+    target_link_gbarecomp_runtime_stack(test_rom_thumb)
     add_test(NAME test_rom_thumb COMMAND test_rom_thumb
         ${GBA_SUITE_ROOT}/thumb/thumb.gba)
 else()
@@ -316,8 +326,7 @@ endif()
 # bios_smoke — Phase 2.1 canary. Loads bios/gba_bios.bin, runs the
 # interpreter from PC=0 for N instructions, prints a trace.
 add_executable(bios_smoke tools/bios_smoke/main.cpp)
-target_link_libraries(bios_smoke PRIVATE
-    gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
+target_link_gbarecomp_runtime_stack(bios_smoke)
 if(WIN32 OR MSYS)
     target_link_libraries(bios_smoke PRIVATE ws2_32)
 endif()

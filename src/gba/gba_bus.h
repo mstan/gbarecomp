@@ -30,9 +30,18 @@ public:
     ~GbaBus() override;
 
     // Wire up the BIOS image. Reads from 0x00000000..0x00003FFF go
-    // through `bios->read*()`. Pass nullptr to leave BIOS region
-    // unmapped (reads return open-bus; writes are silently dropped).
+    // through `bios->read*()` only while BIOS access is enabled. Pass
+    // nullptr to leave BIOS region unmapped.
     void set_bios(const GbaBios* bios) { bios_ = bios; }
+
+    // Real GBA BIOS bytes are protected after the BIOS hands control
+    // to cartridge code. Runtime-generated reads update this from the
+    // executing PC before each bus access; standalone BIOS/interpreter
+    // tooling leaves the default enabled state intact.
+    void set_bios_access_enabled(bool enabled) {
+        bios_access_enabled_ = enabled;
+    }
+    bool bios_access_enabled() const { return bios_access_enabled_; }
 
     // Wire up the cartridge ROM bytes. The bus does NOT take
     // ownership; the caller must keep the buffer alive.
@@ -99,6 +108,7 @@ private:
     const GbaBios* bios_ = nullptr;
     const uint8_t* rom_  = nullptr;
     std::size_t    rom_size_ = 0;
+    bool           bios_access_enabled_ = true;
 
     std::array<uint8_t, 256 * 1024> ewram_{};
     std::array<uint8_t,  32 * 1024> iwram_{};

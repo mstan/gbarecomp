@@ -66,6 +66,7 @@ const char* trace_kind_name(uint32_t kind) {
         case RUNTIME_TRACE_BRANCH:    return "branch";
         case RUNTIME_TRACE_IRQ:       return "irq";
         case RUNTIME_TRACE_CALL:      return "call";
+        case RUNTIME_TRACE_MEM_READ:  return "mem_r";
         default:                      return "unknown";
     }
 }
@@ -127,6 +128,22 @@ extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc,
         std::abort();
     }
 
+    static int abort_on_high_mem_read = -1;
+    if (abort_on_high_mem_read < 0) {
+        abort_on_high_mem_read =
+            std::getenv("GBARECOMP_ABORT_ON_MEM_READ_HIGH") ? 1 : 0;
+    }
+    if (abort_on_high_mem_read &&
+        kind == RUNTIME_TRACE_MEM_READ &&
+        (addr >> 24) >= 0x0Eu) {
+        std::fprintf(stderr,
+                     "runtime_trace: high mem-read abort pc=0x%08X "
+                     "addr=0x%08X value=0x%08X width=%u\n",
+                     pc, addr, value, aux);
+        runtime_trace_dump_recent(160);
+        std::abort();
+    }
+
     static int branch_abort_after = -2;
     if (branch_abort_after == -2) {
         const char* env = std::getenv("GBARECOMP_ABORT_AFTER_BRANCHES");
@@ -182,6 +199,17 @@ extern "C" void runtime_trace_dump_recent(uint32_t max_entries) {
                      e.addr, e.value, e.aux, e.r0, e.r1, e.r2, e.r3,
                      e.r4, e.r5, e.r12, e.r13, e.r14);
     }
+}
+
+extern "C" uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
+                                               uint32_t max_entries) {
+    if (!out || max_entries == 0) return 0;
+    if (max_entries > g_trace_count) max_entries = g_trace_count;
+    uint32_t start = (g_trace_write + kTraceSize - max_entries) % kTraceSize;
+    for (uint32_t i = 0; i < max_entries; ++i) {
+        out[i] = g_trace[(start + i) % kTraceSize];
+    }
+    return max_entries;
 }
 
 // ── Bus binding ────────────────────────────────────────────────────

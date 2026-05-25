@@ -18,6 +18,9 @@
 #include <cstdint>
 #include <functional>
 
+struct ArmCpuState;
+struct RuntimeTraceEntry;
+
 namespace armv4t {
 struct CPUState;
 class  Bus;
@@ -36,13 +39,17 @@ public:
     // host runs one PPU frame and updates its own counters; returns
     // false if the run terminated abnormally (e.g. NotImplemented).
     using StepFn = std::function<bool()>;
+    using RuntimeTraceCopyFn =
+        std::function<uint32_t(RuntimeTraceEntry*, uint32_t)>;
 
     struct Context {
         armv4t::CPUState* cpu = nullptr;
+        ::ArmCpuState*     recomp_cpu = nullptr;
         gba::GbaBus*      bus = nullptr;   // owns the regions
         gba::GbaPpu*      ppu = nullptr;
         StepFn            step;       // advances one PPU frame
         StepFn            step_inst;  // advances one CPU instruction
+        RuntimeTraceCopyFn runtime_trace_copy;
         // Mirror of the host's counters so `counters` queries can
         // report them. Host updates these between commands.
         uint64_t* irq_entries        = nullptr;

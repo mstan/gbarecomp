@@ -31,6 +31,7 @@
 #include "gba_bus.h"
 #include "gba_io.h"
 #include "gba_ppu.h"
+#include "runtime_arm.h"
 
 namespace gbarecomp::debug {
 
@@ -282,6 +283,61 @@ void cmd_audio_trace(gba::GbaBus& bus, std::string_view req,
     out += "]}";
 }
 
+void cmd_runtime_trace(const TcpDebugServer::Context& ctx,
+                       std::string_view req, std::string& out) {
+    if (!ctx.runtime_trace_copy) {
+        emit_error(out, "runtime trace unavailable");
+        return;
+    }
+
+    uint64_t max_entries = 128;
+    uint64_t parsed = 0;
+    if (extract_uint(req, "\"max\"", parsed) ||
+        extract_uint(req, "\"count\"", parsed)) {
+        max_entries = parsed;
+    }
+    if (max_entries > 512) max_entries = 512;
+
+    std::vector<RuntimeTraceEntry> entries(
+        static_cast<std::size_t>(max_entries));
+    uint32_t n = ctx.runtime_trace_copy(
+        entries.data(), static_cast<uint32_t>(entries.size()));
+
+    char hdr[80];
+    std::snprintf(hdr, sizeof(hdr), "{\"ok\":true,\"count\":%u,\"entries\":[",
+                  static_cast<unsigned>(n));
+    out = hdr;
+    for (uint32_t i = 0; i < n; ++i) {
+        const RuntimeTraceEntry& e = entries[i];
+        if (i) out += ",";
+        char item[512];
+        std::snprintf(
+            item, sizeof(item),
+            "{\"seq\":%u,\"kind\":%u,\"pc\":%u,\"cpsr\":%u,"
+            "\"addr\":%u,\"value\":%u,\"aux\":%u,"
+            "\"r0\":%u,\"r1\":%u,\"r2\":%u,\"r3\":%u,"
+            "\"r4\":%u,\"r5\":%u,\"r12\":%u,\"r13\":%u,\"r14\":%u}",
+            static_cast<unsigned>(e.seq),
+            static_cast<unsigned>(e.kind),
+            static_cast<unsigned>(e.pc),
+            static_cast<unsigned>(e.cpsr),
+            static_cast<unsigned>(e.addr),
+            static_cast<unsigned>(e.value),
+            static_cast<unsigned>(e.aux),
+            static_cast<unsigned>(e.r0),
+            static_cast<unsigned>(e.r1),
+            static_cast<unsigned>(e.r2),
+            static_cast<unsigned>(e.r3),
+            static_cast<unsigned>(e.r4),
+            static_cast<unsigned>(e.r5),
+            static_cast<unsigned>(e.r12),
+            static_cast<unsigned>(e.r13),
+            static_cast<unsigned>(e.r14));
+        out += item;
+    }
+    out += "]}";
+}
+
 void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
               std::string& out, bool& want_quit, bool& step_failed) {
     out.clear();
@@ -308,7 +364,8 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         // Return PC + CPSR + R0..R14 so the lockstep harness can
         // catch register-level divergence at its true origin (not
         // wait for the cascade into a branch decision).
-        uint32_t pc = ctx.cpu ? ctx.cpu->R[15] : 0u;
+        uint32_t pc = ctx.recomp_cpu ? ctx.recomp_cpu->R[15]
+                                      : (ctx.cpu ? ctx.cpu->R[15] : 0u);
         uint64_t f  = frame_counter(ctx);
         std::string body;
         body.reserve(512);
@@ -324,7 +381,18 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
                       static_cast<unsigned long long>(ctx.cycles_elapsed ?
                           *ctx.cycles_elapsed : 0u));
         body = hdr;
-        if (ctx.cpu) {
+        if (ctx.recomp_cpu) {
+            for (int i = 0; i < 15; ++i) {
+                char f[48];
+                std::snprintf(f, sizeof(f), ",\"r%d\":%u",
+                              i, static_cast<unsigned>(ctx.recomp_cpu->R[i]));
+                body += f;
+            }
+            char cpsr_field[48];
+            std::snprintf(cpsr_field, sizeof(cpsr_field), ",\"cpsr\":%u",
+                          static_cast<unsigned>(ctx.recomp_cpu->cpsr));
+            body += cpsr_field;
+        } else if (ctx.cpu) {
             for (int i = 0; i < 15; ++i) {
                 char f[48];
                 std::snprintf(f, sizeof(f), ",\"r%d\":%u",
@@ -489,25 +557,42 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         cmd_audio_trace(*ctx.bus, req, out);
         return;
     }
+    if (contains("\"runtime_trace\"")) {
+        cmd_runtime_trace(ctx, req, out);
+        return;
+    }
     if (contains("\"registers\"")) {
-        if (!ctx.cpu) { emit_error(out, "cpu unavailable"); return; }
-        std::string body = "{\"ok\":true";
-        for (int i = 0; i < 16; ++i) {
-            char field[64];
-            std::snprintf(field, sizeof(field), ",\"r%d\":%u",
-                          i, static_cast<unsigned>(ctx.cpu->R[i]));
-            body += field;
+        if (!ctx.cpu && !ctx.recomp_cpu) {
+            emit_error(out, "cpu unavailable");
+            return;
         }
-        // Pack CPSR the same way enter_irq does.
+        std::string body = "{\"ok\":true";
         uint32_t cpsr = 0;
-        if (ctx.cpu->cpsr.n) cpsr |= 1u << 31;
-        if (ctx.cpu->cpsr.z) cpsr |= 1u << 30;
-        if (ctx.cpu->cpsr.c) cpsr |= 1u << 29;
-        if (ctx.cpu->cpsr.v) cpsr |= 1u << 28;
-        if (ctx.cpu->cpsr.i) cpsr |= 1u << 7;
-        if (ctx.cpu->cpsr.f) cpsr |= 1u << 6;
-        if (ctx.cpu->cpsr.t) cpsr |= 1u << 5;
-        cpsr |= ctx.cpu->cpsr.mode & 0x1Fu;
+        if (ctx.recomp_cpu) {
+            for (int i = 0; i < 16; ++i) {
+                char field[64];
+                std::snprintf(field, sizeof(field), ",\"r%d\":%u",
+                              i, static_cast<unsigned>(ctx.recomp_cpu->R[i]));
+                body += field;
+            }
+            cpsr = ctx.recomp_cpu->cpsr;
+        } else {
+            for (int i = 0; i < 16; ++i) {
+                char field[64];
+                std::snprintf(field, sizeof(field), ",\"r%d\":%u",
+                              i, static_cast<unsigned>(ctx.cpu->R[i]));
+                body += field;
+            }
+            // Pack CPSR the same way enter_irq does.
+            if (ctx.cpu->cpsr.n) cpsr |= 1u << 31;
+            if (ctx.cpu->cpsr.z) cpsr |= 1u << 30;
+            if (ctx.cpu->cpsr.c) cpsr |= 1u << 29;
+            if (ctx.cpu->cpsr.v) cpsr |= 1u << 28;
+            if (ctx.cpu->cpsr.i) cpsr |= 1u << 7;
+            if (ctx.cpu->cpsr.f) cpsr |= 1u << 6;
+            if (ctx.cpu->cpsr.t) cpsr |= 1u << 5;
+            cpsr |= ctx.cpu->cpsr.mode & 0x1Fu;
+        }
         char tail[64];
         std::snprintf(tail, sizeof(tail), ",\"cpsr\":%u}",
                       static_cast<unsigned>(cpsr));

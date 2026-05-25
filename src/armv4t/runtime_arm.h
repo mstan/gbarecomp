@@ -147,6 +147,7 @@ void runtime_call_cancel_return(uint32_t return_pc);
 // RUNTIME_TRACE_CALL aux values:
 //   1 push, 2 top-frame return, 3 no match, 4 cancel, 5 non-local return.
 #define RUNTIME_TRACE_CALL      7u
+#define RUNTIME_TRACE_MEM_READ  8u
 
 typedef struct RuntimeTraceEntry {
     uint32_t seq;
@@ -171,6 +172,8 @@ void runtime_trace_event(uint32_t kind, uint32_t pc, uint32_t addr,
                          uint32_t value, uint32_t aux);
 void runtime_trace_reset(void);
 void runtime_trace_dump_recent(uint32_t max_entries);
+uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
+                                   uint32_t max_entries);
 void runtime_tick(uint32_t cycles);
 bool runtime_should_yield(void);
 
