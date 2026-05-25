@@ -64,7 +64,11 @@ struct Args {
     std::string game_short_name;
     std::string bios;
     std::string bios_sha1 = gba::GbaBios::kExpectedSha1;
-    std::uint32_t bios_crc32 = gba::GbaBios::kExpectedCrc32;
+    // SHA-1 is the gate (40 hex chars, way stronger than a 32-bit
+    // CRC). CRC32 is left at 0 = "no check" — the asset picker will
+    // still compute + display it, but only SHA-1 mismatch raises the
+    // warning dialog.
+    std::uint32_t bios_crc32 = 0;
     std::string rom;
     std::string rom_sha1;
     std::uint32_t rom_crc32 = 0;  // 0 = no CRC check (per-game TOML fills)
@@ -582,8 +586,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         args.steps = std::numeric_limits<int>::max() / 2;
     }
 
+    // The picker has already validated SHA-1 (warn-and-try). Pass an
+    // empty expected hash here so a non-canonical-but-warned dump
+    // doesn't trip a hard fail in the loader.
     gba::GbaBios bios;
-    if (!bios.load_from_file(args.bios, args.bios_sha1, &err)) {
+    if (!bios.load_from_file(args.bios, std::string{}, &err)) {
         std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
         return 1;
     }

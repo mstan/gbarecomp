@@ -24,9 +24,13 @@ public:
     static constexpr std::size_t kSize = 16 * 1024;
     static constexpr const char* kExpectedSha1 =
         "300c20df6731a33952ded8c436f7f186d25d3492";
-    // CRC32 of the canonical GBA BIOS (matches No$gba's reported value).
-    // Quoted alongside SHA-1 by the asset picker on mismatch.
-    static constexpr std::uint32_t kExpectedCrc32 = 0x21A2AE0Au;
+    // CRC32 of the canonical GBA BIOS (per zlib / IEEE 802.3). Kept
+    // as informational metadata — the picker computes CRC32 of any
+    // supplied dump but the gate is SHA-1 alone (CRC32 is a 32-bit
+    // hash and SHA-1 is already strictly stronger; carrying both as
+    // hard checks just produces extra noise when one of our hardcoded
+    // values is wrong).
+    static constexpr std::uint32_t kCanonicalCrc32 = 0x81977335u;
 
     GbaBios();
     ~GbaBios();

@@ -21,6 +21,10 @@
 #include <fstream>
 #include <vector>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #include "arm_decode.h"
 #include "arm_ir.h"
 #include "asset_picker.h"
@@ -173,6 +177,15 @@ armv4t::CPUState make_reset_cpu() {
 int main(int argc, char** argv) {
     auto args = parse_args(argc, argv);
 
+    // No-args launch (e.g. double-clicked gba.exe from Explorer):
+    // default to windowed open-ended mode so the user actually sees
+    // the BIOS chime + GAME BOY logo instead of a console flashing.
+    // CLI-driven runs (CI, dev) keep the previous headless defaults.
+    if (argc <= 1) {
+        args.window = true;
+        args.quiet = true;
+    }
+
     // 1. Resolve the BIOS path. Released builds end up next to a user
     //    who doesn't know about --bios; the picker falls back to a
     //    Win32 file dialog (and caches the validated path) when the
@@ -188,22 +201,30 @@ int main(int argc, char** argv) {
         spec.cache_filename = "bios.cfg";
         spec.expected_size  = gba::GbaBios::kSize;
         spec.expected_sha1  = gba::GbaBios::kExpectedSha1;
-        spec.expected_crc32 = gba::GbaBios::kExpectedCrc32;
+        spec.expected_crc32 = 0;  // SHA-1 is the gate; CRC32 is informational.
         auto r = gbarecomp::resolve_asset(args.bios, spec, argv[0]);
         if (!r.ok) {
             std::fprintf(stderr, "bios_smoke: %s\n", r.error.c_str());
+#if defined(_WIN32)
+            MessageBoxA(nullptr, r.error.c_str(), "GBA BIOS",
+                        MB_OK | MB_ICONERROR);
+#endif
             return 1;
         }
         args.bios = r.path;
     }
 
-    // 2. Load + hash-verify the BIOS (cheap double-check; the picker
-    //    has already validated, but the loader sets up the byte buffer
-    //    used by the bus and is the canonical entry point).
+    // 2. Load the BIOS bytes. The picker has already verified SHA-1
+    //    (warn-and-try semantics); don't re-validate strictly here or
+    //    a non-canonical-but-warned dump fails the second check.
     gba::GbaBios bios;
     std::string err;
-    if (!bios.load_from_file(args.bios, gba::GbaBios::kExpectedSha1, &err)) {
+    if (!bios.load_from_file(args.bios, std::string{}, &err)) {
         std::fprintf(stderr, "bios_smoke: %s\n", err.c_str());
+#if defined(_WIN32)
+        MessageBoxA(nullptr, err.c_str(), "GBA BIOS",
+                    MB_OK | MB_ICONERROR);
+#endif
         return 1;
     }
     if (!args.quiet) {
