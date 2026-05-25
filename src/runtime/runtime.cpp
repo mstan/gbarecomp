@@ -18,6 +18,7 @@
 
 #include "runtime.h"
 
+#include "asset_picker.h"
 #include "gba_bios.h"
 #include "gba_bus.h"
 #include "gba_ppu.h"
@@ -63,8 +64,10 @@ struct Args {
     std::string game_short_name;
     std::string bios;
     std::string bios_sha1 = gba::GbaBios::kExpectedSha1;
+    std::uint32_t bios_crc32 = gba::GbaBios::kExpectedCrc32;
     std::string rom;
     std::string rom_sha1;
+    std::uint32_t rom_crc32 = 0;  // 0 = no CRC check (per-game TOML fills)
     int steps = 16;
     int frames = -1;
     int scale = 3;
@@ -126,6 +129,20 @@ bool parse_int(std::string_view text, int* out) {
     }
     *out = static_cast<int>(v);
     return true;
+}
+
+// Parse a hex CRC32 from TOML/CLI. Accepts "0x21A2AE0A", "21A2AE0A",
+// "21a2ae0a". Returns 0 on unparseable input (which means "no CRC
+// check" downstream — that's the intended fallback).
+std::uint32_t parse_hex_u32(const std::string& s) {
+    if (s.empty()) return 0;
+    const char* p = s.c_str();
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) p += 2;
+    char* end = nullptr;
+    unsigned long long v = std::strtoull(p, &end, 16);
+    if (end == p || *end != '\0') return 0;
+    if (v > 0xFFFFFFFFull) return 0;
+    return static_cast<std::uint32_t>(v);
 }
 
 std::string resolve_config_path(const std::filesystem::path& base,
@@ -250,10 +267,14 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
             args->bios = resolve_config_path(base, val);
         } else if (section == "bios" && key == "sha1") {
             args->bios_sha1 = lower_ascii(val);
+        } else if (section == "bios" && key == "crc32") {
+            args->bios_crc32 = parse_hex_u32(val);
         } else if (section == "rom" && key == "path" && !val.empty()) {
             args->rom = resolve_config_path(base, val);
         } else if (section == "rom" && key == "sha1") {
             args->rom_sha1 = lower_ascii(val);
+        } else if (section == "rom" && key == "crc32") {
+            args->rom_crc32 = parse_hex_u32(val);
         }
     }
     return true;
@@ -465,26 +486,75 @@ int run_game(int argc, char** argv) {
         return 1;
     }
 
-    if (args.bios.empty()) {
-        std::fprintf(stderr, "[gbarecomp:runtime] missing BIOS path\n");
-        return 1;
+    // Resolve BIOS via the picker chain (argv path -> sidecar cache ->
+    // Win32 file dialog). Released binaries don't ship a default path
+    // that exists, so the picker is what makes a fresh install work
+    // without a CLI argument. CRC32 + SHA-1 mismatch is a soft warning
+    // so the user can boot with an uncatalogued region/revision; wrong
+    // size is a hard fail (see asset_picker.cpp).
+    {
+        AssetSpec spec;
+        spec.display_name   = "GBA BIOS";
+        spec.dialog_filter  = "GBA BIOS (*.bin;*.BIN)\0*.bin;*.BIN\0"
+                              "All Files (*.*)\0*.*\0";
+        spec.dialog_title   = "Select your GBA BIOS dump (gba_bios.bin)";
+        spec.cache_filename = "bios.cfg";
+        spec.expected_size  = gba::GbaBios::kSize;
+        spec.expected_sha1  = args.bios_sha1.empty()
+                                ? gba::GbaBios::kExpectedSha1
+                                : args.bios_sha1.c_str();
+        spec.expected_crc32 = args.bios_crc32;
+        auto r = resolve_asset(args.bios, spec, argv[0]);
+        if (!r.ok) {
+            std::fprintf(stderr,
+                         "[gbarecomp:runtime] BIOS resolution failed: %s\n",
+                         r.error.c_str());
+            return 1;
+        }
+        args.bios = r.path;
     }
-    if (args.rom.empty()) {
-        std::fprintf(stderr, "[gbarecomp:runtime] missing ROM path\n");
-        return 1;
-    }
+
+    // Resolve ROM the same way. The per-game TOML supplies the
+    // expected hash + (optionally) CRC32 — both come pre-filled via
+    // load_config.
     if (args.rom_sha1.empty()) {
         std::fprintf(stderr,
                      "[gbarecomp:runtime] missing expected ROM SHA-1; "
-                     "refusing to launch\n");
+                     "refusing to launch (per-game TOML must set "
+                     "[rom].sha1)\n");
         return 1;
+    }
+    {
+        AssetSpec spec;
+        spec.display_name   = args.game_short_name.empty()
+                                ? "game ROM" : args.game_short_name.c_str();
+        spec.dialog_filter  = "GBA ROM (*.gba;*.GBA)\0*.gba;*.GBA\0"
+                              "All Files (*.*)\0*.*\0";
+        spec.dialog_title   = "Select the game ROM (.gba)";
+        spec.cache_filename = "rom.cfg";
+        spec.expected_size  = 0;  // GBA ROMs vary in size; SHA-1 covers it
+        spec.expected_sha1  = args.rom_sha1.c_str();
+        spec.expected_crc32 = args.rom_crc32;
+        auto r = resolve_asset(args.rom, spec, argv[0]);
+        if (!r.ok) {
+            std::fprintf(stderr,
+                         "[gbarecomp:runtime] ROM resolution failed: %s\n",
+                         r.error.c_str());
+            return 1;
+        }
+        args.rom = r.path;
     }
 
     if (!args.steps_set && !args.frames_set && args.tcp_port <= 0) {
+        // Auto-window when nothing was specified and SDL is built in.
         if (!args.window_set && HostWindow::is_available()) {
             args.window = true;
             args.quiet = true;
-        } else {
+        }
+        // Headless fallback: one frame is enough to validate the runtime
+        // came up. Explicit --window runs stay open-ended (let the user
+        // close the window).
+        if (!args.window) {
             args.frames = 1;
             args.frames_set = true;
         }

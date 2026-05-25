@@ -78,6 +78,7 @@ add_library(gbarecomp_gba STATIC
     src/gba/gba_scheduler.cpp
     src/gba/gba_rom_header.cpp
     src/gba/sha1.cpp
+    src/gba/crc32.cpp
 )
 target_include_directories(gbarecomp_gba PUBLIC src/gba)
 target_link_libraries(gbarecomp_gba PUBLIC gbarecomp_armv4t)
@@ -92,6 +93,7 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/runtime_bus_bridge.cpp
     src/runtime/host_platform.cpp
     src/runtime/host_window.cpp
+    src/runtime/asset_picker.cpp
     # Production abort stubs for runtime_dispatch_miss +
     # runtime_unimplemented_op. Test binaries that link only
     # gbarecomp_armv4t (not gbarecomp_runtime) supply their own.
@@ -127,6 +129,10 @@ if(GBARECOMP_SDL2_OK)
     # `#include_next <stdlib.h>`.
     target_include_directories(gbarecomp_runtime PUBLIC ${SDL2_INCLUDE_DIRS})
     target_link_libraries(gbarecomp_runtime PUBLIC ${SDL2_LIBRARIES})
+endif()
+if(WIN32 OR MSYS)
+    # asset_picker uses GetOpenFileNameA (comdlg32) and MessageBoxA (user32).
+    target_link_libraries(gbarecomp_runtime PUBLIC comdlg32 user32)
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────

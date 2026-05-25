@@ -23,6 +23,7 @@
 
 #include "arm_decode.h"
 #include "arm_ir.h"
+#include "asset_picker.h"
 #include "cpu_state.h"
 #include "gba_bios.h"
 #include "gba_bus.h"
@@ -172,7 +173,33 @@ armv4t::CPUState make_reset_cpu() {
 int main(int argc, char** argv) {
     auto args = parse_args(argc, argv);
 
-    // 1. Load + hash-verify the BIOS.
+    // 1. Resolve the BIOS path. Released builds end up next to a user
+    //    who doesn't know about --bios; the picker falls back to a
+    //    Win32 file dialog (and caches the validated path) when the
+    //    CLI / default path isn't present. CRC32 + SHA-1 mismatch is a
+    //    user-warning, not a hard fail — the user may have a region
+    //    revision we haven't catalogued. Wrong SIZE still hard-fails.
+    {
+        gbarecomp::AssetSpec spec;
+        spec.display_name   = "GBA BIOS";
+        spec.dialog_filter  = "GBA BIOS (*.bin;*.BIN)\0*.bin;*.BIN\0"
+                              "All Files (*.*)\0*.*\0";
+        spec.dialog_title   = "Select your GBA BIOS dump (gba_bios.bin)";
+        spec.cache_filename = "bios.cfg";
+        spec.expected_size  = gba::GbaBios::kSize;
+        spec.expected_sha1  = gba::GbaBios::kExpectedSha1;
+        spec.expected_crc32 = gba::GbaBios::kExpectedCrc32;
+        auto r = gbarecomp::resolve_asset(args.bios, spec, argv[0]);
+        if (!r.ok) {
+            std::fprintf(stderr, "bios_smoke: %s\n", r.error.c_str());
+            return 1;
+        }
+        args.bios = r.path;
+    }
+
+    // 2. Load + hash-verify the BIOS (cheap double-check; the picker
+    //    has already validated, but the loader sets up the byte buffer
+    //    used by the bus and is the canonical entry point).
     gba::GbaBios bios;
     std::string err;
     if (!bios.load_from_file(args.bios, gba::GbaBios::kExpectedSha1, &err)) {
