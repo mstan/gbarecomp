@@ -472,14 +472,33 @@ std::size_t count_nonzero(const uint8_t* p, std::size_t n) {
 
 }  // namespace
 
-int run_game(int argc, char** argv) {
+int run_game(int argc, char** argv, const RunOptions& opts) {
     Args args;
+
+    // Seed built-in defaults from the caller (the per-game runner).
+    // CLI / TOML can still override these.
+    if (opts.builtin_game_name && *opts.builtin_game_name) {
+        args.game_short_name = opts.builtin_game_name;
+    }
+    if (opts.builtin_rom_sha1 && *opts.builtin_rom_sha1) {
+        args.rom_sha1 = lower_ascii(opts.builtin_rom_sha1);
+    }
+    if (opts.builtin_rom_crc32 != 0) {
+        args.rom_crc32 = opts.builtin_rom_crc32;
+    }
+
     find_config_arg(argc, argv, &args);
 
     std::string err;
+    // load_config is tolerant of a missing TOML — standalone .exe
+    // releases ship without one and rely on the built-in defaults
+    // above plus the picker. A malformed TOML still fails hard.
     if (!load_config(&args, &err)) {
-        std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
-        return 1;
+        std::error_code ec;
+        if (std::filesystem::exists(args.config, ec)) {
+            std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
+            return 1;
+        }
     }
     if (!parse_cli(argc, argv, &args, &err)) {
         std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());

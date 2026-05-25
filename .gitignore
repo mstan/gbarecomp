@@ -56,10 +56,13 @@ third_party/tomlpp/
 # stay out of version control — re-clone to update.
 third_party/gba_suite/
 
-# Release packaging output. The stage dir and the final zip live in
-# the repo root for the GH release attach step, but neither is source.
+# Release packaging output. The build-release dir + the final
+# standalone exe land at the repo root for upload to GH releases.
+build-release/
 release-stage/
+gba.exe
 gbarecomp-v*-windows-x64.zip
+gbarecomp-v*-windows-x64.exe
 
 # Sidecar caches written by the asset picker (bios.cfg, rom.cfg).
 # These are per-user runtime state.

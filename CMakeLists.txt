@@ -26,22 +26,82 @@ endif()
 set(GBARECOMP_SDL2_OK FALSE)
 set(GBARECOMP_MINGW_PREFIX_UNIX "/c/msys64/mingw64" CACHE PATH
     "MSYS2 mingw64 install root, in Unix form, used for finding SDL2")
+
+# Release builds bake SDL2 + libstdc++ + libgcc + libwinpthread into
+# the executable so the shipped .exe has no DLL dependencies on a
+# vanilla Windows install. Dev / debug builds keep the dynamic SDL2
+# link so iteration is fast.
+option(GBARECOMP_STATIC_RELEASE
+    "Statically link SDL2 + the mingw C++ runtime into release exes"
+    OFF)
+
 find_path(SDL2_INCLUDE_DIR
     NAMES SDL.h
     PATH_SUFFIXES SDL2 SDL2/include
     HINTS ${GBARECOMP_MINGW_PREFIX_UNIX}/include
 )
-find_library(SDL2_LIBRARY
-    NAMES SDL2
-    HINTS ${GBARECOMP_MINGW_PREFIX_UNIX}/lib
-)
+if(GBARECOMP_STATIC_RELEASE)
+    # Pin the static archives directly. CMake's find_library would
+    # prefer libSDL2.dll.a on a default MSYS2 install. Try the Unix
+    # form first (works under msys2 shells), fall back to the native
+    # Windows path (works under PowerShell / cmd).
+    set(SDL2_STATIC_LIB_CANDIDATES
+        ${GBARECOMP_MINGW_PREFIX_UNIX}/lib/libSDL2.a
+        C:/msys64/mingw64/lib/libSDL2.a)
+    set(SDL2_LIBRARY "")
+    foreach(_cand IN LISTS SDL2_STATIC_LIB_CANDIDATES)
+        if(EXISTS "${_cand}")
+            set(SDL2_LIBRARY      "${_cand}")
+            string(REPLACE "libSDL2.a" "libSDL2main.a"
+                   SDL2_MAIN_LIBRARY "${_cand}")
+            break()
+        endif()
+    endforeach()
+    if(SDL2_LIBRARY STREQUAL "" OR NOT EXISTS "${SDL2_MAIN_LIBRARY}")
+        message(FATAL_ERROR
+            "GBARECOMP_STATIC_RELEASE=ON but libSDL2.a / libSDL2main.a "
+            "not found. Searched: ${SDL2_STATIC_LIB_CANDIDATES}")
+    endif()
+    # SDL2 static depends on a list of Windows system libs that
+    # libSDL2.dll already pulls in transitively when dynamic.
+    # (From `pkg-config --static --libs sdl2`.)
+    # Use full paths to libSDL2.a + libSDL2main.a — `-lSDL2` would let
+    # the linker prefer libSDL2.dll.a (dynamic import) over libSDL2.a.
+    set(SDL2_STATIC_SYSDEPS
+        -lmingw32
+        ${SDL2_MAIN_LIBRARY}
+        ${SDL2_LIBRARY}
+        -lm
+        -lkernel32 -luser32 -lgdi32 -lwinmm -limm32 -lole32 -loleaut32
+        -lversion -luuid -ladvapi32 -lsetupapi -lshell32 -ldinput8
+        -mwindows)
+else()
+    find_library(SDL2_LIBRARY
+        NAMES SDL2
+        HINTS ${GBARECOMP_MINGW_PREFIX_UNIX}/lib
+    )
+endif()
+
 if(SDL2_INCLUDE_DIR AND SDL2_LIBRARY)
     set(GBARECOMP_SDL2_OK TRUE)
     set(SDL2_INCLUDE_DIRS ${SDL2_INCLUDE_DIR})
-    set(SDL2_LIBRARIES   ${SDL2_LIBRARY})
-    message(STATUS "gbarecomp: SDL2 found — inc=${SDL2_INCLUDE_DIR} lib=${SDL2_LIBRARY}")
+    if(GBARECOMP_STATIC_RELEASE)
+        set(SDL2_LIBRARIES ${SDL2_STATIC_SYSDEPS})
+    else()
+        set(SDL2_LIBRARIES ${SDL2_LIBRARY})
+    endif()
+    message(STATUS "gbarecomp: SDL2 found — inc=${SDL2_INCLUDE_DIR} lib=${SDL2_LIBRARY} static=${GBARECOMP_STATIC_RELEASE}")
 else()
     message(STATUS "gbarecomp: SDL2 NOT found — host_window will stub out (inc=${SDL2_INCLUDE_DIR} lib=${SDL2_LIBRARY})")
+endif()
+
+if(GBARECOMP_STATIC_RELEASE)
+    # NOTE: -static / -static-libgcc / -static-libstdc++ MUST be set
+    # via -DCMAKE_EXE_LINKER_FLAGS at configure time (see package_release.ps1).
+    # add_link_options() here would only apply to targets defined in
+    # gbarecomp's subdir, not to a parent project that includes us via
+    # add_subdirectory() (e.g. MinishCapRecomp). The cache var works
+    # across the whole tree.
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
