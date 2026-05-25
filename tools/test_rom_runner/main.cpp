@@ -88,6 +88,7 @@ int main(int argc, char** argv) {
     bus.io().set_bus(&bus);
 
     gbarecomp::set_active_bus(&bus);
+    gbarecomp::set_active_ppu(&ppu);
     runtime_init(&bus);
 
     // Inline reset (reset_recomp_cpu is internal to runtime.cpp;
@@ -96,11 +97,16 @@ int main(int argc, char** argv) {
 
     // Direct boot: skip BIOS, jump to cart entry. The test ROM's
     // entry point at 0x080000C0 is a B instruction to `main:`.
-    // Stack pointer mimics post-BIOS state (BIOS would have
-    // initialized banked SPs; we approximate the user-mode SP).
+    // Stack pointers mimic the post-BIOS handoff. The gba-suite
+    // ARM ROM switches through privileged modes and finishes in
+    // System mode before rendering its result, so the User/System
+    // bank must be live, not just the SVC bank.
     g_cpu.R[15] = 0x080000C0u;
-    g_cpu.R[13] = 0x03007F00u;     // user SP, post-BIOS-ish
-    g_cpu.cpsr  = CPSR_I_BIT | CPSR_F_BIT | 0x13u;  // SVC, I/F masked
+    g_cpu.R[13] = 0x03007F00u;  // User/System SP
+    g_cpu.banked_sp[ARM_BANK_USER] = 0x03007F00u;
+    g_cpu.banked_sp[ARM_BANK_IRQ] = 0x03007FA0u;
+    g_cpu.banked_sp[ARM_BANK_SUPERVISOR] = 0x03007FE0u;
+    g_cpu.cpsr  = CPSR_I_BIT | CPSR_F_BIT | 0x1Fu;  // System, I/F masked
 
     // Step loop. Each runtime_dispatch executes one recompiled
     // function. The function may itself call sub-functions (direct

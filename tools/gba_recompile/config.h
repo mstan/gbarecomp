@@ -60,6 +60,14 @@ struct ConfigDataRange {
     std::string note;
 };
 
+struct ConfigCodeCopy {
+    uint32_t    runtime_start = 0;
+    uint32_t    source_start = 0;
+    uint32_t    size = 0;
+    std::string name;
+    std::string note;
+};
+
 struct ConfigJumpTable {
     uint32_t            addr = 0;
     uint32_t            stride = 0;
@@ -81,6 +89,7 @@ struct Config {
     ConfigIdentity          identity;
     std::vector<ConfigExtraFunc>    extra_funcs;
     std::vector<ConfigDataRange>    data_ranges;
+    std::vector<ConfigCodeCopy>     code_copies;
     std::vector<ConfigJumpTable>    jump_tables;
     std::vector<ConfigExcludeFunc>  exclude_funcs;
 };

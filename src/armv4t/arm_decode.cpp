@@ -222,7 +222,8 @@ Instr ArmDecoder::decode_block_data_transfer(uint32_t word, uint32_t pc) {
     i.block.writeback   = bit(word, 21);
     i.block.load        = load;
     i.block.reg_list    = static_cast<uint16_t>(bits(word, 15, 0));
-    if (load && (i.block.reg_list & (1u << 15))) {
+    if (load && ((i.block.reg_list & (1u << 15)) ||
+                 i.block.reg_list == 0)) {
         i.is_pc_writing = true;
         i.is_branch = true;
         i.is_indirect = true;

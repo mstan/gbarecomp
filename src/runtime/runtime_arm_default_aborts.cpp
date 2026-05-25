@@ -33,6 +33,7 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
                  "address (< 0x4000), run `gba_recompile --bios "
                  "bios/gba_bios.bin` and rebuild.\n",
                  target_pc);
+    runtime_trace_dump_recent(96);
     std::abort();
 }
 
@@ -44,5 +45,6 @@ extern "C" void runtime_unimplemented_op(const char* op_name,
                  "never load-bearing\"). Add the lowering in "
                  "src/armv4t/arm_codegen.cpp.\n",
                  op_name ? op_name : "(null)", pc);
+    runtime_trace_dump_recent(96);
     std::abort();
 }

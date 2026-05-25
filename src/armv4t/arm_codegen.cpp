@@ -22,6 +22,16 @@ std::string fmt_hex32(uint32_t v) {
     return std::string(buf);
 }
 
+std::string label_for_addr(uint32_t v) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "L_%08X", v);
+    return std::string(buf);
+}
+
+uint64_t function_key(uint32_t addr, bool thumb) {
+    return (static_cast<uint64_t>(addr) << 1u) | (thumb ? 1u : 0u);
+}
+
 // Read a guest register in operand position. R15 returns the
 // PC-pipeline value as a literal (ARM: pc+8, THUMB: pc+4). Other
 // registers read g_cpu.R[r].
@@ -33,6 +43,11 @@ std::string read_reg_expr(uint8_t r, const Instr& ins) {
     char buf[16];
     std::snprintf(buf, sizeof(buf), "g_cpu.R[%u]", static_cast<unsigned>(r));
     return std::string(buf);
+}
+
+uint32_t stm_pc_store_value(const Instr& ins) {
+    if (!ins.thumb) return ins.pc + 12u;
+    return ((ins.pc + 4u) & ~2u) + 4u;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -120,7 +135,13 @@ Op2Code emit_op2(const Instr& ins, const char* indent) {
     out.carry_expr = co_var;
 
     std::ostringstream s;
-    s << indent << "uint32_t " << rm_var << " = " << read_reg_expr(sr.rm, ins) << ";\n";
+    s << indent << "uint32_t " << rm_var << " = ";
+    if (sr.by_register && sr.rm == 15 && !ins.thumb) {
+        s << fmt_hex32(ins.pc + 12u);
+    } else {
+        s << read_reg_expr(sr.rm, ins);
+    }
+    s << ";\n";
     s << indent << "uint32_t " << op2_var << ";\n";
     s << indent << "uint32_t " << co_var << ";\n";
 
@@ -264,11 +285,14 @@ const char* mode_is_priv_non_system_expr() {
 // otherwise route through runtime_dispatch. In both cases also
 // update g_cpu.R[15] so any caller that reads PC after the branch
 // (e.g. via stale stack values) sees the right value.
-std::string emit_direct_branch(uint32_t target, bool is_link,
+std::string emit_direct_branch(uint32_t target, uint32_t branch_pc,
+                                bool is_link,
                                 uint32_t link_value, bool thumb_link,
                                 const CodegenCtx& ctx,
                                 const char* indent) {
     std::ostringstream s;
+    // A link call that returns with any other PC was really a tail
+    // transfer through the callee, so do not execute link fallthrough.
     if (is_link) {
         // LR = next_pc (with THUMB bit if the caller is THUMB).
         uint32_t lr = thumb_link ? (link_value | 1u) : link_value;
@@ -282,15 +306,49 @@ std::string emit_direct_branch(uint32_t target, bool is_link,
     // switches modes), this would need updating.
     s << indent << "g_cpu.R[15] = " << fmt_hex32(target) << ";\n";
 
+    if (!is_link &&
+        target >= ctx.current_function_addr &&
+        target < ctx.current_function_end_addr &&
+        target < branch_pc) {
+        s << indent << "runtime_trace_event(RUNTIME_TRACE_BRANCH, "
+          << fmt_hex32(branch_pc) << ", " << fmt_hex32(target)
+          << ", 0u, 0u);\n";
+        s << indent << "goto " << label_for_addr(target) << ";\n";
+        return s.str();
+    }
+
+    if (is_link && target == link_value) {
+        // `bl` to the next instruction is a get-PC idiom. Guest
+        // execution just continues with LR set; a host C call would
+        // execute the suffix once as a callee and then fall through
+        // to it again.
+        return s.str();
+    }
+    if (is_link) {
+        s << indent << "runtime_call_push_return("
+          << fmt_hex32(link_value & ~1u) << ");\n";
+    }
+
     const std::string* name = nullptr;
-    if (ctx.names_by_addr) {
-        auto it = ctx.names_by_addr->find(target);
-        if (it != ctx.names_by_addr->end()) name = &it->second;
+    if (ctx.names_by_key) {
+        auto it = ctx.names_by_key->find(
+            function_key(target, ctx.current_function_thumb));
+        if (it != ctx.names_by_key->end()) name = &it->second;
     }
     if (name) {
-        s << indent << *name << "();\n";
+        if (!is_link && target == ctx.current_function_addr) {
+            // A tight `b .` loop must not become recursive host C.
+            // Return to the dispatch loop with PC unchanged so the
+            // runtime can observe/stall the guest loop normally.
+        } else {
+            s << indent << *name << "();\n";
+        }
     } else {
-        s << indent << "runtime_dispatch(" << fmt_hex32(target) << ");\n";
+        if (!is_link && target == ctx.current_function_addr) {
+            // See known-name self-loop case above.
+        } else {
+            s << indent << "runtime_dispatch(" << fmt_hex32(target) << ");\n";
+        }
     }
     // B is a tail-call: never return to this caller, so emit
     // `return;`. BL is a call: after the callee returns (its `bx lr`
@@ -298,7 +356,11 @@ std::string emit_direct_branch(uint32_t target, bool is_link,
     // function's body at the next instruction. So DO NOT emit
     // `return;` for BL — let C control fall through to the next
     // decoded instruction.
-    if (!is_link) {
+    if (is_link) {
+        s << indent << "if (g_cpu.R[15] != " << fmt_hex32(link_value & ~1u)
+          << ") { runtime_call_cancel_return("
+          << fmt_hex32(link_value & ~1u) << "); return; }\n";
+    } else {
         s << indent << "return;\n";
     }
     return s.str();
@@ -385,8 +447,14 @@ bool emit_data_processing(std::ostringstream& body, const Instr& ins,
         // (also applies for the other THUMB DP forms that use PC).
         bool pc_align = (ins.thumb && ins.rn == 15 &&
                           ins.op2.kind == Op2::Kind::Imm);
-        body << indent << "uint32_t " << rn_var << " = "
-             << read_reg_expr(ins.rn, ins);
+        body << indent << "uint32_t " << rn_var << " = ";
+        if (!ins.thumb && ins.rn == 15 &&
+            ins.op2.kind == Op2::Kind::Shifted &&
+            ins.op2.shifted.by_register) {
+            body << fmt_hex32(ins.pc + 12u);
+        } else {
+            body << read_reg_expr(ins.rn, ins);
+        }
         if (pc_align) body << " & ~3u";
         body << ";\n";
     }
@@ -447,6 +515,7 @@ bool emit_data_processing(std::ostringstream& body, const Instr& ins,
     // Set flags. Exception return: Rd=R15 + S=1 in priv non-system
     // mode skips flag-set and routes through runtime_exception_return.
     bool excpt_return = ins.set_flags && (ins.rd == 15) && !is_test;
+    bool spsr_restore_test = ins.set_flags && (ins.rd == 15) && is_test;
     if (ins.set_flags) {
         if (excpt_return) {
             // Exception return: don't touch flags here; restore from SPSR.
@@ -489,6 +558,11 @@ bool emit_data_processing(std::ostringstream& body, const Instr& ins,
                 default: break;
             }
         }
+        if (spsr_restore_test) {
+            body << indent << "if (" << mode_is_priv_non_system_expr() << ") {\n"
+                 << indent << "    runtime_restore_cpsr_from_spsr();\n"
+                 << indent << "}\n";
+        }
     }
 
     // Writeback (non-test).
@@ -506,11 +580,17 @@ bool emit_data_processing(std::ostringstream& body, const Instr& ins,
                  ins.op2.shifted.rm == 14 &&
                  !ins.op2.shifted.by_register &&
                  ins.op2.shifted.imm_or_rs == 0);
-            body << indent << "g_cpu.R[15] = " << r_var << ";\n";
+            std::string pc_var = "_pc" + uniq_suffix(ins);
+            body << indent << "uint32_t " << pc_var << " = " << r_var
+                 << (ins.thumb ? " & ~1u" : " & ~3u") << ";\n";
+            body << indent << "g_cpu.R[15] = " << pc_var << ";\n";
             if (is_lr_return) {
+                body << indent << "if (runtime_call_should_return("
+                     << pc_var << ")) return;\n";
+                body << indent << "runtime_dispatch(" << pc_var << ");\n";
                 body << indent << "return;\n";
             } else {
-                body << indent << "runtime_dispatch(" << r_var << ");\n";
+                body << indent << "runtime_dispatch(" << pc_var << ");\n";
                 body << indent << "return;\n";
             }
         } else {
@@ -525,13 +605,13 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
                  const CodegenCtx& ctx, const char* indent) {
     switch (ins.op) {
         case IrOp::B:
-            body << emit_direct_branch(ins.branch_target, false, 0, ins.thumb,
-                                       ctx, indent);
+            body << emit_direct_branch(ins.branch_target, ins.pc, false, 0,
+                                       ins.thumb, ctx, indent);
             return true;
         case IrOp::BL: {
             uint32_t link = ins.pc + (ins.thumb ? 2u : 4u);
-            body << emit_direct_branch(ins.branch_target, true, link, ins.thumb,
-                                       ctx, indent);
+            body << emit_direct_branch(ins.branch_target, ins.pc, true, link,
+                                       ins.thumb, ctx, indent);
             return true;
         }
         case IrOp::BX: {
@@ -540,17 +620,21 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
             body << indent << "uint32_t " << target_var << " = "
                  << read_reg_expr(ins.rm, ins) << ";\n";
             body << indent << "g_cpu.R[15] = " << target_var << " & ~1u;\n";
-            if (ins.rm == 14) {
+            if (ins.rm == 14 || ctx.force_bx_c_return) {
                 // `bx lr` — the AAPCS function-return idiom. In the
                 // direct-C-call dispatch model, BL emits a real C
                 // call to the target; the target's `bx lr` is the
-                // matching C return. No dispatch — just set PC and
-                // let C unwind one frame, resuming the caller's
-                // body at the instruction after the BL.
+                // matching C return. No dispatch, but still perform
+                // BX interworking before unwinding one host frame.
                 //
                 // Non-return BX (computed jump, trampoline, BX to a
                 // non-caller via BL/BLX from a different source)
                 // is handled by the dispatch path below.
+                body << indent << "if (" << target_var
+                     << " & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;\n";
+                body << indent << "if (runtime_call_should_return(g_cpu.R[15])) return;\n";
+                body << indent << "runtime_dispatch_with_exchange("
+                     << target_var << ");\n";
                 body << indent << "return;\n";
             } else {
                 body << indent << "runtime_dispatch_with_exchange("
@@ -577,7 +661,13 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
             uint32_t new_lr = (ins.pc + 2u) | 1u;
             body << indent << "g_cpu.R[14] = " << fmt_hex32(new_lr) << ";\n";
             body << indent << "g_cpu.R[15] = " << target_var << ";\n";
+            body << indent << "runtime_call_push_return("
+                 << fmt_hex32(new_lr & ~1u) << ");\n";
             body << indent << "runtime_dispatch(" << target_var << ");\n";
+            body << indent << "if (g_cpu.R[15] != "
+                 << fmt_hex32(new_lr & ~1u)
+                 << ") { runtime_call_cancel_return("
+                 << fmt_hex32(new_lr & ~1u) << "); return; }\n";
             return true;
         }
         default:
@@ -686,14 +776,23 @@ bool emit_memory(std::ostringstream& body, const Instr& ins,
         }
         switch (ins.op) {
             case IrOp::STR:
+                body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
+                     << fmt_hex32(ins.pc) << ", " << ea_var << " & ~3u, "
+                     << val_expr << ", 4u);\n";
                 body << indent << "bus_write_u32(" << ea_var << " & ~3u, "
                      << val_expr << ");\n";
                 break;
             case IrOp::STRB:
+                body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
+                     << fmt_hex32(ins.pc) << ", " << ea_var << ", (uint32_t)("
+                     << val_expr << " & 0xFFu), 1u);\n";
                 body << indent << "bus_write_u8(" << ea_var << ", (uint8_t)("
                      << val_expr << " & 0xFFu));\n";
                 break;
             case IrOp::STRH:
+                body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
+                     << fmt_hex32(ins.pc) << ", " << ea_var << " & ~1u, (uint32_t)("
+                     << val_expr << " & 0xFFFFu), 2u);\n";
                 body << indent << "bus_write_u16(" << ea_var << " & ~1u, (uint16_t)("
                      << val_expr << " & 0xFFFFu));\n";
                 break;
@@ -711,8 +810,51 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
                           const char* indent) {
     const auto& blk = ins.block;
     if (blk.reg_list == 0) {
-        // Empty list: ARMv4T edge case. Defer.
-        return false;
+        std::string sfx = uniq_suffix(ins);
+        std::string base_var = "_b" + sfx;
+        std::string addr_var = "_a" + sfx;
+        std::string fb_var = "_fb" + sfx;
+        body << indent << "uint32_t " << base_var << " = g_cpu.R["
+             << static_cast<unsigned>(blk.rn) << "];\n";
+        if (blk.add) {
+            body << indent << "uint32_t " << addr_var << " = " << base_var
+                 << (blk.pre_indexed ? " + 4u" : "") << ";\n";
+            body << indent << "uint32_t " << fb_var << " = " << base_var
+                 << " + 0x40u;\n";
+        } else {
+            body << indent << "uint32_t " << addr_var << " = " << base_var
+                 << (blk.pre_indexed ? " - 0x40u" : " - 0x3Cu") << ";\n";
+            body << indent << "uint32_t " << fb_var << " = " << base_var
+                 << " - 0x40u;\n";
+        }
+        if (blk.load) {
+            std::string pcv = "_pc" + sfx;
+            body << indent << "uint32_t " << pcv
+                 << " = bus_read_u32(" << addr_var << " & ~3u);\n";
+            if (blk.writeback) {
+                body << indent << "g_cpu.R[" << static_cast<unsigned>(blk.rn)
+                     << "] = " << fb_var << ";\n";
+            }
+            if (blk.s_bit) {
+                body << indent << "if (" << mode_is_priv_non_system_expr()
+                     << ") { runtime_exception_return(" << pcv
+                     << " & ~1u); return; }\n";
+            }
+            body << indent << "g_cpu.R[15] = " << pcv << " & ~1u;\n";
+            body << indent << "runtime_dispatch(g_cpu.R[15]);\n";
+            body << indent << "return;\n";
+        } else {
+            body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
+                 << fmt_hex32(ins.pc) << ", " << addr_var << " & ~3u, "
+                 << fmt_hex32(stm_pc_store_value(ins)) << ", 4u);\n";
+            body << indent << "bus_write_u32(" << addr_var << " & ~3u, "
+                 << fmt_hex32(stm_pc_store_value(ins)) << ");\n";
+            if (blk.writeback) {
+                body << indent << "g_cpu.R[" << static_cast<unsigned>(blk.rn)
+                     << "] = " << fb_var << ";\n";
+            }
+        }
+        return true;
     }
     int n = 0;
     for (int r = 0; r < 16; ++r) if (blk.reg_list & (1u << r)) ++n;
@@ -756,22 +898,39 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
                     body << indent << "g_cpu.R[15] = " << pcv << " & ~1u;\n";
                 }
             } else {
-                body << indent << "g_cpu.R[" << r << "] = bus_read_u32("
-                     << addr_var << " & ~3u);\n";
+                if (blk.s_bit && !pc_in_list) {
+                    body << indent << "runtime_write_user_reg(" << r
+                         << "u, bus_read_u32(" << addr_var
+                         << " & ~3u));\n";
+                } else {
+                    body << indent << "g_cpu.R[" << r << "] = bus_read_u32("
+                         << addr_var << " & ~3u);\n";
+                }
             }
         } else {
+            std::string store_val;
             if (r == 15) {
-                body << indent << "bus_write_u32(" << addr_var
-                     << " & ~3u, " << fmt_hex32(ins.pc + 12u) << ");\n";
+                store_val = fmt_hex32(stm_pc_store_value(ins));
             } else {
-                body << indent << "bus_write_u32(" << addr_var
-                     << " & ~3u, g_cpu.R[" << r << "]);\n";
+                bool store_writeback_base =
+                    blk.writeback && r == blk.rn &&
+                    (blk.reg_list & ((1u << r) - 1u)) != 0;
+                store_val = store_writeback_base
+                    ? fb_var
+                    : ((blk.s_bit ? "runtime_read_user_reg(" : "g_cpu.R[") +
+                       std::to_string(r) + (blk.s_bit ? "u)" : "]"));
             }
+            body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
+                 << fmt_hex32(ins.pc) << ", " << addr_var << " & ~3u, "
+                 << store_val << ", 4u);\n";
+            body << indent << "bus_write_u32(" << addr_var
+                 << " & ~3u, " << store_val << ");\n";
         }
         body << indent << addr_var << " += 4u;\n";
     }
 
-    if (blk.writeback) {
+    bool base_in_list = (blk.reg_list & (1u << blk.rn)) != 0;
+    if (blk.writeback && !(blk.load && base_in_list)) {
         body << indent << "g_cpu.R[" << static_cast<unsigned>(blk.rn)
              << "] = " << fb_var << ";\n";
     }
@@ -788,6 +947,8 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
         // jump (state-machine dispatch, jump tables popped from
         // arbitrary memory). Those still need runtime_dispatch.
         if (blk.rn == 13) {
+            body << indent << "if (runtime_call_should_return(g_cpu.R[15])) return;\n";
+            body << indent << "runtime_dispatch(g_cpu.R[15]);\n";
             body << indent << "return;\n";
         } else {
             body << indent << "runtime_dispatch(g_cpu.R[15]);\n";
@@ -904,6 +1065,9 @@ bool emit_swap(std::ostringstream& body, const Instr& ins,
         body << indent << "{ uint32_t _rot = (" << av << " & 3u) * 8u; "
              << "if (_rot) " << ov << " = (" << ov << " >> _rot) | ("
              << ov << " << (32u - _rot)); }\n";
+        body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
+             << fmt_hex32(ins.pc) << ", " << av << " & ~3u, g_cpu.R["
+             << static_cast<unsigned>(ins.rm) << "], 4u);\n";
         body << indent << "bus_write_u32(" << av << " & ~3u, g_cpu.R["
              << static_cast<unsigned>(ins.rm) << "]);\n";
         body << indent << "g_cpu.R[" << static_cast<unsigned>(ins.rd)
@@ -916,6 +1080,9 @@ bool emit_swap(std::ostringstream& body, const Instr& ins,
         body << indent << "uint32_t " << av << " = g_cpu.R["
              << static_cast<unsigned>(ins.rn) << "];\n";
         body << indent << "uint8_t " << ov << " = bus_read_u8(" << av << ");\n";
+        body << indent << "runtime_trace_event(RUNTIME_TRACE_MEM_WRITE, "
+             << fmt_hex32(ins.pc) << ", " << av << ", (uint32_t)(g_cpu.R["
+             << static_cast<unsigned>(ins.rm) << "] & 0xFFu), 1u);\n";
         body << indent << "bus_write_u8(" << av << ", (uint8_t)(g_cpu.R["
              << static_cast<unsigned>(ins.rm) << "] & 0xFFu));\n";
         body << indent << "g_cpu.R[" << static_cast<unsigned>(ins.rd)
@@ -980,7 +1147,17 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
         return s.str();
     }
 
+    if (cond_never(ins.cond)) {
+        return "    /* cond NV: never executes */\n";
+    }
+
     std::ostringstream os;
+    // Advance hardware at instruction boundaries. The generated bodies
+    // use static PC semantics for operand reads, so keeping R15 at the
+    // current instruction PC here is only for exception/IRQ resume state.
+    os << "    g_cpu.R[15] = " << fmt_hex32(ins.pc) << ";\n";
+    os << "    runtime_tick(1u);\n";
+    os << "    if (runtime_should_yield()) return;\n";
     emit_cond_open(os, ins.cond);
     const char* indent = indent_for(ins.cond);
     bool ok = false;

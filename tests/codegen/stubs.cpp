@@ -98,15 +98,15 @@ uint32_t g_unimplemented_pc     = 0;
 
 // ── DispatchEntry definitions ──────────────────────────────────────
 // runtime_arm.cpp declares:
-//   struct DispatchEntry { uint32_t addr; void (*fn)(void); };
+//   struct DispatchEntry { uint32_t addr; uint8_t thumb; void (*fn)(void); };
 //   extern "C" const DispatchEntry kDispatchTable[];
 //   extern "C" const unsigned kDispatchTableLen;
 // Provide minimal stubs. Empty length means every dispatch falls
 // through to runtime_dispatch_miss, which we override below.
-struct DispatchEntry { uint32_t addr; void (*fn)(void); };
+struct DispatchEntry { uint32_t addr; uint8_t thumb; void (*fn)(void); };
 
 extern "C" const DispatchEntry kDispatchTable[1] = {
-    {0xFFFFFFFFu, nullptr},
+    {0xFFFFFFFFu, 0u, nullptr},
 };
 extern "C" const unsigned kDispatchTableLen = 0u;
 
@@ -115,7 +115,7 @@ extern "C" const unsigned kDispatchTableLen = 0u;
 // PC falls through to kDispatchTable, then to runtime_dispatch_miss,
 // which is the stubbed recorder above.
 extern "C" const DispatchEntry kBiosDispatchTable[1] = {
-    {0xFFFFFFFFu, nullptr},
+    {0xFFFFFFFFu, 0u, nullptr},
 };
 extern "C" const unsigned kBiosDispatchTableLen = 0u;
 
@@ -183,4 +183,13 @@ extern "C" void runtime_unimplemented_op(const char* op_name,
     }
     codegen_test::g_unimplemented_pc = pc;
     // Don't abort — let the runner report the failure cleanly.
+}
+
+extern "C" void runtime_tick(uint32_t) {
+    // L1 codegen cases validate CPU/bus side effects only. Production
+    // runners link the real runtime_tick from runtime_bus_bridge.cpp.
+}
+
+extern "C" bool runtime_should_yield(void) {
+    return false;
 }

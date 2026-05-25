@@ -29,6 +29,7 @@
 // generated/dispatch_table.cpp defines these.
 struct DispatchEntry {
     uint32_t addr;
+    uint8_t thumb;
     void (*fn)(void);
 };
 extern "C" const DispatchEntry kDispatchTable[];
@@ -43,6 +44,145 @@ extern "C" const unsigned kBiosDispatchTableLen;
 // ── CPU state ──────────────────────────────────────────────────────
 
 extern "C" ArmCpuState g_cpu = {};
+
+namespace {
+
+constexpr uint32_t kTraceSize = 4096u;
+RuntimeTraceEntry g_trace[kTraceSize] = {};
+uint32_t g_trace_write = 0;
+uint32_t g_trace_count = 0;
+uint32_t g_trace_seq = 0;
+
+constexpr uint32_t kCallReturnStackSize = 1024u;
+uint32_t g_call_return_stack[kCallReturnStackSize] = {};
+uint32_t g_call_return_depth = 0;
+
+const char* trace_kind_name(uint32_t kind) {
+    switch (kind) {
+        case RUNTIME_TRACE_DISPATCH:  return "dispatch";
+        case RUNTIME_TRACE_EXCHANGE:  return "exchange";
+        case RUNTIME_TRACE_SWI:       return "swi";
+        case RUNTIME_TRACE_MEM_WRITE: return "mem_w";
+        case RUNTIME_TRACE_BRANCH:    return "branch";
+        case RUNTIME_TRACE_IRQ:       return "irq";
+        case RUNTIME_TRACE_CALL:      return "call";
+        default:                      return "unknown";
+    }
+}
+
+}  // namespace
+
+extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc,
+                                     uint32_t addr, uint32_t value,
+                                     uint32_t aux) {
+    RuntimeTraceEntry& e = g_trace[g_trace_write];
+    e.seq = ++g_trace_seq;
+    e.kind = kind;
+    e.pc = pc;
+    e.cpsr = g_cpu.cpsr;
+    e.addr = addr;
+    e.value = value;
+    e.aux = aux;
+    e.r0 = g_cpu.R[0];
+    e.r1 = g_cpu.R[1];
+    e.r2 = g_cpu.R[2];
+    e.r3 = g_cpu.R[3];
+    e.r4 = g_cpu.R[4];
+    e.r5 = g_cpu.R[5];
+    e.r12 = g_cpu.R[12];
+    e.r13 = g_cpu.R[13];
+    e.r14 = g_cpu.R[14];
+
+    g_trace_write = (g_trace_write + 1u) % kTraceSize;
+    if (g_trace_count < kTraceSize) ++g_trace_count;
+
+    static int abort_on_bios_write = -1;
+    if (abort_on_bios_write < 0) {
+        abort_on_bios_write =
+            std::getenv("GBARECOMP_ABORT_ON_BIOS_WRITE") ? 1 : 0;
+    }
+    if (abort_on_bios_write &&
+        kind == RUNTIME_TRACE_MEM_WRITE &&
+        addr < 0x00004000u) {
+        std::fprintf(stderr,
+                     "runtime_trace: generated BIOS-region write "
+                     "pc=0x%08X addr=0x%08X value=0x%08X width=%u\n",
+                     pc, addr, value, aux);
+        runtime_trace_dump_recent(96);
+        std::abort();
+    }
+
+    static uint32_t abort_mem_addr = 0xFFFFFFFFu;
+    if (abort_mem_addr == 0xFFFFFFFFu) {
+        const char* env = std::getenv("GBARECOMP_ABORT_ON_MEM_WRITE_ADDR");
+        abort_mem_addr = env ? static_cast<uint32_t>(std::strtoul(env, nullptr, 0))
+                             : 0xFFFFFFFEu;
+    }
+    if (kind == RUNTIME_TRACE_MEM_WRITE && addr == abort_mem_addr) {
+        std::fprintf(stderr,
+                     "runtime_trace: mem-write-addr abort pc=0x%08X "
+                     "addr=0x%08X value=0x%08X width=%u\n",
+                     pc, addr, value, aux);
+        runtime_trace_dump_recent(160);
+        std::abort();
+    }
+
+    static int branch_abort_after = -2;
+    if (branch_abort_after == -2) {
+        const char* env = std::getenv("GBARECOMP_ABORT_AFTER_BRANCHES");
+        branch_abort_after = env ? std::atoi(env) : -1;
+    }
+    if (kind == RUNTIME_TRACE_BRANCH && branch_abort_after >= 0) {
+        if (branch_abort_after == 0) {
+            std::fprintf(stderr,
+                         "runtime_trace: branch abort at pc=0x%08X "
+                         "target=0x%08X\n",
+                         pc, addr);
+            runtime_trace_dump_recent(96);
+            std::abort();
+        }
+        --branch_abort_after;
+    }
+
+    static uint32_t abort_branch_pc = 0xFFFFFFFFu;
+    if (abort_branch_pc == 0xFFFFFFFFu) {
+        const char* env = std::getenv("GBARECOMP_ABORT_ON_BRANCH_PC");
+        abort_branch_pc = env ? static_cast<uint32_t>(std::strtoul(env, nullptr, 0))
+                              : 0xFFFFFFFEu;
+    }
+    if (kind == RUNTIME_TRACE_BRANCH && pc == abort_branch_pc) {
+        std::fprintf(stderr,
+                     "runtime_trace: branch-pc abort at pc=0x%08X "
+                     "target=0x%08X\n",
+                     pc, addr);
+        runtime_trace_dump_recent(160);
+        std::abort();
+    }
+}
+
+extern "C" void runtime_trace_reset(void) {
+    g_trace_write = 0;
+    g_trace_count = 0;
+    g_trace_seq = 0;
+}
+
+extern "C" void runtime_trace_dump_recent(uint32_t max_entries) {
+    if (max_entries > g_trace_count) max_entries = g_trace_count;
+    std::fprintf(stderr, "runtime_trace: last %u event(s)\n", max_entries);
+    uint32_t start = (g_trace_write + kTraceSize - max_entries) % kTraceSize;
+    for (uint32_t i = 0; i < max_entries; ++i) {
+        const RuntimeTraceEntry& e = g_trace[(start + i) % kTraceSize];
+        std::fprintf(stderr,
+                     "  #%u %-8s pc=0x%08X cpsr=0x%08X "
+                     "addr=0x%08X value=0x%08X aux=0x%X "
+                     "r0=0x%08X r1=0x%08X r2=0x%08X r3=0x%08X "
+                     "r4=0x%08X r5=0x%08X r12=0x%08X "
+                     "sp=0x%08X lr=0x%08X\n",
+                     e.seq, trace_kind_name(e.kind), e.pc, e.cpsr,
+                     e.addr, e.value, e.aux, e.r0, e.r1, e.r2, e.r3,
+                     e.r4, e.r5, e.r12, e.r13, e.r14);
+    }
+}
 
 // ── Bus binding ────────────────────────────────────────────────────
 
@@ -253,17 +393,20 @@ extern "C" void arm_set_nzcv_sbc(uint32_t a, uint32_t b, uint32_t c_in,
 
 namespace {
 
-// Binary-search a sorted DispatchEntry table for `pc`. Returns
-// the matching `fn`, or nullptr if not found.
+// Binary-search a sorted DispatchEntry table for `pc` and current
+// instruction-set state. Same numeric addresses can have both ARM
+// and THUMB entries, so scan the equal-address run for CPSR.T.
 void (*lookup_in(const DispatchEntry* table, unsigned len,
-                 uint32_t pc))(void) {
+                 uint32_t pc, bool thumb))(void) {
     unsigned lo = 0, hi = len;
     while (lo < hi) {
         unsigned mid = (lo + hi) >> 1u;
         if (table[mid].addr < pc) lo = mid + 1u;
         else                       hi = mid;
     }
-    if (lo < len && table[lo].addr == pc) return table[lo].fn;
+    for (unsigned i = lo; i < len && table[i].addr == pc; ++i) {
+        if ((table[i].thumb != 0) == thumb) return table[i].fn;
+    }
     return nullptr;
 }
 
@@ -278,12 +421,14 @@ constexpr uint32_t kBiosRegionEnd = 0x00004000u;
 extern "C" void runtime_dispatch(uint32_t target_pc) {
     // Strip THUMB bit; codegen handles the mode via cpsr_T already.
     uint32_t pc = target_pc & ~1u;
+    runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
 
     void (*fn)(void) = nullptr;
+    bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
     if (pc < kBiosRegionEnd) {
-        fn = lookup_in(kBiosDispatchTable, kBiosDispatchTableLen, pc);
+        fn = lookup_in(kBiosDispatchTable, kBiosDispatchTableLen, pc, thumb);
     } else {
-        fn = lookup_in(kDispatchTable, kDispatchTableLen, pc);
+        fn = lookup_in(kDispatchTable, kDispatchTableLen, pc, thumb);
     }
     if (fn) { fn(); return; }
     runtime_dispatch_miss(target_pc);
@@ -293,7 +438,51 @@ extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
     // Bit 0 of target indicates THUMB.
     if (target_pc & 1u) g_cpu.cpsr |= CPSR_T_BIT;
     else                g_cpu.cpsr &= ~CPSR_T_BIT;
+    runtime_trace_event(RUNTIME_TRACE_EXCHANGE, target_pc & ~1u, target_pc, 0, 0);
     runtime_dispatch(target_pc);
+}
+
+extern "C" void runtime_call_push_return(uint32_t return_pc) {
+    uint32_t pc = return_pc & ~1u;
+    if (g_call_return_depth >= kCallReturnStackSize) {
+        std::fprintf(stderr,
+                     "runtime_arm: generated call-return stack overflow "
+                     "at return_pc=0x%08X\n",
+                     pc);
+        runtime_trace_dump_recent(96);
+        std::abort();
+    }
+    g_call_return_stack[g_call_return_depth++] = pc;
+    runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_call_return_depth, 1u);
+}
+
+extern "C" int runtime_call_should_return(uint32_t target_pc) {
+    uint32_t pc = target_pc & ~1u;
+    for (uint32_t i = g_call_return_depth; i != 0; --i) {
+        uint32_t slot = i - 1u;
+        if (g_call_return_stack[slot] == pc) {
+            runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc,
+                                g_call_return_depth,
+                                (slot + 1u == g_call_return_depth) ? 2u : 5u);
+            g_call_return_depth = slot;
+            return 1;
+        }
+    }
+    uint32_t top = g_call_return_depth != 0
+        ? g_call_return_stack[g_call_return_depth - 1u]
+        : 0xFFFFFFFFu;
+    runtime_trace_event(RUNTIME_TRACE_CALL, pc, top, g_call_return_depth, 3u);
+    return 0;
+}
+
+extern "C" void runtime_call_cancel_return(uint32_t return_pc) {
+    uint32_t pc = return_pc & ~1u;
+    if (g_call_return_depth != 0 &&
+        g_call_return_stack[g_call_return_depth - 1u] == pc) {
+        runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_call_return_depth,
+                            4u);
+        --g_call_return_depth;
+    }
 }
 
 // runtime_dispatch_miss is defined in src/runtime/runtime_arm_default_aborts.cpp
@@ -348,6 +537,49 @@ void bank_in(unsigned new_bank, uint32_t new_mode) {
 }
 
 }  // namespace
+
+extern "C" uint32_t runtime_read_user_reg(uint32_t reg) {
+    reg &= 15u;
+    uint32_t mode = g_cpu.cpsr & 0x1Fu;
+    if (reg < 8u || reg == 15u) {
+        return g_cpu.R[reg];
+    }
+    if (reg < 13u) {
+        return (mode == 0x11u)
+            ? g_cpu.r8_12_user[reg - 8u]
+            : g_cpu.R[reg];
+    }
+    if (mode == 0x10u || mode == 0x1Fu) {
+        return g_cpu.R[reg];
+    }
+    return (reg == 13u)
+        ? g_cpu.banked_sp[ARM_BANK_USER]
+        : g_cpu.banked_lr[ARM_BANK_USER];
+}
+
+extern "C" void runtime_write_user_reg(uint32_t reg, uint32_t value) {
+    reg &= 15u;
+    uint32_t mode = g_cpu.cpsr & 0x1Fu;
+    if (reg < 8u || reg == 15u) {
+        g_cpu.R[reg] = value;
+        return;
+    }
+    if (reg < 13u) {
+        if (mode == 0x11u) {
+            g_cpu.r8_12_user[reg - 8u] = value;
+        } else {
+            g_cpu.R[reg] = value;
+        }
+        return;
+    }
+    if (mode == 0x10u || mode == 0x1Fu) {
+        g_cpu.R[reg] = value;
+    } else if (reg == 13u) {
+        g_cpu.banked_sp[ARM_BANK_USER] = value;
+    } else {
+        g_cpu.banked_lr[ARM_BANK_USER] = value;
+    }
+}
 
 extern "C" uint32_t runtime_mrs_cpsr(void) {
     return g_cpu.cpsr;
@@ -421,6 +653,21 @@ extern "C" void runtime_exception_return(uint32_t new_pc) {
     g_cpu.R[15] = new_pc;
 }
 
+extern "C" void runtime_restore_cpsr_from_spsr(void) {
+    uint32_t old_cpsr = g_cpu.cpsr;
+    uint32_t old_mode = old_cpsr & 0x1Fu;
+    if (old_mode == 0x10u || old_mode == 0x1Fu) {
+        return;
+    }
+    unsigned old_bank = mode_to_bank(old_cpsr);
+    uint32_t spsr = g_cpu.banked_spsr[old_bank];
+
+    bank_out(old_bank, old_cpsr);
+    g_cpu.cpsr = spsr;
+    unsigned new_bank = mode_to_bank(spsr);
+    bank_in(new_bank, spsr);
+}
+
 // ── BIOS / SWI ─────────────────────────────────────────────────────
 // Mirror ARM ARM A2.6.4 SWI entry. The recompiled SWI instruction's
 // codegen already set g_cpu.R[15] = pc_of_swi + 4 (ARM) or +2 (THUMB)
@@ -442,10 +689,9 @@ extern "C" void runtime_exception_return(uint32_t new_pc) {
 // "BIOS not recompiled" gate.
 
 extern "C" void runtime_swi(uint32_t swi_imm) {
-    (void)swi_imm;  // recompiled BIOS reads it from [LR-4]/[LR-2].
-
     uint32_t return_address = g_cpu.R[15];
     uint32_t saved_cpsr     = g_cpu.cpsr;
+    runtime_trace_event(RUNTIME_TRACE_SWI, return_address, swi_imm, saved_cpsr, 0);
 
     // Switch to SVC mode. SPSR_svc gets the pre-SWI CPSR. LR_svc gets
     // the return address. R8..R12 don't change unless leaving FIQ.
@@ -469,6 +715,30 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     runtime_dispatch(0x00000008u);
 }
 
+extern "C" void runtime_irq(uint32_t return_address) {
+    uint32_t saved_cpsr = g_cpu.cpsr;
+    runtime_trace_event(RUNTIME_TRACE_IRQ, return_address, 0, saved_cpsr, 0);
+
+    uint32_t new_cpsr =
+        (saved_cpsr & ~(0x1Fu | CPSR_T_BIT))
+        | 0x12u
+        | CPSR_I_BIT;
+
+    unsigned old_bank = mode_to_bank(saved_cpsr);
+    unsigned new_bank = mode_to_bank(new_cpsr);
+    if (old_bank != new_bank) {
+        bank_out(old_bank, saved_cpsr);
+        bank_in(new_bank, new_cpsr);
+    }
+
+    g_cpu.cpsr                  = new_cpsr;
+    g_cpu.banked_spsr[new_bank] = saved_cpsr;
+    g_cpu.R[14]                 = return_address + 4u;
+    g_cpu.R[15]                 = 0x00000018u;
+
+    runtime_dispatch(0x00000018u);
+}
+
 // runtime_unimplemented_op is defined in
 // src/runtime/runtime_arm_default_aborts.cpp for production builds,
 // or by test stubs for codegen tests.
@@ -477,8 +747,10 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
 
 extern "C" void runtime_init(void* bus_handle) {
     gbarecomp::runtime_arm::g_bus_handle = bus_handle;
+    g_call_return_depth = 0;
 }
 
 extern "C" void runtime_shutdown(void) {
     gbarecomp::runtime_arm::g_bus_handle = nullptr;
+    g_call_return_depth = 0;
 }

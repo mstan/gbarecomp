@@ -4,6 +4,7 @@
 #pragma once
 
 namespace gba { class GbaBus; }
+namespace gba { class GbaPpu; }
 
 namespace gbarecomp {
 
@@ -11,6 +12,7 @@ namespace gbarecomp {
 // calls from generated code (declared in src/armv4t/runtime_arm.h)
 // will delegate to this bus.
 void set_active_bus(gba::GbaBus* bus);
+void set_active_ppu(gba::GbaPpu* ppu);
 
 // Retrieve the currently-bound bus, or nullptr if none.
 gba::GbaBus* active_bus();

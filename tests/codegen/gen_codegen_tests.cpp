@@ -55,6 +55,7 @@ int emit(FILE* f, const char* out_path) {
         const TestCase& tc = kTestCases[i];
         armv4t::Instr ins = decode_one(tc);
         armv4t::CodegenCtx ctx{};
+        ctx.current_function_addr = tc.pc;
         bool not_implemented = false;
         std::string body = armv4t::ArmCodegen::emit_instr(
             ins, ctx, &not_implemented);

@@ -41,11 +41,13 @@ struct FunctionSeed {
     uint32_t addr;
     CpuMode  mode;
     std::string name;   // empty → finder generates "func_XXXXXXXX"
+    uint32_t source_addr = 0;  // 0 => decode from addr or code_copy map
 };
 
 // Output: one entry per discovered function.
 struct Function {
     uint32_t addr;
+    uint32_t source_addr;
     CpuMode  mode;
     std::string name;
     // Approximate end address (exclusive). Set by the finder via
@@ -85,6 +87,13 @@ struct DataRange {
     std::string note;
 };
 
+struct CodeCopyRange {
+    uint32_t    runtime_start;
+    uint32_t    source_start;
+    uint32_t    size;
+    std::string note;
+};
+
 // Diagnostic for the hard error: control flow entered a data_range.
 // The collision names BOTH the offending branch (origin) AND the
 // range, so the operator can decide which to fix.
@@ -117,6 +126,9 @@ public:
     // jump-table bytes.
     void add_data_range(uint32_t start, uint32_t end,
                          const std::string& note);
+
+    void add_code_copy(uint32_t runtime_start, uint32_t source_start,
+                       uint32_t size, const std::string& note);
 
     // Register a post-discovery exclusion. After discovery, any
     // function whose address matches is dropped from the output.
@@ -153,6 +165,7 @@ private:
     FinderStats stats_{};
 
     std::vector<DataRange>           data_ranges_;
+    std::vector<CodeCopyRange>       code_copies_;
     std::vector<DataRangeCollision>  collisions_;
     std::unordered_set<uint32_t>     excluded_;
     std::unordered_map<uint32_t, std::string> exclude_reasons_;
@@ -167,6 +180,8 @@ private:
         return addr >= rom_base_ &&
                (addr - rom_base_) < rom_size_;
     }
+    bool map_addr_to_source(uint32_t addr, uint32_t* source) const;
+    bool can_read_at(uint32_t addr, uint32_t len) const;
     bool addr_in_data_range(uint32_t addr) const;
     const DataRange* find_data_range(uint32_t addr) const;
     void record_collision(uint32_t target,
@@ -177,7 +192,8 @@ private:
     uint32_t read_u32(uint32_t addr) const;
     uint16_t read_u16(uint32_t addr) const;
     void discover_one(uint32_t addr, CpuMode mode,
-                      const std::string& name);
+                      const std::string& name,
+                      uint32_t source_addr = 0);
 };
 
 }  // namespace gbarecomp

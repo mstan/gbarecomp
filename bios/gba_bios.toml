@@ -149,6 +149,12 @@ mode = "arm"
 name = "_00000344"
 
 [[extra_func]]
+addr = 0x00000348
+mode = "arm"
+name = "bios_halt_cont_0348"
+note = "continuation after BIOS Halt writes HALTCNT at 0x00000344"
+
+[[extra_func]]
 addr = 0x00000358
 mode = "arm"
 name = "sub_00000358"
@@ -439,10 +445,28 @@ mode = "arm"
 name = "_00000D54"
 
 [[extra_func]]
+addr = 0x00001708
+mode = "thumb"
+name = "bios_noop_callback_1708"
+note = "embedded BIOS callback pointer at 0x000016FC"
+
+[[extra_func]]
 addr = 0x00001928
 mode = "thumb"
 name = "bios_unknown_1928"
 note = "discovered via dispatch_miss during BIOS boot"
+
+[[extra_func]]
+addr = 0x00002148
+mode = "thumb"
+name = "bios_unknown_2148"
+note = "discovered via BIOS callback pointer 0x00002149 during BIOS boot"
+
+[[extra_func]]
+addr = 0x00002424
+mode = "thumb"
+name = "bios_intro_callback_2424"
+note = "embedded BIOS callback pointer at 0x000016F8"
 
 [[extra_func]]
 addr = 0x00003710
@@ -471,4 +495,13 @@ format       = "abs32"
 entries_mode = "auto"  # bit 0 of entry encodes mode
 name         = "swi_branch_table"
 note         = "BIOS SWI dispatch table — SWI 0x00..0x2A"
+
+[[jump_table]]
+addr         = 0x00003738
+stride       = 4
+count        = 30
+format       = "abs32"
+entries_mode = "auto"  # bit 0 of entry encodes mode
+name         = "bios_intro_command_table"
+note         = "BIOS intro command handlers; opcodes 0xB1..0xCE"
 

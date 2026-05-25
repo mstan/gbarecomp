@@ -435,6 +435,7 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
 // the post-BIOS stack base (recompiled BIOS will reprogram banked
 // SPs to their canonical values).
 void reset_recomp_cpu() {
+    runtime_trace_reset();
     for (int i = 0; i < 16; ++i) g_cpu.R[i] = 0;
     g_cpu.R[13] = 0x03007FE0;
     g_cpu.cpsr = CPSR_I_BIT | CPSR_F_BIT | 0x13u /* SVC */;
@@ -546,6 +547,7 @@ int run_game(int argc, char** argv) {
     bus.io().set_bus(&bus);
 
     set_active_bus(&bus);
+    set_active_ppu(&ppu);
     runtime_init(&bus);
     reset_recomp_cpu();
 
@@ -561,12 +563,6 @@ int run_game(int argc, char** argv) {
     //     to runtime_unimplemented_op pending Phase C codegen.
     // Either way the runtime aborts with a clear message naming the
     // gap. That abort is the gate; do NOT route to the interpreter.
-    auto step_once = [&]() -> bool {
-        runtime_dispatch(g_cpu.R[15]);
-        return true;  // unreachable until codegen + BIOS recomp land
-    };
-    auto step_frame = [&]() -> bool { return step_once(); };
-
     uint64_t taken = 0;
     uint64_t cycles_elapsed = 0;
     uint32_t last_step_cycles = 0;
@@ -577,6 +573,39 @@ int run_game(int argc, char** argv) {
     uint64_t swi_entries = 0;
     int frames_presented = 0;
     bool host_quit = false;
+
+    auto pump_idle = [&](uint32_t max_cycles) -> uint32_t {
+        uint32_t chunk = ppu.cycles_until_next_event();
+        uint32_t until_timer = bus.io().cycles_until_next_timer_event();
+        uint32_t until_sample = bus.audio().cycles_until_next_sample();
+        if (until_timer < chunk) chunk = until_timer;
+        if (until_sample < chunk) chunk = until_sample;
+        if (chunk == 0 || chunk == 0xFFFFFFFFu) chunk = 1;
+        if (chunk > max_cycles) chunk = max_cycles;
+        runtime_tick(chunk);
+        cycles_elapsed += chunk;
+        last_step_cycles += chunk;
+        return chunk;
+    };
+
+    auto step_once = [&]() -> bool {
+        last_step_cycles = 0;
+        if (bus.io().halted()) {
+            ++halt_steps;
+            uint32_t idle_budget = gba::GbaPpu::kCyclesPerFrame;
+            while (bus.io().halted() && idle_budget != 0) {
+                uint32_t chunk = pump_idle(idle_budget);
+                idle_budget -= chunk;
+            }
+            ++taken;
+            return true;
+        }
+
+        runtime_dispatch(g_cpu.R[15]);
+        ++taken;
+        return true;
+    };
+    auto step_frame = [&]() -> bool { return step_once(); };
 
     if (args.tcp_port > 0) {
         debug::TcpDebugServer server;

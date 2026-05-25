@@ -59,6 +59,13 @@ start = 0x000001A0
 end   = 0x000001C0              # [start, end) — exclusive upper bound
 note  = "Nintendo logo pattern bytes"
 
+[[code_copy]]
+runtime_start = 0x030056F0
+source_start  = 0x080B197C
+size          = 0x00001280
+name          = "iwram_funcs"    # optional documentation
+note          = "ROM code copied to IWRAM before execution"
+
 [[jump_table]]
 addr         = 0x00000168
 stride       = 4
@@ -151,6 +158,27 @@ miss) lets stale TOML rot.
 - No overlap with any `[[jump_table]]`'s table bytes.
 - Ranges may overlap each other (idempotent union).
 
+### `[[code_copy]]` (zero or more)
+
+Runtime code-copy mappings. Some GBA binaries copy executable bytes
+from ROM into RAM and branch to the RAM address. This section tells
+the finder how to decode a runtime address by reading bytes from its
+ROM source address.
+
+`[[code_copy]]` does **not** create function entries by itself. Add
+`[[extra_func]]` entries for known runtime entry points, or let the
+finder discover branches into the copied range. When decoding a
+function in the copied range, generated code keeps the runtime PC
+addresses while reading opcodes from the source bytes.
+
+| key             | type    | required | meaning |
+|-----------------|---------|----------|---------|
+| `runtime_start` | int hex | yes      | First executable address after the copy completes. |
+| `source_start`  | int hex | yes      | First source byte in the original binary. |
+| `size`          | int hex | yes      | Number of copied bytes. |
+| `name`          | string  | no       | Mapping label (documentation). |
+| `note`          | string  | no       | Free-form documentation. |
+
 ### `[[jump_table]]` (zero or more)
 
 Annotated dispatch tables. The finder reads `count` entries of
@@ -234,13 +262,14 @@ In order of evaluation:
 1. **Identity check** — SHA-1 (and optional MD5) verified against the binary. Mismatch → abort.
 2. **Structural validation** — overlapping `extra_func` + `data_range`, mode disagreements within the TOML, `exclude_func` colliding with `extra_func`. Any → abort with diagnostic.
 3. **Data ranges** registered. Finder will refuse to walk into them.
-4. **Jump tables** read, expanded to per-target `extra_func` equivalents.
-5. **`extra_func` entries** registered (including the entry from `[program].entry_pc`).
-6. **Finder walks** from the union of seeds. Every walked target compared against:
+4. **Code-copy ranges** registered. Finder can decode runtime RAM addresses from their ROM source bytes.
+5. **Jump tables** read, expanded to per-target `extra_func` equivalents.
+6. **`extra_func` entries** registered (including the entry from `[program].entry_pc`).
+7. **Finder walks** from the union of seeds. Every walked target compared against:
    - existing `extra_func` registry → dedupe (mode mismatch → error)
    - `data_range` → walk stops at boundary
-7. **`exclude_func`** entries applied last — remove from final dispatch table.
-8. **Summary printed** (see below).
+8. **`exclude_func`** entries applied last — remove from final dispatch table.
+9. **Summary printed** (see below).
 
 ## Summary output
 
@@ -251,6 +280,7 @@ After every `gba_recompile` run with a config:
   identity sha1:           300c20df... (verified)
   extra_func entries:      54
   data_range entries:      12
+  code_copy entries:       1
   jump_table entries:      1   (expanded to 43 extra_func equivalents)
   exclude_func entries:    0
 
@@ -259,6 +289,7 @@ After every `gba_recompile` run with a config:
   redundant_manual:        37     in both — TOML carries documentation value
   manual_seeds_only:       60     would be lost without TOML
   finder_rejected_walks:   2      hit a data_range boundary
+  code_copies:             1
   excluded:                0
   TOTAL emitted:           97
 ```

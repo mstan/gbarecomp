@@ -315,7 +315,12 @@ uint16_t GbaIo::read16(uint32_t off) {
 
 uint32_t GbaIo::read32(uint32_t off) {
     if (off + 3 >= kIoSize) { warn_unhandled(off, 0, false, 4); return 0; }
-    return load_u32(&io_[off]);
+    // 32-bit IO reads are routed as two 16-bit reads so dynamic
+    // registers (DISPSTAT, VCOUNT, timers, etc.) expose their live
+    // values instead of stale backing-array bytes.
+    uint32_t lo = read16(off);
+    uint32_t hi = read16(off + 2);
+    return lo | (hi << 16);
 }
 
 // ─────────────────────────────────────────────────────────────────────

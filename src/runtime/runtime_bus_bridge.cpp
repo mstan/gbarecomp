@@ -7,13 +7,19 @@
 
 #include "../armv4t/runtime_arm.h"
 #include "../gba/gba_bus.h"
+#include "../gba/gba_ppu.h"
 
 namespace gbarecomp {
 
 static gba::GbaBus* g_active_bus = nullptr;
+static gba::GbaPpu* g_active_ppu = nullptr;
 
 void set_active_bus(gba::GbaBus* bus) {
     g_active_bus = bus;
+}
+
+void set_active_ppu(gba::GbaPpu* ppu) {
+    g_active_ppu = ppu;
 }
 
 gba::GbaBus* active_bus() {
@@ -50,4 +56,63 @@ extern "C" void bus_write_u16(uint32_t addr, uint16_t val) {
 
 extern "C" void bus_write_u8(uint32_t addr, uint8_t val) {
     if (gbarecomp::g_active_bus) gbarecomp::g_active_bus->write8(addr, val);
+}
+
+extern "C" void runtime_tick(uint32_t cycles) {
+    auto* bus = gbarecomp::g_active_bus;
+    auto* ppu = gbarecomp::g_active_ppu;
+    if (!bus || !ppu || cycles == 0) return;
+
+    uint32_t remaining = cycles;
+    while (remaining != 0) {
+        uint32_t chunk = remaining;
+        uint32_t until_sample = bus->audio().cycles_until_next_sample();
+        uint32_t until_timer = bus->io().cycles_until_next_timer_event();
+        uint32_t until_ppu = ppu->cycles_until_next_event();
+        if (until_sample < chunk) chunk = until_sample;
+        if (until_timer < chunk) chunk = until_timer;
+        if (until_ppu < chunk) chunk = until_ppu;
+        if (chunk == 0) chunk = 1;
+
+        bus->audio().tick(chunk);
+        bus->io().tick_timers(chunk);
+
+        uint16_t vc_compare = static_cast<uint16_t>(
+            (bus->io().dispstat() >> 8) & 0xFFu);
+        auto events = ppu->tick(chunk, vc_compare);
+        uint16_t ds = bus->io().dispstat();
+        if (events.hblank_started &&
+            ppu->vcount() < gba::GbaPpu::kLinesVisible) {
+            ppu->render_scanline(ppu->vcount(),
+                                 bus->io().read16(0x000),
+                                 bus->io().raw(),
+                                 bus->vram_ptr(),
+                                 bus->oam_ptr(),
+                                 bus->pal_ptr());
+        }
+        if (events.vblank_started) {
+            ppu->mark_framebuffer_latched();
+        }
+        if (events.vblank_started && (ds & 0x0008u)) {
+            bus->io().request_irq(gba::GbaIo::IrqVBlank);
+        }
+        if (events.hblank_started && (ds & 0x0010u)) {
+            bus->io().request_irq(gba::GbaIo::IrqHBlank);
+        }
+        if (events.vcount_matched && (ds & 0x0020u)) {
+            bus->io().request_irq(gba::GbaIo::IrqVCount);
+        }
+
+        remaining -= chunk;
+    }
+
+    if (bus->io().irq_pending() && (g_cpu.cpsr & CPSR_I_BIT) == 0) {
+        if (bus->io().halted()) bus->io().clear_halt();
+        runtime_irq(g_cpu.R[15]);
+    }
+}
+
+extern "C" bool runtime_should_yield(void) {
+    auto* bus = gbarecomp::g_active_bus;
+    return bus && bus->io().halted();
 }

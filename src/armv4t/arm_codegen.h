@@ -43,7 +43,15 @@ struct CodegenResult {
 // target is known to be a recompiled function in the same dispatch
 // table; unknown targets fall back to runtime_dispatch.
 struct CodegenCtx {
-    const std::unordered_map<uint32_t, std::string>* names_by_addr = nullptr;
+    // Key is (addr << 1) | thumb_bit. Direct B/BL preserves the
+    // current instruction-set state, so codegen can resolve the
+    // correct same-mode callee even when ARM and THUMB entries share
+    // the same numeric address.
+    const std::unordered_map<uint64_t, std::string>* names_by_key = nullptr;
+    uint32_t current_function_addr = 0xFFFFFFFFu;
+    uint32_t current_function_end_addr = 0xFFFFFFFFu;
+    bool current_function_thumb = false;
+    bool force_bx_c_return = false;
 };
 
 class ArmCodegen {

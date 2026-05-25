@@ -42,6 +42,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "config.h"
@@ -221,16 +222,184 @@ std::vector<FunctionSeed> load_symbols(const std::string& path) {
 void emit_function_body(std::FILE* f, const Function& fn,
                         const uint8_t* rom, std::size_t rom_size,
                         uint32_t rom_base,
-                        const std::unordered_map<uint32_t, std::string>&
-                            func_names_by_addr) {
+                        const std::unordered_map<uint64_t, std::string>&
+                            func_names_by_key) {
     const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
     armv4t::CodegenCtx ctx;
-    ctx.names_by_addr = &func_names_by_addr;
+    ctx.names_by_key = &func_names_by_key;
+    ctx.current_function_addr = fn.addr;
+    ctx.current_function_end_addr = fn.end_addr;
+    ctx.current_function_thumb = (fn.mode == CpuMode::Thumb);
+    const uint32_t fn_source_addr = fn.source_addr ? fn.source_addr : fn.addr;
+
+    auto source_offset_for = [&](uint32_t guest_pc, uint32_t len,
+                                 std::size_t* out) -> bool {
+        int64_t delta = static_cast<int64_t>(guest_pc) -
+            static_cast<int64_t>(fn.addr);
+        int64_t source_pc = static_cast<int64_t>(fn_source_addr) + delta;
+        if (source_pc < static_cast<int64_t>(rom_base)) return false;
+        uint64_t off64 = static_cast<uint64_t>(
+            source_pc - static_cast<int64_t>(rom_base));
+        if (off64 + len > rom_size) return false;
+        *out = static_cast<std::size_t>(off64);
+        return true;
+    };
+
+    auto plain_reg_source = [](const armv4t::Instr& ins, uint8_t* rm) {
+        if (ins.op != armv4t::IrOp::MOV ||
+            ins.op2.kind != armv4t::Op2::Kind::Shifted ||
+            ins.op2.shifted.by_register ||
+            ins.op2.shifted.type != armv4t::ShiftType::LSL ||
+            ins.op2.shifted.imm_or_rs != 0) {
+            return false;
+        }
+        *rm = ins.op2.shifted.rm;
+        return true;
+    };
+
+    auto invalidate_written_aliases = [](const armv4t::Instr& ins,
+                                         bool alias[16]) {
+        auto clear = [&](uint8_t reg) {
+            if (reg < 16) alias[reg] = false;
+        };
+
+        switch (ins.op) {
+            case armv4t::IrOp::AND: case armv4t::IrOp::EOR:
+            case armv4t::IrOp::SUB: case armv4t::IrOp::RSB:
+            case armv4t::IrOp::ADD: case armv4t::IrOp::ADC:
+            case armv4t::IrOp::SBC: case armv4t::IrOp::RSC:
+            case armv4t::IrOp::ORR: case armv4t::IrOp::MOV:
+            case armv4t::IrOp::BIC: case armv4t::IrOp::MVN:
+            case armv4t::IrOp::LDR: case armv4t::IrOp::LDRB:
+            case armv4t::IrOp::LDRH: case armv4t::IrOp::LDRSB:
+            case armv4t::IrOp::LDRSH: case armv4t::IrOp::SWP:
+            case armv4t::IrOp::SWPB: case armv4t::IrOp::MRS:
+                clear(ins.rd);
+                break;
+            case armv4t::IrOp::MUL: case armv4t::IrOp::MLA:
+                clear(ins.rd);
+                break;
+            case armv4t::IrOp::UMULL: case armv4t::IrOp::UMLAL:
+            case armv4t::IrOp::SMULL: case armv4t::IrOp::SMLAL:
+                clear(ins.rd);
+                clear(ins.rn);
+                break;
+            case armv4t::IrOp::LDM:
+                if (ins.block.load) {
+                    for (uint8_t reg = 0; reg < 16; ++reg) {
+                        if (ins.block.reg_list & (1u << reg)) {
+                            clear(reg);
+                        }
+                    }
+                }
+                break;
+            case armv4t::IrOp::BL:
+            case armv4t::IrOp::BL_prefix:
+            case armv4t::IrOp::BL_suffix:
+                clear(14);
+                break;
+            default:
+                break;
+        }
+    };
+
+    std::unordered_set<uint32_t> backward_targets;
+    std::unordered_set<uint32_t> bx_c_return_pcs;
+    bool lr_alias[16] = {};
+    lr_alias[14] = true;
+    armv4t::Instr prev_scan_ins{};
+    bool have_prev_scan_ins = false;
+
+    // Function boundaries can split compact THUMB epilogues:
+    //
+    //   pop {r3}
+    //   bx  r3
+    //
+    // If the finder discovered the BX as a separate entry, the scan below
+    // starts at the BX and would otherwise miss the stack-pop return idiom.
+    // Seed the previous instruction from ROM so the first decoded instruction
+    // in this function can still be classified correctly.
+    if (fn_source_addr >= rom_base && (fn_source_addr - rom_base) >= step) {
+        const uint32_t prev_pc = fn.addr - step;
+        std::size_t prev_off = 0;
+        if (source_offset_for(prev_pc, step, &prev_off)) {
+            if (fn.mode == CpuMode::Thumb) {
+                uint16_t hw = static_cast<uint16_t>(
+                    rom[prev_off] | (rom[prev_off + 1] << 8));
+                prev_scan_ins = armv4t::ThumbDecoder::decode(hw, prev_pc);
+            } else {
+                uint32_t w = static_cast<uint32_t>(rom[prev_off])
+                    | (static_cast<uint32_t>(rom[prev_off + 1]) << 8)
+                    | (static_cast<uint32_t>(rom[prev_off + 2]) << 16)
+                    | (static_cast<uint32_t>(rom[prev_off + 3]) << 24);
+                prev_scan_ins = armv4t::ArmDecoder::decode(w, prev_pc);
+            }
+            have_prev_scan_ins = true;
+        }
+    }
+
+    for (uint32_t scan_pc = fn.addr; scan_pc < fn.end_addr; scan_pc += step) {
+        std::size_t scan_off = 0;
+        if (!source_offset_for(scan_pc, step, &scan_off)) break;
+        armv4t::Instr scan_ins;
+        if (fn.mode == CpuMode::Thumb) {
+            uint16_t hw = static_cast<uint16_t>(
+                rom[scan_off] | (rom[scan_off + 1] << 8));
+            scan_ins = armv4t::ThumbDecoder::decode(hw, scan_pc);
+        } else {
+            uint32_t w = static_cast<uint32_t>(rom[scan_off])
+                | (static_cast<uint32_t>(rom[scan_off + 1]) << 8)
+                | (static_cast<uint32_t>(rom[scan_off + 2]) << 16)
+                | (static_cast<uint32_t>(rom[scan_off + 3]) << 24);
+            scan_ins = armv4t::ArmDecoder::decode(w, scan_pc);
+        }
+        if (scan_ins.op == armv4t::IrOp::B &&
+            scan_ins.branch_target >= fn.addr &&
+            scan_ins.branch_target < fn.end_addr &&
+            scan_ins.branch_target < scan_pc) {
+            backward_targets.insert(scan_ins.branch_target);
+        }
+        if (scan_ins.op == armv4t::IrOp::BX &&
+            have_prev_scan_ins &&
+            prev_scan_ins.op == armv4t::IrOp::LDM &&
+            prev_scan_ins.block.load &&
+            prev_scan_ins.block.writeback &&
+            prev_scan_ins.block.rn == 13 &&
+            scan_ins.rm < 16 &&
+            (prev_scan_ins.block.reg_list &
+                static_cast<uint16_t>(1u << scan_ins.rm)) != 0) {
+            bx_c_return_pcs.insert(scan_pc);
+        }
+        if (scan_ins.op == armv4t::IrOp::BX &&
+            scan_ins.rm < 16 &&
+            lr_alias[scan_ins.rm]) {
+            bx_c_return_pcs.insert(scan_pc);
+        }
+
+        bool sets_lr_alias = false;
+        uint8_t alias_dst = 0;
+        uint8_t alias_src = 0;
+        if (plain_reg_source(scan_ins, &alias_src) &&
+            scan_ins.rd < 16 &&
+            scan_ins.cond == armv4t::Cond::AL &&
+            alias_src < 16 &&
+            lr_alias[alias_src]) {
+            sets_lr_alias = true;
+            alias_dst = scan_ins.rd;
+        }
+        invalidate_written_aliases(scan_ins, lr_alias);
+        if (sets_lr_alias) {
+            lr_alias[alias_dst] = true;
+        }
+
+        prev_scan_ins = scan_ins;
+        have_prev_scan_ins = true;
+    }
+
     uint32_t pc = fn.addr;
     while (pc < fn.end_addr) {
-        if (pc < rom_base) break;
-        std::size_t off = pc - rom_base;
-        if (off + step > rom_size) break;
+        std::size_t off = 0;
+        if (!source_offset_for(pc, step, &off)) break;
         armv4t::Instr ins;
         if (fn.mode == CpuMode::Thumb) {
             uint16_t hw = static_cast<uint16_t>(
@@ -244,10 +413,15 @@ void emit_function_body(std::FILE* f, const Function& fn,
             ins = armv4t::ArmDecoder::decode(w, pc);
         }
 
+        if (backward_targets.count(pc) != 0) {
+            std::fprintf(f, "L_%08X:\n", pc);
+        }
+
         std::string line = armv4t::format_ir(ins);
         std::fprintf(f, "    /* %08X  %s */\n", pc, line.c_str());
 
         bool ni = false;
+        ctx.force_bx_c_return = bx_c_return_pcs.count(pc) != 0;
         std::string emitted = armv4t::ArmCodegen::emit_instr(ins, ctx, &ni);
         std::fputs(emitted.c_str(), f);
         // emit_instr already handles all return-shaped flows
@@ -355,14 +529,17 @@ void write_dispatch_table(const std::string& dir,
         "// Dispatch table: maps recompiled function addresses to\n"
         "// the corresponding generated C function pointer. The\n"
         "// runtime calls runtime_dispatch(addr) which binary-searches\n"
-        "// this table.\n\n"
+        "// this table by address and current CPSR.T mode.\n\n"
         "#include <cstdint>\n"
         "#include \"%s\"\n\n"
-        "struct DispatchEntry { uint32_t addr; void (*fn)(void); };\n"
+        "struct DispatchEntry { uint32_t addr; uint8_t thumb; void (*fn)(void); };\n"
         "extern \"C\" const DispatchEntry %s[] = {\n",
         names.header, names.table_symbol);
     for (const auto& fn : funcs) {
-        std::fprintf(f, "    {0x%08Xu, %s},\n", fn.addr, fn.name.c_str());
+        std::fprintf(f, "    {0x%08Xu, %uu, %s},\n",
+                     fn.addr,
+                     fn.mode == CpuMode::Thumb ? 1u : 0u,
+                     fn.name.c_str());
     }
     std::fprintf(f,
         "};\n"
@@ -376,8 +553,12 @@ void write_body(const std::string& dir,
                 const uint8_t* rom, std::size_t rom_size,
                 uint32_t rom_base,
                 const OutputNames& names) {
-    std::unordered_map<uint32_t, std::string> name_by_addr;
-    for (const auto& fn : funcs) name_by_addr[fn.addr] = fn.name;
+    std::unordered_map<uint64_t, std::string> name_by_key;
+    for (const auto& fn : funcs) {
+        uint64_t key = (static_cast<uint64_t>(fn.addr) << 1u) |
+            (fn.mode == CpuMode::Thumb ? 1u : 0u);
+        name_by_key[key] = fn.name;
+    }
 
     std::string path = dir + "/" + names.body;
     std::FILE* f = std::fopen(path.c_str(), "wb");
@@ -408,7 +589,7 @@ void write_body(const std::string& dir,
             fn.direct_branch_targets.size(),
             fn.has_indirect_transfer ? "  indirect" : "",
             fn.name.c_str());
-        emit_function_body(f, fn, rom, rom_size, rom_base, name_by_addr);
+        emit_function_body(f, fn, rom, rom_size, rom_base, name_by_key);
         std::fprintf(f, "}\n\n");
     }
     std::fclose(f);
@@ -438,10 +619,9 @@ int main(int argc, char** argv) {
     // docs/TOML_SCHEMA.md. When present, the binary's SHA-1 is
     // verified against [identity].sha1 before any discovery runs.
     //
-    // The config's extra_funcs / data_ranges / jump_tables are
-    // consumed by the function-finder in a later integration step;
-    // for now we just load + verify + summarize so authors get
-    // immediate feedback on whether their TOML is well-formed.
+    // When present, [program].load_address and [program].entry_pc
+    // become the discovery base/entry. CLI --rom-base/--entry remain
+    // the no-config path and quick-spike overrides.
     Config cfg;
     bool have_cfg = false;
     if (!cli.config_path.empty()) {
@@ -455,7 +635,12 @@ int main(int argc, char** argv) {
         have_cfg = true;
     }
 
-    FunctionFinder finder(rom.data(), rom.size(), cli.rom_base);
+    const uint32_t effective_rom_base =
+        have_cfg ? cfg.program.load_address : cli.rom_base;
+    const uint32_t effective_entry =
+        have_cfg ? cfg.program.entry_pc : cli.entry;
+
+    FunctionFinder finder(rom.data(), rom.size(), effective_rom_base);
 
     // ── Apply TOML config to the finder ──────────────────────────
     // Order: data_ranges + excludes first (so seed validation can
@@ -466,6 +651,10 @@ int main(int argc, char** argv) {
     if (have_cfg) {
         for (const auto& dr : cfg.data_ranges) {
             finder.add_data_range(dr.start, dr.end, dr.note);
+        }
+        for (const auto& cc : cfg.code_copies) {
+            finder.add_code_copy(cc.runtime_start, cc.source_start,
+                                 cc.size, cc.note);
         }
         for (const auto& ex : cfg.exclude_funcs) {
             finder.add_exclude(ex.addr, ex.reason);
@@ -518,9 +707,9 @@ int main(int argc, char** argv) {
                     default: break;
                     }
                 } else if (jt.format == gbarecomp::JumpTableFormat::Abs16) {
-                    if (entry_pos + 2u > cli.rom_base + rom.size() ||
-                        entry_pos < cli.rom_base) continue;
-                    std::size_t off = entry_pos - cli.rom_base;
+                    if (entry_pos + 2u > effective_rom_base + rom.size() ||
+                        entry_pos < effective_rom_base) continue;
+                    std::size_t off = entry_pos - effective_rom_base;
                     uint16_t v = static_cast<uint16_t>(rom[off])
                         | (static_cast<uint16_t>(rom[off + 1]) << 8);
                     target_addr = v;
@@ -577,7 +766,7 @@ int main(int argc, char** argv) {
                     seeds.size(),
                     cli.symbols_path.empty() ? "(none)"
                                               : cli.symbols_path.c_str());
-        finder.add_seed(FunctionSeed{cli.entry, CpuMode::Arm,
+        finder.add_seed(FunctionSeed{effective_entry, CpuMode::Arm,
                                       "start_vector"});
         for (const auto& s : seeds) finder.add_seed(s);
     }
@@ -642,6 +831,8 @@ int main(int argc, char** argv) {
                     jump_table_expanded_seeds);
         std::printf("  data_ranges_honored:   %zu\n",
                     cfg.data_ranges.size() + cfg.jump_tables.size());
+        std::printf("  code_copies:           %zu\n",
+                    cfg.code_copies.size());
         std::printf("  excluded:              %zu\n",
                     stats.excluded_count);
         std::printf("  TOTAL emitted:         %zu\n",
@@ -658,7 +849,7 @@ int main(int argc, char** argv) {
 
     OutputNames names = names_for_mode(cli.bios_mode);
     write_header(cli.out_dir, funcs, names);
-    write_body(cli.out_dir, funcs, rom.data(), rom.size(), cli.rom_base,
+    write_body(cli.out_dir, funcs, rom.data(), rom.size(), effective_rom_base,
                names);
     write_dispatch_table(cli.out_dir, funcs, names);
     std::printf("==> wrote %s/{%s, %s, %s}\n",

@@ -128,6 +128,52 @@ void runtime_dispatch(uint32_t target_pc);
 void runtime_dispatch_with_exchange(uint32_t target_pc);
 void runtime_dispatch_miss(uint32_t target_pc);
 
+// Direct generated BL calls use the host C stack for speed and clarity.
+// Return idioms (`bx lr`, `mov pc, lr`, `pop {..., pc}`) are only C
+// returns when they match the top direct-call return address; otherwise
+// they are real guest branches and must dispatch.
+void runtime_call_push_return(uint32_t return_pc);
+int  runtime_call_should_return(uint32_t target_pc);
+void runtime_call_cancel_return(uint32_t return_pc);
+
+// Always-on structured execution trace. This records diagnostic state
+// only; it never routes execution or substitutes for missing codegen.
+#define RUNTIME_TRACE_DISPATCH  1u
+#define RUNTIME_TRACE_EXCHANGE  2u
+#define RUNTIME_TRACE_SWI       3u
+#define RUNTIME_TRACE_MEM_WRITE 4u
+#define RUNTIME_TRACE_BRANCH    5u
+#define RUNTIME_TRACE_IRQ       6u
+// RUNTIME_TRACE_CALL aux values:
+//   1 push, 2 top-frame return, 3 no match, 4 cancel, 5 non-local return.
+#define RUNTIME_TRACE_CALL      7u
+
+typedef struct RuntimeTraceEntry {
+    uint32_t seq;
+    uint32_t kind;
+    uint32_t pc;
+    uint32_t cpsr;
+    uint32_t addr;
+    uint32_t value;
+    uint32_t aux;
+    uint32_t r0;
+    uint32_t r1;
+    uint32_t r2;
+    uint32_t r3;
+    uint32_t r4;
+    uint32_t r5;
+    uint32_t r12;
+    uint32_t r13;
+    uint32_t r14;
+} RuntimeTraceEntry;
+
+void runtime_trace_event(uint32_t kind, uint32_t pc, uint32_t addr,
+                         uint32_t value, uint32_t aux);
+void runtime_trace_reset(void);
+void runtime_trace_dump_recent(uint32_t max_entries);
+void runtime_tick(uint32_t cycles);
+bool runtime_should_yield(void);
+
 // ── BIOS / SWI ─────────────────────────────────────────────────────
 // SWI emits a call here. The runtime sets up the exception frame
 // (LR_svc = PC+4, SPSR_svc = CPSR, mode=SVC, I=1, T=0) and
@@ -138,6 +184,7 @@ void runtime_dispatch_miss(uint32_t target_pc);
 // informative, never load-bearing (SHOWSTOPPER)".
 
 void runtime_swi(uint32_t swi_imm);
+void runtime_irq(uint32_t return_address);
 
 // ── PSR transfer ───────────────────────────────────────────────────
 // MRS/MSR helpers. Routing through the runtime lets us validate mode
@@ -153,6 +200,11 @@ uint32_t runtime_mrs_spsr(void);
 void runtime_msr_cpsr(uint32_t value, uint32_t mask);
 void runtime_msr_spsr(uint32_t value, uint32_t mask);
 
+// LDM/STM with S=1 and PC absent transfers User-mode registers while
+// remaining in the current mode.
+uint32_t runtime_read_user_reg(uint32_t reg);
+void runtime_write_user_reg(uint32_t reg, uint32_t value);
+
 // ── Exception return ───────────────────────────────────────────────
 // Implements the DP-S/LDM-S "Rd=PC" exception return path:
 // SPSR_<current mode> → CPSR, bank-swap R13/R14 to the restored
@@ -160,6 +212,7 @@ void runtime_msr_spsr(uint32_t value, uint32_t mask);
 // PC in list + S bit.
 
 void runtime_exception_return(uint32_t new_pc);
+void runtime_restore_cpsr_from_spsr(void);
 
 // ── Fallback ───────────────────────────────────────────────────────
 // Emitted for IrOps codegen hasn't lowered yet. The runtime ALWAYS

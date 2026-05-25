@@ -174,6 +174,41 @@ bool parse_data_ranges(const toml::array& arr,
     return true;
 }
 
+bool parse_code_copies(const toml::array& arr,
+                       std::vector<ConfigCodeCopy>& out) {
+    for (std::size_t i = 0; i < arr.size(); ++i) {
+        const auto* t = arr[i].as_table();
+        if (!t) {
+            std::fprintf(stderr,
+                "%s[[code_copy]] entry %zu is not a table\n",
+                kAbortHeader, i);
+            return false;
+        }
+        ConfigCodeCopy cc;
+        bool ok = true;
+        std::string err;
+        cc.runtime_start = get_u32_field(*t, "runtime_start", true, ok, err);
+        cc.source_start  = get_u32_field(*t, "source_start",  true, ok, err);
+        cc.size          = get_u32_field(*t, "size",          true, ok, err);
+        if (!ok) {
+            std::fprintf(stderr,
+                "%s[[code_copy]] entry %zu: %s\n",
+                kAbortHeader, i, err.c_str());
+            return false;
+        }
+        if (cc.size == 0) {
+            std::fprintf(stderr,
+                "%s[[code_copy]] entry %zu: size must be non-zero\n",
+                kAbortHeader, i);
+            return false;
+        }
+        cc.name = get_string_field(*t, "name", false, ok, err);
+        cc.note = get_string_field(*t, "note", false, ok, err);
+        out.push_back(std::move(cc));
+    }
+    return true;
+}
+
 bool parse_jump_tables(const toml::array& arr,
                        std::vector<ConfigJumpTable>& out) {
     for (std::size_t i = 0; i < arr.size(); ++i) {
@@ -389,6 +424,11 @@ bool load_config(const std::string& path, Config& out) {
         if (!parse_data_ranges(*dr, out.data_ranges)) return false;
     }
 
+    // [[code_copy]]
+    if (auto cc = tbl["code_copy"].as_array()) {
+        if (!parse_code_copies(*cc, out.code_copies)) return false;
+    }
+
     // [[jump_table]]
     if (auto jt = tbl["jump_table"].as_array()) {
         if (!parse_jump_tables(*jt, out.jump_tables)) return false;
@@ -446,6 +486,7 @@ void print_config_summary(const Config& cfg) {
                 hex_lower(cfg.identity.sha1).c_str());
     std::printf("  extra_func entries:    %zu\n", cfg.extra_funcs.size());
     std::printf("  data_range entries:    %zu\n", cfg.data_ranges.size());
+    std::printf("  code_copy entries:     %zu\n", cfg.code_copies.size());
     std::printf("  jump_table entries:    %zu\n", cfg.jump_tables.size());
     std::printf("  exclude_func entries:  %zu\n", cfg.exclude_funcs.size());
 }

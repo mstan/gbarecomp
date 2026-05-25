@@ -49,6 +49,10 @@ const TestMemInit mem_block_ldm_pattern[] = {
     {0x200Cu, 0x00000444u},
 };
 
+const TestMemInit mem_word_at_2000_target[] = {
+    {0x2000u, 0x00001234u},
+};
+
 const TestMemInit mem_swp_init[] = {
     {0x3000u, 0xAAAA5555u},
 };
@@ -61,6 +65,7 @@ const TestMemInit mem_swp_init[] = {
 // tests.
 //   System mode: 0x1F
 #define MODE_SYSTEM 0x1Fu
+#define MODE_FIQ    0x11u
 
 const TestCase kTestCases[] = {
     // ── DP imm: MOV ─────────────────────────────────────────────────
@@ -167,6 +172,28 @@ const TestCase kTestCases[] = {
     },
 
     // ── DP reg-shifted-by-register: shift count > 32 (LSL r2=33 → 0)
+    // ARM register-controlled shifts read PC as PC+12 when PC is Rm.
+    {
+        "arm_mov_pc_lsl_reg_uses_pc_plus_12",
+        false, 0x100u,
+        0xE1A0001Fu,  // MOV r0, pc, LSL r0
+        {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM,
+        nullptr, 0,
+        false, 0, 0,
+    },
+
+    // ARM register-controlled shifts also make Rn=PC read as PC+12.
+    {
+        "arm_add_pc_lsl_reg_uses_pc_plus_12",
+        false, 0x100u,
+        0xE08F0010u,  // ADD r0, pc, r0, LSL r0
+        {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM,
+        nullptr, 0,
+        false, 0, 0,
+    },
+
     {
         "arm_mov_lsl_reg_overflow",
         false, 0x100u,
@@ -270,6 +297,16 @@ const TestCase kTestCases[] = {
     // ── STMDB SP! (PUSH-style) ──────────────────────────────────────
     //    STMDB r0!, {r1, r2}  — pre-decrement, writeback.
     {
+        "arm_ldmia_wb_base_in_list",
+        false, 0x100u,
+        0xE8B10006u,  // LDMIA r1!, {r1, r2}
+        {0,0x2000u,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM,
+        mem_block_ldm_pattern, 4,
+        false, 0, 0,
+    },
+
+    {
         "arm_stmdb_wb",
         false, 0x100u,
         0xE9200006u,  // STMDB r0!, {r1, r2}
@@ -280,6 +317,76 @@ const TestCase kTestCases[] = {
     },
 
     // ── MUL r0, r1, r2 ──────────────────────────────────────────────
+    {
+        "arm_stmdb_user_regs_from_fiq",
+        false, 0x100u,
+        0xE9400300u,  // STMDB r0, {r8, r9}^
+        {0x2008u,0,0,0, 0,0,0,0, 0x40u,0x63u,0,0, 0,0,0, 0x100u},
+        MODE_FIQ,
+        nullptr, 0,
+        false, 0, 0,
+    },
+
+    {
+        "arm_stmdb_wb_base_not_first",
+        false, 0x100u,
+        0xE921000Fu,  // STMDB r1!, {r0, r1, r2, r3}
+        {0xAAAAAAAAu,0x2010u,0xBBBBBBBBu,0xCCCCCCCCu, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM,
+        nullptr, 0,
+        false, 0, 0,
+    },
+
+    {
+        "arm_ldmia_empty_wb",
+        false, 0x100u,
+        0xE8B00000u,  // LDMIA r0!, {}
+        {0x2000u,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM,
+        mem_word_at_2000_target, 1,
+        true, 0, 0,
+    },
+
+    {
+        "arm_stmia_empty_wb",
+        false, 0x100u,
+        0xE8A00000u,  // STMIA r0!, {}
+        {0x2000u,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM,
+        nullptr, 0,
+        false, 0, 0,
+    },
+
+    {
+        "arm_stmda_empty_wb",
+        false, 0x100u,
+        0xE8200000u,  // STMDA r0!, {}
+        {0x2040u,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM,
+        nullptr, 0,
+        false, 0, 0,
+    },
+
+    {
+        "arm_stmdb_empty_wb",
+        false, 0x100u,
+        0xE9200000u,  // STMDB r0!, {}
+        {0x2040u,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM,
+        nullptr, 0,
+        false, 0, 0,
+    },
+
+    {
+        "arm_stmib_empty_wb",
+        false, 0x100u,
+        0xE9A00000u,  // STMIB r0!, {}
+        {0x2000u,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM,
+        nullptr, 0,
+        false, 0, 0,
+    },
+
     {
         "arm_mul",
         false, 0x100u,
@@ -396,6 +503,16 @@ const TestCase kTestCases[] = {
     //    Encoding: cond 0001 0010 1111 1111 1111 0001 Rm
     //    BX r0: word = 0xE12FFF10
     {
+        "arm_blnv_not_taken",
+        false, 0x100u,
+        0xFB000000u,  // BLNV is never executed on ARMv4T.
+        {0, 0, 0, 0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM,
+        nullptr, 0,
+        false, 0, 0,
+    },
+
+    {
         "arm_bx_to_arm",
         false, 0x100u,
         0xE12FFF10u,
@@ -412,6 +529,26 @@ const TestCase kTestCases[] = {
         0xE12FFF10u,
         {0x301u, 0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
         MODE_SYSTEM,
+        nullptr, 0,
+        true, 0, 0,
+    },
+
+    {
+        "arm_bx_lr_to_thumb_sets_t",
+        false, 0x100u,
+        0xE12FFF1Eu,
+        {0, 0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0x301u, 0x100u},
+        MODE_SYSTEM,
+        nullptr, 0,
+        true, 0, 0,
+    },
+
+    {
+        "thumb_bx_lr_to_arm_clears_t",
+        true, 0x100u,
+        0x00004770u,
+        {0, 0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0x300u, 0x100u},
+        (1u << 5) | MODE_SYSTEM,
         nullptr, 0,
         true, 0, 0,
     },
@@ -687,6 +824,11 @@ const TestCase kTestCases[] = {
       {3, 4, 0, 0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
       (1u<<5) | MODE_SYSTEM, nullptr, 0, false, 0, 0 },
 
+    // THUMB high-register MOV PC, Rm stays in THUMB and clears bit 0.
+    { "thumb_mov_pc_clears_bit0", true, 0x100u, 0x00004687u,
+      {0x201u, 0, 0, 0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      (1u<<5) | MODE_SYSTEM, nullptr, 0, true, 0, 0 },
+
     // ── THUMB fmt3 CMP imm (CMP r0, #5) ───────────────────────────
     //   word = 0x2805
     { "thumb_cmp_imm", true, 0x100u, 0x00002805u,
@@ -705,6 +847,11 @@ const TestCase kTestCases[] = {
     { "thumb_push", true, 0x100u, 0x0000B530u,
       // sp starts at 0x3000 (above mem block range to avoid collision)
       {0, 0, 0, 0, 0x1000u, 0x2000u, 0, 0, 0,0,0,0, 0,0x3000u,0xCAFEu, 0x100u},
+      (1u<<5) | MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+
+    // THUMB empty STM writes the aligned PC-store value and writebacks by 0x40.
+    { "thumb_stmia_empty_wb_pc_store_align", true, 0x102u, 0x0000C000u,
+      {0x2000u, 0, 0, 0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x102u},
       (1u<<5) | MODE_SYSTEM, nullptr, 0, false, 0, 0 },
 
     // ── THUMB fmt19 BL pair: BL +4 (two halfwords) ────────────────

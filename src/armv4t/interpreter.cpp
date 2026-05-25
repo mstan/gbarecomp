@@ -125,6 +125,12 @@ uint32_t Interpreter::read_reg(const CPUState& cpu, uint8_t r, const Instr& i) {
     return i.thumb ? thumb_pc_value(i.pc) : arm_pc_value(i.pc);
 }
 
+uint32_t stm_pc_store_value(const CPUState& cpu, const Instr& i) {
+    uint32_t pc = Interpreter::read_reg(cpu, 15, i);
+    if (i.thumb) pc &= ~2u;
+    return pc + 4u;
+}
+
 void Interpreter::enter_irq(CPUState& cpu, uint32_t return_address) {
     // Pack CPSR into a uint32 view for SPSR storage.
     uint32_t cpsr_u32 = 0;
@@ -252,6 +258,10 @@ Op2Eval eval_op2(const CPUState& cpu, const Instr& i) {
     uint32_t count;
     bool count_zero_encoded;
     if (sr.by_register) {
+        // ARM register-controlled shifts read R15 as PC+12 when it
+        // is the shifted value (Rm). The extra +4 is the same
+        // pipeline effect modeled below for PC-as-Rs.
+        if (!i.thumb && sr.rm == 15) rm_val += 4u;
         // PC-as-Rs adds an extra +4 (per ARM ARM register-shift rule).
         // We don't expect this in practice for GBA games, but model
         // it correctly anyway.
@@ -283,7 +293,11 @@ void set_arith_flags(CPSR& cpsr, const ArithFlags& f) {
 }
 
 // Returns true if the instruction wrote PC (so caller skips auto-advance).
-bool write_dest(CPUState& cpu, uint8_t rd, uint32_t value) {
+bool write_dest(CPUState& cpu, uint8_t rd, uint32_t value, const Instr& i) {
+    if (rd == 15) {
+        cpu.R[15] = i.thumb ? (value & ~1u) : (value & ~3u);
+        return true;
+    }
     cpu.R[rd] = value;
     return rd == 15;
 }
@@ -296,6 +310,44 @@ BankedSlot mode_to_bank(uint8_t m) {
         case Mode::Abort:      return Bank_Abort;
         case Mode::Undefined:  return Bank_Undefined;
         default:               return Bank_User;
+    }
+}
+
+uint32_t read_user_reg(const CPUState& cpu, int reg) {
+    if (reg < 8 || reg == 15) return cpu.R[reg];
+    if (reg < 13) {
+        return (cpu.cpsr.mode == static_cast<uint8_t>(Mode::FIQ))
+            ? cpu.r8_12_user[reg - 8]
+            : cpu.R[reg];
+    }
+    if (cpu.cpsr.mode == static_cast<uint8_t>(Mode::User) ||
+        cpu.cpsr.mode == static_cast<uint8_t>(Mode::System)) {
+        return cpu.R[reg];
+    }
+    return (reg == 13) ? cpu.banked_sp[Bank_User]
+                       : cpu.banked_lr[Bank_User];
+}
+
+void write_user_reg(CPUState& cpu, int reg, uint32_t value) {
+    if (reg < 8 || reg == 15) {
+        cpu.R[reg] = value;
+        return;
+    }
+    if (reg < 13) {
+        if (cpu.cpsr.mode == static_cast<uint8_t>(Mode::FIQ)) {
+            cpu.r8_12_user[reg - 8] = value;
+        } else {
+            cpu.R[reg] = value;
+        }
+        return;
+    }
+    if (cpu.cpsr.mode == static_cast<uint8_t>(Mode::User) ||
+        cpu.cpsr.mode == static_cast<uint8_t>(Mode::System)) {
+        cpu.R[reg] = value;
+    } else if (reg == 13) {
+        cpu.banked_sp[Bank_User] = value;
+    } else {
+        cpu.banked_lr[Bank_User] = value;
     }
 }
 
@@ -342,6 +394,34 @@ void exception_return(CPUState& cpu, uint32_t new_pc) {
     cpu.R[14] = cpu.banked_lr[new_bank];
 
     cpu.R[15] = new_pc;
+}
+
+void restore_cpsr_from_spsr(CPUState& cpu) {
+    uint8_t old_mode = cpu.cpsr.mode;
+    if (old_mode == static_cast<uint8_t>(Mode::User) ||
+        old_mode == static_cast<uint8_t>(Mode::System)) {
+        return;
+    }
+    auto old_bank = mode_to_bank(old_mode);
+    uint32_t spsr = cpu.banked_spsr[old_bank];
+
+    cpu.banked_sp[old_bank] = cpu.R[13];
+    cpu.banked_lr[old_bank] = cpu.R[14];
+
+    uint8_t new_mode = static_cast<uint8_t>(spsr & 0x1Fu);
+    cpu.cpsr.n = (spsr >> 31) & 1u;
+    cpu.cpsr.z = (spsr >> 30) & 1u;
+    cpu.cpsr.c = (spsr >> 29) & 1u;
+    cpu.cpsr.v = (spsr >> 28) & 1u;
+    cpu.cpsr.i = (spsr >>  7) & 1u;
+    cpu.cpsr.f = (spsr >>  6) & 1u;
+    cpu.cpsr.t = (spsr >>  5) & 1u;
+    cpu.cpsr.mode = new_mode;
+    cpu.thumb = cpu.cpsr.t;
+
+    auto new_bank = mode_to_bank(new_mode);
+    cpu.R[13] = cpu.banked_sp[new_bank];
+    cpu.R[14] = cpu.banked_lr[new_bank];
 }
 
 bool is_priv_non_system(uint8_t mode) {
@@ -490,6 +570,11 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             uint32_t rn  = (i.op == IrOp::MOV || i.op == IrOp::MVN)
                             ? 0u
                             : read_reg(cpu, i.rn, i);
+            if (!i.thumb && i.rn == 15 &&
+                i.op2.kind == Op2::Kind::Shifted &&
+                i.op2.shifted.by_register) {
+                rn += 4u;
+            }
             uint32_t r;
             switch (i.op) {
                 case IrOp::AND: r = rn & o2.value;  break;
@@ -507,15 +592,20 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             // do NOT update flags from the result.
             bool excpt_return =
                 i.set_flags && i.rd == 15 && is_priv_non_system(cpu.cpsr.mode);
+            bool spsr_restore_test =
+                i.set_flags && i.rd == 15 &&
+                (i.op == IrOp::TST || i.op == IrOp::TEQ) &&
+                is_priv_non_system(cpu.cpsr.mode);
             if (i.set_flags && !excpt_return) {
                 set_logical_flags(cpu.cpsr, r, o2.carry);
+                if (spsr_restore_test) restore_cpsr_from_spsr(cpu);
             }
             if (i.op != IrOp::TST && i.op != IrOp::TEQ) {
                 if (excpt_return) {
                     exception_return(cpu, r);
                     wrote_pc = true;
                 } else {
-                    wrote_pc = write_dest(cpu, i.rd, r);
+                    wrote_pc = write_dest(cpu, i.rd, r, i);
                 }
             }
             break;
@@ -527,6 +617,11 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
         case IrOp::CMP: case IrOp::CMN: {
             auto o2 = eval_op2(cpu, i);
             uint32_t rn = read_reg(cpu, i.rn, i);
+            if (!i.thumb && i.rn == 15 &&
+                i.op2.kind == Op2::Kind::Shifted &&
+                i.op2.shifted.by_register) {
+                rn += 4u;
+            }
             // THUMB ADD Rd, PC, #imm aligns the PC value to a 4-byte
             // boundary (ARM ARM A4.1.6). Same rule as the LDR PC-rel
             // path above. ARM mode does NOT align PC reads.
@@ -548,15 +643,20 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             }
             bool excpt_return_arith =
                 i.set_flags && i.rd == 15 && is_priv_non_system(cpu.cpsr.mode);
+            bool spsr_restore_test =
+                i.set_flags && i.rd == 15 &&
+                (i.op == IrOp::CMP || i.op == IrOp::CMN) &&
+                is_priv_non_system(cpu.cpsr.mode);
             if (i.set_flags && !excpt_return_arith) {
                 set_arith_flags(cpu.cpsr, f);
+                if (spsr_restore_test) restore_cpsr_from_spsr(cpu);
             }
             if (i.op != IrOp::CMP && i.op != IrOp::CMN) {
                 if (excpt_return_arith) {
                     exception_return(cpu, f.result);
                     wrote_pc = true;
                 } else {
-                    wrote_pc = write_dest(cpu, i.rd, f.result);
+                    wrote_pc = write_dest(cpu, i.rd, f.result, i);
                 }
             }
             break;
@@ -687,7 +787,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
                     }
                     default: break;
                 }
-                wrote_pc = write_dest(cpu, i.rd, value);
+                wrote_pc = write_dest(cpu, i.rd, value, i);
             } else {
                 // Store form. Note: STR of PC stores `pc + 12` on
                 // ARMv4T (pipeline + one extra instruction).
@@ -716,17 +816,35 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
 
         // ── Block transfer ─────────────────────────────────────────
         case IrOp::LDM: case IrOp::STM: {
-            // Basic case: S bit ignored (no user-mode-bank or
-            // SPSR-restore semantics yet).
             uint32_t base = cpu.R[i.block.rn];
             uint16_t list = i.block.reg_list;
             int n = __builtin_popcount(list);
             if (n == 0) {
-                // Edge case (empty reg list): ARMv4T behavior is to
-                // transfer R15 and offset base by 0x40. Mark as not
-                // implemented for now; real games don't emit this.
-                if (cycles_out) *cycles_out = 1;
-                return Result::NotImplemented;
+                uint32_t addr;
+                if (i.block.add) {
+                    addr = i.block.pre_indexed ? base + 4u : base;
+                } else {
+                    addr = i.block.pre_indexed ? base - 0x40u : base - 0x3Cu;
+                }
+                uint32_t final_base = i.block.add
+                    ? base + 0x40u
+                    : base - 0x40u;
+                mem_cycles += bus.access_cycles(addr & ~3u, 4,
+                                                /*sequential=*/false);
+                if (i.block.load) {
+                    uint32_t v = bus.read32(addr & ~3u);
+                    if (i.block.writeback) cpu.R[i.block.rn] = final_base;
+                    if (i.block.s_bit && is_priv_non_system(cpu.cpsr.mode)) {
+                        exception_return(cpu, v & ~1u);
+                    } else {
+                        cpu.R[15] = v & ~1u;
+                    }
+                    wrote_pc = true;
+                } else {
+                    bus.write32(addr & ~3u, stm_pc_store_value(cpu, i));
+                    if (i.block.writeback) cpu.R[i.block.rn] = final_base;
+                }
+                break;
             }
             uint32_t addr;
             // Compute starting address. The four addressing modes
@@ -772,18 +890,29 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
                             cpu.R[15] = v & ~1u;
                         }
                         wrote_pc = true;
+                    } else if (i.block.s_bit &&
+                               (list & (1u << 15)) == 0) {
+                        write_user_reg(cpu, reg, v);
                     } else {
                         cpu.R[reg] = v;
                     }
                 } else {
+                    bool store_writeback_base =
+                        i.block.writeback && reg == i.block.rn &&
+                        (list & ((1u << reg) - 1u)) != 0;
                     uint32_t v = (reg == 15)
-                        ? read_reg(cpu, 15, i) + 4u
-                        : cpu.R[reg];
+                        ? stm_pc_store_value(cpu, i)
+                        : (store_writeback_base
+                            ? final_base
+                            : (i.block.s_bit
+                                ? read_user_reg(cpu, reg)
+                                : cpu.R[reg]));
                     bus.write32(cursor & ~3u, v);
                 }
                 cursor += 4;
             }
-            if (i.block.writeback) {
+            bool base_in_list = (list & (1u << i.block.rn)) != 0;
+            if (i.block.writeback && !(i.block.load && base_in_list)) {
                 cpu.R[i.block.rn] = final_base;
             }
             break;

@@ -287,6 +287,36 @@ bool run_case(const TestCase& tc, std::size_t idx) {
     return true;
 }
 
+bool run_call_return_stack_cases() {
+    runtime_init(nullptr);
+
+    runtime_call_push_return(0x00000100u);
+    runtime_call_push_return(0x00000200u);
+    if (!runtime_call_should_return(0x00000101u)) {
+        std::printf("FAIL runtime_call_return_stack: non-local return "
+                    "did not match older frame\n");
+        runtime_shutdown();
+        return false;
+    }
+    if (runtime_call_should_return(0x00000200u)) {
+        std::printf("FAIL runtime_call_return_stack: non-local return "
+                    "left younger frame active\n");
+        runtime_shutdown();
+        return false;
+    }
+
+    runtime_call_push_return(0x00000300u);
+    if (!runtime_call_should_return(0x00000301u)) {
+        std::printf("FAIL runtime_call_return_stack: top-frame return "
+                    "did not ignore THUMB bit\n");
+        runtime_shutdown();
+        return false;
+    }
+
+    runtime_shutdown();
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -301,6 +331,7 @@ int main() {
     for (std::size_t i = 0; i < kTestCasesCount; ++i) {
         if (!run_case(kTestCases[i], i)) ++failures;
     }
+    if (!run_call_return_stack_cases()) ++failures;
     if (failures) {
         std::printf("\ncodegen_tests: %d / %zu failed\n",
                     failures, kTestCasesCount);

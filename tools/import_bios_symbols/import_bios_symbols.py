@@ -199,6 +199,10 @@ SWI_TABLE_ADDR = 0x000001C8
 SWI_TABLE_COUNT = 43
 SWI_TABLE_STRIDE = 4
 
+INTRO_COMMAND_TABLE_ADDR = 0x00003738
+INTRO_COMMAND_TABLE_COUNT = 30
+INTRO_COMMAND_TABLE_STRIDE = 4
+
 # ─────────────────────────────────────────────────────────────────────
 # Manual function-entry additions.
 #
@@ -225,6 +229,14 @@ MANUAL_EXTRA_FUNCS: list[tuple[int, str, str, str]] = [
     # the finder later (task #7).
     (0x00001928, "thumb", "bios_unknown_1928",
      "discovered via dispatch_miss during BIOS boot"),
+    (0x00002424, "thumb", "bios_intro_callback_2424",
+     "embedded BIOS callback pointer at 0x000016F8"),
+    (0x00001708, "thumb", "bios_noop_callback_1708",
+     "embedded BIOS callback pointer at 0x000016FC"),
+    (0x00002148, "thumb", "bios_unknown_2148",
+     "discovered via BIOS callback pointer 0x00002149 during BIOS boot"),
+    (0x00000348, "arm", "bios_halt_cont_0348",
+     "continuation after BIOS Halt writes HALTCNT at 0x00000344"),
 ]
 
 
@@ -296,6 +308,15 @@ def emit_toml(out_path: pathlib.Path,
     lines.append('entries_mode = "auto"  # bit 0 of entry encodes mode')
     lines.append('name         = "swi_branch_table"')
     lines.append('note         = "BIOS SWI dispatch table — SWI 0x00..0x2A"')
+    lines.append("")
+    lines.append("[[jump_table]]")
+    lines.append(f"addr         = 0x{INTRO_COMMAND_TABLE_ADDR:08X}")
+    lines.append(f"stride       = {INTRO_COMMAND_TABLE_STRIDE}")
+    lines.append(f"count        = {INTRO_COMMAND_TABLE_COUNT}")
+    lines.append('format       = "abs32"')
+    lines.append('entries_mode = "auto"  # bit 0 of entry encodes mode')
+    lines.append('name         = "bios_intro_command_table"')
+    lines.append('note         = "BIOS intro command handlers; opcodes 0xB1..0xCE"')
     lines.append("")
 
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8",
