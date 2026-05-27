@@ -26,6 +26,10 @@
 #  define CLOSESOCK ::close
 #endif
 
+// Debug PC breakpoint global (defined in runtime_bus_bridge.cpp). The
+// set_break_pc command writes it; runtime_should_yield() consults it.
+extern "C" uint32_t g_runtime_break_pc;
+
 #include "cpu_state.h"
 #include "gba_audio.h"
 #include "gba_bus.h"
@@ -498,6 +502,19 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
             return;
         }
         ctx.bus->io().set_keyinput(static_cast<uint16_t>(value & 0x03FFu));
+        out = "{\"ok\":true}";
+        return;
+    }
+    if (contains("\"set_break_pc\"")) {
+        // Debug PC breakpoint (MC-HP-002): runtime_should_yield() unwinds
+        // the current runtime_dispatch when the guest PC reaches this
+        // value, so the spin inside a single dispatch can be inspected.
+        uint64_t value = 0;
+        if (!extract_uint(req, "\"value\"", value)) {
+            emit_error(out, "missing value");
+            return;
+        }
+        g_runtime_break_pc = static_cast<uint32_t>(value);
         out = "{\"ok\":true}";
         return;
     }

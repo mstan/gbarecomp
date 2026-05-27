@@ -186,6 +186,10 @@ uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
                                    uint32_t max_entries);
 void runtime_tick(uint32_t cycles);
 bool runtime_should_yield(void);
+// Debug PC breakpoint: when nonzero, runtime_should_yield() unwinds the
+// current runtime_dispatch the moment the guest PC equals this value.
+// Set via the TCP set_break_pc command; 0 = disabled. (MC-HP-002.)
+extern uint32_t g_runtime_break_pc;
 
 // ── BIOS / SWI ─────────────────────────────────────────────────────
 // SWI emits a call here. The runtime sets up the exception frame

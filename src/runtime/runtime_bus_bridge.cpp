@@ -19,6 +19,15 @@
 #include <utility>
 #include <vector>
 
+// Debug PC breakpoint (MC-HP-002 sound-engine investigation). When set
+// (via the TCP `set_break_pc` command), the per-instruction
+// runtime_should_yield() returns true the moment the guest PC reaches
+// this address, unwinding the current runtime_dispatch back to the exec
+// loop so the TCP server can inspect register/memory state. The spin we
+// need to inspect (0x08004286) lives inside a single runtime_dispatch,
+// so ordinary step granularity can't enter it. 0 disables (no overhead).
+extern "C" uint32_t g_runtime_break_pc = 0;
+
 namespace gbarecomp {
 
 static gba::GbaBus* g_active_bus = nullptr;
@@ -192,6 +201,9 @@ extern "C" void runtime_tick(uint32_t cycles) {
 }
 
 extern "C" bool runtime_should_yield(void) {
+    if (g_runtime_break_pc != 0u && g_cpu.R[15] == g_runtime_break_pc) {
+        return true;  // debug breakpoint hit — unwind to the exec loop
+    }
     auto* bus = gbarecomp::g_active_bus;
     return bus && bus->io().halted();
 }
