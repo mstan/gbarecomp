@@ -9,10 +9,62 @@
 #include "../gba/gba_bus.h"
 #include "../gba/gba_ppu.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <thread>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
 namespace gbarecomp {
 
 static gba::GbaBus* g_active_bus = nullptr;
 static gba::GbaPpu* g_active_ppu = nullptr;
+
+// ── Guest-PC sampling profiler (debug tooling) ─────────────────────────
+// A background thread samples the guest PC (g_cpu.R[15]) while the
+// single-threaded interpreter core runs, building a histogram. Racy
+// reads are fine for statistical sampling. Enabled by GBARECOMP_SAMPLE;
+// the top hot PCs are printed to stderr at process exit. This is what
+// localized the MC-HP-002 transition freeze to the M4A sound-engine
+// sequence walker (0x08004286) when reasoning + per-call timing failed.
+static std::thread       g_sampler;
+static std::atomic<bool> g_sampling{false};
+static std::unordered_map<uint32_t, uint64_t> g_pc_hist;  // sampler-thread only
+
+static void sampler_loop() {
+    while (g_sampling.load(std::memory_order_relaxed)) {
+        g_pc_hist[g_cpu.R[15]]++;  // racy read; approximate is fine
+        std::this_thread::sleep_for(std::chrono::microseconds(250));
+    }
+}
+
+static void start_sampler() {
+    if (!std::getenv("GBARECOMP_SAMPLE")) return;
+    if (g_sampling.exchange(true)) return;  // start once
+    g_sampler = std::thread(sampler_loop);
+    std::atexit([] {
+        g_sampling.store(false);
+        if (g_sampler.joinable()) g_sampler.join();
+        std::vector<std::pair<uint32_t, uint64_t>> v(g_pc_hist.begin(),
+                                                     g_pc_hist.end());
+        std::sort(v.begin(), v.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        uint64_t total = 0;
+        for (const auto& p : v) total += p.second;
+        if (total == 0) return;
+        std::fprintf(stderr, "[sample] %llu samples; top guest PCs:\n",
+                     static_cast<unsigned long long>(total));
+        for (std::size_t i = 0; i < v.size() && i < 30; ++i) {
+            std::fprintf(stderr, "  0x%08X  %5.2f%%  (%llu)\n", v[i].first,
+                         100.0 * static_cast<double>(v[i].second) / total,
+                         static_cast<unsigned long long>(v[i].second));
+        }
+    });
+}
 
 bool should_trace_unmapped_read(uint32_t addr) {
     return (addr >> 24) >= 0x0Eu;
@@ -33,6 +85,7 @@ void sync_bios_access() {
 
 void set_active_bus(gba::GbaBus* bus) {
     g_active_bus = bus;
+    start_sampler();  // no-op unless GBARECOMP_SAMPLE is set
 }
 
 void set_active_ppu(gba::GbaPpu* ppu) {
