@@ -254,16 +254,27 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
     };
     RegTableAddr reg_table[16];
 
-    // Range bound for a register established by `CMP Ri,#N` immediately
-    // followed by a `B{hi,cs}` guard to the switch's default case. The
-    // bound travels with the index through the scale/add chain and gives
-    // the jump-table emitter an EXACT entry count — the precise terminator
-    // that replaces the old, too-strict "stop at first non-prologue" walk.
+    // Range bound for a register established by a `CMP Ri,#N` switch
+    // guard. The bound travels with the index through the scale/add chain
+    // and gives the jump-table emitter an EXACT entry count — the precise
+    // terminator that replaces the old "stop at first non-prologue" walk.
+    // Two guard shapes feed it: the in-block `B{hi,cs}`-to-default form
+    // (bound set here as we walk past it), and the inverted
+    // `B{ls,cc}`-to-dispatch form, where this walk IS the dispatch target
+    // and the bound was parked in branch_target_bounds_ by the predecessor.
     struct RegBound {
         bool     known     = false;
         uint32_t max_index = 0;
     };
     RegBound reg_bound[16];
+    // Inverted-guard bound parked for this seed (see header). Re-seed it
+    // so the dispatch's scale->add->load chain can size the table.
+    {
+        auto it = branch_target_bounds_.find(entry_addr);
+        if (it != branch_target_bounds_.end() && it->second.reg < 16) {
+            reg_bound[it->second.reg] = {true, it->second.max_index};
+        }
+    }
     struct LastCmp {  // most recent `CMP Ri,#imm`, consumed by the next branch
         bool     known = false;
         uint8_t  reg   = 0;
@@ -1074,12 +1085,29 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             last_cmp.pc    = ins.pc;
         } else if (last_cmp.known && ins.is_branch &&
                    ins.pc == last_cmp.pc + step) {
-            if (ins.cond == armv4t::Cond::HI) {
-                // taken (→default) when Ri > N; in-range max index = N
-                reg_bound[last_cmp.reg] = {true, last_cmp.imm};
-            } else if (ins.cond == armv4t::Cond::CS && last_cmp.imm > 0) {
-                // taken (→default) when Ri >= N; in-range max index = N-1
-                reg_bound[last_cmp.reg] = {true, last_cmp.imm - 1u};
+            // Max in-range index from the compare. HI/LS bound at N
+            // (Ri {>,<=} N); CS/CC bound at N-1 (Ri {>=,<} N).
+            bool have = false; uint32_t maxi = 0;
+            if (ins.cond == armv4t::Cond::HI ||
+                ins.cond == armv4t::Cond::LS) {
+                have = true; maxi = last_cmp.imm;
+            } else if ((ins.cond == armv4t::Cond::CS ||
+                        ins.cond == armv4t::Cond::CC) && last_cmp.imm > 0) {
+                have = true; maxi = last_cmp.imm - 1u;
+            }
+            if (have) {
+                // HI/CS: taken branches AWAY to the default, so the
+                // indexed dispatch is the fall-through of THIS walk —
+                // set the bound directly. LS/CC: taken branches TO the
+                // dispatch, which the finder walks as its own seed —
+                // park the bound for that target (re-seeded at entry).
+                if (ins.cond == armv4t::Cond::HI ||
+                    ins.cond == armv4t::Cond::CS) {
+                    reg_bound[last_cmp.reg] = {true, maxi};
+                } else if (ins.branch_target != 0) {
+                    branch_target_bounds_[ins.branch_target] =
+                        SeedBound{last_cmp.reg, maxi};
+                }
             }
             last_cmp.known = false;
         } else {

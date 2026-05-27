@@ -193,6 +193,14 @@ private:
     // confirmation can fire from several overlapping walks). Keeps the
     // emitted / overlap / rejected tallies counting distinct tables.
     std::unordered_set<uint32_t> jt_seen_bases_;
+    // CMP-bound carried across an inverted switch guard. For the
+    // `CMP Ri,#N; B{ls,cc} <dispatch>; B <default>` idiom the indexed
+    // dispatch lives at the BRANCH TARGET, which the finder walks as its
+    // own seed with fresh tracker state — so the bound recovered at the
+    // compare must be parked here, keyed by the dispatch-target PC, and
+    // re-seeded into reg_bound[reg] when that seed is walked.
+    struct SeedBound { uint8_t reg; uint32_t max_index; };
+    std::unordered_map<uint32_t, SeedBound> branch_target_bounds_;
     FinderStats stats_{};
 
     std::vector<DataRange>           data_ranges_;
