@@ -48,6 +48,12 @@ public:
         // GBA KEYINPUT layout. Active-low: 1 = released, 0 = pressed.
         // Bits: 0=A 1=B 2=Sel 3=Sta 4=Right 5=Left 6=Up 7=Down 8=R 9=L.
         uint16_t keyinput = 0x03FF;
+        // Edge-triggered save-state slot hotkeys. F1..F9 load slot
+        // 1..9; Shift+F1..F9 save slot 1..9. 0 = no request this pump.
+        // The caller acts on these at the top of the loop (a clean
+        // dispatch boundary), never mid-frame.
+        int      save_slot = 0;
+        int      load_slot = 0;
     };
     Events pump();
 

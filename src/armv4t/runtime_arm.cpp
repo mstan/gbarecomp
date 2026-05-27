@@ -513,6 +513,26 @@ extern "C" void runtime_call_cancel_return(uint32_t return_pc) {
     }
 }
 
+// ── Save-state accessors for the call-return stack ─────────────────
+// The stack + depth are file-local (anonymous namespace above). These
+// C-ABI windows let the snapshot orchestrator capture and restore them
+// without pulling the debug headers into this translation unit.
+
+extern "C" uint32_t runtime_call_stack_depth(void) {
+    return g_call_return_depth;
+}
+
+extern "C" const uint32_t* runtime_call_stack_data(void) {
+    return g_call_return_stack;
+}
+
+extern "C" void runtime_call_stack_restore(const uint32_t* entries,
+                                           uint32_t depth) {
+    if (depth > kCallReturnStackSize) depth = kCallReturnStackSize;
+    g_call_return_depth = depth;
+    for (uint32_t i = 0; i < depth; ++i) g_call_return_stack[i] = entries[i];
+}
+
 // runtime_dispatch_miss is defined in src/runtime/runtime_arm_default_aborts.cpp
 // for production builds, or by test stubs for codegen tests.
 

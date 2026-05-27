@@ -12,12 +12,36 @@
 #include <cstdio>
 #include <cstring>
 
+#include "snapshot.h"
+
 namespace gba {
 
 GbaBus::GbaBus() {
     io_dispatch_.set_audio(&audio_);
 }
 GbaBus::~GbaBus() = default;
+
+void GbaBus::serialize(gbarecomp::debug::SnapshotWriter& w) const {
+    w.bytes(ewram_.data(), ewram_.size());
+    w.bytes(iwram_.data(), iwram_.size());
+    w.bytes(pal_.data(),   pal_.size());
+    w.bytes(vram_.data(),  vram_.size());
+    w.bytes(oam_.data(),   oam_.size());
+    w.u32(last_fetched_);
+    w.boolean(bios_access_enabled_);
+    w.u64(unmapped_count_);
+}
+
+void GbaBus::deserialize(gbarecomp::debug::SnapshotReader& r) {
+    r.bytes(ewram_.data(), ewram_.size());
+    r.bytes(iwram_.data(), iwram_.size());
+    r.bytes(pal_.data(),   pal_.size());
+    r.bytes(vram_.data(),  vram_.size());
+    r.bytes(oam_.data(),   oam_.size());
+    last_fetched_        = r.u32();
+    bios_access_enabled_ = r.boolean();
+    unmapped_count_      = static_cast<std::size_t>(r.u64());
+}
 
 namespace {
 

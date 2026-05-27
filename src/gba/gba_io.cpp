@@ -8,8 +8,37 @@
 
 #include "gba_audio.h"
 #include "gba_ppu.h"
+#include "snapshot.h"
 
 namespace gba {
+
+void GbaIo::serialize(gbarecomp::debug::SnapshotWriter& w) const {
+    w.bytes(io_.data(), io_.size());
+    w.boolean(halted_);
+    w.u64(unmapped_count_);
+    for (int i = 0; i < 4; ++i) w.u64(dma_runs_[i]);
+    for (int i = 0; i < 4; ++i) w.u64(dma_words_[i]);
+    for (int i = 0; i < 4; ++i) w.u16(timer_reload_[i]);
+    for (int i = 0; i < 4; ++i) w.u16(timer_counter_[i]);
+    for (int i = 0; i < 4; ++i) w.u16(timer_control_[i]);
+    for (int i = 0; i < 4; ++i) w.u32(timer_accum_[i]);
+    for (int i = 0; i < 4; ++i) w.u32(dma_next_source_[i]);
+    for (int i = 0; i < 4; ++i) w.u32(dma_next_dest_[i]);
+}
+
+void GbaIo::deserialize(gbarecomp::debug::SnapshotReader& r) {
+    r.bytes(io_.data(), io_.size());
+    halted_         = r.boolean();
+    unmapped_count_ = static_cast<std::size_t>(r.u64());
+    for (int i = 0; i < 4; ++i) dma_runs_[i]        = static_cast<std::size_t>(r.u64());
+    for (int i = 0; i < 4; ++i) dma_words_[i]       = static_cast<std::size_t>(r.u64());
+    for (int i = 0; i < 4; ++i) timer_reload_[i]    = r.u16();
+    for (int i = 0; i < 4; ++i) timer_counter_[i]   = r.u16();
+    for (int i = 0; i < 4; ++i) timer_control_[i]   = r.u16();
+    for (int i = 0; i < 4; ++i) timer_accum_[i]     = r.u32();
+    for (int i = 0; i < 4; ++i) dma_next_source_[i] = r.u32();
+    for (int i = 0; i < 4; ++i) dma_next_dest_[i]   = r.u32();
+}
 
 GbaIo::GbaIo() {
     // KEYINPUT default: all keys released. The register is active-low,

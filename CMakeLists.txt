@@ -141,6 +141,10 @@ add_library(gbarecomp_gba STATIC
     src/gba/crc32.cpp
 )
 target_include_directories(gbarecomp_gba PUBLIC src/gba)
+# src/debug for snapshot.h — the save-state SnapshotWriter/Reader are
+# header-only, so this is an include-path dependency only (gbarecomp_gba
+# does NOT link gbarecomp_debug; that would invert the layering).
+target_include_directories(gbarecomp_gba PRIVATE src/debug)
 target_link_libraries(gbarecomp_gba PUBLIC gbarecomp_armv4t)
 set_property(TARGET gbarecomp_gba PROPERTY POSITION_INDEPENDENT_CODE ON)
 

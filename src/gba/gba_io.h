@@ -31,6 +31,8 @@
 
 #include "bus.h"   // armv4t::Bus — used for DMA byte transfers
 
+namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
+
 namespace gba {
 
 class GbaPpu;
@@ -146,6 +148,13 @@ public:
     // and clock direct-sound FIFOs.
     void tick_timers(uint32_t cycles);
     uint32_t cycles_until_next_timer_event() const;
+
+    // Save-state serialization. Captures the 1 KB IO page, halt flag,
+    // and timer/DMA shadow state. Live wiring (ppu_/irq_/bus_/audio_)
+    // is NOT serialized — it stays connected across a restore. See
+    // debug/snapshot.h.
+    void serialize(gbarecomp::debug::SnapshotWriter& w) const;
+    void deserialize(gbarecomp::debug::SnapshotReader& r);
 
 private:
     GbaPpu*       ppu_   = nullptr;

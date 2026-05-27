@@ -136,6 +136,16 @@ void runtime_call_push_return(uint32_t return_pc);
 int  runtime_call_should_return(uint32_t target_pc);
 void runtime_call_cancel_return(uint32_t return_pc);
 
+// Save-state support: expose the host-side call-return stack so the
+// snapshot orchestrator can serialize/restore it. The stack lives in
+// runtime_arm.cpp (file-local); these accessors are the only sanctioned
+// window. restore replaces the live stack wholesale (clamped to the
+// stack capacity). Returned pointer is valid until the next push/pop.
+uint32_t        runtime_call_stack_depth(void);
+const uint32_t* runtime_call_stack_data(void);
+void            runtime_call_stack_restore(const uint32_t* entries,
+                                           uint32_t depth);
+
 // Always-on structured execution trace. This records diagnostic state
 // only; it never routes execution or substitutes for missing codegen.
 #define RUNTIME_TRACE_DISPATCH  1u

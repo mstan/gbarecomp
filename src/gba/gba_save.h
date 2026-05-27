@@ -18,6 +18,8 @@
 #include <cstdint>
 #include <vector>
 
+namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
+
 namespace gba {
 
 class GbaSave {
@@ -36,6 +38,11 @@ public:
     std::vector<uint8_t> eeprom_bytes() const;
     bool dirty() const { return dirty_; }
     void clear_dirty() { dirty_ = false; }
+
+    // Save-state serialization (chip config + EEPROM bytes + in-flight
+    // serial command/read state). See debug/snapshot.h.
+    void serialize(gbarecomp::debug::SnapshotWriter& w) const;
+    void deserialize(gbarecomp::debug::SnapshotReader& r);
 
 private:
     static constexpr std::size_t kMaxEepromSize = 8 * 1024;

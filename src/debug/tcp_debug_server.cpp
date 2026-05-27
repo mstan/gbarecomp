@@ -83,6 +83,33 @@ bool extract_uint(std::string_view req, std::string_view key, uint64_t& out) {
     return true;
 }
 
+// Extract a JSON string value for `key` into `out`. Handles the common
+// escapes a path can carry on the wire (\\ and \"); other escapes pass
+// through verbatim. Returns false if the key/string is absent.
+bool extract_string(std::string_view req, std::string_view key,
+                    std::string& out) {
+    auto pos = req.find(key);
+    if (pos == std::string_view::npos) return false;
+    pos = req.find(':', pos);
+    if (pos == std::string_view::npos) return false;
+    ++pos;
+    while (pos < req.size() && req[pos] == ' ') ++pos;
+    if (pos >= req.size() || req[pos] != '"') return false;
+    ++pos;
+    out.clear();
+    while (pos < req.size()) {
+        char c = req[pos++];
+        if (c == '\\' && pos < req.size()) {
+            char e = req[pos++];
+            out.push_back(e);  // \\ -> \, \" -> ", others -> literal
+            continue;
+        }
+        if (c == '"') return true;
+        out.push_back(c);
+    }
+    return false;  // unterminated string
+}
+
 void emit_error(std::string& out, const char* msg) {
     out = "{\"ok\":false,\"error\":\"";
     out += msg;
@@ -617,6 +644,53 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
             static_cast<unsigned>(ctx.last_step_cycles ?
                 *ctx.last_step_cycles : 0u),
             static_cast<unsigned long long>(val(ctx.sync_frames)));
+        out = buf;
+        return;
+    }
+    if (contains("\"savestate_save\"")) {
+        if (!ctx.savestate_save) {
+            emit_error(out, "savestate_save callback not wired");
+            return;
+        }
+        std::string path;
+        if (!extract_string(req, "\"path\"", path) || path.empty()) {
+            emit_error(out, "missing path");
+            return;
+        }
+        std::string serr;
+        if (!ctx.savestate_save(path, serr)) {
+            emit_error(out, serr.empty() ? "savestate_save failed" : serr.c_str());
+            return;
+        }
+        out = "{\"ok\":true,\"saved\":\"";
+        for (char c : path) { if (c == '"' || c == '\\') out.push_back('\\'); out.push_back(c); }
+        out += "\"}";
+        return;
+    }
+    if (contains("\"savestate_load\"")) {
+        if (!ctx.savestate_load) {
+            emit_error(out, "savestate_load callback not wired");
+            return;
+        }
+        std::string path;
+        if (!extract_string(req, "\"path\"", path) || path.empty()) {
+            emit_error(out, "missing path");
+            return;
+        }
+        std::string serr;
+        if (!ctx.savestate_load(path, serr)) {
+            emit_error(out, serr.empty() ? "savestate_load failed" : serr.c_str());
+            return;
+        }
+        // Report the resume PC + frame so the client can confirm the
+        // restore landed where it expects.
+        uint32_t pc = ctx.recomp_cpu ? ctx.recomp_cpu->R[15]
+                                     : (ctx.cpu ? ctx.cpu->R[15] : 0u);
+        char buf[96];
+        std::snprintf(buf, sizeof(buf),
+                      "{\"ok\":true,\"pc\":%u,\"frame\":%llu}",
+                      static_cast<unsigned>(pc),
+                      static_cast<unsigned long long>(frame_counter(ctx)));
         out = buf;
         return;
     }

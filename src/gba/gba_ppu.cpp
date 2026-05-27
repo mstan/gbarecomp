@@ -7,10 +7,32 @@
 #include <cstdio>
 #include <cstring>
 
+#include "snapshot.h"
+
 namespace gba {
 
 GbaPpu::GbaPpu()  = default;
 GbaPpu::~GbaPpu() = default;
+
+void GbaPpu::serialize(gbarecomp::debug::SnapshotWriter& w) const {
+    w.u32(scanline_);
+    w.u32(dot_in_scanline_);
+    w.u32(cycle_in_dot_);
+    w.u16(vcount_);
+    w.u64(frame_count_);
+    w.boolean(has_latched_fb_);
+    w.bytes(latched_fb_.data(), latched_fb_.size());
+}
+
+void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
+    scanline_        = r.u32();
+    dot_in_scanline_ = r.u32();
+    cycle_in_dot_    = r.u32();
+    vcount_          = r.u16();
+    frame_count_     = r.u64();
+    has_latched_fb_  = r.boolean();
+    r.bytes(latched_fb_.data(), latched_fb_.size());
+}
 
 void GbaPpu::reset() {
     scanline_ = 0;

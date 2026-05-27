@@ -22,6 +22,8 @@
 #include <cstdint>
 #include <cstddef>
 
+namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
+
 namespace gba {
 
 class GbaPpu {
@@ -73,6 +75,11 @@ public:
 
     // Reset to scanline 0, dot 0. Used by the runtime on cold boot.
     void reset();
+
+    // Save-state serialization (all internal timing + latched frame).
+    // No live pointers to skip. See debug/snapshot.h.
+    void serialize(gbarecomp::debug::SnapshotWriter& w) const;
+    void deserialize(gbarecomp::debug::SnapshotReader& r);
 
     // Total frames completed since reset — useful for sync points.
     uint64_t frame_count() const { return frame_count_; }

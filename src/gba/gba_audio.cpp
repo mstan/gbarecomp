@@ -4,6 +4,8 @@
 
 #include <algorithm>
 
+#include "snapshot.h"
+
 namespace gba {
 
 namespace {
@@ -26,6 +28,76 @@ GbaAudio::GbaAudio() {
     reset();
 }
 GbaAudio::~GbaAudio() = default;
+
+void GbaAudio::serialize(gbarecomp::debug::SnapshotWriter& w) const {
+    // Channels + FIFOs are POD nested structs (no pointers); raw bytes
+    // are stable within a build and the snapshot version gates layout.
+    w.bytes(&ch1_, sizeof(ch1_));
+    w.bytes(&ch2_, sizeof(ch2_));
+    w.boolean(master_enable_);
+    w.u8(volume_l_);
+    w.u8(volume_r_);
+    w.boolean(ch1_left_enable_);
+    w.boolean(ch1_right_enable_);
+    w.boolean(ch2_left_enable_);
+    w.boolean(ch2_right_enable_);
+    w.u8(dmg_volume_ratio_);
+    w.bytes(&fifo_a_, sizeof(fifo_a_));
+    w.bytes(&fifo_b_, sizeof(fifo_b_));
+    w.boolean(direct_a_left_);
+    w.boolean(direct_a_right_);
+    w.boolean(direct_a_timer1_);
+    w.boolean(direct_a_full_volume_);
+    w.boolean(direct_b_left_);
+    w.boolean(direct_b_right_);
+    w.boolean(direct_b_timer1_);
+    w.boolean(direct_b_full_volume_);
+    w.u16(soundbias_);
+    w.u32(cycles_per_sample_);
+    w.u32(cycle_accumulator_);
+    // Pending host output ring so playback resumes seamlessly.
+    w.u32(static_cast<uint32_t>(ring_.size()));
+    if (!ring_.empty()) w.bytes(ring_.data(), ring_.size() * sizeof(int16_t));
+    w.u64(ring_head_);
+    w.u64(ring_tail_);
+    w.u64(samples_generated_);
+    w.bytes(current_samples_, sizeof(current_samples_));
+    w.u32(sample_index_);
+}
+
+void GbaAudio::deserialize(gbarecomp::debug::SnapshotReader& r) {
+    r.bytes(&ch1_, sizeof(ch1_));
+    r.bytes(&ch2_, sizeof(ch2_));
+    master_enable_    = r.boolean();
+    volume_l_         = r.u8();
+    volume_r_         = r.u8();
+    ch1_left_enable_  = r.boolean();
+    ch1_right_enable_ = r.boolean();
+    ch2_left_enable_  = r.boolean();
+    ch2_right_enable_ = r.boolean();
+    dmg_volume_ratio_ = r.u8();
+    r.bytes(&fifo_a_, sizeof(fifo_a_));
+    r.bytes(&fifo_b_, sizeof(fifo_b_));
+    direct_a_left_        = r.boolean();
+    direct_a_right_       = r.boolean();
+    direct_a_timer1_      = r.boolean();
+    direct_a_full_volume_ = r.boolean();
+    direct_b_left_        = r.boolean();
+    direct_b_right_       = r.boolean();
+    direct_b_timer1_      = r.boolean();
+    direct_b_full_volume_ = r.boolean();
+    soundbias_         = r.u16();
+    cycles_per_sample_ = r.u32();
+    cycle_accumulator_ = r.u32();
+    uint32_t ring_len = r.u32();
+    ring_.assign(ring_len, 0);
+    if (ring_len) r.bytes(ring_.data(), ring_len * sizeof(int16_t));
+    ring_head_         = static_cast<std::size_t>(r.u64());
+    ring_tail_         = static_cast<std::size_t>(r.u64());
+    samples_generated_ = r.u64();
+    r.bytes(current_samples_, sizeof(current_samples_));
+    sample_index_      = r.u32();
+}
 
 void GbaAudio::reset() {
     ch1_ = Sound1{};

@@ -113,6 +113,29 @@ run_to_pc               run_to_vblank         run_to_swi
 set_input               press                 clear_input          quit
 ```
 
+## Save states
+
+```
+savestate_save {path}   savestate_load {path}
+```
+
+`savestate_save` writes the full machine state — CPU (regs/CPSR/banked
++ the host-side call-return stack), all memory regions (EWRAM/IWRAM/PAL/
+VRAM/OAM), the IO page + timer/DMA shadow state, the audio mixer + FIFOs,
+the EEPROM save chip, and the PPU — to a versioned binary container
+(magic `GBAS`). The blob records the ROM's SHA-1; `savestate_load`
+refuses a state saved against a different ROM, a different format
+version, or a truncated file.
+
+Snapshots are only valid at the dispatch boundary between `step` calls
+(the host C stack is empty of generated frames there) — which is exactly
+when the command-driven server runs, so any time you can issue a command
+is a safe time to save or load. The host window binds nine slots:
+**F1..F9** load slot 1..9, **Shift+F1..F9** save slot 1..9, each backed
+by a `<rom>.stateN` file. The BIOS image and ROM bytes are not stored in
+the snapshot — they are reloaded and hash-verified at launch, and the
+ROM-SHA-1 gate guarantees the match.
+
 ## Comparison & verification
 
 ```

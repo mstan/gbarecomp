@@ -22,6 +22,8 @@
 #include "gba_memory.h"
 #include "gba_save.h"
 
+namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
+
 namespace gba {
 
 class GbaBus : public MemoryBus {
@@ -103,6 +105,16 @@ public:
     // expose it so the fetch loop can keep it current.
     void set_last_fetched(uint32_t word) { last_fetched_ = word; }
     uint32_t last_fetched() const { return last_fetched_; }
+
+    // Save-state serialization of the bus-owned memory regions
+    // (EWRAM/IWRAM/PAL/VRAM/OAM) plus bus-local scalars. The owned
+    // GbaIo / GbaAudio / GbaSave are serialized separately by the
+    // orchestrator via io()/audio()/save(). The BIOS image and ROM
+    // bytes are NOT serialized — they are reloaded (and hash-verified)
+    // on launch, and the snapshot's ROM-SHA-1 gate guarantees a match.
+    // See debug/snapshot.h.
+    void serialize(gbarecomp::debug::SnapshotWriter& w) const;
+    void deserialize(gbarecomp::debug::SnapshotReader& r);
 
 private:
     const GbaBios* bios_ = nullptr;

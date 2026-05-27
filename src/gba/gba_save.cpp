@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "snapshot.h"
+
 namespace gba {
 
 GbaSave::GbaSave() {
@@ -9,6 +11,37 @@ GbaSave::GbaSave() {
 }
 
 GbaSave::~GbaSave() = default;
+
+void GbaSave::serialize(gbarecomp::debug::SnapshotWriter& w) const {
+    w.boolean(eeprom_enabled_);
+    w.boolean(dirty_);
+    w.u64(eeprom_size_);
+    w.u32(eeprom_addr_bits_);
+    w.u32(eeprom_block_mask_);
+    w.bytes(eeprom_.data(), eeprom_.size());
+    w.u32(static_cast<uint32_t>(command_bits_.size()));
+    if (!command_bits_.empty()) {
+        w.bytes(command_bits_.data(), command_bits_.size());
+    }
+    w.boolean(read_active_);
+    w.u32(read_byte_offset_);
+    w.u32(read_bit_index_);
+}
+
+void GbaSave::deserialize(gbarecomp::debug::SnapshotReader& r) {
+    eeprom_enabled_    = r.boolean();
+    dirty_             = r.boolean();
+    eeprom_size_       = static_cast<std::size_t>(r.u64());
+    eeprom_addr_bits_  = r.u32();
+    eeprom_block_mask_ = r.u32();
+    r.bytes(eeprom_.data(), eeprom_.size());
+    uint32_t cmd_len = r.u32();
+    command_bits_.assign(cmd_len, 0);
+    if (cmd_len) r.bytes(command_bits_.data(), cmd_len);
+    read_active_       = r.boolean();
+    read_byte_offset_  = r.u32();
+    read_bit_index_    = r.u32();
+}
 
 void GbaSave::configure_eeprom(std::size_t bytes) {
     if (bytes == 0 || bytes > kMaxEepromSize) bytes = kMaxEepromSize;

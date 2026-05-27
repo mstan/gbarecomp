@@ -17,6 +17,8 @@
 #include <cstdint>
 #include <vector>
 
+namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
+
 namespace gba {
 
 class GbaAudio {
@@ -95,6 +97,13 @@ public:
     // 0 or 1; SOUNDCNT_H selects which timer clocks each FIFO.
     void timer_overflow(int timer_id);
     bool fifo_needs_dma(int fifo_id) const;
+
+    // Save-state serialization. Captures the full guest mixer state
+    // (channels, FIFOs, master, soundbias, sample accumulator) plus the
+    // pending host output ring so playback resumes seamlessly. The
+    // diagnostic FIFO trace ring is NOT serialized. See debug/snapshot.h.
+    void serialize(gbarecomp::debug::SnapshotWriter& w) const;
+    void deserialize(gbarecomp::debug::SnapshotReader& r);
 
 private:
     // ── Channel 1: square wave with frequency sweep ──────────────

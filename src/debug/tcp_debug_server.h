@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 
 struct ArmCpuState;
 struct RuntimeTraceEntry;
@@ -41,6 +42,12 @@ public:
     using StepFn = std::function<bool()>;
     using RuntimeTraceCopyFn =
         std::function<uint32_t(RuntimeTraceEntry*, uint32_t)>;
+    // Save-state hooks. The host wires these to debug::save_state /
+    // load_state with a fully-populated SnapshotContext. Invoked only
+    // between step calls (clean dispatch boundary). On failure, fill
+    // `err` and return false.
+    using SnapshotFn =
+        std::function<bool(const std::string& path, std::string& err)>;
 
     struct Context {
         armv4t::CPUState* cpu = nullptr;
@@ -49,6 +56,8 @@ public:
         gba::GbaPpu*      ppu = nullptr;
         StepFn            step;       // advances one PPU frame
         StepFn            step_inst;  // advances one CPU instruction
+        SnapshotFn        savestate_save;  // write full machine state
+        SnapshotFn        savestate_load;  // restore full machine state
         RuntimeTraceCopyFn runtime_trace_copy;
         // Mirror of the host's counters so `counters` queries can
         // report them. Host updates these between commands.

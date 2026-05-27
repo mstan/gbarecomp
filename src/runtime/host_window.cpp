@@ -194,8 +194,18 @@ HostWindow::Events HostWindow::pump() {
         } else if (e.type == SDL_WINDOWEVENT &&
                    e.window.event == SDL_WINDOWEVENT_CLOSE) {
             ev.quit = true;
-        } else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) {
-            ev.quit = true;
+        } else if (e.type == SDL_KEYDOWN && e.key.repeat == 0) {
+            // Edge-triggered hotkeys (ignore key-repeat). F1..F9 are
+            // save-state slots: plain = load, Shift = save. SDL's F1..F12
+            // keycodes are contiguous, so slot = sym - F1 + 1.
+            SDL_Keycode sym = e.key.keysym.sym;
+            if (sym == SDLK_ESCAPE) {
+                ev.quit = true;
+            } else if (sym >= SDLK_F1 && sym <= SDLK_F9) {
+                int slot = static_cast<int>(sym - SDLK_F1) + 1;
+                if (e.key.keysym.mod & KMOD_SHIFT) ev.save_slot = slot;
+                else                               ev.load_slot = slot;
+            }
         }
     }
 

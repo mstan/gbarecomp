@@ -27,6 +27,7 @@
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
 #include "sha1.h"
+#include "snapshot.h"
 #include "tcp_debug_server.h"
 
 #include <algorithm>
@@ -829,6 +830,34 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         return false;
     };
 
+    // ── Save-state hooks ───────────────────────────────────────────
+    // Only ever invoked at a clean dispatch boundary: TCP commands run
+    // between step calls, and the host-window hotkey is sampled at the
+    // top of a loop iteration (never mid-runtime_dispatch). See
+    // src/debug/snapshot.h for why that boundary is the only safe one.
+    auto make_snapshot_ctx = [&]() {
+        debug::SnapshotContext sc;
+        sc.bus            = &bus;
+        sc.ppu            = &ppu;
+        sc.rom_sha1       = rom_sha1.c_str();
+        sc.taken          = &taken;
+        sc.cycles_elapsed = &cycles_elapsed;
+        sc.vblank_count   = &vblank_count;
+        return sc;
+    };
+    auto do_savestate_save = [&](const std::string& path,
+                                 std::string& e) -> bool {
+        return debug::save_state(path.c_str(), make_snapshot_ctx(), &e);
+    };
+    auto do_savestate_load = [&](const std::string& path,
+                                 std::string& e) -> bool {
+        if (!debug::load_state(path.c_str(), make_snapshot_ctx(), &e)) {
+            return false;
+        }
+        sync_frame_counter();  // realign vblank_count with restored PPU
+        return true;
+    };
+
     if (args.tcp_port > 0) {
         debug::TcpDebugServer server;
         debug::TcpDebugServer::Context ctx;
@@ -841,6 +870,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         ctx.ppu = &ppu;
         ctx.step = step_frame;
         ctx.step_inst = step_once;
+        ctx.savestate_save = do_savestate_save;
+        ctx.savestate_load = do_savestate_load;
         ctx.irq_entries = &irq_entries;
         ctx.swi_entries = &swi_entries;
         ctx.halt_steps = &halt_steps;
@@ -872,11 +903,52 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         live_fb.assign(gba::GbaPpu::kFramebufferBytes, 0);
     }
 
+    // Host-window save-state slots: the ROM path with a .stateN
+    // extension (N = 1..9). Shift+Fn writes slot N, Fn restores it.
+    auto slot_path = [&](int slot) -> std::string {
+        std::filesystem::path p(args.rom);
+        p.replace_extension(".state" + std::to_string(slot));
+        return p.string();
+    };
+
+    uint64_t last_presented_frame = ppu.frame_count();
+
     auto pump_host_input = [&]() {
         if (!args.window) return;
         auto ev = win.pump();
         bus.io().set_keyinput(ev.keyinput);
         if (ev.quit) host_quit = true;
+        if (ev.save_slot) {
+            std::string path = slot_path(ev.save_slot);
+            std::string e;
+            if (do_savestate_save(path, e)) {
+                std::printf("savestate_saved slot=%d path=\"%s\"\n",
+                            ev.save_slot, path.c_str());
+                std::fflush(stdout);
+            } else {
+                std::fprintf(stderr,
+                             "[gbarecomp:runtime] savestate save (slot %d) "
+                             "failed: %s\n", ev.save_slot, e.c_str());
+            }
+        }
+        if (ev.load_slot) {
+            std::string path = slot_path(ev.load_slot);
+            std::string e;
+            if (do_savestate_load(path, e)) {
+                std::printf("savestate_loaded slot=%d path=\"%s\" pc=0x%08x "
+                            "frame=%llu\n", ev.load_slot, path.c_str(),
+                            g_cpu.R[15],
+                            static_cast<unsigned long long>(ppu.frame_count()));
+                std::fflush(stdout);
+                // Force the next iteration to re-present the restored
+                // frame instead of waiting for frame_count to advance.
+                last_presented_frame = ppu.frame_count() - 1;
+            } else {
+                std::fprintf(stderr,
+                             "[gbarecomp:runtime] savestate load (slot %d) "
+                             "failed: %s\n", ev.load_slot, e.c_str());
+            }
+        }
     };
 
     const bool open_ended = (args.window || args.frames >= 0);
@@ -884,7 +956,6 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         ? (args.steps > 16 ? args.steps : std::numeric_limits<int>::max() / 2)
         : args.steps;
 
-    uint64_t last_presented_frame = ppu.frame_count();
     int dispatches_since_pump = 0;
     if (args.window) pump_host_input();
 
