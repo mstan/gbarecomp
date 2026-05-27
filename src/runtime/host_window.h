@@ -54,6 +54,9 @@ public:
         // dispatch boundary), never mid-frame.
         int      save_slot = 0;
         int      load_slot = 0;
+        // Level-triggered: true while the fast-forward key (Tab) is
+        // held. Uncaps the frame limiter for as long as it's down.
+        bool     fast_forward = false;
     };
     Events pump();
 

@@ -196,7 +196,8 @@ if(GBARECOMP_SDL2_OK)
 endif()
 if(WIN32 OR MSYS)
     # asset_picker uses GetOpenFileNameA (comdlg32) and MessageBoxA (user32).
-    target_link_libraries(gbarecomp_runtime PUBLIC comdlg32 user32)
+    # host_platform's FramePacer uses timeBeginPeriod/timeEndPeriod (winmm).
+    target_link_libraries(gbarecomp_runtime PUBLIC comdlg32 user32 winmm)
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────

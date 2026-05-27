@@ -90,9 +90,11 @@ bool HostWindow::open(int scale, const char* title) {
         delete b;
         return false;
     }
-    b->renderer = SDL_CreateRenderer(b->window, -1,
-                                     SDL_RENDERER_ACCELERATED |
-                                     SDL_RENDERER_PRESENTVSYNC);
+    // No PRESENTVSYNC: emulation speed is governed by FramePacer at the
+    // GBA's 59.7275 Hz, not the host monitor's refresh rate. Coupling to
+    // vsync ran the game at monitor speed (MC-HP-004). present() must
+    // not block on the display.
+    b->renderer = SDL_CreateRenderer(b->window, -1, SDL_RENDERER_ACCELERATED);
     if (!b->renderer) {
         // Fall back to software renderer if accelerated path is
         // unavailable (headless Windows, RDP, etc.).
@@ -218,6 +220,7 @@ HostWindow::Events HostWindow::pump() {
         if (bit >= 0) keys &= static_cast<uint16_t>(~(1u << bit));
     }
     ev.keyinput = keys;
+    ev.fast_forward = ks[SDL_SCANCODE_TAB] != 0;  // hold Tab to uncap
     return ev;
 }
 

@@ -23,6 +23,7 @@
 #include "gba_bus.h"
 #include "gba_ppu.h"
 #include "gba_rom_header.h"
+#include "host_platform.h"
 #include "host_window.h"
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
@@ -39,6 +40,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -888,6 +890,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     HostWindow win;
     std::vector<uint8_t> live_fb;
+    // Wall-clock frame limiter — constructed only for windowed runs so
+    // the Windows timer-resolution bump doesn't apply to headless/TCP
+    // batch runs (which intentionally run uncapped).
+    std::optional<FramePacer> pacer;
     if (args.window) {
         if (!HostWindow::is_available()) {
             std::fprintf(stderr,
@@ -901,6 +907,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             return 1;
         }
         live_fb.assign(gba::GbaPpu::kFramebufferBytes, 0);
+        pacer.emplace();  // paces to the GBA's 59.7275 Hz
     }
 
     // Host-window save-state slots: the ROM path with a .stateN
@@ -918,6 +925,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         auto ev = win.pump();
         bus.io().set_keyinput(ev.keyinput);
         if (ev.quit) host_quit = true;
+        if (pacer) pacer->set_uncapped(ev.fast_forward);
         if (ev.save_slot) {
             std::string path = slot_path(ev.save_slot);
             std::string e;
@@ -943,6 +951,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 // Force the next iteration to re-present the restored
                 // frame instead of waiting for frame_count to advance.
                 last_presented_frame = ppu.frame_count() - 1;
+                // The load jumped guest time; realign the pacer so it
+                // doesn't burn the accumulated lag catching up.
+                if (pacer) pacer->reset();
             } else {
                 std::fprintf(stderr,
                              "[gbarecomp:runtime] savestate load (slot %d) "
@@ -988,6 +999,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (args.frames >= 0 && frames_presented >= args.frames) {
                     host_quit = true;
                 }
+                // Pace to real GBA time. Decoupled from monitor vsync
+                // (MC-HP-004); hold Tab to uncap (fast-forward).
+                if (pacer) pacer->wait_for_next_frame();
             }
         }
         if (!args.window && args.frames >= 0 &&
