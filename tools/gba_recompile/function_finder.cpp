@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 
 #include "arm_decode.h"
 #include "thumb_decode.h"
@@ -47,6 +48,14 @@ uint32_t ror32(uint32_t v, unsigned n) {
     n &= 31u;
     if (n == 0) return v;
     return (v >> n) | (v << (32u - n));
+}
+
+// Diagnostic toggle: GBARECOMP_NO_JT=1 disables automatic jump-table
+// detection, so a run can isolate the detector's cost from the baseline
+// finder. Read once.
+bool jump_table_detection_enabled() {
+    static const bool enabled = (std::getenv("GBARECOMP_NO_JT") == nullptr);
+    return enabled;
 }
 
 }  // namespace
@@ -210,6 +219,39 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         uint32_t value = 0;
     };
     RegConst reg_const[16];
+
+    // Jump-table address tracking (MC-HP-000). The compiler builds a
+    // dispatch like:  LDR Rb,=table ; LSL Ri,Ri,#k ; ADD Ra,Ri,Rb ;
+    // LDR Rt,[Ra] ; BX Rt (or BL into the bx-rN veneer). reg_const
+    // already resolves Rb from its literal load; these two track the
+    // scaled index and the resulting element-address register so the
+    // LDR that fetches the entry can reveal the table.
+    struct RegScaled {  // Rd = (unknown index) << shift
+        bool    known = false;
+        uint8_t shift = 0;
+    };
+    RegScaled reg_scaled[16];
+    struct RegTableAddr {  // Rd = base + (scaled index)
+        bool     known  = false;
+        uint32_t base   = 0;
+        uint32_t stride = 0;
+    };
+    RegTableAddr reg_table[16];
+
+    // A jump-table candidate awaiting confirmation. Set when an indexed
+    // load fetches a would-be entry into `dest`; promoted to a real
+    // table ONLY when `dest` is subsequently used as a control-flow
+    // target (BX dest / MOV pc,dest / BL into a `bx dest` veneer). This
+    // is what distinguishes a jump table from an ordinary indexed load
+    // of a DATA pointer (which is dereferenced, not branched to) — the
+    // distinction that keeps the detector from seeding garbage.
+    struct PendingJt {
+        bool     active = false;
+        uint32_t base   = 0;
+        uint32_t stride = 0;
+        uint8_t  dest   = 0;
+    };
+    PendingJt pend;
 
     struct RegSym {
         bool    known = false;
@@ -386,6 +428,75 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 FunctionSeed{target, target_mode, ""});
         }
         ++stats_.branch_targets_discovered;
+    };
+
+    // Recognize an abs32 jump table at `base` revealed by an indexed
+    // load at `site_pc`. Mirrors the manual [[jump_table]] expansion in
+    // main.cpp (mark table bytes as data + seed each entry) but derives
+    // base/count automatically. Precision-first per the sibling-recomp
+    // survey: count is bounded by a validate-and-stop gate — an entry
+    // that isn't a readable in-ROM code pointer (decoding to a defined
+    // instruction in its bit0-selected mode) ends the table. Overlap
+    // with a manual entry is benign: a manual [[jump_table]] already
+    // marks the bytes as a data_range, so the gate stops at i=0 and we
+    // emit nothing (the manual seeds stand).
+    auto emit_jump_table = [&](uint32_t base, uint32_t stride,
+                               uint32_t site_pc) {
+        if (stride != 4) return;  // abs32 only in this pass
+        for (const auto& t : auto_jump_tables_) {
+            if (t.base == base) return;  // already recognized
+        }
+        constexpr uint32_t kMaxEntries = 1024;
+        std::vector<FunctionSeed> targets;
+        for (uint32_t i = 0; i < kMaxEntries; ++i) {
+            uint32_t pos = base + i * stride;
+            if (!can_read_at(pos, 4)) break;
+            if (addr_in_data_range(pos)) break;  // ran into known data
+            uint32_t raw = read_u32(pos);
+            uint32_t tgt = raw & ~uint32_t{1};
+            CpuMode tmode = (raw & 1u) ? CpuMode::Thumb : CpuMode::Arm;
+            uint32_t tstep = (tmode == CpuMode::Thumb) ? 2u : 4u;
+            if (tgt == 0 || !can_read_at(tgt, tstep) ||
+                addr_in_data_range(tgt)) {
+                break;
+            }
+            // Strong entry gate: a real jump-table entry points at a
+            // FUNCTION PROLOGUE — THUMB `push {..,(lr)}` or ARM
+            // `stmfd sp!,{..}`. A `!is_undefined` check was far too weak
+            // (most 0x08xxxxxx data words decode to *some* instruction),
+            // so the table over-counted past its real end into trailing
+            // data pointers, seeded garbage targets, and exploded
+            // discovery when those were walked as code. Requiring a
+            // prologue stops the count at the first non-prologue word
+            // and rejects false-positive tables outright. Raw-encoding
+            // check (decoder-independent): THUMB PUSH = 1011 010x
+            // (0xB4xx/0xB5xx); ARM STMFD sp! = cond 100 1 0 0 1 0 Rn=SP.
+            uint32_t src = tgt;
+            if (!map_addr_to_source(tgt, &src)) break;
+            bool prologue;
+            if (tmode == CpuMode::Thumb) {
+                prologue = (read_u16(tgt) & 0xFE00u) == 0xB400u;
+            } else {
+                prologue = (read_u32(tgt) & 0x0FFF0000u) == 0x092D0000u;
+            }
+            if (!prologue) break;
+            targets.push_back(FunctionSeed{tgt, tmode, ""});
+        }
+        if (targets.size() < 2) return;  // too short to trust as a table
+
+        uint32_t count = static_cast<uint32_t>(targets.size());
+        data_ranges_.push_back(
+            DataRange{base, base + count * stride, "auto jump_table"});
+        for (uint32_t i = 0; i < count; ++i) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "autojt_%08X_%02u", base, i);
+            targets[i].name = buf;
+            mode_switch_seeds_.push_back(targets[i]);
+            ++stats_.auto_jump_table_targets;
+        }
+        auto_jump_tables_.push_back(
+            AutoJumpTable{base, stride, count, site_pc, entry_mode});
+        ++stats_.auto_jump_tables;
     };
 
     auto eval_dp_imm_pc_write = [&](const armv4t::Instr& i,
@@ -726,6 +837,106 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             }
         }
 
+        // Jump-table confirmation (MC-HP-000). If a candidate from a
+        // prior indexed load is pending, check whether THIS instruction
+        // uses the loaded register as a control-flow target. That
+        // promotion is the proof it's a jump table rather than an
+        // indexed DATA-pointer load (which is dereferenced, not branched
+        // to). Without this gate the detector seeds garbage and the walk
+        // explodes.
+        if (pend.active) {
+            bool confirmed = false;
+            const armv4t::Op2& po = ins.op2;
+            if (ins.op == armv4t::IrOp::BX && ins.rm == pend.dest) {
+                confirmed = true;  // BX dest
+            } else if (ins.rd == 15 &&
+                       po.kind == armv4t::Op2::Kind::Shifted &&
+                       !po.shifted.by_register &&
+                       po.shifted.imm_or_rs == 0 &&
+                       po.shifted.rm == pend.dest) {
+                confirmed = true;  // MOV pc, dest (computed jump)
+            } else if (ins.is_call && ins.branch_target != 0 &&
+                       can_read_at(ins.branch_target, 2)) {
+                // ARM BL into a `bx dest` veneer (single-instruction BL).
+                armv4t::Instr v = armv4t::ThumbDecoder::decode(
+                    read_u16(ins.branch_target), ins.branch_target);
+                if (v.op == armv4t::IrOp::BX && v.rm == pend.dest) {
+                    confirmed = true;
+                }
+            } else if (entry_mode == CpuMode::Thumb &&
+                       ins.op == armv4t::IrOp::BL_prefix &&
+                       can_read_at(ins.pc + 2, 2)) {
+                // THUMB BL is a prefix/suffix halfword PAIR; the full
+                // target only exists once combined. This is the dominant
+                // dispatch form — `bl <bx-dest veneer>` — so without it
+                // every THUMB-BL-dispatched table is missed. Combine the
+                // pair (same math as the finder's direct-BL handling),
+                // then check the veneer it lands on.
+                armv4t::Instr lo = armv4t::ThumbDecoder::decode(
+                    read_u16(ins.pc + 2), ins.pc + 2);
+                if (lo.op == armv4t::IrOp::BL_suffix) {
+                    uint32_t full =
+                        (ins.branch_target + lo.swi_imm) & ~uint32_t{1};
+                    if (can_read_at(full, 2)) {
+                        armv4t::Instr v = armv4t::ThumbDecoder::decode(
+                            read_u16(full), full);
+                        if (v.op == armv4t::IrOp::BX &&
+                            v.rm == pend.dest) {
+                            confirmed = true;
+                        }
+                    }
+                }
+            }
+            if (confirmed) {
+                emit_jump_table(pend.base, pend.stride, ins.pc);
+                pend.active = false;
+            } else if (ins.rd == pend.dest) {
+                pend.active = false;  // dest overwritten before any branch
+            }
+        }
+
+        // Jump-table detection. An indexed load of a would-be table entry
+        // whose address is (tracked ROM-pointer base) + (index<<2). Two
+        // shapes:
+        //   (a) register-offset:  LDR Rt,[Rb, Ri, LSL #2]
+        //   (b) the common THUMB form where a prior ADD folded
+        //       base + (index<<2) into reg_table[] (see maintenance below).
+        // Records a pending candidate; emission waits for the
+        // confirmation above. Detection runs before the tracker update so
+        // reg_table[] from the preceding ADD is still live even when
+        // Rt == the base reg.
+        if (jump_table_detection_enabled() && ins.op == armv4t::IrOp::LDR) {
+            uint32_t jt_base = 0;
+            bool jt = false;
+            if (ins.mem.by_register && ins.mem.rn < 16 &&
+                ins.mem.reg_offset.rm < 16 &&
+                ins.mem.reg_offset.type == armv4t::ShiftType::LSL &&
+                !ins.mem.reg_offset.by_register &&
+                ins.mem.reg_offset.imm_or_rs == 2 &&
+                reg_const[ins.mem.rn].known &&
+                addr_in_rom(reg_const[ins.mem.rn].value)) {
+                jt_base = reg_const[ins.mem.rn].value;
+                jt = true;
+            } else if (!ins.mem.by_register && ins.mem.rn < 16 &&
+                       reg_table[ins.mem.rn].known &&
+                       reg_table[ins.mem.rn].stride == 4) {
+                int32_t off = 0;
+                if (ins.mem.pre_indexed) {
+                    int32_t imm = static_cast<int32_t>(ins.mem.imm_offset);
+                    off = ins.mem.add ? imm : -imm;
+                }
+                jt_base = reg_table[ins.mem.rn].base +
+                          static_cast<uint32_t>(off);
+                jt = true;
+            }
+            if (jt) {
+                pend.active = true;
+                pend.base   = jt_base;
+                pend.stride = 4;
+                pend.dest   = ins.rd;
+            }
+        }
+
         if (ins.op == armv4t::IrOp::STR) {
             uint8_t rn = 0;
             int32_t offset = 0;
@@ -807,6 +1018,8 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                    ins.block.rn < 16) {
             reg_const[ins.block.rn].known = false;
             reg_sym[ins.block.rn].known = false;
+            reg_scaled[ins.block.rn].known = false;
+            reg_table[ins.block.rn].known = false;
             invalidate_mem_base(ins.block.rn);
             invalidate_sym_base(ins.block.rn);
         }
@@ -900,6 +1113,57 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             invalidate_sym_base(ins.rd);
         }
 
+        // Maintain the jump-table address trackers (independent of the
+        // reg_const tracker above; consumed by the LDR detection). A
+        // write to Rd clears its scaled/table state unless this same
+        // instruction re-establishes it.
+        if (ins.rd < 16) {
+            bool set_scaled = false, set_table = false;
+            const armv4t::Op2& o = ins.op2;
+            if (ins.op == armv4t::IrOp::MOV &&
+                o.kind == armv4t::Op2::Kind::Shifted &&
+                !o.shifted.by_register &&
+                o.shifted.type == armv4t::ShiftType::LSL &&
+                o.shifted.imm_or_rs > 0 && o.shifted.rm < 16) {
+                // Rd = (unknown index) << k
+                reg_scaled[ins.rd].known = true;
+                reg_scaled[ins.rd].shift = o.shifted.imm_or_rs;
+                set_scaled = true;
+            } else if (ins.op == armv4t::IrOp::ADD &&
+                       o.kind == armv4t::Op2::Kind::Shifted &&
+                       !o.shifted.by_register && o.shifted.rm < 16 &&
+                       ins.rn < 16) {
+                const uint8_t rm = o.shifted.rm;
+                auto rom_const = [&](uint8_t r) {
+                    return reg_const[r].known &&
+                           addr_in_rom(reg_const[r].value);
+                };
+                if (o.shifted.type == armv4t::ShiftType::LSL &&
+                    o.shifted.imm_or_rs > 0) {
+                    // One-instruction scaled add: ADD Rd, Rbase, Ri LSL#k
+                    if (rom_const(ins.rn)) {
+                        reg_table[ins.rd] = {true, reg_const[ins.rn].value,
+                                             1u << o.shifted.imm_or_rs};
+                        set_table = true;
+                    }
+                } else if (o.shifted.imm_or_rs == 0) {
+                    // Plain reg add: one side a ROM-pointer base, the
+                    // other a previously-scaled index.
+                    if (rom_const(ins.rn) && reg_scaled[rm].known) {
+                        reg_table[ins.rd] = {true, reg_const[ins.rn].value,
+                                             1u << reg_scaled[rm].shift};
+                        set_table = true;
+                    } else if (rom_const(rm) && reg_scaled[ins.rn].known) {
+                        reg_table[ins.rd] = {true, reg_const[rm].value,
+                                             1u << reg_scaled[ins.rn].shift};
+                        set_table = true;
+                    }
+                }
+            }
+            if (!set_scaled) reg_scaled[ins.rd].known = false;
+            if (!set_table)  reg_table[ins.rd].known = false;
+        }
+
         if ((ins.op == armv4t::IrOp::LDR ||
              ins.op == armv4t::IrOp::LDRB ||
              ins.op == armv4t::IrOp::LDRH ||
@@ -911,6 +1175,8 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             ins.mem.writeback && ins.mem.rn < 16) {
             reg_const[ins.mem.rn].known = false;
             reg_sym[ins.mem.rn].known = false;
+            reg_scaled[ins.mem.rn].known = false;
+            reg_table[ins.mem.rn].known = false;
             invalidate_mem_base(ins.mem.rn);
             invalidate_sym_base(ins.mem.rn);
         }
@@ -996,6 +1262,19 @@ void FunctionFinder::run(std::size_t max_functions) {
     std::size_t pos = 0;
     while (pos < worklist.size() &&
            (functions_.size() < max_functions || required_remaining > 0)) {
+        // Safety net: discovery must converge (worklist drains toward
+        // empty). A runaway past this bound means a detector or decoder
+        // change is seeding garbage — halt loudly rather than exhaust
+        // memory. Baseline Minish Cap discovery peaks near ~170k, so
+        // 2M is far above any healthy run.
+        if (worklist.size() > 2000000u) {
+            std::fprintf(stderr,
+                "[finder] WORKLIST BRAKE at %zu (pos=%zu functions=%zu) "
+                "— halting; discovery is not converging\n",
+                worklist.size(), pos, functions_.size());
+            std::fflush(stderr);
+            break;
+        }
         QueuedSeed queued = worklist[pos++];
         if (queued.required && required_remaining > 0) {
             --required_remaining;

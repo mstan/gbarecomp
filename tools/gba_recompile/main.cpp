@@ -829,6 +829,10 @@ int main(int argc, char** argv) {
         std::printf("  jump_table_expanded:   %zu  "
                     "seeds from [[jump_table]] decode\n",
                     jump_table_expanded_seeds);
+        std::printf("  auto_jump_tables:      %zu  (%zu targets) "
+                    "auto-detected, no hint\n",
+                    stats.auto_jump_tables,
+                    stats.auto_jump_table_targets);
         std::printf("  data_ranges_honored:   %zu\n",
                     cfg.data_ranges.size() + cfg.jump_tables.size());
         std::printf("  code_copies:           %zu\n",
@@ -837,7 +841,17 @@ int main(int argc, char** argv) {
                     stats.excluded_count);
         std::printf("  TOTAL emitted:         %zu\n",
                     stats.functions_total);
+        // Per-table dump so the auto-detected bases can be diffed
+        // against the manual ground-truth set (MC-HP-000 validation).
+        for (const auto& jt : finder.auto_jump_tables()) {
+            std::printf("  auto_jt 0x%08X count=%u stride=%u site=0x%08X\n",
+                        jt.base, jt.count, jt.stride, jt.site_pc);
+        }
     }
+    // Flush the discovery summary now so it's observable before the
+    // (much slower) codegen pass — lets a measurement run read the
+    // numbers without waiting for full generation.
+    std::fflush(stdout);
 
     // Make sure the output dir exists.
 #ifdef _WIN32

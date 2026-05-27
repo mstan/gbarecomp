@@ -63,6 +63,17 @@ struct Function {
     bool has_indirect_transfer = false;
 };
 
+// A jump table the finder recognized automatically (no [[jump_table]]
+// hint). Recorded for the discovery summary and for validating the
+// detector against the manual ground-truth set. See MC-HP-000.
+struct AutoJumpTable {
+    uint32_t base;       // table base address (guest)
+    uint32_t stride;     // bytes per entry (4 = abs32)
+    uint32_t count;      // entries accepted by the validate-and-stop gate
+    uint32_t site_pc;    // PC of the indexed load that revealed the table
+    CpuMode  site_mode;  // mode of the dispatching code
+};
+
 struct FinderStats {
     std::size_t functions_total = 0;
     std::size_t functions_arm = 0;
@@ -70,6 +81,9 @@ struct FinderStats {
     std::size_t indirect_transfer_count = 0;
     std::size_t branch_targets_discovered = 0;
     std::size_t undefined_instr_count = 0;
+    // Automatic jump-table detection (MC-HP-000).
+    std::size_t auto_jump_tables = 0;          // tables recognized
+    std::size_t auto_jump_table_targets = 0;   // entry targets seeded
     // Discovery-source breakdown — populated by run() against the
     // set of (addr, mode) keys seen across seeds vs walks.
     std::size_t manual_seeds_total = 0;     // # of seeds the caller added
@@ -142,6 +156,11 @@ public:
     const std::vector<Function>& functions() const { return functions_; }
     const FinderStats& stats() const { return stats_; }
 
+    // Jump tables recognized automatically during discovery.
+    const std::vector<AutoJumpTable>& auto_jump_tables() const {
+        return auto_jump_tables_;
+    }
+
     // Non-empty when the recompile must abort. See
     // docs/TOML_SCHEMA.md "[[data_range]]" — control flow into
     // a data_range is a hard error.
@@ -162,6 +181,7 @@ private:
     std::vector<FunctionSeed> seeds_;
     std::vector<Function>     functions_;
     std::unordered_map<uint64_t, std::size_t> visited_;  // key=(addr<<1)|mode
+    std::vector<AutoJumpTable> auto_jump_tables_;
     FinderStats stats_{};
 
     std::vector<DataRange>           data_ranges_;
