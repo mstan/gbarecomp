@@ -1235,6 +1235,14 @@ void FunctionFinder::run(std::size_t max_functions) {
     }
     stats_.manual_seeds_total = seeds_.size();
 
+    // Dedup-at-push: every (addr,mode) ever queued. discover_one already
+    // dedups at visit time, so the worklist otherwise fills with
+    // already-queued/visited no-ops — on Minish Cap it bloated to ~170k
+    // of mostly-duplicate branch targets. Skipping a re-push is
+    // output-neutral (the discovered closure is unchanged) and is the
+    // dominant regen-speed cost. Seeded with the initial seed keys.
+    std::unordered_set<uint64_t> enqueued = seed_keys;
+
     struct QueuedSeed {
         FunctionSeed seed;
         bool required;
@@ -1312,6 +1320,7 @@ void FunctionFinder::run(std::size_t max_functions) {
             // Mark walk-origin. If this address was ALSO a seed,
             // it now has both bits set (redundant_manual).
             origin_mask[k] |= 2u;
+            if (!enqueued.insert(k).second) continue;  // already queued
             discovered_seeds.push_back(
                 QueuedSeed{FunctionSeed{t, fn.mode, ""}, current_required});
             if (current_required) {
@@ -1324,6 +1333,7 @@ void FunctionFinder::run(std::size_t max_functions) {
         for (const auto& ms : mode_switch_seeds_) {
             uint64_t k = visit_key(ms.addr, ms.mode);
             origin_mask[k] |= 2u;
+            if (!enqueued.insert(k).second) continue;  // already queued
             discovered_seeds.push_back(QueuedSeed{ms, current_required});
             if (current_required) {
                 ++required_remaining;
