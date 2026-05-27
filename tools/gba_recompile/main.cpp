@@ -833,6 +833,16 @@ int main(int argc, char** argv) {
                     "auto-detected, no hint\n",
                     stats.auto_jump_tables,
                     stats.auto_jump_table_targets);
+        std::printf("  jt_confirm_events:     %zu  (%zu distinct: emitted %zu, "
+                    "overlap %zu, rejected %zu unsized + %zu bound-mismatch)\n",
+                    stats.jt_confirmations,
+                    stats.auto_jump_tables + stats.jt_overlap_suppressed +
+                        stats.jt_rejected_unsized +
+                        stats.jt_rejected_bound_mismatch,
+                    stats.auto_jump_tables,
+                    stats.jt_overlap_suppressed,
+                    stats.jt_rejected_unsized,
+                    stats.jt_rejected_bound_mismatch);
         std::printf("  data_ranges_honored:   %zu\n",
                     cfg.data_ranges.size() + cfg.jump_tables.size());
         std::printf("  code_copies:           %zu\n",
@@ -844,8 +854,11 @@ int main(int argc, char** argv) {
         // Per-table dump so the auto-detected bases can be diffed
         // against the manual ground-truth set (MC-HP-000 validation).
         for (const auto& jt : finder.auto_jump_tables()) {
-            std::printf("  auto_jt 0x%08X count=%u stride=%u site=0x%08X\n",
-                        jt.base, jt.count, jt.stride, jt.site_pc);
+            std::printf("  auto_jt 0x%08X count=%u stride=%u site=0x%08X "
+                        "%s %s\n",
+                        jt.base, jt.count, jt.stride, jt.site_pc,
+                        jt.interworking ? "BX" : "MOVpc",
+                        jt.bounded ? "bounded" : "walked");
         }
     }
     // Flush the discovery summary now so it's observable before the

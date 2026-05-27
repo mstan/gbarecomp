@@ -67,11 +67,13 @@ struct Function {
 // hint). Recorded for the discovery summary and for validating the
 // detector against the manual ground-truth set. See MC-HP-000.
 struct AutoJumpTable {
-    uint32_t base;       // table base address (guest)
-    uint32_t stride;     // bytes per entry (4 = abs32)
-    uint32_t count;      // entries accepted by the validate-and-stop gate
-    uint32_t site_pc;    // PC of the indexed load that revealed the table
-    CpuMode  site_mode;  // mode of the dispatching code
+    uint32_t base;          // table base address (guest)
+    uint32_t stride;        // bytes per entry (4 = abs32)
+    uint32_t count;         // entries emitted
+    uint32_t site_pc;       // PC of the indexed load that revealed the table
+    CpuMode  site_mode;     // mode of the dispatching code
+    bool     interworking;  // BX/veneer (per-entry bit0 mode) vs MOV pc (mode = site_mode)
+    bool     bounded;       // count came from an exact CMP bound (vs walk)
 };
 
 struct FinderStats {
@@ -82,8 +84,12 @@ struct FinderStats {
     std::size_t branch_targets_discovered = 0;
     std::size_t undefined_instr_count = 0;
     // Automatic jump-table detection (MC-HP-000).
-    std::size_t auto_jump_tables = 0;          // tables recognized
+    std::size_t auto_jump_tables = 0;          // tables emitted
     std::size_t auto_jump_table_targets = 0;   // entry targets seeded
+    std::size_t jt_confirmations = 0;          // indexed-load+branch confirmed
+    std::size_t jt_rejected_unsized = 0;       // confirmed, no bound, walk found <2
+    std::size_t jt_rejected_bound_mismatch = 0;// bound said N but an entry wasn't code
+    std::size_t jt_overlap_suppressed = 0;     // table already in a data_range (manual hint)
     // Discovery-source breakdown — populated by run() against the
     // set of (addr, mode) keys seen across seeds vs walks.
     std::size_t manual_seeds_total = 0;     // # of seeds the caller added
@@ -182,6 +188,11 @@ private:
     std::vector<Function>     functions_;
     std::unordered_map<uint64_t, std::size_t> visited_;  // key=(addr<<1)|mode
     std::vector<AutoJumpTable> auto_jump_tables_;
+    // Every jump-table base ever handed to the emitter, so the same table
+    // reached by multiple seed walks is accounted once (the dispatch
+    // confirmation can fire from several overlapping walks). Keeps the
+    // emitted / overlap / rejected tallies counting distinct tables.
+    std::unordered_set<uint32_t> jt_seen_bases_;
     FinderStats stats_{};
 
     std::vector<DataRange>           data_ranges_;

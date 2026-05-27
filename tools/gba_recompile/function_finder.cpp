@@ -58,6 +58,15 @@ bool jump_table_detection_enabled() {
     return enabled;
 }
 
+// Diagnostic toggle: GBARECOMP_JT_REPORT=1 prints, to stderr, every
+// confirmed jump table and the emitter's decision (emitted N / rejected
+// why). Used to measure how many confirmed tables the count-terminator
+// actually emits — the MC-HP-000 coverage metric. Read once.
+bool jt_report_enabled() {
+    static const bool enabled = (std::getenv("GBARECOMP_JT_REPORT") != nullptr);
+    return enabled;
+}
+
 }  // namespace
 
 FunctionFinder::FunctionFinder(const uint8_t* rom_bytes,
@@ -227,16 +236,41 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
     // scaled index and the resulting element-address register so the
     // LDR that fetches the entry can reveal the table.
     struct RegScaled {  // Rd = (unknown index) << shift
-        bool    known = false;
-        uint8_t shift = 0;
+        bool     known = false;
+        uint8_t  shift = 0;
+        // Exact range bound carried from a `CMP index,#N; B{hi,cs}` guard
+        // (max_index is the largest in-range index). Lets the jump-table
+        // emitter size the table precisely instead of guessing.
+        bool     bound_known = false;
+        uint32_t max_index   = 0;
     };
     RegScaled reg_scaled[16];
     struct RegTableAddr {  // Rd = base + (scaled index)
         bool     known  = false;
         uint32_t base   = 0;
         uint32_t stride = 0;
+        bool     bound_known = false;  // carried from RegScaled
+        uint32_t max_index   = 0;
     };
     RegTableAddr reg_table[16];
+
+    // Range bound for a register established by `CMP Ri,#N` immediately
+    // followed by a `B{hi,cs}` guard to the switch's default case. The
+    // bound travels with the index through the scale/add chain and gives
+    // the jump-table emitter an EXACT entry count — the precise terminator
+    // that replaces the old, too-strict "stop at first non-prologue" walk.
+    struct RegBound {
+        bool     known     = false;
+        uint32_t max_index = 0;
+    };
+    RegBound reg_bound[16];
+    struct LastCmp {  // most recent `CMP Ri,#imm`, consumed by the next branch
+        bool     known = false;
+        uint8_t  reg   = 0;
+        uint32_t imm   = 0;
+        uint32_t pc    = 0;
+    };
+    LastCmp last_cmp;
 
     // A jump-table candidate awaiting confirmation. Set when an indexed
     // load fetches a would-be entry into `dest`; promoted to a real
@@ -246,10 +280,13 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
     // of a DATA pointer (which is dereferenced, not branched to) — the
     // distinction that keeps the detector from seeding garbage.
     struct PendingJt {
-        bool     active = false;
-        uint32_t base   = 0;
-        uint32_t stride = 0;
-        uint8_t  dest   = 0;
+        bool     active      = false;
+        uint32_t base        = 0;
+        uint32_t stride      = 0;
+        uint8_t  dest        = 0;
+        // Exact entry count from the dispatcher's CMP-bound, when present.
+        bool     count_known = false;
+        uint32_t count       = 0;
     };
     PendingJt pend;
 
@@ -430,59 +467,122 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         ++stats_.branch_targets_discovered;
     };
 
-    // Recognize an abs32 jump table at `base` revealed by an indexed
-    // load at `site_pc`. Mirrors the manual [[jump_table]] expansion in
-    // main.cpp (mark table bytes as data + seed each entry) but derives
-    // base/count automatically. Precision-first per the sibling-recomp
-    // survey: count is bounded by a validate-and-stop gate — an entry
-    // that isn't a readable in-ROM code pointer (decoding to a defined
-    // instruction in its bit0-selected mode) ends the table. Overlap
-    // with a manual entry is benign: a manual [[jump_table]] already
-    // marks the bytes as a data_range, so the gate stops at i=0 and we
-    // emit nothing (the manual seeds stand).
-    auto emit_jump_table = [&](uint32_t base, uint32_t stride,
-                               uint32_t site_pc) {
-        if (stride != 4) return;  // abs32 only in this pass
-        for (const auto& t : auto_jump_tables_) {
-            if (t.base == base) return;  // already recognized
+    // Code-vs-data discriminator for a jump-table entry target. Accepts
+    // any plausible CODE target (NOT just a function prologue — a real
+    // `switch` table points at mid-function case labels that open with
+    // arbitrary instructions, e.g. `add r0,r4,#0`), while still rejecting
+    // DATA words that merely happen to fall in ROM. The old gate required
+    // a `push`/`stmfd` prologue and so rejected every switch table whose
+    // cases aren't function entries (this is exactly what blocked
+    // MC-HP-001). Checks, in order: correct alignment for the mode; lands
+    // in ROM and not in a known data_range; decodes to defined
+    // instruction(s) in `mode`. `strict` (used only when no exact count
+    // bound exists) decodes a short run and requires every instruction
+    // defined — a single `!is_undefined` is too weak to terminate an
+    // unbounded walk, since most 0x08xxxxxx words decode to *something*.
+    auto looks_like_code = [&](uint32_t tgt, CpuMode mode,
+                               bool strict) -> bool {
+        if (mode == CpuMode::Thumb) {
+            if (tgt & 1u) return false;
+        } else if (tgt & 3u) {
+            return false;
         }
-        constexpr uint32_t kMaxEntries = 1024;
+        if (!addr_in_rom(tgt) || addr_in_data_range(tgt)) return false;
+        uint32_t src = 0;
+        if (!map_addr_to_source(tgt, &src)) return false;
+        const uint32_t k = strict ? 6u : 1u;
+        uint32_t a = tgt;
+        for (uint32_t j = 0; j < k; ++j) {
+            if (mode == CpuMode::Thumb) {
+                if (!can_read_at(a, 2)) return j > 0;
+                if (armv4t::ThumbDecoder::decode(read_u16(a), a).is_undefined)
+                    return false;
+                a += 2;
+            } else {
+                if (!can_read_at(a, 4)) return j > 0;
+                if (armv4t::ArmDecoder::decode(read_u32(a), a).is_undefined)
+                    return false;
+                a += 4;
+            }
+        }
+        return true;
+    };
+
+    // Recognize an abs32 jump table at `base` revealed by an indexed load
+    // at `site_pc`. Mirrors the manual [[jump_table]] expansion in
+    // main.cpp (mark table bytes as data + seed each entry) but derives
+    // base/count/mode automatically.
+    //
+    //  * `interworking`  — how the dispatcher consumes an entry. true for
+    //    `BX Rt` / a `bx`-veneer reached by BL: bit0 of each word selects
+    //    ARM/THUMB (the classic abs32-with-thumb-bit table). false for
+    //    `MOV pc,Rt`: a non-interworking write to PC that KEEPS the
+    //    dispatcher's current mode, so the words carry no mode bit and
+    //    every target inherits `entry_mode`. Deriving mode from bit0 here
+    //    (the old behavior) mis-seeded MC-HP-001's even THUMB targets as
+    //    ARM.
+    //  * `count_hint`    — exact entry count from the dispatcher's
+    //    `CMP index,#N; B{hi,cs} default` bound, or 0 if none was
+    //    recovered. When known it is the authoritative terminator (no
+    //    guessing); a within-range entry that fails the code check then
+    //    means the detection was bogus, so the whole table is rejected.
+    //    When unknown we fall back to a strict validate-and-stop walk.
+    //
+    // Overlap with a manual entry is benign: a manual [[jump_table]]
+    // already marks the bytes as a data_range, so the walk yields nothing.
+    auto emit_jump_table = [&](uint32_t base, uint32_t stride,
+                               uint32_t site_pc, bool interworking,
+                               uint32_t count_hint) {
+        if (stride != 4) return;  // abs32 only in this pass
+        // Account each distinct base once, no matter how many overlapping
+        // seed walks confirm the same dispatcher.
+        if (!jt_seen_bases_.insert(base).second) return;
+        const bool bounded = count_hint > 0;
+        const uint32_t limit = bounded ? count_hint : 1024u;
         std::vector<FunctionSeed> targets;
-        for (uint32_t i = 0; i < kMaxEntries; ++i) {
+        // Benign overlap: the table bytes are already covered by a
+        // data_range (a manual [[jump_table]] hint, or a prior auto table).
+        // The walk yields nothing and we suppress silently — this is the
+        // detector independently rediscovering a hand-annotated table, not
+        // a failure. Distinguished from a genuine bound mismatch below.
+        bool overlap = false;
+        for (uint32_t i = 0; i < limit; ++i) {
             uint32_t pos = base + i * stride;
             if (!can_read_at(pos, 4)) break;
-            if (addr_in_data_range(pos)) break;  // ran into known data
+            if (addr_in_data_range(pos)) { if (i == 0) overlap = true; break; }
             uint32_t raw = read_u32(pos);
-            uint32_t tgt = raw & ~uint32_t{1};
-            CpuMode tmode = (raw & 1u) ? CpuMode::Thumb : CpuMode::Arm;
-            uint32_t tstep = (tmode == CpuMode::Thumb) ? 2u : 4u;
-            if (tgt == 0 || !can_read_at(tgt, tstep) ||
-                addr_in_data_range(tgt)) {
-                break;
-            }
-            // Strong entry gate: a real jump-table entry points at a
-            // FUNCTION PROLOGUE — THUMB `push {..,(lr)}` or ARM
-            // `stmfd sp!,{..}`. A `!is_undefined` check was far too weak
-            // (most 0x08xxxxxx data words decode to *some* instruction),
-            // so the table over-counted past its real end into trailing
-            // data pointers, seeded garbage targets, and exploded
-            // discovery when those were walked as code. Requiring a
-            // prologue stops the count at the first non-prologue word
-            // and rejects false-positive tables outright. Raw-encoding
-            // check (decoder-independent): THUMB PUSH = 1011 010x
-            // (0xB4xx/0xB5xx); ARM STMFD sp! = cond 100 1 0 0 1 0 Rn=SP.
-            uint32_t src = tgt;
-            if (!map_addr_to_source(tgt, &src)) break;
-            bool prologue;
-            if (tmode == CpuMode::Thumb) {
-                prologue = (read_u16(tgt) & 0xFE00u) == 0xB400u;
+            CpuMode tmode;
+            uint32_t tgt;
+            if (interworking) {
+                tmode = (raw & 1u) ? CpuMode::Thumb : CpuMode::Arm;
+                tgt = raw & ~uint32_t{1};
             } else {
-                prologue = (read_u32(tgt) & 0x0FFF0000u) == 0x092D0000u;
+                tmode = entry_mode;  // MOV pc keeps the dispatcher's mode
+                tgt = raw & (entry_mode == CpuMode::Thumb ? ~uint32_t{1}
+                                                          : ~uint32_t{3});
             }
-            if (!prologue) break;
+            if (tgt == 0 || !looks_like_code(tgt, tmode, /*strict=*/!bounded))
+                break;
             targets.push_back(FunctionSeed{tgt, tmode, ""});
         }
-        if (targets.size() < 2) return;  // too short to trust as a table
+
+        const bool ok = bounded
+            ? (targets.size() == count_hint)  // every bounded entry was code
+            : (targets.size() >= 2);          // long enough to trust
+        if (jt_report_enabled()) {
+            std::fprintf(stderr,
+                "[jt] base=0x%08X site=0x%08X %-6s bound=%-4s "
+                "want=%u got=%zu -> %s\n",
+                base, site_pc, interworking ? "BX" : "MOVpc",
+                bounded ? "yes" : "no", count_hint, targets.size(),
+                ok ? "EMIT" : (overlap ? "overlap" : "reject"));
+        }
+        if (!ok) {
+            if (overlap)       ++stats_.jt_overlap_suppressed;
+            else if (bounded)  ++stats_.jt_rejected_bound_mismatch;
+            else               ++stats_.jt_rejected_unsized;
+            return;
+        }
 
         uint32_t count = static_cast<uint32_t>(targets.size());
         data_ranges_.push_back(
@@ -495,7 +595,8 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             ++stats_.auto_jump_table_targets;
         }
         auto_jump_tables_.push_back(
-            AutoJumpTable{base, stride, count, site_pc, entry_mode});
+            AutoJumpTable{base, stride, count, site_pc, entry_mode,
+                          interworking, bounded});
         ++stats_.auto_jump_tables;
     };
 
@@ -846,15 +947,21 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         // explodes.
         if (pend.active) {
             bool confirmed = false;
+            // How the dispatcher consumes the loaded entry decides target
+            // mode: BX / bx-veneer interwork on bit0; MOV pc keeps the
+            // dispatcher's current mode. See emit_jump_table().
+            bool interworking = true;
             const armv4t::Op2& po = ins.op2;
             if (ins.op == armv4t::IrOp::BX && ins.rm == pend.dest) {
                 confirmed = true;  // BX dest
+                interworking = true;
             } else if (ins.rd == 15 &&
                        po.kind == armv4t::Op2::Kind::Shifted &&
                        !po.shifted.by_register &&
                        po.shifted.imm_or_rs == 0 &&
                        po.shifted.rm == pend.dest) {
                 confirmed = true;  // MOV pc, dest (computed jump)
+                interworking = false;
             } else if (ins.is_call && ins.branch_target != 0 &&
                        can_read_at(ins.branch_target, 2)) {
                 // ARM BL into a `bx dest` veneer (single-instruction BL).
@@ -888,7 +995,9 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 }
             }
             if (confirmed) {
-                emit_jump_table(pend.base, pend.stride, ins.pc);
+                ++stats_.jt_confirmations;
+                emit_jump_table(pend.base, pend.stride, ins.pc, interworking,
+                                pend.count_known ? pend.count : 0u);
                 pend.active = false;
             } else if (ins.rd == pend.dest) {
                 pend.active = false;  // dest overwritten before any branch
@@ -908,6 +1017,8 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         if (jump_table_detection_enabled() && ins.op == armv4t::IrOp::LDR) {
             uint32_t jt_base = 0;
             bool jt = false;
+            bool     count_known = false;
+            uint32_t count = 0;
             if (ins.mem.by_register && ins.mem.rn < 16 &&
                 ins.mem.reg_offset.rm < 16 &&
                 ins.mem.reg_offset.type == armv4t::ShiftType::LSL &&
@@ -917,6 +1028,12 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 addr_in_rom(reg_const[ins.mem.rn].value)) {
                 jt_base = reg_const[ins.mem.rn].value;
                 jt = true;
+                // Inline-scaled form: the index is the offset register.
+                uint8_t ireg = ins.mem.reg_offset.rm;
+                if (reg_bound[ireg].known) {
+                    count_known = true;
+                    count = reg_bound[ireg].max_index + 1u;
+                }
             } else if (!ins.mem.by_register && ins.mem.rn < 16 &&
                        reg_table[ins.mem.rn].known &&
                        reg_table[ins.mem.rn].stride == 4) {
@@ -928,13 +1045,46 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 jt_base = reg_table[ins.mem.rn].base +
                           static_cast<uint32_t>(off);
                 jt = true;
+                if (reg_table[ins.mem.rn].bound_known) {
+                    count_known = true;
+                    count = reg_table[ins.mem.rn].max_index + 1u;
+                }
             }
             if (jt) {
-                pend.active = true;
-                pend.base   = jt_base;
-                pend.stride = 4;
-                pend.dest   = ins.rd;
+                pend.active      = true;
+                pend.base        = jt_base;
+                pend.stride      = 4;
+                pend.dest        = ins.rd;
+                pend.count_known = count_known;
+                pend.count       = count;
             }
+        }
+
+        // CMP-bound capture for exact jump-table sizing (MC-HP-000). The
+        // canonical switch guard is `CMP Ri,#N` immediately followed by a
+        // `B{hi,cs}` to the default case; the in-range index span gives the
+        // table's entry count with no guessing. Record the compare, then on
+        // the very next instruction (the guard branch) stamp reg_bound[Ri].
+        // The bound then rides the index through the scale/add chain below.
+        if (ins.op == armv4t::IrOp::CMP &&
+            ins.op2.kind == armv4t::Op2::Kind::Imm && ins.rn < 16) {
+            last_cmp.known = true;
+            last_cmp.reg   = ins.rn;
+            last_cmp.imm   = ins.op2.imm_value;
+            last_cmp.pc    = ins.pc;
+        } else if (last_cmp.known && ins.is_branch &&
+                   ins.pc == last_cmp.pc + step) {
+            if (ins.cond == armv4t::Cond::HI) {
+                // taken (→default) when Ri > N; in-range max index = N
+                reg_bound[last_cmp.reg] = {true, last_cmp.imm};
+            } else if (ins.cond == armv4t::Cond::CS && last_cmp.imm > 0) {
+                // taken (→default) when Ri >= N; in-range max index = N-1
+                reg_bound[last_cmp.reg] = {true, last_cmp.imm - 1u};
+            }
+            last_cmp.known = false;
+        } else {
+            // any other instruction ends the (adjacent-only) cmp window
+            last_cmp.known = false;
         }
 
         if (ins.op == armv4t::IrOp::STR) {
@@ -1128,6 +1278,12 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 // Rd = (unknown index) << k
                 reg_scaled[ins.rd].known = true;
                 reg_scaled[ins.rd].shift = o.shifted.imm_or_rs;
+                reg_scaled[ins.rd].bound_known = false;
+                if (o.shifted.rm < 16 && reg_bound[o.shifted.rm].known) {
+                    reg_scaled[ins.rd].bound_known = true;
+                    reg_scaled[ins.rd].max_index =
+                        reg_bound[o.shifted.rm].max_index;
+                }
                 set_scaled = true;
             } else if (ins.op == armv4t::IrOp::ADD &&
                        o.kind == armv4t::Op2::Kind::Shifted &&
@@ -1141,27 +1297,48 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 if (o.shifted.type == armv4t::ShiftType::LSL &&
                     o.shifted.imm_or_rs > 0) {
                     // One-instruction scaled add: ADD Rd, Rbase, Ri LSL#k
+                    // (Ri is the inline-scaled index; bound rides on it.)
                     if (rom_const(ins.rn)) {
                         reg_table[ins.rd] = {true, reg_const[ins.rn].value,
                                              1u << o.shifted.imm_or_rs};
+                        if (reg_bound[rm].known) {
+                            reg_table[ins.rd].bound_known = true;
+                            reg_table[ins.rd].max_index =
+                                reg_bound[rm].max_index;
+                        }
                         set_table = true;
                     }
                 } else if (o.shifted.imm_or_rs == 0) {
                     // Plain reg add: one side a ROM-pointer base, the
-                    // other a previously-scaled index.
+                    // other a previously-scaled index (bound carried).
                     if (rom_const(ins.rn) && reg_scaled[rm].known) {
                         reg_table[ins.rd] = {true, reg_const[ins.rn].value,
                                              1u << reg_scaled[rm].shift};
+                        if (reg_scaled[rm].bound_known) {
+                            reg_table[ins.rd].bound_known = true;
+                            reg_table[ins.rd].max_index =
+                                reg_scaled[rm].max_index;
+                        }
                         set_table = true;
                     } else if (rom_const(rm) && reg_scaled[ins.rn].known) {
                         reg_table[ins.rd] = {true, reg_const[rm].value,
                                              1u << reg_scaled[ins.rn].shift};
+                        if (reg_scaled[ins.rn].bound_known) {
+                            reg_table[ins.rd].bound_known = true;
+                            reg_table[ins.rd].max_index =
+                                reg_scaled[ins.rn].max_index;
+                        }
                         set_table = true;
                     }
                 }
             }
             if (!set_scaled) reg_scaled[ins.rd].known = false;
             if (!set_table)  reg_table[ins.rd].known = false;
+            // The cmp-derived bound has been consumed into reg_scaled/
+            // reg_table above; any non-branch write to Rd retires it. A
+            // branch is skipped because the guard branch itself is what
+            // SET the bound (see the CMP-bound capture above).
+            if (!ins.is_branch) reg_bound[ins.rd].known = false;
         }
 
         if ((ins.op == armv4t::IrOp::LDR ||
