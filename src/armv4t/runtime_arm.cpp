@@ -46,6 +46,10 @@ extern "C" const unsigned kBiosDispatchTableLen;
 
 extern "C" ArmCpuState g_cpu = {};
 
+// VBlank-start counter (defined in src/runtime/runtime_bus_bridge.cpp).
+// Used to frame-gate the mem-write watchpoint.
+extern "C" unsigned long long g_runtime_vblank_starts;
+
 namespace {
 
 constexpr uint32_t kTraceSize = 4096u;
@@ -130,11 +134,22 @@ extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc,
                                : 160u;
         if (abort_dump_depth == 0u) abort_dump_depth = 160u;
     }
-    if (kind == RUNTIME_TRACE_MEM_WRITE && addr == abort_mem_addr) {
+    // Optional frame gate: suppress the mem-write abort until this many
+    // VBlank-starts have elapsed. Lets a watchpoint skip the identical
+    // early frames and fire on the write in the frame where the value
+    // actually diverges (e.g. MC-HP-002's frame-40 onset). 0 = no gate.
+    static uint64_t abort_min_vblank = 0xFFFFFFFFFFFFFFFFull;
+    if (abort_min_vblank == 0xFFFFFFFFFFFFFFFFull) {
+        const char* env = std::getenv("GBARECOMP_ABORT_ON_MEM_WRITE_MIN_FRAME");
+        abort_min_vblank = env ? std::strtoull(env, nullptr, 0) : 0ull;
+    }
+    if (kind == RUNTIME_TRACE_MEM_WRITE && addr == abort_mem_addr &&
+        g_runtime_vblank_starts >= abort_min_vblank) {
         std::fprintf(stderr,
                      "runtime_trace: mem-write-addr abort pc=0x%08X "
-                     "addr=0x%08X value=0x%08X width=%u\n",
-                     pc, addr, value, aux);
+                     "addr=0x%08X value=0x%08X width=%u (vblanks=%llu)\n",
+                     pc, addr, value, aux,
+                     static_cast<unsigned long long>(g_runtime_vblank_starts));
         runtime_trace_dump_recent(abort_dump_depth);
         std::abort();
     }

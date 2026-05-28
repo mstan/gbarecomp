@@ -124,6 +124,11 @@ extern "C" const DispatchEntry kBiosDispatchTable[1] = {
 };
 extern "C" const unsigned kBiosDispatchTableLen = 0u;
 
+// VBlank-start counter the runtime defines in runtime_bus_bridge.cpp and
+// runtime_arm.cpp references for the watchpoint frame-gate. The L1 codegen
+// harness links the armv4t lib without the runtime, so it provides its own.
+extern "C" unsigned long long g_runtime_vblank_starts = 0;
+
 // ── Bus accessors used by generated test functions ─────────────────
 
 extern "C" uint8_t bus_read_u8(uint32_t addr) {
