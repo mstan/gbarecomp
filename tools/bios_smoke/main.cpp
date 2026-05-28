@@ -35,6 +35,8 @@
 #include "gba_rom_header.h"
 #include "host_window.h"
 #include "interpreter.h"
+#include "runtime_arm.h"   // ArmCpuState + g_cpu, for savestate_load mapping
+#include "snapshot.h"      // debug::load_state (interpreter-as-oracle restore)
 #include "tcp_debug_server.h"
 #include "thumb_decode.h"
 
@@ -459,6 +461,49 @@ int main(int argc, char** argv) {
         return true;
     };
 
+    // Restore a runtime savestate INTO THE INTERPRETER (offline oracle).
+    // load_state restores memory/IO/PPU/devices plus the recomp global
+    // g_cpu; we then map g_cpu (ArmCpuState) into the interpreter's CPUState
+    // (a different struct) and drop the recomp-only host call-return stack
+    // (the interpreter resumes purely from R[15] + the guest stack in IWRAM).
+    // The ROM-SHA1 gate is skipped (rom_sha1=nullptr) since the oracle is
+    // launched with the matching --rom. This lets the interpreter execute
+    // the SAME ARM code from a recomp savestate, so we can diff intended vs
+    // recompiled behavior at a transition (e.g. an entity's animation index).
+    auto do_savestate_load = [&](const std::string& path,
+                                 std::string& e) -> bool {
+        gbarecomp::debug::SnapshotContext sc;
+        sc.bus = &bus;
+        sc.ppu = &ppu;
+        sc.rom_sha1 = nullptr;
+        sc.taken = &taken;
+        sc.cycles_elapsed = &cycles_elapsed;
+        sc.vblank_count = &vblank_count;
+        if (!gbarecomp::debug::load_state(path.c_str(), sc, &e)) return false;
+        const ArmCpuState& g = g_cpu;  // populated by load_state
+        for (int i = 0; i < 16; ++i) cpu.R[i] = g.R[i];
+        cpu.cpsr.n = (g.cpsr >> 31) & 1u;
+        cpu.cpsr.z = (g.cpsr >> 30) & 1u;
+        cpu.cpsr.c = (g.cpsr >> 29) & 1u;
+        cpu.cpsr.v = (g.cpsr >> 28) & 1u;
+        cpu.cpsr.i = (g.cpsr >> 7) & 1u;
+        cpu.cpsr.f = (g.cpsr >> 6) & 1u;
+        cpu.cpsr.t = (g.cpsr >> 5) & 1u;
+        cpu.cpsr.mode = g.cpsr & 0x1Fu;
+        for (int i = 0; i < 6; ++i) {
+            cpu.banked_sp[i]   = g.banked_sp[i];
+            cpu.banked_lr[i]   = g.banked_lr[i];
+            cpu.banked_spsr[i] = g.banked_spsr[i];
+        }
+        for (int i = 0; i < 5; ++i) {
+            cpu.r8_12_user[i] = g.r8_12_user[i];
+            cpu.r8_12_fiq[i]  = g.r8_12_fiq[i];
+        }
+        cpu.thumb = cpu.cpsr.t;
+        vblank_count = ppu.frame_count();  // re-sync frame clock to restored PPU
+        return true;
+    };
+
     // TCP debug server mode. Open the listener, hand it the live
     // CPU/bus/PPU plus the step callback, block until the client
     // disconnects. No --frames / --window logic in this path; the
@@ -471,6 +516,7 @@ int main(int argc, char** argv) {
         srv_ctx.ppu = &ppu;
         srv_ctx.step      = step_one_frame;
         srv_ctx.step_inst = run_one_cpu_step;
+        srv_ctx.savestate_load = do_savestate_load;
         srv_ctx.irq_entries        = &irq_entries;
         srv_ctx.swi_entries        = &swi_entries;
         srv_ctx.halt_steps         = &halt_steps;
