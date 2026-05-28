@@ -96,6 +96,32 @@ enum class IrOp : uint16_t {
 
 const char* ir_op_name(IrOp op) noexcept;
 
+// ── ARM7TDMI per-instruction cycle accounting (single source of truth) ──
+//
+// Used by the IR interpreter (the timing oracle), the recompiler codegen,
+// and the runtime tick helpers — so the recompiled cycle stream advances
+// the PPU / audio / timers exactly like the interpreter does, byte-for-byte.
+//
+// `instr_cycle_base` is the FIXED part of an op's cost: the 1S fetch plus
+// any internal (I) cycles, with the branch pipeline-refill folded in. The
+// memory-access (N/S) cycles and operand-dependent multiply cycles are NOT
+// included here — they depend on the runtime target region / operand and
+// are added at execute time via `Bus::access_cycles` and `mul_wait_cycles`.
+// Two further fixed surcharges (statically known at codegen) are layered on
+// by the caller, matching the interpreter:
+//   + 1  when Op2 is a register-shifted operand (extra shifter I-cycle)
+//   + 2  when a NON-branch op writes PC (pipeline refill)
+uint32_t instr_cycle_base(IrOp op) noexcept;
+
+// ARM7TDMI multiply m-cycle count for the multiplier operand `rs_value`.
+// `extra` is the accumulate/long adjustment (0 for MUL; 1 for MLA, UMULL,
+// SMULL; 2 for UMLAL, SMLAL). `signed_variant` selects the leading
+// 0s-or-1s early-termination rule used by the signed multiplies and the
+// short MUL/MLA forms (true), versus the leading-0s-only rule of the
+// unsigned long multiplies (false).
+uint32_t mul_wait_cycles(uint32_t rs_value, bool signed_variant,
+                         uint32_t extra) noexcept;
+
 // Addressing form for LDR/STR family. The 'P', 'U', 'W', 'B' bits in the
 // ARM encoding all funnel through these flags. THUMB load/store encodings
 // also normalize into the same shape.

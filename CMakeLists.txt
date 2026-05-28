@@ -114,6 +114,7 @@ add_library(gbarecomp_armv4t STATIC
     src/armv4t/arm_ir.cpp
     src/armv4t/arm_codegen.cpp
     src/armv4t/runtime_arm.cpp
+    src/armv4t/symbol_lookup.cpp
     src/armv4t/interpreter.cpp
 )
 target_include_directories(gbarecomp_armv4t PUBLIC src/armv4t)
@@ -330,7 +331,8 @@ endif()
 
 # bios_smoke — Phase 2.1 canary. Loads bios/gba_bios.bin, runs the
 # interpreter from PC=0 for N instructions, prints a trace.
-add_executable(bios_smoke tools/bios_smoke/main.cpp)
+add_executable(bios_smoke tools/bios_smoke/main.cpp
+                          tools/bios_smoke/dispatch_stub.cpp)
 target_link_gbarecomp_runtime_stack(bios_smoke)
 if(WIN32 OR MSYS)
     target_link_libraries(bios_smoke PRIVATE ws2_32)

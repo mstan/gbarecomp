@@ -8,6 +8,7 @@
 // interpreter's case in src/armv4t/interpreter.cpp.
 
 #include "runtime_arm.h"
+#include "symbol_lookup.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -189,13 +190,22 @@ extern "C" void runtime_trace_dump_recent(uint32_t max_entries) {
     uint32_t start = (g_trace_write + kTraceSize - max_entries) % kTraceSize;
     for (uint32_t i = 0; i < max_entries; ++i) {
         const RuntimeTraceEntry& e = g_trace[(start + i) % kTraceSize];
+        // Annotate the PC with the nearest recompiled function name, e.g.
+        // <UpdateAnimationVariableFrames+0x10>, when a symbol map is linked.
+        char symbuf[96];
+        symbuf[0] = '\0';
+        uint32_t off = 0;
+        const char* sym = gba_symbol_lookup(e.pc, &off);
+        if (sym) {
+            std::snprintf(symbuf, sizeof(symbuf), " <%s+0x%X>", sym, off);
+        }
         std::fprintf(stderr,
-                     "  #%u %-8s pc=0x%08X cpsr=0x%08X "
+                     "  #%u %-8s pc=0x%08X%s cpsr=0x%08X "
                      "addr=0x%08X value=0x%08X aux=0x%X "
                      "r0=0x%08X r1=0x%08X r2=0x%08X r3=0x%08X "
                      "r4=0x%08X r5=0x%08X r12=0x%08X "
                      "sp=0x%08X lr=0x%08X\n",
-                     e.seq, trace_kind_name(e.kind), e.pc, e.cpsr,
+                     e.seq, trace_kind_name(e.kind), e.pc, symbuf, e.cpsr,
                      e.addr, e.value, e.aux, e.r0, e.r1, e.r2, e.r3,
                      e.r4, e.r5, e.r12, e.r13, e.r14);
     }
@@ -759,6 +769,14 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     g_cpu.banked_spsr[new_bank] = saved_cpsr;
     g_cpu.R[14]                 = return_address;  // LR_svc
     g_cpu.R[15]                 = 0x00000008u;
+
+    // Charge the SWI instruction's own cost (instr_cycle_base(SWI) = 3:
+    // 2S+1N). Ticked here — AFTER CPSR.I is masked above — so a VBlank/
+    // timer IRQ that becomes pending during these 3 cycles stays masked
+    // until the handler re-enables it, matching the interpreter oracle
+    // (enter_swi sets I=1, then pump_step(3), then the next-boundary IRQ
+    // check sees I=1). The recompiled SWI codegen does not tick this op.
+    runtime_tick(3u);
 
     runtime_dispatch(0x00000008u);
 }

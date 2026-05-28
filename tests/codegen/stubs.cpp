@@ -21,6 +21,7 @@
 #include <cstring>
 #include <vector>
 
+#include "arm_ir.h"
 #include "stubs.h"
 
 namespace {
@@ -50,6 +51,7 @@ void bus_reset(uint32_t base, uint32_t size) {
     g_dispatch_called = false;
     g_last_swi_imm = 0;
     g_swi_called = false;
+    g_ticked_cycles = 0;
     g_unimplemented_called = false;
     if (g_unimplemented_op) {
         std::free(reinterpret_cast<void*>(
@@ -84,6 +86,9 @@ uint32_t bus_size() { return static_cast<uint32_t>(g_mem.size()); }
 const uint8_t* bus_data() {
     return g_mem.empty() ? nullptr : g_mem.data();
 }
+
+// Cycle accounting recorder (see stubs.h).
+uint64_t g_ticked_cycles        = 0;
 
 // Dispatch / SWI recorders.
 uint32_t g_last_dispatch_target = 0;
@@ -185,11 +190,31 @@ extern "C" void runtime_unimplemented_op(const char* op_name,
     // Don't abort — let the runner report the failure cleanly.
 }
 
-extern "C" void runtime_tick(uint32_t) {
-    // L1 codegen cases validate CPU/bus side effects only. Production
-    // runners link the real runtime_tick from runtime_bus_bridge.cpp.
+extern "C" void runtime_tick(uint32_t cycles) {
+    // Accumulate so the runner can diff the recompiled instruction's
+    // total cycle cost against the interpreter's per-instruction count.
+    // (No PPU/audio/IRQ side effects here — production runners link the
+    // real runtime_tick from runtime_bus_bridge.cpp for those.)
+    codegen_test::g_ticked_cycles += cycles;
 }
 
 extern "C" bool runtime_should_yield(void) {
     return false;
+}
+
+// The FlatBus on the interpreter side uses armv4t::Bus's default
+// access_cycles (1 cycle / access), so the L1 cycle diff validates
+// base costs, the shift/PC-write surcharges, multiply operand waits,
+// and LDM/STM access *counts*. Region-specific waitstates live in
+// gba::GbaBus::access_cycles (shared by both execution paths in the
+// full build) and are exercised by the differential oracle, not here.
+extern "C" uint32_t runtime_mem_cycles(uint32_t /*addr*/, uint32_t /*width*/,
+                                       uint32_t /*sequential*/) {
+    return 1u;
+}
+
+extern "C" uint32_t runtime_mul_cycles(uint32_t rs_value,
+                                       uint32_t signed_variant,
+                                       uint32_t extra) {
+    return armv4t::mul_wait_cycles(rs_value, signed_variant != 0u, extra);
 }

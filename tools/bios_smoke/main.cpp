@@ -32,6 +32,7 @@
 #include "gba_bios.h"
 #include "gba_bus.h"
 #include "gba_ppu.h"
+#include "gba_rom_header.h"
 #include "host_window.h"
 #include "interpreter.h"
 #include "tcp_debug_server.h"
@@ -44,6 +45,8 @@ constexpr uint32_t kGbaIrqDelayCycles = 7;
 
 struct Args {
     std::string bios = kDefaultBios;
+    std::string rom;     // optional cartridge; when set, bios_smoke runs
+                         // the full game under the interpreter (oracle).
     int  steps   = 16;
     bool quiet   = false;
     std::string dump_bmp;  // optional path for final framebuffer dump
@@ -117,6 +120,7 @@ Args parse_args(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string s = argv[i];
         if (s == "--bios" && i + 1 < argc) { a.bios = argv[++i]; continue; }
+        if (s == "--rom"  && i + 1 < argc) { a.rom  = argv[++i]; continue; }
         if (s == "--steps" && i + 1 < argc) {
             a.steps = std::atoi(argv[++i]); continue;
         }
@@ -241,6 +245,38 @@ int main(int argc, char** argv) {
     bus.set_bios(&bios);
     bus.io().set_ppu(&ppu);
     bus.io().set_bus(&bus);
+
+    // 2b. Optional cartridge. With --rom, bios_smoke becomes a full
+    //     interpreter-driven oracle for the game: it runs the same
+    //     gba::GbaBus/GbaPpu/GbaIo/GbaAudio the recompiled runtime uses,
+    //     so the ONLY difference from the recomp is the CPU execution
+    //     path (interpreted vs recompiled). Mirrors runtime.cpp's
+    //     set_rom + EEPROM configuration.
+    std::vector<uint8_t> rom_bytes;  // must outlive the run
+    if (!args.rom.empty()) {
+        std::ifstream rf(args.rom, std::ios::binary | std::ios::ate);
+        if (!rf) {
+            std::fprintf(stderr, "bios_smoke: cannot open ROM %s\n",
+                         args.rom.c_str());
+            return 1;
+        }
+        std::streamoff sz = rf.tellg();
+        rom_bytes.resize(static_cast<std::size_t>(sz));
+        rf.seekg(0, std::ios::beg);
+        rf.read(reinterpret_cast<char*>(rom_bytes.data()),
+                static_cast<std::streamsize>(rom_bytes.size()));
+        gba::RomHeader header = gba::parse_rom(rom_bytes.data(),
+                                               rom_bytes.size());
+        bus.set_rom(rom_bytes.data(), rom_bytes.size());
+        if (header.save_type == gba::SaveType::EEPROM) {
+            bus.save().configure_eeprom(8 * 1024);
+        }
+        if (!args.quiet) {
+            std::printf("rom_loaded %s size=%zu save=%d\n",
+                        args.rom.c_str(), rom_bytes.size(),
+                        static_cast<int>(header.save_type));
+        }
+    }
 
     // 3. Reset CPU and step the interpreter.
     auto cpu = make_reset_cpu();

@@ -231,7 +231,9 @@ bool run_case(const TestCase& tc, std::size_t idx) {
     }
 
     uint32_t saved_pc = cpu_interp.R[15];
-    auto r = armv4t::Interpreter::step(cpu_interp, bus_interp, ins);
+    uint32_t interp_cycles = 0;
+    auto r = armv4t::Interpreter::step(cpu_interp, bus_interp, ins,
+                                       &interp_cycles);
     if (r == armv4t::Interpreter::Result::NotImplemented) {
         std::printf("FAIL [%zu] %s: interpreter NotImplemented for "
                     "this instruction shape — fix the interpreter or "
@@ -278,6 +280,18 @@ bool run_case(const TestCase& tc, std::size_t idx) {
     // already restored cpu_interp.R[15], so the diff is direct.
     Diff d;
     diff_state(tc, cpu_interp, bus_interp, d);
+
+    // Cycle-cost parity. The recomp's total runtime_tick() cycles for
+    // this instruction must equal the interpreter's per-instruction
+    // count. Both sides use armv4t::Bus::access_cycles == 1, so this
+    // validates the fixed base cost, the register-shift and PC-write
+    // surcharges, the multiply operand waits, and LDM/STM access counts;
+    // region-specific waitstates live in gba::GbaBus and are checked by
+    // the differential oracle, not here.
+    if (codegen_test::g_ticked_cycles != interp_cycles) {
+        note(d, "cycles: interp=%u recomp=%llu", interp_cycles,
+             static_cast<unsigned long long>(codegen_test::g_ticked_cycles));
+    }
 
     if (d.failed) {
         std::printf("FAIL [%zu] %s\n    %s\n",

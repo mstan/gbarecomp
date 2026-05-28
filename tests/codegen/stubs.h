@@ -24,6 +24,11 @@ const uint8_t* bus_data();
 
 // Filled in by the strong overrides of runtime_dispatch_miss / swi.
 // The runner reads these after each test to assert branch behavior.
+// Total cycles passed to runtime_tick during the most recent recomp
+// function run. Reset by bus_reset(); compared by the runner against
+// the interpreter's per-instruction cycle count.
+extern uint64_t g_ticked_cycles;
+
 extern uint32_t g_last_dispatch_target;
 extern bool     g_dispatch_called;
 extern uint32_t g_last_swi_imm;

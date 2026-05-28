@@ -100,6 +100,34 @@ bool extract_uint(std::string_view req, std::string_view key, uint64_t& out) {
     return true;
 }
 
+// Extract the hex string value of `key` (e.g. "data") and decode it
+// into `out` bytes. Returns false if the key is absent or malformed.
+bool extract_hex_bytes(std::string_view req, std::string_view key,
+                       std::vector<uint8_t>& out) {
+    auto pos = req.find(key);
+    if (pos == std::string_view::npos) return false;
+    pos = req.find(':', pos);
+    if (pos == std::string_view::npos) return false;
+    ++pos;
+    while (pos < req.size() && (req[pos] == ' ' || req[pos] == '"')) ++pos;
+    auto hex_digit = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    out.clear();
+    while (pos + 1 < req.size()) {
+        int hi = hex_digit(req[pos]);
+        if (hi < 0) break;  // closing quote or end
+        int lo = hex_digit(req[pos + 1]);
+        if (lo < 0) return false;  // odd nibble count
+        out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+        pos += 2;
+    }
+    return true;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // mGBA driver
 // ─────────────────────────────────────────────────────────────────────
@@ -731,6 +759,87 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         out = body;
         return;
     }
+    // ── State-injection bridge ──────────────────────────────────────
+    // These let a harness sync mGBA to a native gbarecomp savestate:
+    // read the native runtime's RAM + regs over its TCP server, then
+    // push them here. Sync point is a frame boundary; mGBA then runs
+    // forward and we diff its state against native (find-first-divergence
+    // for sound/transition bugs like MC-HP-002/003).
+
+    if (starts("\"emu_set_keys\"")) {
+        if (!o.core) { emit_error(out, "no core"); return; }
+        uint64_t keys = 0;
+        extract_uint(req, "\"keys\"", keys) ||
+            extract_uint(req, "\"value\"", keys);
+        o.core->setKeys(o.core, static_cast<uint32_t>(keys));
+        emit_ok_int(out, "keys", keys);
+        return;
+    }
+
+    if (starts("\"emu_write\"")) {
+        if (!o.core) { emit_error(out, "no core"); return; }
+        uint64_t addr = 0;
+        if (!extract_uint(req, "\"addr\"", addr)) {
+            emit_error(out, "missing addr");
+            return;
+        }
+        std::vector<uint8_t> bytes;
+        if (!extract_hex_bytes(req, "\"data\"", bytes)) {
+            emit_error(out, "missing/odd data");
+            return;
+        }
+        uint64_t width = 8;
+        extract_uint(req, "\"width\"", width);
+        uint32_t a = static_cast<uint32_t>(addr);
+        if (width == 16 && (bytes.size() % 2) == 0) {
+            for (std::size_t i = 0; i < bytes.size(); i += 2) {
+                uint16_t v = static_cast<uint16_t>(
+                    bytes[i] | (bytes[i + 1] << 8));
+                o.core->busWrite16(o.core, a + static_cast<uint32_t>(i), v);
+            }
+        } else if (width == 32 && (bytes.size() % 4) == 0) {
+            for (std::size_t i = 0; i < bytes.size(); i += 4) {
+                uint32_t v = static_cast<uint32_t>(bytes[i]) |
+                    (static_cast<uint32_t>(bytes[i + 1]) << 8) |
+                    (static_cast<uint32_t>(bytes[i + 2]) << 16) |
+                    (static_cast<uint32_t>(bytes[i + 3]) << 24);
+                o.core->busWrite32(o.core, a + static_cast<uint32_t>(i), v);
+            }
+        } else {
+            for (std::size_t i = 0; i < bytes.size(); ++i) {
+                o.core->busWrite8(o.core, a + static_cast<uint32_t>(i),
+                                  bytes[i]);
+            }
+        }
+        emit_ok_int(out, "wrote", bytes.size());
+        return;
+    }
+
+    if (starts("\"emu_set_regs\"")) {
+        if (!o.core) { emit_error(out, "no core"); return; }
+        // Write CPSR first so the mode (and thus the active r13/r14
+        // bank) is correct before the GPRs land; r15 last so the PC
+        // sticks after any bank swap. Only keys that are present are
+        // written, so a partial reg set is allowed.
+        uint64_t v = 0;
+        if (extract_uint(req, "\"cpsr\"", v)) {
+            int32_t cpsr = static_cast<int32_t>(v);
+            o.core->writeRegister(o.core, "cpsr", &cpsr);
+        }
+        for (int i = 0; i <= 15; ++i) {
+            char key[12];
+            std::snprintf(key, sizeof(key), "\"r%d\"", i);
+            if (extract_uint(req, key, v)) {
+                int32_t rv = static_cast<int32_t>(v);
+                char name[8];
+                std::snprintf(name, sizeof(name), "r%d", i);
+                o.core->writeRegister(o.core, name, &rv);
+            }
+        }
+        out = "{\"ok\":true}";
+        return;
+    }
+
     if (starts("\"quit\"")) {
         out = "{\"ok\":true,\"bye\":true}";
         return;

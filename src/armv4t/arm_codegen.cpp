@@ -50,6 +50,34 @@ uint32_t stm_pc_store_value(const Instr& ins) {
     return ((ins.pc + 4u) & ~2u) + 4u;
 }
 
+// True when this op writes PC and is NOT a branch — i.e. it incurs the
+// +2 pipeline-refill surcharge in the interpreter's cycle model (branch
+// refill is already folded into instr_cycle_base). Statically known
+// from the destination register / reg-list, so the codegen folds it into
+// the instruction's fixed cost. Mirrors interpreter.cpp's `wrote_pc &&
+// !branch_op` test.
+bool writes_pc_nonbranch(const Instr& ins) {
+    switch (ins.op) {
+        case IrOp::AND: case IrOp::EOR: case IrOp::SUB: case IrOp::RSB:
+        case IrOp::ADD: case IrOp::ADC: case IrOp::SBC: case IrOp::RSC:
+        case IrOp::ORR: case IrOp::MOV: case IrOp::BIC: case IrOp::MVN:
+            // TST/TEQ/CMP/CMN write no destination, so they are excluded.
+            return ins.rd == 15u;
+        case IrOp::LDR:  case IrOp::LDRB: case IrOp::LDRH:
+        case IrOp::LDRSB: case IrOp::LDRSH:
+            return ins.rd == 15u;
+        case IrOp::LDM:
+            // Empty-list LDM loads PC at the 0x40-stride address; a
+            // non-empty list writes PC only when R15 is in the list.
+            // (STM never writes PC — it is a separate IrOp handled by
+            // the default case below.)
+            return ins.block.reg_list == 0u ||
+                   (ins.block.reg_list & (1u << 15)) != 0u;
+        default:
+            return false;
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Condition wrapping
 // ─────────────────────────────────────────────────────────────────────
@@ -108,6 +136,14 @@ std::string uniq_suffix(const Instr& ins) {
     char buf[16];
     std::snprintf(buf, sizeof(buf), "_%08X", ins.pc);
     return std::string(buf);
+}
+
+// The per-instruction cycle accumulator variable name. Declared in
+// emit_instr; referenced by the body emitters (which add memory/multiply
+// cost) and by the early-exit tick sites so each control-flow path ticks
+// the instruction's cost exactly once.
+std::string cyc_var_for(const Instr& ins) {
+    return "_cyc" + uniq_suffix(ins);
 }
 
 Op2Code emit_op2(const Instr& ins, const char* indent) {
@@ -291,6 +327,10 @@ std::string emit_direct_branch(uint32_t target, uint32_t branch_pc,
                                 const CodegenCtx& ctx,
                                 const char* indent) {
     std::ostringstream s;
+    // The cycle accumulator declared by emit_instr for this branch's PC.
+    char cycbuf[24];
+    std::snprintf(cycbuf, sizeof(cycbuf), "_cyc_%08X", branch_pc);
+    const std::string cyc(cycbuf);
     // A link call that returns with any other PC was really a tail
     // transfer through the callee, so do not execute link fallthrough.
     if (is_link) {
@@ -313,6 +353,7 @@ std::string emit_direct_branch(uint32_t target, uint32_t branch_pc,
         s << indent << "runtime_trace_event(RUNTIME_TRACE_BRANCH, "
           << fmt_hex32(branch_pc) << ", " << fmt_hex32(target)
           << ", 0u, 0u);\n";
+        s << indent << "runtime_tick(" << cyc << ");\n";
         s << indent << "goto " << label_for_addr(target) << ";\n";
         return s.str();
     }
@@ -328,6 +369,15 @@ std::string emit_direct_branch(uint32_t target, uint32_t branch_pc,
         s << indent << "runtime_call_push_return("
           << fmt_hex32(link_value & ~1u) << ");\n";
     }
+
+    // Branch executes here: pump its fixed cost before transferring, so
+    // the PPU/IRQ boundary lands between this branch and the target —
+    // matching the interpreter (pump branch cost, then check IRQ at the
+    // next boundary). For a link call (BL / BL_suffix) zero _cyc after,
+    // so the fall-through epilogue tick (reached when the callee C-
+    // returns) does not double-count.
+    s << indent << "runtime_tick(" << cyc << ");\n";
+    if (is_link) s << indent << cyc << " = 0u;\n";
 
     const std::string* name = nullptr;
     if (ctx.names_by_key) {
@@ -584,6 +634,9 @@ bool emit_data_processing(std::ostringstream& body, const Instr& ins,
             body << indent << "uint32_t " << pc_var << " = " << r_var
                  << (ins.thumb ? " & ~1u" : " & ~3u") << ";\n";
             body << indent << "g_cpu.R[15] = " << pc_var << ";\n";
+            // PC write completes the instruction; tick its cost (incl.
+            // the +2 refill folded into _cyc) before transferring.
+            body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
             if (is_lr_return) {
                 body << indent << "if (runtime_call_should_return("
                      << pc_var << ")) return;\n";
@@ -620,6 +673,9 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
             body << indent << "uint32_t " << target_var << " = "
                  << read_reg_expr(ins.rm, ins) << ";\n";
             body << indent << "g_cpu.R[15] = " << target_var << " & ~1u;\n";
+            // BX always transfers; tick its cost before either the C-
+            // return or the dispatch path (both exit the function).
+            body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
             if (ins.rm == 14 || ctx.force_bx_c_return) {
                 // `bx lr` — the AAPCS function-return idiom. In the
                 // direct-C-call dispatch model, BL emits a real C
@@ -663,6 +719,11 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
             body << indent << "g_cpu.R[15] = " << target_var << ";\n";
             body << indent << "runtime_call_push_return("
                  << fmt_hex32(new_lr & ~1u) << ");\n";
+            // Pump the call's cost before transferring; zero _cyc so the
+            // fall-through epilogue tick (after the callee C-returns)
+            // does not double-count.
+            body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
+            body << indent << cyc_var_for(ins) << " = 0u;\n";
             body << indent << "runtime_dispatch(" << target_var << ");\n";
             body << indent << "if (g_cpu.R[15] != "
                  << fmt_hex32(new_lr & ~1u)
@@ -703,6 +764,17 @@ bool emit_memory(std::ostringstream& body, const Instr& ins,
          << (mem.add ? (base_var + " + " + off_var)
                      : (base_var + " - " + off_var))
          << ";\n";
+
+    // Region-aware data-access cost (single N access at the effective
+    // address; width follows the op, like the interpreter's mem_cycles).
+    unsigned access_w = 4u;
+    switch (ins.op) {
+        case IrOp::LDRB: case IrOp::STRB: case IrOp::LDRSB: access_w = 1u; break;
+        case IrOp::LDRH: case IrOp::STRH: case IrOp::LDRSH: access_w = 2u; break;
+        default: access_w = 4u; break;
+    }
+    body << indent << cyc_var_for(ins) << " += runtime_mem_cycles("
+         << ea_var << ", " << access_w << "u, 0u);\n";
 
     bool is_load = (ins.op == IrOp::LDR || ins.op == IrOp::LDRB ||
                     ins.op == IrOp::LDRH || ins.op == IrOp::LDRSB ||
@@ -757,6 +829,7 @@ bool emit_memory(std::ostringstream& body, const Instr& ins,
         // Store the loaded value into Rd. If Rd == PC, dispatch.
         if (ins.rd == 15) {
             body << indent << "g_cpu.R[15] = " << val_var << " & ~1u;\n";
+            body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
             body << indent << "runtime_dispatch(" << val_var << " & ~1u);\n";
             body << indent << "return;\n";
         } else {
@@ -827,6 +900,10 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
             body << indent << "uint32_t " << fb_var << " = " << base_var
                  << " - 0x40u;\n";
         }
+        // Empty-list LDM/STM performs a single N access at the
+        // 0x40-stride address (interpreter parity).
+        body << indent << cyc_var_for(ins) << " += runtime_mem_cycles("
+             << addr_var << " & ~3u, 4u, 0u);\n";
         if (blk.load) {
             std::string pcv = "_pc" + sfx;
             body << indent << "uint32_t " << pcv
@@ -837,10 +914,12 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
             }
             if (blk.s_bit) {
                 body << indent << "if (" << mode_is_priv_non_system_expr()
-                     << ") { runtime_exception_return(" << pcv
+                     << ") { runtime_tick(" << cyc_var_for(ins)
+                     << "); runtime_exception_return(" << pcv
                      << " & ~1u); return; }\n";
             }
             body << indent << "g_cpu.R[15] = " << pcv << " & ~1u;\n";
+            body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
             body << indent << "runtime_dispatch(g_cpu.R[15]);\n";
             body << indent << "return;\n";
         } else {
@@ -881,9 +960,18 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
 
     bool pc_in_list = (blk.reg_list & (1u << 15)) != 0;
 
+    // First access is non-sequential (N), each subsequent access is
+    // sequential (S). Matches the interpreter's per-register cost loop,
+    // which matters over slow regions (e.g. EWRAM: 6 N vs 3 S per word).
+    bool first_access = true;
+
     // Iterate registers in ascending order.
     for (int r = 0; r < 16; ++r) {
         if (!(blk.reg_list & (1u << r))) continue;
+        body << indent << cyc_var_for(ins) << " += runtime_mem_cycles("
+             << addr_var << " & ~3u, 4u, " << (first_access ? "0u" : "1u")
+             << ");\n";
+        first_access = false;
         if (blk.load) {
             if (r == 15) {
                 std::string pcv = "_pc" + sfx;
@@ -891,7 +979,8 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
                      << " = bus_read_u32(" << addr_var << " & ~3u);\n";
                 if (blk.s_bit) {
                     body << indent << "if (" << mode_is_priv_non_system_expr()
-                         << ") { runtime_exception_return(" << pcv
+                         << ") { runtime_tick(" << cyc_var_for(ins)
+                         << "); runtime_exception_return(" << pcv
                          << " & ~1u); return; }\n";
                     body << indent << "g_cpu.R[15] = " << pcv << " & ~1u;\n";
                 } else {
@@ -946,6 +1035,9 @@ bool emit_block_transfer(std::ostringstream& body, const Instr& ins,
         // When the base is NOT SP, the popped PC is a computed
         // jump (state-machine dispatch, jump tables popped from
         // arbitrary memory). Those still need runtime_dispatch.
+        // Every path here exits the function, so tick the accumulated
+        // cost once before any of them.
+        body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
         if (blk.rn == 13) {
             body << indent << "if (runtime_call_should_return(g_cpu.R[15])) return;\n";
             body << indent << "runtime_dispatch(g_cpu.R[15]);\n";
@@ -967,6 +1059,8 @@ bool emit_multiply(std::ostringstream& body, const Instr& ins,
     auto rs = static_cast<unsigned>(ins.rs);
     switch (ins.op) {
         case IrOp::MUL: {
+            body << indent << cyc_var_for(ins) << " += runtime_mul_cycles(g_cpu.R["
+                 << (ins.thumb ? rm : rs) << "], 1u, 0u);\n";
             std::string rv = "_r" + sfx;
             body << indent << "uint32_t " << rv << " = g_cpu.R[" << rm
                  << "] * g_cpu.R[" << rs << "];\n";
@@ -975,6 +1069,8 @@ bool emit_multiply(std::ostringstream& body, const Instr& ins,
             return true;
         }
         case IrOp::MLA: {
+            body << indent << cyc_var_for(ins)
+                 << " += runtime_mul_cycles(g_cpu.R[" << rs << "], 1u, 1u);\n";
             std::string rv = "_r" + sfx;
             body << indent << "uint32_t " << rv << " = g_cpu.R[" << rm
                  << "] * g_cpu.R[" << rs << "] + g_cpu.R[" << rn << "];\n";
@@ -983,6 +1079,8 @@ bool emit_multiply(std::ostringstream& body, const Instr& ins,
             return true;
         }
         case IrOp::UMULL: {
+            body << indent << cyc_var_for(ins)
+                 << " += runtime_mul_cycles(g_cpu.R[" << rs << "], 0u, 1u);\n";
             std::string pv = "_p" + sfx;
             body << indent << "uint64_t " << pv << " = (uint64_t)g_cpu.R["
                  << rm << "] * (uint64_t)g_cpu.R[" << rs << "];\n";
@@ -997,6 +1095,8 @@ bool emit_multiply(std::ostringstream& body, const Instr& ins,
             return true;
         }
         case IrOp::UMLAL: {
+            body << indent << cyc_var_for(ins)
+                 << " += runtime_mul_cycles(g_cpu.R[" << rs << "], 0u, 2u);\n";
             std::string pv = "_p" + sfx;
             std::string av = "_acc" + sfx;
             std::string sv = "_sum" + sfx;
@@ -1016,6 +1116,8 @@ bool emit_multiply(std::ostringstream& body, const Instr& ins,
             return true;
         }
         case IrOp::SMULL: {
+            body << indent << cyc_var_for(ins)
+                 << " += runtime_mul_cycles(g_cpu.R[" << rs << "], 1u, 1u);\n";
             std::string pv = "_p" + sfx;
             body << indent << "int64_t " << pv << " = (int64_t)(int32_t)g_cpu.R["
                  << rm << "] * (int64_t)(int32_t)g_cpu.R[" << rs << "];\n";
@@ -1030,6 +1132,8 @@ bool emit_multiply(std::ostringstream& body, const Instr& ins,
             return true;
         }
         case IrOp::SMLAL: {
+            body << indent << cyc_var_for(ins)
+                 << " += runtime_mul_cycles(g_cpu.R[" << rs << "], 1u, 2u);\n";
             std::string pv = "_p" + sfx;
             std::string av = "_acc" + sfx;
             std::string sv = "_sum" + sfx;
@@ -1148,18 +1252,54 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
     }
 
     if (cond_never(ins.cond)) {
-        return "    /* cond NV: never executes */\n";
+        // Never executes, but the instruction is still fetched: charge
+        // the 1S fetch and advance PC, matching the interpreter's
+        // condition-failed path (cycles_out = 1).
+        std::ostringstream s;
+        s << "    /* cond NV: never executes */\n";
+        s << "    g_cpu.R[15] = "
+          << fmt_hex32(ins.pc + (ins.thumb ? 2u : 4u)) << ";\n";
+        s << "    runtime_tick(1u);\n";
+        return s.str();
     }
 
     std::ostringstream os;
-    // Advance hardware at instruction boundaries. The generated bodies
-    // use static PC semantics for operand reads, so keeping R15 at the
-    // current instruction PC here is only for exception/IRQ resume state.
+    // The generated bodies use static PC semantics for operand reads, so
+    // keeping R15 at the current instruction PC here is only for the
+    // exception/IRQ resume state read by runtime_irq/runtime_swi.
     os << "    g_cpu.R[15] = " << fmt_hex32(ins.pc) << ";\n";
-    os << "    runtime_tick(1u);\n";
     os << "    if (runtime_should_yield()) return;\n";
+
+    // Per-instruction cycle accumulator. Starts at the cond-fail cost
+    // (1S fetch); the cond-pass block raises it to the full execute cost,
+    // and memory/multiply ops add their runtime-dependent component. A
+    // single runtime_tick(_cyc) at the instruction boundary (epilogue
+    // below) pumps the PPU/audio/timers and delivers any pending IRQ —
+    // matching the interpreter oracle, which pumps the full cost AFTER
+    // executing and checks IRQs at the next boundary.
+    const std::string cyc_var = cyc_var_for(ins);
+    os << "    uint32_t " << cyc_var << " = 1u;\n";
+
     emit_cond_open(os, ins.cond);
     const char* indent = indent_for(ins.cond);
+
+    // Static execute cost = base (fetch + internal cycles; branch refill
+    // folded in) + register-shift surcharge + non-branch PC-write refill.
+    // Mirrors interpreter.cpp's cost assembly. SWI ticks its own 3 cycles
+    // inside runtime_swi (after masking IRQs), so it leaves _cyc at the
+    // fetch baseline (used only on the cond-fail path).
+    if (ins.op != IrOp::SWI) {
+        uint32_t exec_cost = instr_cycle_base(ins.op);
+        if (ins.op2.kind == Op2::Kind::Shifted &&
+            ins.op2.shifted.by_register) {
+            exec_cost += 1u;  // extra shifter I-cycle (register-specified shift)
+        }
+        if (writes_pc_nonbranch(ins)) {
+            exec_cost += 2u;  // pipeline refill
+        }
+        os << indent << cyc_var << " = " << exec_cost << "u;\n";
+    }
+
     bool ok = false;
 
     switch (ins.op) {
@@ -1209,6 +1349,17 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
     }
 
     emit_cond_close(os, ins.cond);
+
+    // Instruction boundary. Advance R15 to the next instruction so a
+    // pending IRQ delivered by the tick saves the correct return address
+    // (the stacked LR must match the interpreter, or IWRAM diverges),
+    // then pump the accumulated cost. Branch / PC-write / SWI ops have
+    // already set R15 and ticked _cyc before returning, so for them this
+    // is dead code; it is the live path for fall-through ops and the
+    // cond-fail case (where _cyc is the 1-cycle fetch baseline).
+    os << "    g_cpu.R[15] = "
+       << fmt_hex32(ins.pc + (ins.thumb ? 2u : 4u)) << ";\n";
+    os << "    runtime_tick(" << cyc_var << ");\n";
     return os.str();
 }
 

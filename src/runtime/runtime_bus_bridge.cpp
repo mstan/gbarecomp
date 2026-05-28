@@ -6,6 +6,7 @@
 // before any recompiled cart code executes.
 
 #include "../armv4t/runtime_arm.h"
+#include "../armv4t/arm_ir.h"
 #include "../gba/gba_bus.h"
 #include "../gba/gba_ppu.h"
 
@@ -144,6 +145,20 @@ extern "C" void bus_write_u16(uint32_t addr, uint16_t val) {
 
 extern "C" void bus_write_u8(uint32_t addr, uint8_t val) {
     if (gbarecomp::g_active_bus) gbarecomp::g_active_bus->write8(addr, val);
+}
+
+extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
+                                       uint32_t sequential) {
+    auto* bus = gbarecomp::g_active_bus;
+    return bus ? bus->access_cycles(addr, static_cast<uint8_t>(width),
+                                    sequential != 0u)
+               : 1u;
+}
+
+extern "C" uint32_t runtime_mul_cycles(uint32_t rs_value,
+                                       uint32_t signed_variant,
+                                       uint32_t extra) {
+    return armv4t::mul_wait_cycles(rs_value, signed_variant != 0u, extra);
 }
 
 extern "C" void runtime_tick(uint32_t cycles) {

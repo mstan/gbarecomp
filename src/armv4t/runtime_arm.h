@@ -96,6 +96,20 @@ void     bus_write_u32(uint32_t addr, uint32_t val);
 void     bus_write_u16(uint32_t addr, uint16_t val);
 void     bus_write_u8 (uint32_t addr, uint8_t  val);
 
+// ── Per-instruction cycle cost (memory + multiply) ─────────────────
+// Generated code computes the fixed part of an instruction's cost
+// statically (instr_cycle_base + shift/PC-write surcharges) and adds
+// these runtime-dependent parts as it executes, then ticks the total
+// once at the instruction boundary. `runtime_mem_cycles` returns the
+// N/S access cost for the active bus region; `runtime_mul_cycles`
+// returns the ARM7TDMI multiply operand wait. Both mirror the IR
+// interpreter (the timing oracle) exactly. `width` is 1/2/4 bytes;
+// `sequential`/`signed_variant` are 0/1 flags.
+uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
+                            uint32_t sequential);
+uint32_t runtime_mul_cycles(uint32_t rs_value, uint32_t signed_variant,
+                            uint32_t extra);
+
 // ── Shifter helpers ────────────────────────────────────────────────
 // Generated code uses these for data-processing operand2 shifts and
 // for register-shifted-by-register cases. They update the shifter

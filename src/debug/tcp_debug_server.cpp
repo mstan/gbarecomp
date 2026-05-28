@@ -36,6 +36,7 @@ extern "C" uint32_t g_runtime_break_pc;
 #include "gba_io.h"
 #include "gba_ppu.h"
 #include "runtime_arm.h"
+#include "symbol_lookup.h"
 
 namespace gbarecomp::debug {
 
@@ -516,6 +517,32 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         }
         g_runtime_break_pc = static_cast<uint32_t>(value);
         out = "{\"ok\":true}";
+        return;
+    }
+    if (contains("\"symbol\"")) {
+        // Resolve a guest PC to the nearest recompiled function name +
+        // offset, e.g. {"name":"UpdateAnimationVariableFrames","offset":16}.
+        // Backed by the generated address->name map (symbol_lookup.h).
+        uint64_t addr = 0;
+        if (!extract_uint(req, "\"addr\"", addr)) {
+            emit_error(out, "missing addr");
+            return;
+        }
+        uint32_t off = 0;
+        const char* name = gba_symbol_lookup(static_cast<uint32_t>(addr), &off);
+        char buf[256];
+        if (name) {
+            std::snprintf(buf, sizeof(buf),
+                          "{\"ok\":true,\"addr\":%llu,\"name\":\"%s\","
+                          "\"offset\":%u}",
+                          static_cast<unsigned long long>(addr), name, off);
+        } else {
+            std::snprintf(buf, sizeof(buf),
+                          "{\"ok\":true,\"addr\":%llu,\"name\":null,"
+                          "\"offset\":0}",
+                          static_cast<unsigned long long>(addr));
+        }
+        out = buf;
         return;
     }
     if (contains("\"ppu_state\"")) {

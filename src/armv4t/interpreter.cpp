@@ -448,87 +448,11 @@ bool is_priv_non_system(uint8_t mode) {
 // Reference: GBATEK § "GBA Memory Map - Bus Width and Speed",
 // ARM7TDMI TRM § "Instruction Cycle Times", and `GbaBus::access_cycles`.
 
-inline uint32_t cycle_cost_base(IrOp op, uint16_t /*reg_list*/) {
-    switch (op) {
-        case IrOp::AND: case IrOp::EOR: case IrOp::SUB: case IrOp::RSB:
-        case IrOp::ADD: case IrOp::ADC: case IrOp::SBC: case IrOp::RSC:
-        case IrOp::TST: case IrOp::TEQ: case IrOp::CMP: case IrOp::CMN:
-        case IrOp::ORR: case IrOp::MOV: case IrOp::BIC: case IrOp::MVN:
-        case IrOp::MRS: case IrOp::MSR:
-            return 1;  // 1S
-
-        // Branches: 2S+1N pipeline refill folded in here.
-        case IrOp::B: case IrOp::BL: case IrOp::BX: case IrOp::BLX_reg:
-        case IrOp::BL_suffix:
-            return 3;  // 2S+1N
-        case IrOp::BL_prefix:
-            return 1;  // THUMB BL upper half only seeds LR; no PC write
-
-        // Memory ops: fetch + internal/turnaround (no per-access
-        // cycles here; the execute path adds those via
-        // bus.access_cycles). Matching mGBA's model for BIOS-region
-        // execution:
-        //   LDR/LDM: prefetch + per-access waitstate + 2 trailing.
-        //   STR/STM: prefetch + per-access waitstate + 1 trailing.
-        // Store instructions do not pay the same extra internal cycle
-        // that loads do; the previous +2 model made BIOS PPU time run
-        // ahead of mGBA starting at the first STRB to IO.
-        case IrOp::LDR:   case IrOp::LDRB:
-        case IrOp::LDRH:  case IrOp::LDRSB: case IrOp::LDRSH:
-            return 2;
-        case IrOp::STR:   case IrOp::STRB:  case IrOp::STRH:
-            return 1;
-        case IrOp::LDM:
-            return 2;
-        case IrOp::STM:
-            return 1;
-        case IrOp::SWP:  case IrOp::SWPB:
-            return 3;  // 1S+1I + extra trailing cycle
-
-        // MUL family: prefetch here; execute adds mGBA's
-        // operand-dependent ARM_WAIT_*MUL cycles.
-        case IrOp::MUL:
-            return 1;
-        case IrOp::MLA: case IrOp::UMULL: case IrOp::SMULL:
-            return 1;
-        case IrOp::UMLAL: case IrOp::SMLAL:
-            return 1;
-
-        case IrOp::SWI:
-            return 3;  // 2S+1N — mode-change overhead is in enter_irq
-
-        default:
-            return 1;
-    }
-}
-
-inline uint32_t signed_mul_wait(uint32_t r, uint32_t extra) {
-    uint32_t wait = extra;
-    if ((r & 0xFFFFFF00u) == 0xFFFFFF00u || !(r & 0xFFFFFF00u)) {
-        wait += 1;
-    } else if ((r & 0xFFFF0000u) == 0xFFFF0000u || !(r & 0xFFFF0000u)) {
-        wait += 2;
-    } else if ((r & 0xFF000000u) == 0xFF000000u || !(r & 0xFF000000u)) {
-        wait += 3;
-    } else {
-        wait += 4;
-    }
-    return wait;
-}
-
-inline uint32_t unsigned_mul_wait(uint32_t r, uint32_t extra) {
-    uint32_t wait = extra;
-    if (!(r & 0xFFFFFF00u)) {
-        wait += 1;
-    } else if (!(r & 0xFFFF0000u)) {
-        wait += 2;
-    } else if (!(r & 0xFF000000u)) {
-        wait += 3;
-    } else {
-        wait += 4;
-    }
-    return wait;
-}
+// The per-instruction cycle model (fixed base cost + multiply operand
+// waits) lives in arm_ir.cpp as `instr_cycle_base` / `mul_wait_cycles`,
+// shared verbatim with the recompiler codegen and the runtime tick
+// helpers so the recompiled cycle stream matches this oracle exactly.
+// Memory-access N/S cycles come from `Bus::access_cycles`.
 
 }  // namespace
 
@@ -921,7 +845,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
         // ── Multiply (32-bit) ──────────────────────────────────────
         case IrOp::MUL: {
             uint32_t wait_operand = i.thumb ? cpu.R[i.rm] : cpu.R[i.rs];
-            extra_cycles += signed_mul_wait(wait_operand, 0);
+            extra_cycles += mul_wait_cycles(wait_operand, /*signed=*/true, 0);
             uint32_t r = cpu.R[i.rm] * cpu.R[i.rs];
             cpu.R[i.rd] = r;
             if (i.set_flags) {
@@ -933,7 +857,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             break;
         }
         case IrOp::MLA: {
-            extra_cycles += signed_mul_wait(cpu.R[i.rs], 1);
+            extra_cycles += mul_wait_cycles(cpu.R[i.rs], /*signed=*/true, 1);
             // Decoder layout: Rd=destination (and accumulator source
             // from Rn slot), Rm × Rs + Rn → Rd.
             uint32_t r = cpu.R[i.rm] * cpu.R[i.rs] + cpu.R[i.rn];
@@ -952,7 +876,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
         //   Rs (bits 11..8), Rm (bits 3..0)
         // Result low word → R[Rn]; high word → R[Rd].
         case IrOp::UMULL: {
-            extra_cycles += unsigned_mul_wait(cpu.R[i.rs], 1);
+            extra_cycles += mul_wait_cycles(cpu.R[i.rs], /*signed=*/false, 1);
             uint64_t prod = static_cast<uint64_t>(cpu.R[i.rm]) *
                             static_cast<uint64_t>(cpu.R[i.rs]);
             cpu.R[i.rn] = static_cast<uint32_t>(prod & 0xFFFFFFFFu);
@@ -964,7 +888,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             break;
         }
         case IrOp::UMLAL: {
-            extra_cycles += unsigned_mul_wait(cpu.R[i.rs], 2);
+            extra_cycles += mul_wait_cycles(cpu.R[i.rs], /*signed=*/false, 2);
             uint64_t prod = static_cast<uint64_t>(cpu.R[i.rm]) *
                             static_cast<uint64_t>(cpu.R[i.rs]);
             uint64_t acc = (static_cast<uint64_t>(cpu.R[i.rd]) << 32) |
@@ -979,7 +903,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             break;
         }
         case IrOp::SMULL: {
-            extra_cycles += signed_mul_wait(cpu.R[i.rs], 1);
+            extra_cycles += mul_wait_cycles(cpu.R[i.rs], /*signed=*/true, 1);
             int64_t prod = static_cast<int64_t>(static_cast<int32_t>(cpu.R[i.rm])) *
                            static_cast<int64_t>(static_cast<int32_t>(cpu.R[i.rs]));
             uint64_t u = static_cast<uint64_t>(prod);
@@ -992,7 +916,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
             break;
         }
         case IrOp::SMLAL: {
-            extra_cycles += signed_mul_wait(cpu.R[i.rs], 2);
+            extra_cycles += mul_wait_cycles(cpu.R[i.rs], /*signed=*/true, 2);
             int64_t prod = static_cast<int64_t>(static_cast<int32_t>(cpu.R[i.rm])) *
                            static_cast<int64_t>(static_cast<int32_t>(cpu.R[i.rs]));
             uint64_t acc = (static_cast<uint64_t>(cpu.R[i.rd]) << 32) |
@@ -1169,7 +1093,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
 
         // ── Software interrupt ─────────────────────────────────────
         case IrOp::SWI:
-            if (cycles_out) *cycles_out = cycle_cost_base(i.op, 0);
+            if (cycles_out) *cycles_out = instr_cycle_base(i.op);
             return Result::Swi;
 
         default:
@@ -1187,7 +1111,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
     // + pipeline refill (+2) for any non-branch op that wrote PC.
     // Branches (B/BL/BX/BL_*) fold the refill into base.
     if (cycles_out) {
-        uint32_t c = cycle_cost_base(i.op, i.block.reg_list) +
+        uint32_t c = instr_cycle_base(i.op) +
                      mem_cycles + extra_cycles;
         bool branch_op = (i.op == IrOp::B || i.op == IrOp::BL ||
                           i.op == IrOp::BX || i.op == IrOp::BLX_reg ||

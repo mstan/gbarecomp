@@ -79,6 +79,85 @@ const char* ir_op_name(IrOp op) noexcept {
     return "?";
 }
 
+uint32_t instr_cycle_base(IrOp op) noexcept {
+    switch (op) {
+        case IrOp::AND: case IrOp::EOR: case IrOp::SUB: case IrOp::RSB:
+        case IrOp::ADD: case IrOp::ADC: case IrOp::SBC: case IrOp::RSC:
+        case IrOp::TST: case IrOp::TEQ: case IrOp::CMP: case IrOp::CMN:
+        case IrOp::ORR: case IrOp::MOV: case IrOp::BIC: case IrOp::MVN:
+        case IrOp::MRS: case IrOp::MSR:
+            return 1;  // 1S
+
+        // Branches: 2S+1N pipeline refill folded in here.
+        case IrOp::B: case IrOp::BL: case IrOp::BX: case IrOp::BLX_reg:
+        case IrOp::BL_suffix:
+            return 3;  // 2S+1N
+        case IrOp::BL_prefix:
+            return 1;  // THUMB BL upper half only seeds LR; no PC write
+
+        // Memory ops: fetch + internal/turnaround (per-access N/S cycles
+        // are added at execute time via Bus::access_cycles). Matches the
+        // interpreter's mGBA-derived model:
+        //   LDR/LDM: prefetch + per-access waitstate + trailing I.
+        //   STR/STM: prefetch + per-access waitstate (no extra trailing I).
+        case IrOp::LDR:   case IrOp::LDRB:
+        case IrOp::LDRH:  case IrOp::LDRSB: case IrOp::LDRSH:
+            return 2;
+        case IrOp::STR:   case IrOp::STRB:  case IrOp::STRH:
+            return 1;
+        case IrOp::LDM:
+            return 2;
+        case IrOp::STM:
+            return 1;
+        case IrOp::SWP:  case IrOp::SWPB:
+            return 3;  // 1S+1I + extra trailing cycle
+
+        // MUL family: prefetch here; execute adds the operand-dependent
+        // ARM_WAIT_*MUL cycles via mul_wait_cycles().
+        case IrOp::MUL:
+        case IrOp::MLA: case IrOp::UMULL: case IrOp::SMULL:
+        case IrOp::UMLAL: case IrOp::SMLAL:
+            return 1;
+
+        case IrOp::SWI:
+            return 3;  // 2S+1N — mode-change overhead is in the SWI entry
+
+        case IrOp::Undefined:
+        default:
+            return 1;
+    }
+}
+
+uint32_t mul_wait_cycles(uint32_t rs_value, bool signed_variant,
+                         uint32_t extra) noexcept {
+    uint32_t wait = extra;
+    if (signed_variant) {
+        // Early-terminate on leading all-0s OR all-1s (the multiplier is
+        // treated as signed).
+        if ((rs_value & 0xFFFFFF00u) == 0xFFFFFF00u || !(rs_value & 0xFFFFFF00u)) {
+            wait += 1;
+        } else if ((rs_value & 0xFFFF0000u) == 0xFFFF0000u || !(rs_value & 0xFFFF0000u)) {
+            wait += 2;
+        } else if ((rs_value & 0xFF000000u) == 0xFF000000u || !(rs_value & 0xFF000000u)) {
+            wait += 3;
+        } else {
+            wait += 4;
+        }
+    } else {
+        // Unsigned long multiply: early-terminate on leading all-0s only.
+        if (!(rs_value & 0xFFFFFF00u)) {
+            wait += 1;
+        } else if (!(rs_value & 0xFFFF0000u)) {
+            wait += 2;
+        } else if (!(rs_value & 0xFF000000u)) {
+            wait += 3;
+        } else {
+            wait += 4;
+        }
+    }
+    return wait;
+}
+
 namespace {
 
 const char* shift_name(ShiftType t) {

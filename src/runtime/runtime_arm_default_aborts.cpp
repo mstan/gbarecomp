@@ -19,20 +19,26 @@
 // the diff runner.
 
 #include "runtime_arm.h"
+#include "symbol_lookup.h"
 
 #include <cstdio>
 #include <cstdlib>
 
 extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
+    char symbuf[96];
+    symbuf[0] = '\0';
+    uint32_t off = 0;
+    const char* sym = gba_symbol_lookup(target_pc, &off);
+    if (sym) std::snprintf(symbuf, sizeof(symbuf), " <near %s+0x%X>", sym, off);
     std::fprintf(stderr,
-                 "runtime_arm: dispatch miss for pc=0x%08X "
+                 "runtime_arm: dispatch miss for pc=0x%08X%s "
                  "(no generated function; not recompiled, "
                  "or function-finder didn't reach it). "
                  "If this is a cart address, add to game.toml "
                  "[functions] and regenerate. If this is a BIOS "
                  "address (< 0x4000), run `gba_recompile --bios "
                  "bios/gba_bios.bin` and rebuild.\n",
-                 target_pc);
+                 target_pc, symbuf);
     runtime_trace_dump_recent(96);
     std::abort();
 }

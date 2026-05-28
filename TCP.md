@@ -150,8 +150,17 @@ irq_diff
 call_stack              (requires runtime stack tracking)
 dispatch_miss_info      (also written to dispatch_misses.log)
 watchdog_status         unmapped_io_log
-unknown_swi_log
+unknown_swi_log         symbol
 ```
+
+`symbol {addr}` resolves a guest PC to the nearest recompiled function name
++ offset, e.g. `{"ok":true,"name":"UpdateAnimationVariableFrames","offset":16}`
+(or `"name":null` when no symbol maps to it). Backed by the recompiler-
+generated address→name map (`generated/symbol_map.cpp`, registered into
+`src/armv4t/symbol_lookup.cpp`). The same map annotates every PC in
+`runtime_trace` dumps and in dispatch-miss reports as `<Name+0xoff>`.
+The map is emitted by default; pass `gba_recompile --no-symbol-map` to omit
+it (binaries without it degrade gracefully to raw PCs).
 
 ---
 
