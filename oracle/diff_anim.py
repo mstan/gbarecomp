@@ -124,17 +124,23 @@ def main():
         print(f"   @load interp {anim_fields(ib)}")
         print(f"   @load region {'IDENTICAL' if rb == ib else 'DIFFERS'}")
 
+        PRIO = 0x03003DC0  # gPriorityHandler; EntityDisabled compares it vs
+                           # entity[0x11]&0xF to pause low-priority objects.
         rec_dead = intp_dead = False
         for f in range(1, args.frames + 1):
             rb = rec.read_bytes(ENTITY, 0x20) if not rec_dead else None
             ib = intp.read_bytes(ENTITY, 0x20) if not intp_dead else None
+            rp = rec.read_bytes(PRIO, 4).hex() if not rec_dead else "(spun)"
+            ip = intp.read_bytes(PRIO, 4).hex() if not intp_dead else "(spun)"
             ra = anim_fields(rb)["animIdx@12"] if rb else "(spun)"
             ia = anim_fields(ib)["animIdx@12"] if ib else "(spun)"
             flag = ""
             if rb and ib and ra != ia:
-                flag = "  <-- DIVERGE"
-            print(f"f{f:3d}: recomp animIdx={ra!s:>6}  interp animIdx={ia!s:>6}{flag}",
-                  flush=True)
+                flag = "  <-- animIdx DIVERGE"
+            if rp != ip and "(spun)" not in (rp, ip):
+                flag += "  <-- gPriorityHandler DIVERGE"
+            print(f"f{f:3d}: recomp[anim={ra!s:>5} prio={rp}]  "
+                  f"interp[anim={ia!s:>5} prio={ip}]{flag}", flush=True)
             if flag:
                 print(f"   recomp {anim_fields(rb)}")
                 print(f"   interp {anim_fields(ib)}")

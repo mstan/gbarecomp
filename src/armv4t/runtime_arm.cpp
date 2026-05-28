@@ -120,12 +120,22 @@ extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc,
         abort_mem_addr = env ? static_cast<uint32_t>(std::strtoul(env, nullptr, 0))
                              : 0xFFFFFFFEu;
     }
+    // How many trailing trace events the abort handlers dump. Default 160;
+    // raise (up to the ring size) to capture the full call chain back to a
+    // main loop. GBARECOMP_TRACE_DUMP_DEPTH=4000.
+    static uint32_t abort_dump_depth = 0u;
+    if (abort_dump_depth == 0u) {
+        const char* env = std::getenv("GBARECOMP_TRACE_DUMP_DEPTH");
+        abort_dump_depth = env ? static_cast<uint32_t>(std::strtoul(env, nullptr, 0))
+                               : 160u;
+        if (abort_dump_depth == 0u) abort_dump_depth = 160u;
+    }
     if (kind == RUNTIME_TRACE_MEM_WRITE && addr == abort_mem_addr) {
         std::fprintf(stderr,
                      "runtime_trace: mem-write-addr abort pc=0x%08X "
                      "addr=0x%08X value=0x%08X width=%u\n",
                      pc, addr, value, aux);
-        runtime_trace_dump_recent(160);
+        runtime_trace_dump_recent(abort_dump_depth);
         std::abort();
     }
 
