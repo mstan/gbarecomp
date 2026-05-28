@@ -29,6 +29,17 @@
 // so ordinary step granularity can't enter it. 0 disables (no overhead).
 extern "C" uint32_t g_runtime_break_pc = 0;
 
+// Count of PPU VBlank-start events (scanline 159->160), incremented
+// unconditionally in runtime_tick regardless of DISPSTAT IRQ-enable.
+// The debug step-one-frame primitive (runtime.cpp step_frame) stops when
+// this advances, so the recomp's TCP `step` parks at VBlank-start — the
+// same PPU phase the interpreter (tools/bios_smoke step_one_frame) and
+// mGBA (runFrame) park at. Stopping at scanline-WRAP instead (the old
+// ppu.frame_count() convention) parked the recomp ~68 scanlines / one
+// frame of game-logic later than the oracles, manufacturing a spurious
+// "recomp runs a frame ahead" when diffing memory at the same step index.
+extern "C" unsigned long long g_runtime_vblank_starts = 0;
+
 namespace gbarecomp {
 
 static gba::GbaBus* g_active_bus = nullptr;
@@ -195,6 +206,7 @@ extern "C" void runtime_tick(uint32_t cycles) {
         }
         if (events.vblank_started) {
             ppu->mark_framebuffer_latched();
+            ++g_runtime_vblank_starts;
         }
         if (events.vblank_started && (ds & 0x0008u)) {
             bus->io().request_irq(gba::GbaIo::IrqVBlank);

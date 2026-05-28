@@ -822,12 +822,21 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         sync_frame_counter();
         return true;
     };
+    // Advance until the PPU reaches the next VBlank-start (scanline
+    // 159->160), NOT the scanline wrap (227->0). The interpreter oracle
+    // (tools/bios_smoke step_one_frame) and mGBA (runFrame) both return at
+    // VBlank-start; keying off ppu.frame_count() (which increments at the
+    // wrap) parked the recomp ~68 scanlines / one frame of game-logic later
+    // than the oracles, so memory diffed at the same step index showed a
+    // spurious "recomp is a frame ahead". g_runtime_vblank_starts counts
+    // VBlank-start events; stopping on its increment puts the recomp at the
+    // same PPU phase as both oracles. See runtime_bus_bridge.cpp.
     auto step_frame = [&]() -> bool {
-        uint64_t start_frame = ppu.frame_count();
+        uint64_t start_vbl = g_runtime_vblank_starts;
         constexpr uint64_t kMaxDispatchesPerFrame = 2'000'000ull;
         for (uint64_t i = 0; i < kMaxDispatchesPerFrame; ++i) {
             if (!step_once()) return false;
-            if (ppu.frame_count() != start_frame) return true;
+            if (g_runtime_vblank_starts != start_vbl) return true;
         }
         return false;
     };
