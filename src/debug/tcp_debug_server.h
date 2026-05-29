@@ -48,6 +48,10 @@ public:
     // `err` and return false.
     using SnapshotFn =
         std::function<bool(const std::string& path, std::string& err)>;
+    // Dump the per-instruction fingerprint ring (oldest-first) to a binary
+    // file in the shared GFP1 format. Returns the number of records written.
+    // Wired to runtime_fp_save_file (recomp) / the interp oracle's mirror.
+    using FpSaveFn = std::function<uint32_t(const std::string& path)>;
 
     struct Context {
         armv4t::CPUState* cpu = nullptr;
@@ -58,6 +62,7 @@ public:
         StepFn            step_inst;  // advances one CPU instruction
         SnapshotFn        savestate_save;  // write full machine state
         SnapshotFn        savestate_load;  // restore full machine state
+        FpSaveFn          fp_save;          // dump fingerprint ring to a file
         RuntimeTraceCopyFn runtime_trace_copy;
         // Mirror of the host's counters so `counters` queries can
         // report them. Host updates these between commands.

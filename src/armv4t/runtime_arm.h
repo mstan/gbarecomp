@@ -175,6 +175,7 @@ void            runtime_call_stack_restore(const uint32_t* entries,
 
 typedef struct RuntimeTraceEntry {
     uint32_t seq;
+    uint64_t cycles;  // cumulative guest cycles at the moment of this event
     uint32_t kind;
     uint32_t pc;
     uint32_t cpsr;
@@ -196,10 +197,43 @@ void runtime_trace_event(uint32_t kind, uint32_t pc, uint32_t addr,
                          uint32_t value, uint32_t aux);
 void runtime_trace_reset(void);
 void runtime_trace_dump_recent(uint32_t max_entries);
+
+// ── Per-instruction fingerprint ring (MC-HP-002 cycle-aligned diff) ──
+// When g_runtime_insn_trace != 0 the generated per-instruction prologue calls
+// runtime_insn_fp() to record the pre-execution architectural state of EVERY
+// instruction: {cumulative cycles, pc, cpsr, R0..R15}. The ring is always-on
+// once armed (armed at machine reset from GBARECOMP_INSN_TRACE, or via the TCP
+// `insn_trace` command) and bounded by eviction; a targeted dump pulls the
+// window of interest. This is the substrate for diffing the recomp against the
+// bios_smoke interp oracle at identical cycle counts — the FIRST fingerprint
+// that differs (pc or any register) localizes the first real divergence.
+// Disarmed (default) it costs one not-taken branch per instruction.
+typedef struct RuntimeFpEntry {
+    unsigned long long cycles;  // cumulative guest cycles BEFORE this instruction
+    uint32_t pc;
+    uint32_t cpsr;
+    uint32_t r[16];
+} RuntimeFpEntry;
+
+extern unsigned g_runtime_insn_trace;  // 0 = off (zero overhead)
+void runtime_insn_fp(void);            // emit one fingerprint (armed-gated by caller)
+void runtime_fp_reset(void);
+uint32_t runtime_fp_count(void);
+// Write the whole ring (oldest-first) as a compact binary file: a 16-byte
+// header {u32 magic 'GFP1', u32 entry_size, u64 count} followed by `count`
+// RuntimeFpEntry records. Returns the number of records written (0 on error).
+uint32_t runtime_fp_save_file(const char* path);
 uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
                                    uint32_t max_entries);
 void runtime_tick(uint32_t cycles);
 bool runtime_should_yield(void);
+// Cumulative guest-cycle clock. Incremented by runtime_tick on EVERY tick
+// (per-instruction exec ticks AND halt-pump chunks), so it is the authoritative
+// total-cycle count — unlike runtime.cpp's `cycles_elapsed`, which only tallied
+// the halt path (the MC-HP-002 "cycles incomparable" red herring). Reset to 0
+// at machine reset (runtime_trace_reset). Stamped onto every ring entry so the
+// recomp and interp oracle can be aligned by identical cycle counts. (MC-HP-002.)
+extern unsigned long long g_runtime_cycles;
 // Debug PC breakpoint: when nonzero, runtime_should_yield() unwinds the
 // current runtime_dispatch the moment the guest PC equals this value.
 // Set via the TCP set_break_pc command; 0 = disabled. (MC-HP-002.)

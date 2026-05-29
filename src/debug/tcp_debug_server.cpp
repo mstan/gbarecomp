@@ -328,7 +328,7 @@ void cmd_runtime_trace(const TcpDebugServer::Context& ctx,
         extract_uint(req, "\"count\"", parsed)) {
         max_entries = parsed;
     }
-    if (max_entries > 512) max_entries = 512;
+    if (max_entries > 4096) max_entries = 4096;  // full g_trace ring depth
 
     std::vector<RuntimeTraceEntry> entries(
         static_cast<std::size_t>(max_entries));
@@ -342,14 +342,15 @@ void cmd_runtime_trace(const TcpDebugServer::Context& ctx,
     for (uint32_t i = 0; i < n; ++i) {
         const RuntimeTraceEntry& e = entries[i];
         if (i) out += ",";
-        char item[512];
+        char item[560];
         std::snprintf(
             item, sizeof(item),
-            "{\"seq\":%u,\"kind\":%u,\"pc\":%u,\"cpsr\":%u,"
+            "{\"seq\":%u,\"cycles\":%llu,\"kind\":%u,\"pc\":%u,\"cpsr\":%u,"
             "\"addr\":%u,\"value\":%u,\"aux\":%u,"
             "\"r0\":%u,\"r1\":%u,\"r2\":%u,\"r3\":%u,"
             "\"r4\":%u,\"r5\":%u,\"r12\":%u,\"r13\":%u,\"r14\":%u}",
             static_cast<unsigned>(e.seq),
+            static_cast<unsigned long long>(e.cycles),
             static_cast<unsigned>(e.kind),
             static_cast<unsigned>(e.pc),
             static_cast<unsigned>(e.cpsr),
@@ -709,6 +710,24 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         out = "{\"ok\":true,\"saved\":\"";
         for (char c : path) { if (c == '"' || c == '\\') out.push_back('\\'); out.push_back(c); }
         out += "\"}";
+        return;
+    }
+    if (contains("\"fp_save\"")) {
+        if (!ctx.fp_save) {
+            emit_error(out, "fp_save callback not wired (insn fingerprinting "
+                            "unavailable)");
+            return;
+        }
+        std::string path;
+        if (!extract_string(req, "\"path\"", path) || path.empty()) {
+            emit_error(out, "missing path");
+            return;
+        }
+        uint32_t n = ctx.fp_save(path);
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "{\"ok\":true,\"count\":%u}",
+                      static_cast<unsigned>(n));
+        out = buf;
         return;
     }
     if (contains("\"savestate_load\"")) {

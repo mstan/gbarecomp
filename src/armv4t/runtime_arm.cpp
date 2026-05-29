@@ -83,6 +83,7 @@ extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc,
                                      uint32_t aux) {
     RuntimeTraceEntry& e = g_trace[g_trace_write];
     e.seq = ++g_trace_seq;
+    e.cycles = g_runtime_cycles;
     e.kind = kind;
     e.pc = pc;
     e.cpsr = g_cpu.cpsr;
@@ -143,8 +144,20 @@ extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc,
         const char* env = std::getenv("GBARECOMP_ABORT_ON_MEM_WRITE_MIN_FRAME");
         abort_min_vblank = env ? std::strtoull(env, nullptr, 0) : 0ull;
     }
+    // Optional value gate: only abort when the written value matches. Lets a
+    // watchpoint skip a correct write to an address and fire on the specific
+    // erroneous value (e.g. MC-HP-002: a per-frame countdown is written 0x0C
+    // first — correct — then 0x0B by the extra tick; watch value=0x0B to land
+    // on the duplicate write, not the legitimate one). -1 = match any value.
+    static long long abort_mem_value = -2;
+    if (abort_mem_value == -2) {
+        const char* env = std::getenv("GBARECOMP_ABORT_ON_MEM_WRITE_VALUE");
+        abort_mem_value = env ? static_cast<long long>(std::strtoull(env, nullptr, 0))
+                              : -1;
+    }
     if (kind == RUNTIME_TRACE_MEM_WRITE && addr == abort_mem_addr &&
-        g_runtime_vblank_starts >= abort_min_vblank) {
+        g_runtime_vblank_starts >= abort_min_vblank &&
+        (abort_mem_value < 0 || value == static_cast<uint32_t>(abort_mem_value))) {
         std::fprintf(stderr,
                      "runtime_trace: mem-write-addr abort pc=0x%08X "
                      "addr=0x%08X value=0x%08X width=%u (vblanks=%llu)\n",
@@ -207,6 +220,13 @@ extern "C" void runtime_trace_reset(void) {
     g_trace_write = 0;
     g_trace_count = 0;
     g_trace_seq = 0;
+    g_runtime_cycles = 0;  // cycle clock shares the machine-reset lifecycle
+    // Arm per-instruction fingerprinting for the whole run if requested, so the
+    // ring is always-on from reset (no arm-then-run latency gap) and we query it
+    // after the fact. Also settable via the TCP `insn_trace` command.
+    const char* it = std::getenv("GBARECOMP_INSN_TRACE");
+    g_runtime_insn_trace = (it && it[0] && it[0] != '0') ? 1u : 0u;
+    runtime_fp_reset();
 }
 
 extern "C" void runtime_trace_dump_recent(uint32_t max_entries) {
@@ -245,6 +265,64 @@ extern "C" uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
         out[i] = g_trace[(start + i) % kTraceSize];
     }
     return max_entries;
+}
+
+// ── Per-instruction fingerprint ring ───────────────────────────────
+// A large bounded ring of pre-execution architectural fingerprints, one per
+// guest instruction, captured when armed. Lives here (not the runtime bridge)
+// so the codegen test harness — which links the armv4t lib but not the runtime
+// — gets the symbols without a stub. See runtime_arm.h for the contract.
+
+extern "C" unsigned g_runtime_insn_trace = 0;
+
+namespace {
+// ~1M instructions of history. At ~125k instr/PPU-frame this covers ~8 frames,
+// comfortably spanning the MC-HP-002 f40 onset and the f48 spin. 80 bytes/entry
+// → ~80 MB, only touched when armed.
+constexpr uint32_t kFpSize = 1u << 20;
+RuntimeFpEntry* g_fp = nullptr;       // lazily allocated on first arm
+uint32_t        g_fp_write = 0;
+uint32_t        g_fp_count = 0;
+}  // namespace
+
+extern "C" void runtime_insn_fp(void) {
+    if (!g_fp) {
+        g_fp = static_cast<RuntimeFpEntry*>(
+            std::calloc(kFpSize, sizeof(RuntimeFpEntry)));
+        if (!g_fp) { g_runtime_insn_trace = 0; return; }  // OOM → disarm quietly
+    }
+    RuntimeFpEntry& e = g_fp[g_fp_write];
+    e.cycles = g_runtime_cycles;
+    e.pc = g_cpu.R[15];
+    e.cpsr = g_cpu.cpsr;
+    for (int i = 0; i < 16; ++i) e.r[i] = g_cpu.R[i];
+    g_fp_write = (g_fp_write + 1u) % kFpSize;
+    if (g_fp_count < kFpSize) ++g_fp_count;
+}
+
+extern "C" void runtime_fp_reset(void) {
+    g_fp_write = 0;
+    g_fp_count = 0;
+}
+
+extern "C" uint32_t runtime_fp_count(void) { return g_fp_count; }
+
+extern "C" uint32_t runtime_fp_save_file(const char* path) {
+    if (!path || !g_fp || g_fp_count == 0) return 0;
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f) return 0;
+    uint32_t magic = 0x31504647u;  // 'GFP1'
+    uint32_t esz = static_cast<uint32_t>(sizeof(RuntimeFpEntry));
+    unsigned long long count = g_fp_count;
+    std::fwrite(&magic, sizeof(magic), 1, f);
+    std::fwrite(&esz, sizeof(esz), 1, f);
+    std::fwrite(&count, sizeof(count), 1, f);
+    uint32_t start = (g_fp_write + kFpSize - g_fp_count) % kFpSize;
+    for (uint32_t i = 0; i < g_fp_count; ++i) {
+        std::fwrite(&g_fp[(start + i) % kFpSize], sizeof(RuntimeFpEntry), 1, f);
+    }
+    std::fclose(f);
+    return g_fp_count;
 }
 
 // ── Bus binding ────────────────────────────────────────────────────
@@ -806,9 +884,53 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     runtime_dispatch(0x00000008u);
 }
 
+// Count of IRQ vectorings performed by the recompiled runtime (every
+// runtime_irq call = one exception entry to 0x18). The recomp delivers IRQs
+// here (called from runtime_tick), NOT in runtime.cpp's run loop, so this is
+// the authoritative per-engine IRQ-entry tally. The TCP `counters` command
+// surfaces it (runtime.cpp wires ctx.irq_entries here) so a probe can compare
+// IRQ delivery against the interpreter oracle — the MC-HP-002 1-game-frame-lead
+// test (does the recomp vector an extra/early VBlank IRQ?). Never reset; probes
+// compare per-frame deltas.
+extern "C" unsigned long long g_runtime_irq_entries = 0;
+// Live host-recursion nesting depth of IRQ delivery (++ on entry, -- after the
+// handler unwinds) and the high-water mark. Distinguishes the MC-HP-002 storm
+// shape: deep nesting (depth climbs → a long handler spanning the next IRQ
+// boundary) vs. flat re-fire (depth stays ~1 → an unacked source re-vectoring).
+static uint32_t          g_irq_nest_depth = 0;
+extern "C" unsigned long long g_runtime_irq_max_depth = 0;
+
 extern "C" void runtime_irq(uint32_t return_address) {
+    ++g_runtime_irq_entries;
+    ++g_irq_nest_depth;
+    if (g_irq_nest_depth > g_runtime_irq_max_depth)
+        g_runtime_irq_max_depth = g_irq_nest_depth;
+    // Debug: dump the always-on ring the moment IRQ nesting reaches a
+    // threshold, capturing the storm chain BEFORE later busy execution scrolls
+    // it out (MC-HP-002). Env-gated, zero-overhead when unset.
+    static int irq_depth_gate = -1;
+    if (irq_depth_gate < 0) {
+        const char* e = std::getenv("GBARECOMP_ABORT_ON_IRQ_DEPTH");
+        irq_depth_gate = e ? std::atoi(e) : 0;
+    }
+    if (irq_depth_gate > 0 && (int)g_irq_nest_depth >= irq_depth_gate) {
+        std::fprintf(stderr,
+                     "runtime_irq: nesting depth %u reached (entries=%llu) "
+                     "ret=0x%08X cpsr=0x%08X\n",
+                     g_irq_nest_depth,
+                     (unsigned long long)g_runtime_irq_entries,
+                     return_address, g_cpu.cpsr);
+        runtime_trace_dump_recent(160);
+        std::abort();
+    }
     uint32_t saved_cpsr = g_cpu.cpsr;
-    runtime_trace_event(RUNTIME_TRACE_IRQ, return_address, 0, saved_cpsr, 0);
+    // Record the active IRQ source(s) (IE & IF) in the trace addr field and the
+    // nesting depth in aux so a ring dump names which interrupt is being
+    // vectored and how deep — used to pin the MC-HP-002 IRQ storm. Reading
+    // IE/IF is side-effect-free.
+    uint32_t irq_src = bus_read_u16(0x04000200u) & bus_read_u16(0x04000202u);
+    runtime_trace_event(RUNTIME_TRACE_IRQ, return_address, irq_src, saved_cpsr,
+                        g_irq_nest_depth);
 
     uint32_t new_cpsr =
         (saved_cpsr & ~(0x1Fu | CPSR_T_BIT))
@@ -828,6 +950,7 @@ extern "C" void runtime_irq(uint32_t return_address) {
     g_cpu.R[15]                 = 0x00000018u;
 
     runtime_dispatch(0x00000018u);
+    --g_irq_nest_depth;
 }
 
 // runtime_unimplemented_op is defined in

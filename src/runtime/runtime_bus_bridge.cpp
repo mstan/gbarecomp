@@ -8,6 +8,7 @@
 #include "../armv4t/runtime_arm.h"
 #include "../armv4t/arm_ir.h"
 #include "../gba/gba_bus.h"
+#include "../gba/gba_irq.h"
 #include "../gba/gba_ppu.h"
 
 #include <algorithm>
@@ -39,6 +40,15 @@ extern "C" uint32_t g_runtime_break_pc = 0;
 // frame of game-logic later than the oracles, manufacturing a spurious
 // "recomp runs a frame ahead" when diffing memory at the same step index.
 extern "C" unsigned long long g_runtime_vblank_starts = 0;
+
+// Cumulative guest-cycle clock (MC-HP-002 cycle-aligned divergence hunt).
+// Incremented by runtime_tick on EVERY tick — both the per-instruction exec
+// ticks emitted by generated code and the halt-pump chunks — so it is the
+// authoritative total guest-cycle count. (runtime.cpp's `cycles_elapsed` only
+// summed the halt path, which is why it was incomparable to the interpreter's
+// fixed-quantum clock.) runtime_trace_event stamps this onto every ring entry
+// so the recomp and the bios_smoke interp oracle align by identical cycles.
+extern "C" unsigned long long g_runtime_cycles = 0;
 
 namespace gbarecomp {
 
@@ -172,11 +182,11 @@ extern "C" uint32_t runtime_mul_cycles(uint32_t rs_value,
     return armv4t::mul_wait_cycles(rs_value, signed_variant != 0u, extra);
 }
 
-extern "C" void runtime_tick(uint32_t cycles) {
-    auto* bus = gbarecomp::g_active_bus;
-    auto* ppu = gbarecomp::g_active_ppu;
-    if (!bus || !ppu || cycles == 0) return;
-
+// Advance the devices (audio, timers, PPU) by `cycles`, rendering scanlines
+// and raising IRQ-pending bits (IF) as events occur — but WITHOUT taking the
+// IRQ. Shared by runtime_tick's normal path and the wake-from-HALT latency
+// pump, so the delay window ticks devices identically without re-vectoring.
+static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
     uint32_t remaining = cycles;
     while (remaining != 0) {
         uint32_t chunk = remaining;
@@ -220,9 +230,30 @@ extern "C" void runtime_tick(uint32_t cycles) {
 
         remaining -= chunk;
     }
+}
+
+extern "C" void runtime_tick(uint32_t cycles) {
+    auto* bus = gbarecomp::g_active_bus;
+    auto* ppu = gbarecomp::g_active_ppu;
+    if (!bus || !ppu || cycles == 0) return;
+
+    g_runtime_cycles += cycles;
+    tick_devices(bus, ppu, cycles);
 
     if (bus->io().irq_pending() && (g_cpu.cpsr & CPSR_I_BIT) == 0) {
-        if (bus->io().halted()) bus->io().clear_halt();
+        if (bus->io().halted()) {
+            // Wake-from-HALT IRQ latency. The ARM7TDMI does not vector the
+            // instant the IRQ pends out of HALT, and the interpreter oracle
+            // (bios_smoke) models this delay. Taking it immediately here
+            // vectored ~kIrqWakeDelayCycles early every VBlank (the game
+            // VBlankIntrWaits each frame), shifting m4a sequencer phase enough
+            // to double-tick a channel once a fade started → MC-HP-002 hang.
+            // Pump the devices for the latency window WITHOUT re-taking the
+            // IRQ (tick_devices, not runtime_tick), then vector — matching the
+            // oracle exactly. Newly-pended bits stay in IF for the next check.
+            bus->io().clear_halt();
+            tick_devices(bus, ppu, gba::kIrqWakeDelayCycles);
+        }
         runtime_irq(g_cpu.R[15]);
     }
 }

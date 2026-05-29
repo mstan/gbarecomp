@@ -129,6 +129,13 @@ extern "C" const unsigned kBiosDispatchTableLen = 0u;
 // harness links the armv4t lib without the runtime, so it provides its own.
 extern "C" unsigned long long g_runtime_vblank_starts = 0;
 
+// Cumulative guest-cycle clock. The production definition + increment live in
+// runtime_bus_bridge.cpp (not linked here); runtime_arm.cpp's runtime_trace_event
+// stamps it and runtime_trace_reset zeroes it, so the L1 harness must supply the
+// symbol. The stub runtime_tick below doesn't touch it (no cycle-aligned diffing
+// in unit tests), so it simply stays 0.
+extern "C" unsigned long long g_runtime_cycles = 0;
+
 // ── Bus accessors used by generated test functions ─────────────────
 
 extern "C" uint8_t bus_read_u8(uint32_t addr) {

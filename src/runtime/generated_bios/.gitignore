@@ -4,5 +4,9 @@
 bios_recompiled.cpp
 bios_recompiled.h
 
+# Likewise BIOS-derived: the address->name symbol table, emitted by
+# `gba_recompile --bios` alongside bios_recompiled.cpp. Regenerate locally.
+bios_symbol_map.cpp
+
 # bios_dispatch_table.cpp IS committed as a placeholder so the build
 # works without BIOS regen. gba_recompile --bios overwrites it.

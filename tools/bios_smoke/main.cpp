@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -31,6 +32,7 @@
 #include "cpu_state.h"
 #include "gba_bios.h"
 #include "gba_bus.h"
+#include "gba_irq.h"      // gba::kIrqWakeDelayCycles (shared with the runtime)
 #include "gba_ppu.h"
 #include "gba_rom_header.h"
 #include "host_window.h"
@@ -43,7 +45,8 @@
 namespace {
 
 constexpr const char* kDefaultBios = "bios/gba_bios.bin";
-constexpr uint32_t kGbaIrqDelayCycles = 7;
+// Single source of truth in gba_irq.h; the recompiled runtime uses the same.
+constexpr uint32_t kGbaIrqDelayCycles = gba::kIrqWakeDelayCycles;
 
 struct Args {
     std::string bios = kDefaultBios;
@@ -365,6 +368,61 @@ int main(int argc, char** argv) {
     int frames_presented = 0;
     bool host_quit = false;
 
+    // ── Per-instruction fingerprint ring (interp oracle mirror) ───────
+    // Mirrors the recomp's runtime_insn_fp ring (runtime_arm.cpp) in the SAME
+    // GFP1 binary layout so oracle/diff_cycle_trace.py can align the two engines
+    // by cumulative cycle and find the first divergent instruction (MC-HP-002).
+    // Armed for the whole run via GBARECOMP_INSN_TRACE (same env as the recomp),
+    // so the ring is on from reset and we query it after the fact.
+    const bool fp_armed = [] {
+        const char* it = std::getenv("GBARECOMP_INSN_TRACE");
+        return it && it[0] && it[0] != '0';
+    }();
+    constexpr size_t kFpSize = 1u << 20;  // ~1M instructions, matches the recomp
+    std::vector<RuntimeFpEntry> fp_ring;
+    size_t fp_write = 0, fp_count = 0;
+    if (fp_armed) fp_ring.resize(kFpSize);
+    auto pack_cpsr = [](const armv4t::CPSR& c) -> uint32_t {
+        uint32_t v = 0;
+        if (c.n) v |= 1u << 31;
+        if (c.z) v |= 1u << 30;
+        if (c.c) v |= 1u << 29;
+        if (c.v) v |= 1u << 28;
+        if (c.i) v |= 1u << 7;
+        if (c.f) v |= 1u << 6;
+        if (c.t) v |= 1u << 5;
+        v |= static_cast<uint32_t>(c.mode & 0x1Fu);
+        return v;
+    };
+    auto fp_emit = [&]() {
+        if (!fp_armed) return;
+        RuntimeFpEntry& e = fp_ring[fp_write];
+        e.cycles = cycles_elapsed;  // cumulative cycles BEFORE this instruction
+        e.pc = cpu.R[15];
+        e.cpsr = pack_cpsr(cpu.cpsr);
+        for (int i = 0; i < 16; ++i) e.r[i] = cpu.R[i];
+        fp_write = (fp_write + 1) % kFpSize;
+        if (fp_count < kFpSize) ++fp_count;
+    };
+    auto fp_save = [&](const std::string& path) -> uint32_t {
+        if (!fp_armed || fp_count == 0) return 0;
+        std::FILE* f = std::fopen(path.c_str(), "wb");
+        if (!f) return 0;
+        uint32_t magic = 0x31504647u;  // 'GFP1'
+        uint32_t esz = static_cast<uint32_t>(sizeof(RuntimeFpEntry));
+        unsigned long long count = fp_count;
+        std::fwrite(&magic, sizeof(magic), 1, f);
+        std::fwrite(&esz, sizeof(esz), 1, f);
+        std::fwrite(&count, sizeof(count), 1, f);
+        size_t start = (fp_write + kFpSize - fp_count) % kFpSize;
+        for (size_t i = 0; i < fp_count; ++i) {
+            std::fwrite(&fp_ring[(start + i) % kFpSize],
+                        sizeof(RuntimeFpEntry), 1, f);
+        }
+        std::fclose(f);
+        return static_cast<uint32_t>(fp_count);
+    };
+
     auto run_cpu_step = [&](int trace_index) -> bool {
         uint32_t step_cycles = 0;
         auto pump_step = [&](uint32_t cycles) {
@@ -396,6 +454,12 @@ int main(int argc, char** argv) {
                 return true;
             }
         }
+
+        // Fingerprint the about-to-execute instruction (post IRQ/halt handling,
+        // so an IRQ-vector entry is captured here just as the recomp captures
+        // it at the vector function's prologue). Only reached when we actually
+        // step the CPU — the halted-no-IRQ path returns above without emitting.
+        fp_emit();
 
         uint32_t pc = cpu.R[15];
         armv4t::Instr insn{};
@@ -501,6 +565,16 @@ int main(int argc, char** argv) {
         }
         cpu.thumb = cpu.cpsr.t;
         vblank_count = ppu.frame_count();  // re-sync frame clock to restored PPU
+        // Re-origin the fingerprint cycle clock + ring at the load point so the
+        // interp and recomp share a cycle origin for diff_cycle_trace.py. The
+        // snapshot restored cycles_elapsed to the (large) absolute count saved in
+        // the state; the recomp's g_runtime_cycles is NOT snapshotted and starts
+        // at 0, so without this the two clocks were ~860x apart and the diff's
+        // cycle-based anchor picked the wrong loop iteration. We diff relative to
+        // the load, so zeroing both is correct.
+        cycles_elapsed = 0;
+        fp_write = 0;
+        fp_count = 0;
         return true;
     };
 
@@ -517,6 +591,7 @@ int main(int argc, char** argv) {
         srv_ctx.step      = step_one_frame;
         srv_ctx.step_inst = run_one_cpu_step;
         srv_ctx.savestate_load = do_savestate_load;
+        srv_ctx.fp_save        = fp_save;
         srv_ctx.irq_entries        = &irq_entries;
         srv_ctx.swi_entries        = &swi_entries;
         srv_ctx.halt_steps         = &halt_steps;

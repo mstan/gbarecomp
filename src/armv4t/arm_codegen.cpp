@@ -1257,6 +1257,11 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
         // condition-failed path (cycles_out = 1).
         std::ostringstream s;
         s << "    /* cond NV: never executes */\n";
+        // Fingerprint at the current pc (pre-advance) so the armed insn trace
+        // stays 1:1 with the interpreter, which fingerprints every fetched
+        // instruction including condition-failed ones (MC-HP-002).
+        s << "    g_cpu.R[15] = " << fmt_hex32(ins.pc) << ";\n";
+        s << "    if (g_runtime_insn_trace) runtime_insn_fp();\n";
         s << "    g_cpu.R[15] = "
           << fmt_hex32(ins.pc + (ins.thumb ? 2u : 4u)) << ";\n";
         s << "    runtime_tick(1u);\n";
@@ -1269,6 +1274,11 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
     // exception/IRQ resume state read by runtime_irq/runtime_swi.
     os << "    g_cpu.R[15] = " << fmt_hex32(ins.pc) << ";\n";
     os << "    if (runtime_should_yield()) return;\n";
+    // Per-instruction fingerprint (armed): record pre-execution state so the
+    // recomp can be diffed against the interp oracle at identical cycle counts
+    // (MC-HP-002). Placed AFTER the yield check so a yielded (not-executed)
+    // instruction is not fingerprinted. Zero cost when disarmed.
+    os << "    if (g_runtime_insn_trace) runtime_insn_fp();\n";
 
     // Per-instruction cycle accumulator. Starts at the cond-fail cost
     // (1S fetch); the cond-pass block raises it to the full execute cost,

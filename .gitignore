@@ -68,3 +68,6 @@ gbarecomp-v*-windows-x64.exe
 # These are per-user runtime state.
 bios.cfg
 rom.cfg
+
+# Scratch dump dir for oracle probes (fingerprint-ring .bin dumps, etc.).
+oracle/trace_out/

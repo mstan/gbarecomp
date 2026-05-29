@@ -45,6 +45,12 @@
 #include <string_view>
 #include <vector>
 
+// Authoritative IRQ-entry counter, incremented in runtime_irq (runtime_arm.cpp)
+// at the actual vectoring site. The TCP `counters` command surfaces it via
+// ctx.irq_entries (the run-loop local never increments — IRQs are taken in
+// runtime_tick, not here). See MC-HP-002 IRQ-delivery comparison.
+extern "C" unsigned long long g_runtime_irq_entries;
+
 #ifndef GBARECOMP_DEFAULT_GAME_CONFIG
 #define GBARECOMP_DEFAULT_GAME_CONFIG "game.toml"
 #endif
@@ -522,8 +528,24 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
 void reset_recomp_cpu() {
     runtime_trace_reset();
     for (int i = 0; i < 16; ++i) g_cpu.R[i] = 0;
+    for (int i = 0; i < ARM_BANK_COUNT; ++i) {
+        g_cpu.banked_sp[i] = 0;
+        g_cpu.banked_lr[i] = 0;
+        g_cpu.banked_spsr[i] = 0;
+    }
+    for (int i = 0; i < 5; ++i) { g_cpu.r8_12_user[i] = 0; g_cpu.r8_12_fiq[i] = 0; }
     g_cpu.R[13] = 0x03007FE0;
     g_cpu.cpsr = CPSR_I_BIT | CPSR_F_BIT | 0x13u /* SVC */;
+    // Seed the banked stack pointers to the canonical GBA post-reset values
+    // (GBATEK "GBA Reset"; what hardware / mGBA / the bios_smoke interpreter
+    // oracle leave after BIOS reset). Without this the User/System and IRQ banks
+    // were 0, so the BIOS reset path's first `msr cpsr,#0x1f` (System mode, at
+    // BIOS 0x90) banked in SP=0 instead of 0x03007F00 — the first recomp-vs-interp
+    // divergence (cycle 16), cascading into stack writes to address ~0 and a
+    // multi-KB IWRAM divergence. (MC-HP-002 fresh-boot root.)
+    g_cpu.banked_sp[ARM_BANK_SUPERVISOR] = 0x03007FE0;
+    g_cpu.banked_sp[ARM_BANK_IRQ]        = 0x03007FA0;
+    g_cpu.banked_sp[ARM_BANK_USER]       = 0x03007F00;
 }
 
 std::size_t count_nonzero(const uint8_t* p, std::size_t n) {
@@ -866,6 +888,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             return false;
         }
         sync_frame_counter();  // realign vblank_count with restored PPU
+        // Re-origin the fingerprint cycle clock + ring at the load point so the
+        // recomp and interp oracle share a cycle origin for diff_cycle_trace.py.
+        // (The snapshot's absolute cycle count is irrelevant; we diff relative to
+        // the load. The interp re-origins its own cycles_elapsed identically.)
+        g_runtime_cycles = 0;
+        runtime_fp_reset();
         return true;
     };
 
@@ -883,7 +911,15 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         ctx.step_inst = step_once;
         ctx.savestate_save = do_savestate_save;
         ctx.savestate_load = do_savestate_load;
-        ctx.irq_entries = &irq_entries;
+        ctx.fp_save = [](const std::string& p) {
+            return runtime_fp_save_file(p.c_str());
+        };
+        // The recomp vectors IRQs in runtime_irq (runtime_arm.cpp), called from
+        // runtime_tick — NOT in this run loop — so the local irq_entries never
+        // increments. Surface the authoritative global counter from the actual
+        // delivery site instead (MC-HP-002 IRQ-delivery comparison).
+        (void)irq_entries;
+        ctx.irq_entries = reinterpret_cast<uint64_t*>(&g_runtime_irq_entries);
         ctx.swi_entries = &swi_entries;
         ctx.halt_steps = &halt_steps;
         ctx.vblank_irqs_raised = &vblank_irqs_raised;
