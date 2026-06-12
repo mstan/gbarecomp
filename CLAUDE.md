@@ -21,7 +21,10 @@ If you:
 - trust unvalidated tool output
 - propose a fix without tracing the writer / scheduler / decoder
 - edit generated C to "fix" a symptom
-- add HLE behavior to make a game work by accident
+- add load-bearing HLE behavior to make a game work by accident
+  (the ONLY permitted HLE is a verified, opt-in, present-time shadow
+  that reverts loudly and never becomes the verify oracle — see
+  PRINCIPLES.md "Verified-enhancement HLE is permitted")
 - stub a BIOS SWI, skip the BIOS intro, or otherwise bypass the
   real BIOS execution path
 - **make any runtime exec path depend on the interpreter** (BIOS,
@@ -86,6 +89,14 @@ recompiler is broken. Fix the recompiler.
 ---
 
 # PHASE 2.7 GATE — BIOS INTRO MUST BE FLAWLESS BEFORE ROM
+
+**STATUS: ✅ CLOSED 2026-05-28 — the BIOS intro is complete.** It boots
+visually + audibly + in-memory correct via `runtime_dispatch`
+(recompiled BIOS), interpreter offline-only; Minish Cap boots through it
+into gameplay. Cart/ROM work (FireRed and other games) is UNBLOCKED. The
+open MC-HP-002 hang is downstream *game* execution, not a BIOS defect.
+See `docs/ROADMAP.md` Phase 2.7. The gate below is satisfied — kept for
+the record and because it re-arms if the BIOS intro ever regresses.
 
 No `--rom`, no `gba_recompile` toward game generation, no
 `MinishCapRecomp` work, no Phase 5 — until the BIOS intro is

@@ -20,6 +20,7 @@
 #include "gba_bios.h"
 #include "gba_io.h"
 #include "gba_memory.h"
+#include "gba_rtc.h"
 #include "gba_save.h"
 
 namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
@@ -50,7 +51,22 @@ public:
     void set_rom(const uint8_t* rom_bytes, std::size_t rom_size) {
         rom_ = rom_bytes;
         rom_size_ = rom_size;
+        // Detect the cartridge RTC (Seiko S-3511A) by SDK signature and
+        // arm the GPIO clock if present. No-op for non-clock carts.
+        rtc_.configure(rom_bytes, rom_size);
+        // Arm the MP2K audio shadow mixer (QoL; off unless the ROM links
+        // MP2K and it's requested via [audio].shadow / GBARECOMP_AUDIO_SHADOW).
+        // The region pointers back its side-effect-free MemView.
+        audio_.configure_shadow(mp2k_detect(rom_bytes, rom_size),
+                                rom_bytes, rom_size,
+                                ewram_.data(), ewram_.size(),
+                                iwram_.data(), iwram_.size(),
+                                audio_shadow_request_);
     }
+
+    // Per-game default for the MP2K audio shadow ([audio].shadow). Set by
+    // the runtime before set_rom; GBARECOMP_AUDIO_SHADOW still overrides.
+    void request_audio_shadow(bool on) { audio_shadow_request_ = on; }
 
     // Access to the IO dispatcher. Callers wire PPU/IRQ pointers in
     // before running code.
@@ -63,6 +79,9 @@ public:
     GbaSave&       save()       { return save_; }
     const GbaSave& save() const { return save_; }
 
+    GbaRtc&       rtc()       { return rtc_; }
+    const GbaRtc& rtc() const { return rtc_; }
+
     // Region accessors — useful for tests, debug snapshots, and the
     // PPU (which reads VRAM/OAM/PAL directly to render).
     uint8_t* ewram_ptr() { return ewram_.data(); }
@@ -70,6 +89,12 @@ public:
     uint8_t* pal_ptr()   { return pal_.data();   }
     uint8_t* vram_ptr()  { return vram_.data();  }
     uint8_t* oam_ptr()   { return oam_.data();   }
+
+    // Cartridge ROM bytes (the buffer set via set_rom; not owned).
+    // Used by observability tooling that scans the image, e.g. MP2K
+    // driver detection (src/gba/gba_m4a).
+    const uint8_t* rom_ptr() const { return rom_; }
+    std::size_t    rom_size() const { return rom_size_; }
 
     const uint8_t* ewram_ptr() const { return ewram_.data(); }
     const uint8_t* iwram_ptr() const { return iwram_.data(); }
@@ -121,6 +146,7 @@ private:
     const uint8_t* rom_  = nullptr;
     std::size_t    rom_size_ = 0;
     bool           bios_access_enabled_ = true;
+    bool           audio_shadow_request_ = false;
 
     std::array<uint8_t, 256 * 1024> ewram_{};
     std::array<uint8_t,  32 * 1024> iwram_{};
@@ -131,6 +157,7 @@ private:
     GbaIo       io_dispatch_;
     GbaAudio    audio_;
     GbaSave     save_;
+    GbaRtc      rtc_;
 
     uint32_t    last_fetched_   = 0;
     std::size_t unmapped_count_ = 0;

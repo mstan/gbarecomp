@@ -154,6 +154,48 @@ hardest case.
   SNES, PSX, Genesis, Xbox-HLE, future). The interpreter is an
   oracle, never an engine.
 
+## Verified-enhancement HLE is permitted; load-bearing HLE is not
+
+The two SHOWSTOPPER rules above forbid HLE and interpreter fallback
+**on the load-bearing path** — where the program's observable
+behavior depends on a hand-written model being correct. That ban
+stands and is the heart of this project.
+
+There is exactly one permitted form of HLE, and it is a quality-of-
+life layer that sits **on top of** correctness, never instead of it.
+A high-level shadow of a guest subsystem (e.g. an audio-engine
+re-render) may ship only if **all** of the following hold:
+
+1. **The recompiled guest code still runs to completion** and remains
+   the authoritative output. The shadow never replaces execution.
+2. **The canon (recompiled) output stays the verify oracle.** Frame
+   hashes, `verify`, and the differential sweeps are defined on the
+   recompiled output, never on the shadow.
+3. **The shadow is continuously, differentially checked** against the
+   canon stream and substitutes only after a proven window.
+4. **It reverts loudly** (logs `DEGRADED`) the instant it stops
+   matching — never a silent guess.
+5. **It is opt-in and present-time**, off by default, and removing it
+   changes nothing the recompiler is responsible for.
+
+**Why this is allowed where BIOS-HLE is not:** the forbidden kind has
+no canon underneath it — the HLE *is* the behavior, unchecked. A
+verified shadow always has the recompiled truth running beneath it
+and policing it; its worst failure is "you hear the stock hardware
+output," not "the game is subtly wrong." It cannot mask a recompiler
+bug, because the recompiled path it shadows is still the thing being
+hashed and diffed. This is the same always-on differential-oracle
+discipline from the Debug Loop, applied to an enhancement.
+
+**Test before adding any HLE:** "If my reimplementation is wrong,
+what happens?" If the answer is "the game misbehaves / a recompiler
+bug stays hidden" → forbidden. If it is "we fall back to the
+recompiled output and log it" → permitted under this rule.
+
+The current instance: the MP2K audio shadow mixer (`src/runtime`
+shadow + `src/gba/gba_m4a`), gated behind the `shadow::Verifier`
+differential self-check. Ported from JRickey/gba-recomp.
+
 ## Tool Skepticism
 
 - Treat every tool result as untrusted until validated against another

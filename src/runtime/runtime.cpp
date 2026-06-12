@@ -93,6 +93,13 @@ struct Args {
     bool quiet = false;
     bool window = false;
     std::string dump_bmp;
+    // [video] screen = raw|unlit|frontlit|backlit|classic — present-time
+    // color simulation (see color_lut). Empty = raw (passthrough). The
+    // GBARECOMP_SCREEN env var overrides this at launch.
+    std::string screen;
+    // [audio] shadow = true|false — arm the MP2K verified-enhancement shadow
+    // mixer (default off). GBARECOMP_AUDIO_SHADOW overrides at launch.
+    bool audio_shadow = false;
 };
 
 std::string trim(std::string_view in) {
@@ -338,6 +345,10 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
                 return false;
             }
             args->save_size = static_cast<std::size_t>(n);
+        } else if (section == "video" && key == "screen") {
+            args->screen = val;
+        } else if (section == "audio" && key == "shadow") {
+            args->audio_shadow = (val == "true" || val == "1");
         }
     }
     return true;
@@ -717,6 +728,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gba::GbaBus bus;
     gba::GbaPpu ppu;
     bus.set_bios(&bios);
+    bus.request_audio_shadow(args.audio_shadow);  // [audio].shadow default; env can override
     bus.set_rom(rom.data(), rom.size());
     if (header.save_type == gba::SaveType::EEPROM) {
         std::size_t eeprom_bytes = args.save_size ? args.save_size : (8 * 1024);
@@ -947,7 +959,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             runtime_shutdown();
             return 1;
         }
-        if (!win.open(args.scale, GBARECOMP_WINDOW_TITLE)) {
+        if (!win.open(args.scale, GBARECOMP_WINDOW_TITLE,
+                      args.screen.empty() ? nullptr : args.screen.c_str())) {
             runtime_shutdown();
             return 1;
         }

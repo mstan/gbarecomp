@@ -133,8 +133,12 @@ add_library(gbarecomp_gba STATIC
     src/gba/gba_timers.cpp
     src/gba/gba_ppu.cpp
     src/gba/gba_audio.cpp
+    src/gba/gba_m4a.cpp
+    src/gba/audio_shadow.cpp
+    src/gba/mp2k_shadow.cpp
     src/gba/gba_input.cpp
     src/gba/gba_save.cpp
+    src/gba/gba_rtc.cpp
     src/gba/gba_bios.cpp
     src/gba/gba_scheduler.cpp
     src/gba/gba_rom_header.cpp
@@ -158,6 +162,7 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/runtime_bus_bridge.cpp
     src/runtime/host_platform.cpp
     src/runtime/host_window.cpp
+    src/runtime/color_lut.cpp
     src/runtime/asset_picker.cpp
     # Production abort stubs for runtime_dispatch_miss +
     # runtime_unimplemented_op. Test binaries that link only

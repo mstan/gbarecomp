@@ -31,7 +31,11 @@ public:
     // Open a window. `scale` is the integer scale factor applied to
     // the 240x160 logical surface. Returns false on failure (also
     // when is_available() is false).
-    bool open(int scale = 3, const char* title = "gbarecomp");
+    // `screen` is the per-game color model from [video].screen in game.toml
+    // (raw|unlit|frontlit|backlit|classic), or nullptr for none. The
+    // GBARECOMP_SCREEN env var, when set, overrides it.
+    bool open(int scale = 3, const char* title = "gbarecomp",
+              const char* screen = nullptr);
     void close();
     bool is_open() const { return open_; }
 

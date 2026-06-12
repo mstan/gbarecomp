@@ -1,10 +1,15 @@
 // gba_audio.h — GBA sound channels + sample mixer.
 //
-// Phase 2.7.C scope: SOUND2 (square wave, no sweep), enough to play
-// the BIOS startup chime. SOUND1 / SOUND3 / SOUND4 and the DMA-driven
-// SOUND A / SOUND B FIFOs are stubbed in — they accept IO writes but
-// produce no output yet. The mixer generates 16-bit signed samples at
-// ~32.768 kHz (one sample per 512 system cycles).
+// Implemented and mixed into the output: SOUND1 (square + sweep),
+// SOUND2 (square), and the DMA-driven Direct Sound A / B FIFOs (the
+// streamed-PCM path the MP2K/m4a music driver uses) — fed via
+// timer_overflow() + DMA refill, mixed in mix_one_sample(). The mixer
+// generates 16-bit signed samples; the rate follows SOUNDBIAS
+// resolution (32768 Hz default, 65536 Hz when the BIOS raises it).
+//
+// NOT yet implemented: SOUND3 (wave RAM) and SOUND4 (noise) — they
+// accept IO writes but contribute no output. Audio correctness vs the
+// mGBA oracle is validated separately (differential audio sweeps).
 //
 // References:
 //   GBATEK § "GBA Sound Channel 2 - Tone"
@@ -16,6 +21,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+
+#include "gba_m4a.h"
+#include "mp2k_shadow.h"
 
 namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
@@ -97,6 +105,19 @@ public:
     // 0 or 1; SOUNDCNT_H selects which timer clocks each FIFO.
     void timer_overflow(int timer_id);
     bool fifo_needs_dma(int fifo_id) const;
+
+    // Arm the MP2K HLE shadow mixer (QoL — verified-enhancement HLE, see
+    // PRINCIPLES.md). `sigs` come from mp2k_detect over the ROM; the region
+    // pointers back the shadow's side-effect-free MemView. Off unless the
+    // ROM links MP2K *and* GBARECOMP_AUDIO_SHADOW is set; canon mix is
+    // unchanged and remains the verify oracle when disabled. The bus calls
+    // this from set_rom.
+    void configure_shadow(const std::vector<Mp2kSig>& sigs,
+                          const uint8_t* rom, std::size_t rom_len,
+                          const uint8_t* ewram, std::size_t ewram_len,
+                          const uint8_t* iwram, std::size_t iwram_len,
+                          bool enable_request);
+    bool shadow_live() const { return shadow_enabled_ && shadow_.live(); }
 
     // Save-state serialization. Captures the full guest mixer state
     // (channels, FIFOs, master, soundbias, sample accumulator) plus the
@@ -213,7 +234,17 @@ private:
     void run_sample_event();
     void ch1_trigger();
     void ch2_trigger();
-    int16_t mix_one_sample(uint32_t direct_slot);
+    // include_direct=false omits the Direct Sound FIFO contribution (PSG
+    // only) — used when the MP2K shadow substitutes the direct-sound mix.
+    int16_t mix_one_sample(uint32_t direct_slot, bool include_direct = true);
+
+    // ── MP2K HLE shadow (verified-enhancement; default off) ──────
+    Mp2kShadow shadow_{};
+    MemView    shadow_mem_{};
+    bool       shadow_enabled_ = false;
+    uint64_t   shadow_cursor_ = 0;          // running grid-sample count
+    uint32_t   shadow_samples_since_hook_ = 0;
+    uint32_t   shadow_hook_period_ = 1097;  // ≈ output samples per 59.7 Hz tick
 };
 
 }  // namespace gba

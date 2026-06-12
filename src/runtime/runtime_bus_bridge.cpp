@@ -9,6 +9,7 @@
 #include "../armv4t/arm_ir.h"
 #include "../gba/gba_bus.h"
 #include "../gba/gba_irq.h"
+#include "../gba/gba_m4a.h"
 #include "../gba/gba_ppu.h"
 
 #include <algorithm>
@@ -125,6 +126,34 @@ void set_active_ppu(gba::GbaPpu* ppu) {
 
 gba::GbaBus* active_bus() {
     return g_active_bus;
+}
+
+// Always-on hang watchdog capture. Called once when the watchdog trips;
+// snapshots the live MP2K channel state (the MC-HP-002 spin walks a
+// corrupt voice pointer) to stderr and hang_dump.log next to the runner.
+// Pure observation — does not alter execution. See PRINCIPLES.md
+// "always-on ring first": the freeze documents itself, no attach timing.
+static void dump_hang_state(const char* reason) {
+    if (!g_active_bus) return;
+    std::string m4a;
+    gba::mp2k_dump_live(*g_active_bus, m4a);
+    std::fprintf(stderr,
+                 "\n[hang-watchdog] %s\n"
+                 "  pc=0x%08X cycles=%llu vblank_starts=%llu\n"
+                 "  m4a=%s\n",
+                 reason, g_cpu.R[15],
+                 static_cast<unsigned long long>(g_runtime_cycles),
+                 static_cast<unsigned long long>(g_runtime_vblank_starts),
+                 m4a.c_str());
+    if (FILE* f = std::fopen("hang_dump.log", "w")) {
+        std::fprintf(f,
+                     "reason=%s\npc=0x%08X\ncycles=%llu\nvblank_starts=%llu\nm4a=%s\n",
+                     reason, g_cpu.R[15],
+                     static_cast<unsigned long long>(g_runtime_cycles),
+                     static_cast<unsigned long long>(g_runtime_vblank_starts),
+                     m4a.c_str());
+        std::fclose(f);
+    }
 }
 
 }  // namespace gbarecomp
@@ -259,9 +288,46 @@ extern "C" void runtime_tick(uint32_t cycles) {
 }
 
 extern "C" bool runtime_should_yield(void) {
+    auto* bus = gbarecomp::g_active_bus;
+    bool halted = bus && bus->io().halted();
+
+    // ── Always-on hang watchdog ──────────────────────────────────────
+    // A healthy GBA game HALTs (VBlankIntrWait) ~60x/sec; the MC-HP-002
+    // freeze is a busy-spin in the M4A mixer that NEVER halts (the PPU
+    // still ticks, so frame counters keep advancing — "no frames" is the
+    // wrong signal; "no HALT" is the right one). If we go many seconds of
+    // wall-clock with no HALT, snapshot the live M4A state ONCE and keep
+    // running (observation, not a fix). Disable with
+    // GBARECOMP_HANG_WATCHDOG=0; tune seconds with GBARECOMP_HANG_SECONDS.
+    static const bool wd_on = [] {
+        const char* e = std::getenv("GBARECOMP_HANG_WATCHDOG");
+        return !(e && e[0] == '0' && e[1] == '\0');
+    }();
+    if (wd_on) {
+        static const long long wd_secs = [] {
+            const char* e = std::getenv("GBARECOMP_HANG_SECONDS");
+            long long s = e ? std::atoll(e) : 0;
+            return s > 0 ? s : 4;
+        }();
+        static bool tripped = false;
+        static std::chrono::steady_clock::time_point last_halt =
+            std::chrono::steady_clock::now();
+        static unsigned long long calls = 0;
+        if (halted) {
+            last_halt = std::chrono::steady_clock::now();
+        } else if (!tripped && (++calls & 0xFFFFFull) == 0) {
+            auto idle = std::chrono::steady_clock::now() - last_halt;
+            if (std::chrono::duration_cast<std::chrono::seconds>(idle).count() >= wd_secs) {
+                gbarecomp::dump_hang_state(
+                    "guest has not HALTed for several seconds — likely a busy-spin "
+                    "freeze (MC-HP-002 class)");
+                tripped = true;
+            }
+        }
+    }
+
     if (g_runtime_break_pc != 0u && g_cpu.R[15] == g_runtime_break_pc) {
         return true;  // debug breakpoint hit — unwind to the exec loop
     }
-    auto* bus = gbarecomp::g_active_bus;
-    return bus && bus->io().halted();
+    return halted;
 }

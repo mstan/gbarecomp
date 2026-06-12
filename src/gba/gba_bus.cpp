@@ -88,6 +88,10 @@ uint8_t GbaBus::read8(uint32_t addr) {
         case Region::Vram:  if (off < vram_.size()) return vram_[off]; break;
         case Region::Oam:   return oam_[off];
         case Region::Rom: {
+            // Cartridge GPIO (RTC) at 0x080000C4..0xC9 when readable; else
+            // the bus returns ordinary ROM (write-only GPIO mode).
+            if (rtc_.active() && rtc_.read_enabled() && off >= 0xC4u && off <= 0xC9u)
+                return rtc_.read(static_cast<uint32_t>(off));
             if (is_eeprom_addr(addr, save_)) {
                 return static_cast<uint8_t>(save_.eeprom_read_bit());
             }
@@ -128,6 +132,10 @@ uint16_t GbaBus::read16(uint32_t addr) {
             break;
         case Region::Oam:   return load_u16(&oam_[off]);
         case Region::Rom: {
+            if (rtc_.active() && rtc_.read_enabled() && off >= 0xC4u && off <= 0xC8u) {
+                uint32_t o = static_cast<uint32_t>(off);
+                return static_cast<uint16_t>(rtc_.read(o) | (rtc_.read(o + 1) << 8));
+            }
             if (is_eeprom_addr(addr, save_)) {
                 return save_.eeprom_read_bit();
             }
@@ -166,6 +174,11 @@ uint32_t GbaBus::read32(uint32_t addr) {
             break;
         case Region::Oam:   return load_u32(&oam_[off]);
         case Region::Rom: {
+            if (rtc_.active() && rtc_.read_enabled() && off >= 0xC4u && off <= 0xC6u) {
+                uint32_t o = static_cast<uint32_t>(off);
+                return rtc_.read(o) | (rtc_.read(o + 1) << 8) |
+                       (rtc_.read(o + 2) << 16) | (rtc_.read(o + 3) << 24);
+            }
             if (is_eeprom_addr(addr, save_)) {
                 return save_.eeprom_read_bit();
             }
@@ -206,6 +219,10 @@ void GbaBus::write8(uint32_t addr, uint8_t v) {
             log_unmapped(addr, v, true, 1);
             return;
         case Region::Rom:
+            if (rtc_.active() && off >= 0xC4u && off <= 0xC9u) {
+                rtc_.write(static_cast<uint32_t>(off), v);
+                return;
+            }
             if (is_eeprom_addr(addr, save_)) {
                 save_.eeprom_write_bit(v);
                 return;
@@ -239,6 +256,10 @@ void GbaBus::write16(uint32_t addr, uint16_t v) {
         case Region::Oam:   store_u16(&oam_[off], v); return;
         case Region::Bios:
         case Region::Rom:
+            if (region == Region::Rom && rtc_.active() && off >= 0xC4u && off <= 0xC8u) {
+                rtc_.write(static_cast<uint32_t>(off), static_cast<uint8_t>(v & 0xFF));
+                return;
+            }
             if (region == Region::Rom && is_eeprom_addr(addr, save_)) {
                 save_.eeprom_write_bit(v);
                 return;
@@ -269,6 +290,10 @@ void GbaBus::write32(uint32_t addr, uint32_t v) {
         case Region::Oam:   store_u32(&oam_[off], v); return;
         case Region::Bios:
         case Region::Rom:
+            if (region == Region::Rom && rtc_.active() && off >= 0xC4u && off <= 0xC6u) {
+                rtc_.write(static_cast<uint32_t>(off), static_cast<uint8_t>(v & 0xFF));
+                return;
+            }
             if (region == Region::Rom && is_eeprom_addr(addr, save_)) {
                 save_.eeprom_write_bit(static_cast<uint16_t>(v));
                 return;

@@ -33,6 +33,7 @@ extern "C" uint32_t g_runtime_break_pc;
 #include "cpu_state.h"
 #include "gba_audio.h"
 #include "gba_bus.h"
+#include "gba_m4a.h"
 #include "gba_io.h"
 #include "gba_ppu.h"
 #include "runtime_arm.h"
@@ -494,6 +495,32 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
     if (contains("\"read_io\"")) {
         if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
         cmd_read_io_dynamic(*ctx.bus, req, out);
+        return;
+    }
+    if (contains("\"m4a_dump\"")) {
+        // Observability (MC-HP-002): read the live MP2K SoundInfo +
+        // 12-channel array out of guest RAM and flag any voice whose
+        // wave/data pointer left a sane region. Pure read; no exec path.
+        if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
+        gba::mp2k_dump_live(*ctx.bus, out);
+        return;
+    }
+    if (contains("\"m4a_detect\"")) {
+        // Scan the loaded ROM image for the SDK MP2K driver (SoundMain
+        // signature → SoundMainRAM hook address). One-shot; static.
+        if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
+        auto sigs = gba::mp2k_detect(ctx.bus->rom_ptr(), ctx.bus->rom_size());
+        out = "{\"ok\":true,\"sigs\":[";
+        for (std::size_t i = 0; i < sigs.size(); ++i) {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf),
+                          "%s{\"sound_main_off\":%llu,\"sound_main_ram\":%u}",
+                          i == 0 ? "" : ",",
+                          static_cast<unsigned long long>(sigs[i].sound_main_off),
+                          static_cast<unsigned>(sigs[i].sound_main_ram));
+            out += buf;
+        }
+        out += "]}";
         return;
     }
     if (contains("\"set_keyinput\"")) {

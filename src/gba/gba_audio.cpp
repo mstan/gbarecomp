@@ -3,6 +3,9 @@
 #include "gba_audio.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
 
 #include "snapshot.h"
 
@@ -467,7 +470,7 @@ void GbaAudio::sample_until_current_time() {
     }
 }
 
-int16_t GbaAudio::mix_one_sample(uint32_t direct_slot) {
+int16_t GbaAudio::mix_one_sample(uint32_t direct_slot, bool include_direct) {
     if (!master_enable_) return 0;
 
     // Per-channel contributions in the range [-15, +15]. Routing
@@ -608,32 +611,98 @@ int16_t GbaAudio::mix_one_sample(uint32_t direct_slot) {
     constexpr int32_t kGain = 600;
     out *= kGain;
 
-    int32_t direct_left = 0;
-    int32_t direct_right = 0;
-    auto add_direct = [&](const DirectFifo& fifo, bool left, bool right,
-                          bool full_volume) {
-        int32_t scale = full_volume ? 4 : 2;
-        int32_t sample =
-            static_cast<int32_t>(fifo.samples[direct_slot]) * scale;
-        if (left) direct_left += sample;
-        if (right) direct_right += sample;
-    };
-    add_direct(fifo_a_, direct_a_left_, direct_a_right_,
-               direct_a_full_volume_);
-    add_direct(fifo_b_, direct_b_left_, direct_b_right_,
-               direct_b_full_volume_);
-    int32_t direct_out = ((direct_left + direct_right) / 2) * 48;
-    out += direct_out;
+    // Direct Sound FIFO contribution. Omitted when the MP2K shadow is
+    // substituting (the caller adds the shadow's direct mix instead).
+    if (include_direct) {
+        int32_t direct_left = 0;
+        int32_t direct_right = 0;
+        auto add_direct = [&](const DirectFifo& fifo, bool left, bool right,
+                              bool full_volume) {
+            int32_t scale = full_volume ? 4 : 2;
+            int32_t sample =
+                static_cast<int32_t>(fifo.samples[direct_slot]) * scale;
+            if (left) direct_left += sample;
+            if (right) direct_right += sample;
+        };
+        add_direct(fifo_a_, direct_a_left_, direct_a_right_,
+                   direct_a_full_volume_);
+        add_direct(fifo_b_, direct_b_left_, direct_b_right_,
+                   direct_b_full_volume_);
+        int32_t direct_out = ((direct_left + direct_right) / 2) * 48;
+        out += direct_out;
+    }
 
     if (out > 32767)  out = 32767;
     if (out < -32767) out = -32767;
     return static_cast<int16_t>(out);
 }
 
+void GbaAudio::configure_shadow(const std::vector<Mp2kSig>& sigs,
+                                const uint8_t* rom, std::size_t rom_len,
+                                const uint8_t* ewram, std::size_t ewram_len,
+                                const uint8_t* iwram, std::size_t iwram_len,
+                                bool enable_request) {
+    shadow_mem_.rom = rom;       shadow_mem_.rom_len = rom_len;
+    shadow_mem_.ewram = ewram;   shadow_mem_.ewram_len = ewram_len;
+    shadow_mem_.iwram = iwram;   shadow_mem_.iwram_len = iwram_len;
+    shadow_.init(sigs);
+    shadow_cursor_ = 0;
+    shadow_samples_since_hook_ = 0;
+    shadow_hook_period_ = sample_rate() / 60u;
+    if (shadow_hook_period_ == 0) shadow_hook_period_ = 1097u;
+    // Opt-in. `enable_request` is the per-game default ([audio].shadow in
+    // game.toml); GBARECOMP_AUDIO_SHADOW overrides it ("0" forces off, any
+    // other value forces on). Only takes effect if the ROM links MP2K.
+    bool want = enable_request;
+    if (const char* e = std::getenv("GBARECOMP_AUDIO_SHADOW")) {
+        want = !(e[0] == '0' && e[1] == '\0');
+    }
+    shadow_enabled_ = shadow_.armed() && want;
+    if (shadow_enabled_) {
+        std::fprintf(stderr, "[audio] MP2K shadow mixer ARMED (verified-"
+                             "enhancement; reverts to hardware mix on divergence)\n");
+    }
+}
+
 void GbaAudio::run_sample_event() {
     uint32_t samples = samples_per_event();
     while (sample_index_ < samples) {
-        current_samples_[sample_index_] = mix_one_sample(sample_index_);
+        uint32_t slot = sample_index_;
+        bool substitute = false;
+        float sl = 0.0f, sr = 0.0f;
+        if (shadow_enabled_) {
+            std::string degraded;
+            shadow_.render(shadow_mem_, fifo_a_.samples[slot],
+                           fifo_b_.samples[slot], sl, sr, degraded);
+            if (!degraded.empty()) {
+                std::fprintf(stderr, "[audio] MP2K shadow DEGRADED: %s\n",
+                             degraded.c_str());
+            }
+            ++shadow_cursor_;
+            if (++shadow_samples_since_hook_ >= shadow_hook_period_) {
+                shadow_.frame_hook(shadow_mem_, shadow_cursor_,
+                                   shadow_.hook_key0());
+                shadow_samples_since_hook_ = 0;
+            }
+            substitute = shadow_.live();
+        }
+        // When the shadow is proven-live, mix PSG-only canon + the shadow's
+        // direct-sound render; otherwise the full canon mix (incl. FIFO).
+        int16_t s = mix_one_sample(slot, /*include_direct=*/!substitute);
+        if (substitute) {
+            // Shadow output is the bus float domain (full-scale FIFO DAC =
+            // 0.25). kShadowOutputScale maps it to our int16 direct-sound
+            // magnitude — the loudness-match knob to tune in the audio
+            // oracle validation pass.
+            constexpr float kShadowOutputScale = 24000.0f;
+            int32_t shadow_mix =
+                static_cast<int32_t>(((sl + sr) * 0.5f) * kShadowOutputScale);
+            int32_t o = static_cast<int32_t>(s) + shadow_mix;
+            if (o > 32767) o = 32767;
+            if (o < -32767) o = -32767;
+            s = static_cast<int16_t>(o);
+        }
+        current_samples_[slot] = s;
         ++sample_index_;
     }
     for (uint32_t i = 0; i < samples; ++i) {

@@ -3,6 +3,11 @@
 #include "host_window.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <vector>
+
+#include "color_lut.h"
 
 #if defined(GBARECOMP_HAVE_SDL2)
 
@@ -17,7 +22,26 @@ struct Backend {
     SDL_Renderer* renderer = nullptr;
     SDL_Texture*  texture  = nullptr;
     SDL_AudioDeviceID audio_dev = 0;
+    // Present-time screen-color simulation. Built once from
+    // GBARECOMP_SCREEN; default Raw = exact passthrough (no copy, no
+    // grading), so default behavior is byte-identical to upstream.
+    std::unique_ptr<runtime::ColorLut> color_lut;
+    std::vector<uint8_t> graded_fb;  // scratch RGB888 (240*160*3)
 };
+
+// Resolve the screen model: the per-game [video].screen from game.toml
+// (`toml_screen`) is the default; GBARECOMP_SCREEN overrides it at launch.
+// Unset/unrecognized → Raw (passthrough). Tokens: raw|unlit|frontlit|
+// backlit|classic.
+runtime::ColorSettings resolve_color_settings(const char* toml_screen) {
+    runtime::ColorSettings s;
+    runtime::ScreenKind k;
+    if (toml_screen && runtime::screen_kind_from_name(toml_screen, k)) s.screen = k;
+    if (const char* env = std::getenv("GBARECOMP_SCREEN")) {
+        if (runtime::screen_kind_from_name(env, k)) s.screen = k;
+    }
+    return s;
+}
 
 // Map an SDL_Scancode to a GBA KEYINPUT bit index, or -1 if unmapped.
 // Default GBA layout:
@@ -57,7 +81,7 @@ HostWindow::~HostWindow() {
 
 bool HostWindow::is_available() { return true; }
 
-bool HostWindow::open(int scale, const char* title) {
+bool HostWindow::open(int scale, const char* title, const char* screen) {
     if (open_) return true;
     if (scale < 1) scale = 1;
 
@@ -144,6 +168,10 @@ bool HostWindow::open(int scale, const char* title) {
         SDL_PauseAudioDevice(b->audio_dev, 0);  // start playback
     }
 
+    b->color_lut = std::make_unique<runtime::ColorLut>(resolve_color_settings(screen));
+    if (!b->color_lut->is_passthrough())
+        b->graded_fb.resize(240 * 160 * 3);
+
     impl_ = b;
     open_ = true;
     return true;
@@ -179,6 +207,13 @@ void HostWindow::close() {
 void HostWindow::present(const uint8_t* rgb888) {
     if (!open_ || !impl_ || !rgb888) return;
     auto* b = static_cast<Backend*>(impl_);
+    // Present-time color grading (opt-in). Raw is passthrough: the raw
+    // PPU frame is uploaded untouched, so verify/frame-hash are unaffected.
+    if (b->color_lut && !b->color_lut->is_passthrough() &&
+        b->graded_fb.size() == 240u * 160u * 3u) {
+        b->color_lut->map_rgb888(rgb888, b->graded_fb.data(), 240, 160);
+        rgb888 = b->graded_fb.data();
+    }
     SDL_UpdateTexture(b->texture, nullptr, rgb888, 240 * 3);
     SDL_RenderClear(b->renderer);
     SDL_RenderCopy(b->renderer, b->texture, nullptr, nullptr);
@@ -235,7 +270,7 @@ HostWindow::~HostWindow() = default;
 
 bool HostWindow::is_available() { return false; }
 
-bool HostWindow::open(int /*scale*/, const char* /*title*/) {
+bool HostWindow::open(int /*scale*/, const char* /*title*/, const char* /*screen*/) {
     std::fprintf(stderr,
                  "host_window: built without SDL2; --window unavailable\n");
     return false;
