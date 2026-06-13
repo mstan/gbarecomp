@@ -11,21 +11,22 @@ sacred"). The current ordering reflects that:
 - Phase 0: scaffold + repo skeleton
 - Phase 1: ARM7TDMI / ARMv4T decoder + IR + interpreter
 - Phase 2: BIOS bring-up (first render target = GBA BIOS intro)
-- **Phase 2.7: BIOS intro flawlessness** (HARD GATE)
-- **Phase 2.8: recompiler-only execution** (HARD GATE — REOPENS 2.7)
+- **Phase 2.7: BIOS intro flawlessness** (HARD GATE — ✅ CLOSED 2026-05-28)
+- **Phase 2.8: recompiler-only execution** (HARD GATE — ✅ CLOSED)
 - Phase 3: full GBA hardware runner (DMA, timers, IO, audio FIFO bookkeeping)
 - Phase 4: oracle / debug workflow
 - Phase 5: Minish Cap target (boots through the recompiled BIOS)
 
-> **HARD GATE** — Phases 2.7 + 2.8 together are a stop sign. The
-> BIOS intro must be **visually + audibly + in-memory flawless**
-> against the mGBA oracle AND must be produced by the recompiler,
-> not the interpreter. The prior Phase 2.7 pass (2026-05-23) used
-> interpreter execution and has been invalidated by the
-> "Interpreter is informative, never load-bearing" rule in
-> `PRINCIPLES.md`. No ROM / cart / game / Phase 5 work resumes
-> until both 2.7 and 2.8 close together via recompiled-BIOS
-> execution.
+> **HARD GATE — CLEARED (2026-05-28).** Phases 2.7 + 2.8 are closed.
+> The GBA BIOS intro is **complete**: it boots **visually + audibly +
+> in-memory** correct, produced solely by `runtime_dispatch`
+> (recompiled BIOS) with the interpreter offline-only. The 2026-05-23
+> re-open (the prior pass had used interpreter execution) is resolved —
+> recompiled-BIOS execution now boots cleanly through the intro into
+> game code. **Cart / ROM / game / Phase 5 work is UNBLOCKED.** The
+> open MC-HP-002 hang is downstream *game* execution (Minish Cap frame
+> ~40+) owned by the MinishCap target — NOT a BIOS-intro defect, and it
+> does not re-gate this.
 
 ---
 
@@ -162,7 +163,7 @@ under `bios/ghidra/` (gitignored) only when this trigger fires.
 
 ---
 
-## Phase 2.7 — BIOS intro flawlessness  *(HARD GATE — REOPENED 2026-05-23)*
+## Phase 2.7 — BIOS intro flawlessness  *(HARD GATE — ✅ CLOSED 2026-05-28)*
 
 This phase is a stop sign between BIOS bring-up and everything that
 comes after. The deliverable is a flawless GBA BIOS intro on three
@@ -171,15 +172,26 @@ not the interpreter. See `PRINCIPLES.md` "BIOS intro must be
 flawless before ROM" and "Interpreter is informative, never
 load-bearing (SHOWSTOPPER)."
 
-**Status note (2026-05-23):** This phase was previously marked
-closed under interpreter execution. The new interpreter-not-
-load-bearing rule invalidates the prior pass. The gate is RE-OPENED
-and unblocks only after Phase 2.8 (per-IrOp codegen + BIOS
-recompilation + dispatch wire-up) lands and re-passes the three
-acceptance criteria with `runtime_dispatch` as the sole execution
-engine. The runtime's exec loop currently aborts on first
-instruction (`runtime_dispatch(0x00000000)` → dispatch miss) — that
-abort is the gate Phase 2.8 closes.
+**Status note (2026-05-28) — CLOSED. The BIOS intro is complete.**
+The intro boots correct on all three axes via `runtime_dispatch`
+(recompiled BIOS) as the sole execution engine — the interpreter is
+offline-only. Phase 2.8 (per-IrOp codegen + BIOS recompilation +
+dispatch wire-up) landed, closing the 2026-05-23 re-open below; the
+first-instruction dispatch-miss abort is long resolved, and Minish Cap
+now boots through the recompiled BIOS into game code (title screen →
+intro cutscene → gameplay). The remaining MC-HP-002 hang is
+**downstream game execution** (Minish Cap frame ~40+), owned by the
+MinishCap target — not a BIOS-intro defect — so it does not re-open
+this gate. Cart/ROM work (FireRed first) is unblocked.
+
+**Status note (2026-05-23, historical):** This phase was previously
+marked closed under interpreter execution. The new interpreter-not-
+load-bearing rule invalidated that pass and RE-OPENED the gate until
+Phase 2.8 re-passed the three acceptance criteria with
+`runtime_dispatch` as the sole execution engine. The runtime's exec
+loop at that time aborted on the first instruction
+(`runtime_dispatch(0x00000000)` → dispatch miss). *(Resolved — see the
+2026-05-28 note above.)*
 
 ### Acceptance criteria (all three must pass)
 
