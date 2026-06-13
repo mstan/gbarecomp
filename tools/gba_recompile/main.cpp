@@ -635,11 +635,12 @@ void write_body(const std::string& dir,
         "//\n"
         "// Each guest function is lowered to a void C function whose\n"
         "// body operates on g_cpu, bus_*, arm_shift_*, arm_set_*, and\n"
-        "// runtime_dispatch (see src/armv4t/runtime_arm.h). The\n"
-        "// interpreter is NOT consulted at runtime — every IrOp that\n"
-        "// the codegen can't yet lower aborts via\n"
-        "// runtime_unimplemented_op. See PRINCIPLES.md \"Interpreter\n"
-        "// is informative, never load-bearing (SHOWSTOPPER)\".\n\n"
+        "// runtime_dispatch (see src/armv4t/runtime_arm.h). A dispatch\n"
+        "// MISS self-heals (interpreter bridge + on-the-fly recompile +\n"
+        "// loud log); an IrOp the codegen can't yet lower is a codegen\n"
+        "// gap (NOT a miss) and aborts via runtime_unimplemented_op.\n"
+        "// See PRINCIPLES.md \"Honest self-healing\" + \"Coverage\n"
+        "// honesty is load-bearing\".\n\n"
         "#include \"runtime_arm.h\"\n"
         "#include \"%s\"\n\n",
         names.header);

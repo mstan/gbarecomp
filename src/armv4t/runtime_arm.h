@@ -244,9 +244,10 @@ extern uint32_t g_runtime_break_pc;
 // (LR_svc = PC+4, SPSR_svc = CPSR, mode=SVC, I=1, T=0) and
 // dispatches to the recompiled BIOS at 0x00000008 via
 // runtime_dispatch. Returns when the recompiled handler issues
-// `movs pc, lr` and we land back at the recompiled site. There is
-// no interpreter fallback — see PRINCIPLES.md "Interpreter is
-// informative, never load-bearing (SHOWSTOPPER)".
+// `movs pc, lr` and we land back at the recompiled site. A missed
+// BIOS handler self-heals (bridge + on-the-fly recompile + log), it
+// is never hand-written HLE — see PRINCIPLES.md "BIOS is sacred —
+// recompiled and dispatched" and "Honest self-healing".
 
 void runtime_swi(uint32_t swi_imm);
 void runtime_irq(uint32_t return_address);
@@ -279,11 +280,13 @@ void runtime_write_user_reg(uint32_t reg, uint32_t value);
 void runtime_exception_return(uint32_t new_pc);
 void runtime_restore_cpsr_from_spsr(void);
 
-// ── Fallback ───────────────────────────────────────────────────────
+// ── Codegen gap (NOT a dispatch miss) ──────────────────────────────
 // Emitted for IrOps codegen hasn't lowered yet. The runtime ALWAYS
-// aborts here — there is no interpreter fallback (see PRINCIPLES.md
-// "Interpreter is informative, never load-bearing"). Every abort is
-// a P0 codegen-completion task.
+// aborts here — this is a CODEGEN gap, not a dispatch miss, so it is
+// NOT self-healed; it is a P0 codegen-completion task. (Analogous to
+// the interpreter's own NotImplemented gate, which also stays loud —
+// see PRINCIPLES.md "Honest self-healing", "Genuine interpreter gaps
+// still abort loudly". Dispatch misses, by contrast, self-heal.)
 
 void runtime_unimplemented_op(const char* op_name, uint32_t pc);
 

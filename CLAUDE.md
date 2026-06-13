@@ -27,12 +27,15 @@ If you:
   PRINCIPLES.md "Verified-enhancement HLE is permitted")
 - stub a BIOS SWI, skip the BIOS intro, or otherwise bypass the
   real BIOS execution path
-- **make any runtime exec path depend on the interpreter** (BIOS,
-  cart, SWI fallback, "temporary scaffold," "until codegen catches
-  up" — all forbidden; see PRINCIPLES.md "Interpreter is informative,
-  never load-bearing")
-- ship a "hybrid" runtime where some PCs are recompiled and others
-  are interpreted
+- let a dispatch miss *silently* interpret forever — no log, no
+  self-heal to static, no miss record (see PRINCIPLES.md "Honest
+  self-healing"); the interpreter may bridge a miss ONLY if it is
+  loudly logged, recompiled on the fly, and fed back to the TOML
+- call a build "statically recompiled / done" while PCs were
+  interpreted or healed-from-cache this session, without reporting it
+  (see PRINCIPLES.md "Coverage honesty is load-bearing")
+- auto-write derived functions into `game.toml` instead of a reviewed
+  proposal file merged by a human
 
 → your response is INVALID
 → restart from `DEBUG.md`
@@ -60,31 +63,37 @@ Fixes belong in:
 3. Build the game binary (`MinishCapRecomp/`).
 4. Run (normal / verify / oracle-compare mode) **with BIOS path AND
    ROM path**. Both must hash-verify or the runtime refuses to start.
-5. **Check `dispatch_misses.log`** next to the executable. If
-   non-empty, add discovered functions to `game.toml`, regenerate,
-   rebuild, re-run. Repeat until empty.
+5. **Check the coverage report + miss-list** next to the executable.
+   The runtime self-heals misses at runtime (interpret → recompile on
+   the fly) and logs them to `recomp_master_misses.toml.frag`. Review
+   the generated `recomp_seed_proposals.toml`, **manually merge** the
+   real ones into `game.toml`, regenerate, rebuild, re-run. Repeat
+   until the coverage report reads FULLY STATIC (zero interpreted /
+   healed-from-cache).
 
-A dispatch miss is a silent game-breaking bug. Resolve all misses
-before debugging anything else.
+A dispatch miss no longer breaks the game (it self-heals), but the
+build is NOT done until coverage is fully static. Never auto-write
+`game.toml` — proposals are human-reviewed and merged.
 
-# BIOS RULE — RECOMPILED, NOT INTERPRETED
+# BIOS RULE — RECOMPILED AND DISPATCHED (SELF-HEALS IF MISSED)
 
 The GBA BIOS at `bios/gba_bios.bin` is **recompiled and executed
-via the dispatch table**, not stubbed, not HLE'd, **not interpreted
-on any runtime hot path**. SWIs and IRQs run through the recompiled
-BIOS bytes via `runtime_dispatch`. There is no HLE path. There is
-no interpreter fallback.
+via the dispatch table**, not stubbed, not HLE'd. SWIs and IRQs run
+through the recompiled BIOS bytes via `runtime_dispatch`. There is no
+hand-written HLE path. A missed BIOS PC **self-heals** (bridged,
+recompiled on the fly, logged) — never silently HLE'd or stubbed; 100%
+recompiled BIOS coverage stays the goal.
 
 See `PRINCIPLES.md`:
-- "BIOS is sacred — and recompiled, not interpreted (SHOWSTOPPER)"
-- "Interpreter is informative, never load-bearing (SHOWSTOPPER)"
+- "BIOS is sacred — recompiled and dispatched (with honest self-healing)"
+- "Honest self-healing — interpreter may bridge, must heal to static + report"
+- "Coverage honesty is load-bearing"
 
 Every game's first render frames are BIOS frames, produced by
-recompiled BIOS code. We do not fast-forward, stub, or interpret
-through them.
+recompiled BIOS code. We do not fast-forward or stub through them.
 
-If the runtime exec loop calls `Interpreter::step` for ANY PC, the
-recompiler is broken. Fix the recompiler.
+If a BIOS PC is interpreted, it must be loud, self-heal to native, and
+seed the next build — never a silent, permanent interpreter path.
 
 ---
 
@@ -121,14 +130,23 @@ shortcuts here propagate into invisible bugs everywhere else.
 
 # DISPATCH MISS RULE
 
-After EVERY game run — manual, scripted, or test — check
-`dispatch_misses.log`. Format:
+After EVERY game run — manual, scripted, or test — check the coverage
+report (exit banner) and the miss-list `recomp_master_misses.toml.frag`.
+Misses self-heal at runtime, but each is a discovery gap to close.
+
+The miss→proposal writer emits `recomp_seed_proposals.toml` with
+`[[extra_func]]` / `[[jump_table]]` entries:
 
 ```
-extra_func 0x08XXXXXX  thumb|arm
+[[extra_func]]
+addr = 0x08XXXXXX
+mode = "thumb"   # or "arm"
+note = "proposed from miss-log ..."
 ```
 
-Add to `[functions]` in `game.toml`. Regenerate. Rebuild.
+**A human reviews and merges** the real ones into `game.toml` (never
+an auto-write). Regenerate. Rebuild. Goal: coverage report = FULLY
+STATIC.
 
 ---
 
