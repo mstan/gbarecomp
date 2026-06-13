@@ -548,29 +548,52 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
     // bounds, data_range, and a defined-instruction decode run. A wrong
     // guess is a dead func_XXXX that is never dispatched, never a hard
     // data_range collision (so it cannot abort the build).
+    // ARM function-entry prologue gate. Literal-pool code pointers point
+    // at function ENTRIES, and a real ARM function opens with the AAPCS
+    // push `STMFD sp!, {..., lr}` (Full Descending: P=1,U=0,W=1,L=0, base
+    // SP, LR in the list). Some older/APCS frames lead with `mov ip,sp`
+    // before the push, so scan the first two instructions. A ROM *data*
+    // word essentially never points at such a push, which is the strong
+    // second signal ARM harvesting needs: plain alignment + a 6-instr
+    // "all defined" decode is far too weak for ARM (its condition field
+    // makes nearly any word decode to something), and without this gate
+    // an ARM harvest exploded Minish Cap discovery 7.5x (~292k bogus
+    // funcs from data pointers). THUMB needs no such gate — bit0-set +
+    // ROM-range + strict decode is already a strong enough signal.
+    auto is_arm_func_prologue = [&](uint32_t tgt) -> bool {
+        uint32_t a = tgt;
+        for (int j = 0; j < 2; ++j) {
+            if (!can_read_at(a, 4)) return false;
+            armv4t::Instr i = armv4t::ArmDecoder::decode(read_u32(a), a);
+            if (i.op == armv4t::IrOp::STM && !i.block.load &&
+                i.block.writeback && i.block.rn == 13 &&
+                i.block.pre_indexed && !i.block.add &&
+                (i.block.reg_list & (1u << 14)) != 0) {
+                return true;  // STMFD sp!, {..., lr}  == push {..., lr}
+            }
+            a += 4;
+        }
+        return false;
+    };
     auto maybe_harvest_literal = [&](uint32_t word) {
         ++stats_.literal_pool_words_seen;
-        // THUMB-ONLY harvest. A word with bit0 set that points into ROM
-        // at an even address is a strong THUMB-code-pointer signal: data
-        // words almost never set bit0 while ALSO landing in the ROM code
-        // range. ARM pointers (bit0==0, word-aligned) are deliberately
-        // NOT harvested — they are indistinguishable from the abundant
-        // ROM *data* pointers (asset/string/struct addresses), and on
-        // Minish Cap an ARM harvest exploded discovery 7.5x (≈292k bogus
-        // ARM funcs: ARM's condition field makes nearly any word decode
-        // to "defined" instructions, so strict-6-instr validation is too
-        // weak). The cart is ~99% THUMB, so THUMB-only captures the real
-        // wins at negligible false-positive cost.
-        // TODO(stage0.1+): ARM literal harvesting needs a stronger gate —
-        // a function-entry prologue (stmfd sp!,{...,lr}) or evidence the
-        // pointer is consumed by an interworking branch — before it can
-        // be enabled safely.
-        if ((word & 1u) == 0u) return;       // not a THUMB code pointer
-        uint32_t tgt = word & ~uint32_t{1};
-        if (!looks_like_code(tgt, CpuMode::Thumb, /*strict=*/true)) return;
+        CpuMode tmode;
+        uint32_t tgt;
+        if (word & 1u) {                 // bit0 set → THUMB pointer
+            tmode = CpuMode::Thumb;
+            tgt = word & ~uint32_t{1};
+        } else if ((word & 3u) == 0u) {  // word-aligned → ARM pointer
+            tmode = CpuMode::Arm;
+            tgt = word;
+        } else {
+            return;                      // half-aligned even → not code
+        }
+        if (!looks_like_code(tgt, tmode, /*strict=*/true)) return;
+        // ARM gets the extra entry-prologue gate; THUMB's signal suffices.
+        if (tmode == CpuMode::Arm && !is_arm_func_prologue(tgt)) return;
         ++stats_.literal_pool_seeds_kept;
         literal_pool_seeds_.push_back(
-            FunctionSeed{tgt, CpuMode::Thumb, "", 0, /*speculative=*/true});
+            FunctionSeed{tgt, tmode, "", 0, /*speculative=*/true});
     };
 
     // Recognize an abs32 jump table at `base` revealed by an indexed load
