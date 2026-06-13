@@ -908,6 +908,10 @@ int main(int argc, char** argv) {
                     stats.jt_overlap_suppressed,
                     stats.jt_rejected_unsized,
                     stats.jt_rejected_bound_mismatch);
+        std::printf("  literal_pool_seeds:    %zu kept / %zu PC-rel "
+                    "literals (speculative code-pointer harvest)\n",
+                    stats.literal_pool_seeds_kept,
+                    stats.literal_pool_words_seen);
         std::printf("  data_ranges_honored:   %zu\n",
                     cfg.data_ranges.size() + cfg.jump_tables.size());
         std::printf("  code_copies:           %zu\n",

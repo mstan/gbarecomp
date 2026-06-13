@@ -139,6 +139,15 @@ void FunctionFinder::record_collision(uint32_t target,
                                        uint32_t origin_addr,
                                        const std::string& origin_name,
                                        const std::string& origin_kind) {
+    // Speculative (literal-pool) flow into a data_range is NOT a hard
+    // error — it just means the harvested literal wasn't really a code
+    // pointer. Swallow it and mark the function for drop; discover_one
+    // erases it so a genuine path can rediscover the address later.
+    // Authoritative walks (entry/symbols/jump_table) still hard-error.
+    if (current_walk_speculative_) {
+        current_walk_dropped_ = true;
+        return;
+    }
     DataRangeCollision col{};
     col.flow_target_addr  = target;
     col.flow_origin_addr  = origin_addr;
@@ -177,7 +186,8 @@ uint16_t FunctionFinder::read_u16(uint32_t addr) const {
 
 void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                                    const std::string& seed_name,
-                                   uint32_t seed_source_addr) {
+                                   uint32_t seed_source_addr,
+                                   bool speculative) {
     uint32_t entry_source = 0;
     if (seed_source_addr != 0) {
         entry_source = seed_source_addr;
@@ -187,6 +197,11 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
     }
     uint64_t key = visit_key(entry_addr, entry_mode);
     if (visited_.find(key) != visited_.end()) return;
+
+    // Speculative (literal-pool) walks downgrade data_range collisions
+    // from a hard error to a silent drop (see record_collision).
+    current_walk_speculative_ = speculative;
+    current_walk_dropped_ = false;
 
     Function fn{};
     fn.addr = entry_addr;
@@ -472,8 +487,10 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         if (target_mode == entry_mode) {
             fn.direct_branch_targets.push_back(target);
         } else {
+            // Propagate speculation: a cross-mode target reached from a
+            // speculative (literal-pool) walk is itself speculative.
             mode_switch_seeds_.push_back(
-                FunctionSeed{target, target_mode, ""});
+                FunctionSeed{target, target_mode, "", 0, speculative});
         }
         ++stats_.branch_targets_discovered;
     };
@@ -517,6 +534,43 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             }
         }
         return true;
+    };
+
+    // Literal-pool harvesting (Stage 0.1, ported from jrickey gba-recomp
+    // analyze.rs). A PC-relative `LDR rX,[pc,#imm]` whose loaded word
+    // looks like a code pointer seeds a new function entry. This catches
+    // function pointers stashed in literal pools that are NEVER consumed
+    // by a statically-resolvable branch (stored into a callback table,
+    // passed as an argument, returned) — the main source of "missed
+    // function" dispatch gaps. SPECULATIVE + SILENT: the heuristic is
+    // bit0==1 → THUMB target, (word&3)==0 → ARM target; anything else is
+    // not a pointer. looks_like_code (strict) gates on alignment, ROM
+    // bounds, data_range, and a defined-instruction decode run. A wrong
+    // guess is a dead func_XXXX that is never dispatched, never a hard
+    // data_range collision (so it cannot abort the build).
+    auto maybe_harvest_literal = [&](uint32_t word) {
+        ++stats_.literal_pool_words_seen;
+        // THUMB-ONLY harvest. A word with bit0 set that points into ROM
+        // at an even address is a strong THUMB-code-pointer signal: data
+        // words almost never set bit0 while ALSO landing in the ROM code
+        // range. ARM pointers (bit0==0, word-aligned) are deliberately
+        // NOT harvested — they are indistinguishable from the abundant
+        // ROM *data* pointers (asset/string/struct addresses), and on
+        // Minish Cap an ARM harvest exploded discovery 7.5x (≈292k bogus
+        // ARM funcs: ARM's condition field makes nearly any word decode
+        // to "defined" instructions, so strict-6-instr validation is too
+        // weak). The cart is ~99% THUMB, so THUMB-only captures the real
+        // wins at negligible false-positive cost.
+        // TODO(stage0.1+): ARM literal harvesting needs a stronger gate —
+        // a function-entry prologue (stmfd sp!,{...,lr}) or evidence the
+        // pointer is consumed by an interworking branch — before it can
+        // be enabled safely.
+        if ((word & 1u) == 0u) return;       // not a THUMB code pointer
+        uint32_t tgt = word & ~uint32_t{1};
+        if (!looks_like_code(tgt, CpuMode::Thumb, /*strict=*/true)) return;
+        ++stats_.literal_pool_seeds_kept;
+        literal_pool_seeds_.push_back(
+            FunctionSeed{tgt, CpuMode::Thumb, "", 0, /*speculative=*/true});
     };
 
     // Recognize an abs32 jump table at `base` revealed by an indexed load
@@ -1275,6 +1329,14 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                     raw = ror32(raw, (ea & 3u) * 8u);
                     reg_const[ins.rd].known = true;
                     reg_const[ins.rd].value = raw;
+                    // Harvest only true PC-relative literal pools
+                    // (`[pc,#imm]`). reg_const-based pointer-table loads
+                    // are intentionally excluded here (higher false-
+                    // positive rate); a BX/BLX/MOV-pc consumer of a
+                    // tracked pointer is already resolved separately.
+                    if (ins.mem.rn == 15 && !ins.mem.by_register) {
+                        maybe_harvest_literal(raw);
+                    }
                 } else {
                     reg_const[ins.rd].known = false;
                 }
@@ -1415,6 +1477,20 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         }
     }
 
+    if (current_walk_dropped_) {
+        // A speculative literal-pool function entered a data_range — not
+        // real code. Drop it silently (no hard error). Erase the visited
+        // marker so a genuine, authoritative path can rediscover the
+        // address later (and that path WILL hard-error if it too enters
+        // a data_range — surfacing a real contradiction). Discard any
+        // sub-seeds harvested during this discarded walk.
+        visited_.erase(key);
+        mode_switch_seeds_.clear();
+        literal_pool_seeds_.clear();
+        current_walk_dropped_ = false;
+        return;  // do NOT push_back fn
+    }
+
     functions_.push_back(std::move(fn));
 }
 
@@ -1510,7 +1586,7 @@ void FunctionFinder::run(std::size_t max_functions) {
         }
 
         std::size_t before = functions_.size();
-        discover_one(s.addr, s.mode, s.name, s.source_addr);
+        discover_one(s.addr, s.mode, s.name, s.source_addr, s.speculative);
         if (functions_.size() == before) continue;
 
         // The function we just added is at the end of functions_.
@@ -1526,8 +1602,11 @@ void FunctionFinder::run(std::size_t max_functions) {
             // it now has both bits set (redundant_manual).
             origin_mask[k] |= 2u;
             if (!enqueued.insert(k).second) continue;  // already queued
+            // Propagate speculation: a branch target reached only from a
+            // speculative (literal-pool) walk is itself speculative.
             discovered_seeds.push_back(
-                QueuedSeed{FunctionSeed{t, fn.mode, ""}, current_required});
+                QueuedSeed{FunctionSeed{t, fn.mode, "", 0, s.speculative},
+                           current_required});
             if (current_required) {
                 ++required_remaining;
             }
@@ -1545,6 +1624,21 @@ void FunctionFinder::run(std::size_t max_functions) {
             }
         }
         mode_switch_seeds_.clear();
+        // Drain speculative literal-pool seeds harvested during this
+        // walk (PC-relative loads of words that look like code pointers).
+        // Same enqueue path as mode_switch_seeds_; the worklist dedups
+        // against anything already discovered, so a literal that points
+        // at a known function is harmlessly dropped here.
+        for (const auto& ls : literal_pool_seeds_) {
+            uint64_t k = visit_key(ls.addr, ls.mode);
+            origin_mask[k] |= 2u;
+            if (!enqueued.insert(k).second) continue;  // already queued
+            discovered_seeds.push_back(QueuedSeed{ls, current_required});
+            if (current_required) {
+                ++required_remaining;
+            }
+        }
+        literal_pool_seeds_.clear();
         if (!discovered_seeds.empty()) {
             worklist.insert(worklist.begin() + static_cast<std::ptrdiff_t>(pos),
                             discovered_seeds.begin(),

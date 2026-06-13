@@ -42,6 +42,11 @@ struct FunctionSeed {
     CpuMode  mode;
     std::string name;   // empty → finder generates "func_XXXXXXXX"
     uint32_t source_addr = 0;  // 0 => decode from addr or code_copy map
+    // Speculative seeds (harvested from literal pools, Stage 0.1) must
+    // never cause a hard data_range collision: if their walk enters a
+    // data_range the function is silently DROPPED (the literal wasn't
+    // really code). Propagates to every descendant reached from it.
+    bool speculative = false;
 };
 
 // Output: one entry per discovered function.
@@ -97,6 +102,10 @@ struct FinderStats {
     std::size_t redundant_manual = 0;       // in both seeds AND walk-discovered
     std::size_t manual_seeds_only = 0;      // would be lost without seeds
     std::size_t excluded_count = 0;         // # removed by exclude_func
+    // Literal-pool harvesting (Stage 0.1): a PC-relative LDR of a word
+    // that looks like a code pointer seeds a new function entry.
+    std::size_t literal_pool_words_seen = 0;  // PC-rel literals examined
+    std::size_t literal_pool_seeds_kept = 0;  // passed the code filter
 };
 
 // A byte range the finder must not decode as code. See
@@ -215,6 +224,13 @@ private:
     // after each function's body is processed.
     std::vector<FunctionSeed>        mode_switch_seeds_;
 
+    // Speculative seeds harvested from PC-relative literal pools (a
+    // loaded word that looks like a code pointer). Drained by run()
+    // like mode_switch_seeds_. Silent + speculative — a wrong guess is
+    // a dead func_XXXX, never a hard data_range collision. (Stage 0.1,
+    // ported from jrickey gba-recomp analyze.rs literal-pool scan.)
+    std::vector<FunctionSeed>        literal_pool_seeds_;
+
     bool addr_in_rom(uint32_t addr) const {
         return addr >= rom_base_ &&
                (addr - rom_base_) < rom_size_;
@@ -232,7 +248,15 @@ private:
     uint16_t read_u16(uint32_t addr) const;
     void discover_one(uint32_t addr, CpuMode mode,
                       const std::string& name,
-                      uint32_t source_addr = 0);
+                      uint32_t source_addr = 0,
+                      bool speculative = false);
+
+    // Set at the top of each discover_one from its `speculative` arg.
+    // When a speculative walk would record a data_range collision,
+    // record_collision swallows it and sets current_walk_dropped_ so
+    // discover_one drops the function instead of hard-erroring.
+    bool current_walk_speculative_ = false;
+    bool current_walk_dropped_ = false;
 };
 
 }  // namespace gbarecomp
