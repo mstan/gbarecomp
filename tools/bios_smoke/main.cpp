@@ -28,6 +28,7 @@
 #include <windows.h>
 #endif
 
+#include "arm_cpu_bridge.h"
 #include "arm_decode.h"
 #include "arm_ir.h"
 #include "asset_picker.h"
@@ -636,26 +637,9 @@ int main(int argc, char** argv) {
         sc.cycles_elapsed = &cycles_elapsed;
         sc.vblank_count = &vblank_count;
         if (!gbarecomp::debug::load_state(path.c_str(), sc, &e)) return false;
-        const ArmCpuState& g = g_cpu;  // populated by load_state
-        for (int i = 0; i < 16; ++i) cpu.R[i] = g.R[i];
-        cpu.cpsr.n = (g.cpsr >> 31) & 1u;
-        cpu.cpsr.z = (g.cpsr >> 30) & 1u;
-        cpu.cpsr.c = (g.cpsr >> 29) & 1u;
-        cpu.cpsr.v = (g.cpsr >> 28) & 1u;
-        cpu.cpsr.i = (g.cpsr >> 7) & 1u;
-        cpu.cpsr.f = (g.cpsr >> 6) & 1u;
-        cpu.cpsr.t = (g.cpsr >> 5) & 1u;
-        cpu.cpsr.mode = g.cpsr & 0x1Fu;
-        for (int i = 0; i < 6; ++i) {
-            cpu.banked_sp[i]   = g.banked_sp[i];
-            cpu.banked_lr[i]   = g.banked_lr[i];
-            cpu.banked_spsr[i] = g.banked_spsr[i];
-        }
-        for (int i = 0; i < 5; ++i) {
-            cpu.r8_12_user[i] = g.r8_12_user[i];
-            cpu.r8_12_fiq[i]  = g.r8_12_fiq[i];
-        }
-        cpu.thumb = cpu.cpsr.t;
+        // g_cpu (the recomp ABI register file) was populated by load_state;
+        // mirror it into the interpreter's CPUState via the shared bridge.
+        gbarecomp::load_arm_cpu_into_interp(g_cpu, cpu);
         vblank_count = ppu.frame_count();  // re-sync frame clock to restored PPU
         // Re-origin the fingerprint cycle clock + ring at the load point so the
         // interp and recomp share a cycle origin for diff_cycle_trace.py. The

@@ -160,6 +160,7 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/runtime.cpp
     src/runtime/generated_dispatch.cpp
     src/runtime/runtime_bus_bridge.cpp
+    src/runtime/arm_cpu_bridge.cpp
     src/runtime/host_platform.cpp
     src/runtime/host_window.cpp
     src/runtime/color_lut.cpp
