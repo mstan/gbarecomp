@@ -12,6 +12,7 @@
 //
 // CLI:
 //   bios_smoke [--bios <path>] [--steps N] [--quiet]
+//             [--rom <path>] [--frames N] [--emit-target-seeds <out.tsv>]
 
 #include <cstdint>
 #include <cstdio>
@@ -20,6 +21,7 @@
 #include <string>
 
 #include <fstream>
+#include <map>
 #include <vector>
 
 #if defined(_WIN32)
@@ -60,6 +62,7 @@ struct Args {
     int  frames  = -1;     // when >=0, cap by completed frames not steps
     std::string snapshot;  // optional path prefix for OAM/VRAM/PAL/IWRAM dump
     int tcp_port = 0;      // when >0, run as TCP debug server
+    std::string emit_target_seeds;  // Stage 0.2: profile-guided seed TSV out
 };
 
 // Minimal 24-bit BMP writer for a 240x160 RGB888 framebuffer (row 0
@@ -146,6 +149,11 @@ Args parse_args(int argc, char** argv) {
         if (s == "--tcp" && i + 1 < argc) {
             a.tcp_port = std::atoi(argv[++i]);
             a.quiet = true;
+            continue;
+        }
+        if (s == "--emit-target-seeds" && i + 1 < argc) {
+            a.emit_target_seeds = argv[++i];
+            a.quiet = true;  // headless profiling run; no per-step trace
             continue;
         }
         std::fprintf(stderr, "bios_smoke: unknown arg %s\n", s.c_str());
@@ -423,6 +431,84 @@ int main(int argc, char** argv) {
         return static_cast<uint32_t>(fp_count);
     };
 
+    // ── Stage 0.2: profile-guided seed harvesting ────────────────────
+    // When --emit-target-seeds is set, accumulate (always-on from reset,
+    // queried once at exit) every INDIRECT control-transfer destination the
+    // interpreter actually reaches: function entries reached via function
+    // pointers / indirect tailcalls / computed calls that the recompiler's
+    // STATIC walk cannot follow. Direct B/BL targets are already discovered
+    // statically (the walk follows them) so they are counted but NOT emitted.
+    // Returns (bx lr, pop {pc}, mov pc,lr) are dropped via the decoder's
+    // is_return flag; the remaining indirect destinations are gated to
+    // addresses bearing a recognized function prologue (THUMB `push {..,lr}`
+    // / ARM `stmfd sp!,{..,lr}`), which rejects jump-table case labels and
+    // non-prologue return sites that aren't real function entries. Known
+    // gate cost: a leaf reached ONLY by pointer that never pushes lr is
+    // missed (rare; Stage 1 self-healing catches it at runtime). The result
+    // is written as a REVIEW-REQUIRED seed TSV in the imported_symbols.tsv
+    // format — never auto-merged into game.toml / symbols.
+    const bool seed_armed = !args.emit_target_seeds.empty();
+    struct SeedRec { uint8_t thumb = 0; uint64_t hits = 0; };
+    std::map<uint32_t, SeedRec> rom_seeds;   // statically-recompilable ROM entries
+    std::map<uint32_t, SeedRec> dyn_seeds;   // IWRAM/EWRAM (dynamic code — Stage 4)
+    uint64_t seed_branches = 0, seed_returns = 0, seed_direct_call = 0,
+             seed_direct_branch = 0, seed_bios = 0, seed_other = 0,
+             seed_no_prologue = 0;
+    auto thumb_has_prologue = [&](uint32_t a) -> bool {
+        // push {..., lr} == 1011 0101 xxxxxxxx
+        return (bus.read16(a) & 0xFF00u) == 0xB500u;
+    };
+    auto arm_has_prologue = [&](uint32_t a) -> bool {
+        // STMFD sp!, {..., lr} (Full Descending) in the first two instrs
+        // — same predicate as the recompiler's literal-pool harvest gate.
+        for (int j = 0; j < 2; ++j) {
+            armv4t::Instr i = armv4t::ArmDecoder::decode(bus.read32(a), a);
+            if (i.op == armv4t::IrOp::STM && !i.block.load &&
+                i.block.writeback && i.block.rn == 13 &&
+                i.block.pre_indexed && !i.block.add &&
+                (i.block.reg_list & (1u << 14)) != 0) {
+                return true;
+            }
+            a += 4;
+        }
+        return false;
+    };
+    auto record_seed_target = [&](const armv4t::Instr& branch_insn) {
+        ++seed_branches;
+        if (branch_insn.is_return) { ++seed_returns; return; }
+        if (!branch_insn.is_indirect) {
+            // Direct, statically-resolvable transfer — the static walk
+            // already follows these. Count for honesty, don't emit.
+            if (branch_insn.is_call) ++seed_direct_call;
+            else                     ++seed_direct_branch;
+            return;
+        }
+        // Indirect, non-return: a computed call/jump. The destination is the
+        // live post-step PC; its mode is the post-step CPSR.T flag.
+        const bool dthumb = cpu.thumb;
+        const uint32_t dest =
+            cpu.R[15] & (dthumb ? ~uint32_t{1} : ~uint32_t{3});
+        if (dest < 0x4000u) { ++seed_bios; return; }  // BIOS dispatch owns this
+        const bool in_rom = dest >= 0x08000000u &&
+                            dest < 0x08000000u + rom_bytes.size();
+        const bool in_ram = (dest >= 0x02000000u && dest < 0x02040000u) ||
+                            (dest >= 0x03000000u && dest < 0x03008000u);
+        if (in_rom) {
+            const bool prologue = dthumb ? thumb_has_prologue(dest)
+                                         : arm_has_prologue(dest);
+            if (!prologue) { ++seed_no_prologue; return; }  // case-label/return-like
+            SeedRec& r = rom_seeds[dest];
+            r.thumb = dthumb ? 1 : 0;
+            ++r.hits;
+        } else if (in_ram) {
+            SeedRec& r = dyn_seeds[dest];
+            r.thumb = dthumb ? 1 : 0;
+            ++r.hits;
+        } else {
+            ++seed_other;
+        }
+    };
+
     auto run_cpu_step = [&](int trace_index) -> bool {
         uint32_t step_cycles = 0;
         auto pump_step = [&](uint32_t cycles) {
@@ -479,6 +565,12 @@ int main(int argc, char** argv) {
         }
         pump_step(insn_cycles);
         last_step_cycles = step_cycles;
+
+        // Stage 0.2: record indirect control-transfer destinations as seed
+        // candidates (post-step, so cpu.R[15]/cpu.thumb are the destination).
+        if (seed_armed && r == armv4t::Interpreter::Result::Branched) {
+            record_seed_target(insn);
+        }
 
         if (!args.quiet && trace_index >= 0) {
             const char* r_name = "?";
@@ -604,6 +696,31 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // Stage 0.2: deterministic demo-input driver for the headless profiling
+    // run. A no-input headless run idles on the title/menu screen and never
+    // exercises the indirect-dispatch-heavy gameplay code we want to profile,
+    // so when --emit-target-seeds is active (and we own the loop, i.e. not
+    // --window / --tcp) we synthesize a button track: each button is held 6
+    // frames then released 6 (edge-triggered menus need the release), cycling
+    // Start/A to blow through menus + directions/B to move and interact in
+    // game. Frame-indexed (no RNG) so the profile is reproducible.
+    enum : uint16_t {
+        KEY_A = 1u << 0, KEY_B = 1u << 1, KEY_START = 1u << 3,
+        KEY_RIGHT = 1u << 4, KEY_LEFT = 1u << 5,
+        KEY_UP = 1u << 6, KEY_DOWN = 1u << 7,
+    };
+    auto seed_input_for_frame = [](uint64_t frame) -> uint16_t {
+        static const uint16_t kButtons[] = {
+            KEY_START, KEY_A, KEY_A, KEY_DOWN, KEY_A, KEY_RIGHT,
+            KEY_B, KEY_A, KEY_LEFT, KEY_A, KEY_UP, KEY_B,
+        };
+        if (((frame / 6) & 1u) != 0u) return 0x03FFu;  // release phase
+        const uint16_t btn = kButtons[(frame / 12) %
+            (sizeof(kButtons) / sizeof(kButtons[0]))];
+        return static_cast<uint16_t>(0x03FFu & ~btn);
+    };
+    uint64_t last_input_frame = ~uint64_t{0};
+
     // When --window or --frames is set without an explicit --steps,
     // run open-ended (capped at INT_MAX/2) and let the frame cap or
     // window quit terminate the loop instead.
@@ -613,6 +730,13 @@ int main(int argc, char** argv) {
         : args.steps;
     for (int i = 0; i < step_budget && !host_quit; ++i) {
         if (!run_cpu_step(i)) break;
+        if (!args.window && seed_armed) {
+            const uint64_t fc = ppu.frame_count();
+            if (fc != last_input_frame) {
+                last_input_frame = fc;
+                bus.io().set_keyinput(seed_input_for_frame(fc));
+            }
+        }
         if (args.window && frame_just_completed) {
             frame_just_completed = false;
             if (ppu.has_latched_framebuffer()) {
@@ -642,6 +766,71 @@ int main(int argc, char** argv) {
             ppu.frame_count() >= static_cast<uint64_t>(args.frames)) break;
     }
     if (args.window) win.close();
+
+    // Stage 0.2: emit the profile-guided seed proposal + dynamic-code report.
+    if (seed_armed) {
+        std::ofstream sf(args.emit_target_seeds);
+        if (!sf) {
+            std::fprintf(stderr, "bios_smoke: cannot write %s\n",
+                         args.emit_target_seeds.c_str());
+        } else {
+            sf << "# Profile-guided seed proposal — bios_smoke --emit-target-seeds\n";
+            sf << "# Source: interpreter run of " << args.rom << " for "
+               << ppu.frame_count() << " frames.\n";
+            sf << "# Class: INDIRECT-branch destinations (function pointers /\n";
+            sf << "#        indirect tailcalls / computed calls) that the static\n";
+            sf << "#        walk cannot follow, gated to a recognized function\n";
+            sf << "#        prologue. Direct B/BL targets are discovered\n";
+            sf << "#        statically and are NOT emitted here.\n";
+            sf << "# REVIEW REQUIRED: a human merges the real entries into\n";
+            sf << "#        symbols/*.tsv or game.toml. Never auto-merged.\n";
+            sf << "# Format: 0xADDR<TAB>mode<TAB>name  (matches imported_symbols.tsv)\n";
+            char buf[64];
+            for (const auto& kv : rom_seeds) {
+                std::snprintf(buf, sizeof(buf), "0x%08x\t%s\tprof_%08x\n",
+                              kv.first, kv.second.thumb ? "thumb" : "arm",
+                              kv.first);
+                sf << buf;
+            }
+        }
+        // Dynamic-code (IWRAM/EWRAM) sidecar — Stage 4 surface, visibility only.
+        const std::string dyn_path = args.emit_target_seeds + ".dynamic";
+        std::ofstream df(dyn_path);
+        if (df) {
+            df << "# Dynamic-code indirect targets (IWRAM 0x03xxxxxx / EWRAM "
+                  "0x02xxxxxx).\n";
+            df << "# RAM-resident (copied at runtime) — NOT statically\n";
+            df << "# recompilable from the ROM image. Recorded for Stage 4 scope.\n";
+            df << "# Format: 0xADDR<TAB>mode<TAB>hits<TAB>prologue\n";
+            char buf[96];
+            for (const auto& kv : dyn_seeds) {
+                const bool pro = kv.second.thumb ? thumb_has_prologue(kv.first)
+                                                 : arm_has_prologue(kv.first);
+                std::snprintf(buf, sizeof(buf), "0x%08x\t%s\t%llu\t%s\n",
+                              kv.first, kv.second.thumb ? "thumb" : "arm",
+                              static_cast<unsigned long long>(kv.second.hits),
+                              pro ? "yes" : "no");
+                df << buf;
+            }
+        }
+        std::printf("\n[profile seeds] frames=%llu branches=%llu\n"
+                    "  rom_seeds_emitted=%zu (indirect, prologue-gated)\n"
+                    "  dynamic_targets=%zu (IWRAM/EWRAM -> %s.dynamic)\n"
+                    "  skipped: returns=%llu direct_call=%llu direct_branch=%llu "
+                    "bios=%llu no_prologue=%llu other=%llu\n"
+                    "  wrote %s\n",
+                    static_cast<unsigned long long>(ppu.frame_count()),
+                    static_cast<unsigned long long>(seed_branches),
+                    rom_seeds.size(), dyn_seeds.size(),
+                    args.emit_target_seeds.c_str(),
+                    static_cast<unsigned long long>(seed_returns),
+                    static_cast<unsigned long long>(seed_direct_call),
+                    static_cast<unsigned long long>(seed_direct_branch),
+                    static_cast<unsigned long long>(seed_bios),
+                    static_cast<unsigned long long>(seed_no_prologue),
+                    static_cast<unsigned long long>(seed_other),
+                    args.emit_target_seeds.c_str());
+    }
 
     // Final-state summary always prints, including under --quiet, so
     // long runs can be benchmarked / regression-checked without
