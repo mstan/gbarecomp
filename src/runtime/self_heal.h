@@ -72,11 +72,19 @@ std::vector<SelfHealCluster> self_heal_cluster_misses(
     const std::vector<SelfHealMiss>& sorted_misses,
     std::uint32_t max_gap, std::size_t min_run);
 
-// JSON snapshot of the live miss/heal state for the TCP `misses` command:
-// aggregate counters (distinct misses, interpreted insns, healed-to-native,
-// native calls, in-flight, failed) plus a per-bridged-PC array tagging which
-// have healed and their native-call counts. A pure query of the always-on
-// bookkeeping — no arming.
+// JSON snapshot of the live miss/heal state for the TCP `misses` command and
+// the exit coverage file: a top-level "coverage" verdict (FULLY_STATIC /
+// NOT_STATIC), aggregate counters (distinct misses, interpreted insns,
+// healed-to-native, native calls, in-flight, failed, jump-table-candidate
+// regions) plus a per-bridged-PC array tagging healed state, native-call
+// counts, and whether each PC is part of a jump-table-candidate run. A pure
+// query of the always-on bookkeeping — no arming.
 std::string self_heal_misses_json();
+
+// Write self_heal_misses_json() to `path` (+ a trailing newline). Unlike the
+// frag proposal, this is written on EVERY exit so the build loop / CI can
+// read one machine-readable file to confirm FULLY_STATIC or drive the merge
+// loop. Returns false if the path can't be opened. NEVER touches game.toml.
+bool self_heal_write_coverage_json(const char* path);
 
 }  // namespace gbarecomp

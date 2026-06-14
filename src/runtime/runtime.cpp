@@ -967,6 +967,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         const char* frag = std::getenv("GBARECOMP_MISS_FRAG");
         gbarecomp::self_heal_write_report(
             frag ? frag : "recomp_master_misses.toml.frag");
+        // Machine-readable coverage summary for the build loop / CI (written
+        // every exit, FULLY_STATIC included). Override path with env.
+        const char* cov = std::getenv("GBARECOMP_COVERAGE_JSON");
+        gbarecomp::self_heal_write_coverage_json(
+            cov ? cov : "recomp_coverage.json");
         if (const char* fp = std::getenv("GBARECOMP_FP_SAVE")) {
             uint32_t n = runtime_fp_save_file(fp);
             std::printf("fp_ring_saved path=\"%s\" records=%u\n", fp, n);

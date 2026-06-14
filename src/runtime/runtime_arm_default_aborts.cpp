@@ -205,19 +205,43 @@ std::string self_heal_misses_json() {
     std::uint64_t healed = 0, native_calls = 0, inflight = 0, failed = 0;
     gbarecomp::overlay_counters(&healed, &native_calls, &inflight, &failed);
 
+    // Reuse the proposal writer's jump-table-candidate grouping so the
+    // machine-readable summary flags which misses are case targets of an
+    // unsized computed-jump switch (build loop / CI can prefer a sized
+    // [[jump_table]] over the per-PC [[extra_func]] runs).
+    std::vector<gbarecomp::SelfHealMiss> sorted;
+    sorted.reserve(g_misses.size());
+    for (const auto& kv : g_misses)
+        sorted.push_back({kv.first, kv.second.thumb, kv.second.count});
+    const auto clusters = gbarecomp::self_heal_cluster_misses(sorted, 0x80, 3);
+    std::map<std::uint32_t, bool> jt_pc;  // pc -> in a jump-table candidate run
+    std::size_t jt_regions = 0;
+    for (const auto& c : clusters) {
+        if (c.jump_table_candidate) ++jt_regions;
+        for (std::size_t k = c.begin; k < c.end; ++k)
+            jt_pc[sorted[k].pc] = c.jump_table_candidate;
+    }
+
+    // FULLY_STATIC iff nothing was bridged AND nothing was healed (a warm
+    // cache heals with zero misses but is still NOT fully static).
+    const bool fully_static = g_misses.empty() && healed == 0;
+
     std::string out;
-    char buf[320];
+    char buf[384];
     std::snprintf(buf, sizeof(buf),
-        "{\"ok\":true,\"enabled\":%s,\"distinct_misses\":%zu,"
-        "\"interpreted_insns\":%llu,\"healed_native\":%llu,"
-        "\"native_calls\":%llu,\"inflight\":%llu,\"failed\":%llu,\"misses\":[",
+        "{\"ok\":true,\"coverage\":\"%s\",\"enabled\":%s,"
+        "\"distinct_misses\":%zu,\"interpreted_insns\":%llu,"
+        "\"healed_native\":%llu,\"native_calls\":%llu,\"inflight\":%llu,"
+        "\"failed\":%llu,\"jump_table_candidate_regions\":%zu,\"misses\":[",
+        fully_static ? "FULLY_STATIC" : "NOT_STATIC",
         gbarecomp::overlay_enabled() ? "true" : "false",
         g_misses.size(),
         static_cast<unsigned long long>(g_interp_insns),
         static_cast<unsigned long long>(healed),
         static_cast<unsigned long long>(native_calls),
         static_cast<unsigned long long>(inflight),
-        static_cast<unsigned long long>(failed));
+        static_cast<unsigned long long>(failed),
+        jt_regions);
     out += buf;
 
     bool first = true;
@@ -227,16 +251,36 @@ std::string self_heal_misses_json() {
             gbarecomp::overlay_query(kv.first, kv.second.thumb, &ncalls);
         std::snprintf(buf, sizeof(buf),
             "%s{\"pc\":\"0x%08X\",\"mode\":\"%s\",\"bridged\":%llu,"
-            "\"healed\":%s,\"native_calls\":%llu}",
+            "\"healed\":%s,\"native_calls\":%llu,\"jump_table_candidate\":%s}",
             first ? "" : ",", kv.first, kv.second.thumb ? "thumb" : "arm",
             static_cast<unsigned long long>(kv.second.count),
             is_healed ? "true" : "false",
-            static_cast<unsigned long long>(ncalls));
+            static_cast<unsigned long long>(ncalls),
+            jt_pc[kv.first] ? "true" : "false");
         out += buf;
         first = false;
     }
     out += "]}";
     return out;
+}
+
+bool self_heal_write_coverage_json(const char* path) {
+    if (!path) return false;
+    std::FILE* f = std::fopen(path, "w");
+    if (!f) {
+        std::fprintf(stderr,
+                     "self_heal: could not open %s for the coverage summary\n",
+                     path);
+        return false;
+    }
+    // Written on EVERY exit (unlike the frag, which only writes on misses) so
+    // the build loop can read one file to confirm FULLY_STATIC or drive the
+    // TOML merge loop. Same content as the TCP `misses` command.
+    const std::string json = self_heal_misses_json();
+    std::fwrite(json.data(), 1, json.size(), f);
+    std::fputc('\n', f);
+    std::fclose(f);
+    return true;
 }
 
 }  // namespace gbarecomp
