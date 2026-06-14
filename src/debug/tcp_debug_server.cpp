@@ -719,6 +719,19 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         out = buf;
         return;
     }
+    if (contains("\"misses\"")) {
+        // Live self-heal coverage: the always-on miss/heal bookkeeping queried
+        // for the window of interest (no arm-then-run). Reports every PC the
+        // interpreter bridged this session, which have healed to native, and
+        // the native-call counts, so a TCP-driven repro can confirm a PC flips
+        // bridge -> native (interp count freezes, native_calls climbs).
+        if (!ctx.misses_query) {
+            emit_error(out, "misses_query callback not wired");
+            return;
+        }
+        out = ctx.misses_query();
+        return;
+    }
     if (contains("\"savestate_save\"")) {
         if (!ctx.savestate_save) {
             emit_error(out, "savestate_save callback not wired");

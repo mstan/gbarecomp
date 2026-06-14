@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace gbarecomp {
 
@@ -37,5 +38,12 @@ std::uint64_t self_heal_interpreted_insns();
 // frag_path is non-null, write the reviewed proposal fragment (a set of
 // [[extra_func]] entries) to frag_path. NEVER merges into game.toml.
 void self_heal_write_report(const char* frag_path);
+
+// JSON snapshot of the live miss/heal state for the TCP `misses` command:
+// aggregate counters (distinct misses, interpreted insns, healed-to-native,
+// native calls, in-flight, failed) plus a per-bridged-PC array tagging which
+// have healed and their native-call counts. A pure query of the always-on
+// bookkeeping — no arming.
+std::string self_heal_misses_json();
 
 }  // namespace gbarecomp

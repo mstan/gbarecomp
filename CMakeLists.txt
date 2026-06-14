@@ -177,6 +177,8 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/runtime_bus_bridge.cpp
     src/runtime/arm_cpu_bridge.cpp
     src/runtime/overlay_emit.cpp
+    src/runtime/overlay_loader.cpp
+    src/runtime/overlay_compile.cpp
     src/runtime/host_platform.cpp
     src/runtime/host_window.cpp
     src/runtime/color_lut.cpp
@@ -207,6 +209,12 @@ else()
                    "to populate.")
 endif()
 target_include_directories(gbarecomp_runtime PUBLIC src/runtime)
+# Bake the gbarecomp source root so the Stage-2 runtime compiler can find the
+# overlay shim headers (src/runtime + src/armv4t) when it invokes g++ on a
+# healed function. CMAKE_CURRENT_SOURCE_DIR is the gbarecomp worktree root even
+# when a game project (MinishCapRecomp) pulls us in via add_subdirectory.
+target_compile_definitions(gbarecomp_runtime PRIVATE
+    GBARECOMP_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(gbarecomp_runtime PUBLIC
     gbarecomp_gba gbarecomp_debug gbarecomp_recompile_core)
 set_property(TARGET gbarecomp_runtime PROPERTY POSITION_INDEPENDENT_CODE ON)
@@ -457,6 +465,30 @@ target_include_directories(codegen_tests PRIVATE
     src/armv4t)
 target_link_libraries(codegen_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME codegen_tests COMMAND codegen_tests)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# selfheal_stage2_bios_identical — Stage-2 GFP1 byte-identity gate. Proves a
+# healed-to-native BIOS function (0xBA4 exclude fixture) executes instruction-
+# for-instruction identically to the fully-static corpus (static == bridge ==
+# heal_cold == heal_warm). Heavy + needs the gitignored ROM/BIOS + a built
+# MinishCapRecomp, so it is OPT-IN: pass -DGBARECOMP_SELFHEAL_MC_DIR=<MC dir>.
+# Skips (ctest "Skipped") if the assets are absent.
+# ─────────────────────────────────────────────────────────────────────────────
+if(GBARECOMP_SELFHEAL_MC_DIR)
+    find_program(BASH_EXE bash HINTS C:/msys64/usr/bin /usr/bin)
+    if(BASH_EXE)
+        add_test(NAME selfheal_stage2_bios_identical
+            COMMAND ${BASH_EXE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/selfheal/stage2_bios_identical.sh)
+        set_tests_properties(selfheal_stage2_bios_identical PROPERTIES
+            ENVIRONMENT "GBARECOMP_ROOT=${CMAKE_CURRENT_SOURCE_DIR};MC_DIR=${GBARECOMP_SELFHEAL_MC_DIR}"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 2400)
+    else()
+        message(STATUS "gbarecomp: bash not found; skipping "
+                       "selfheal_stage2_bios_identical test")
+    endif()
+endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Oracle binary — opt-in (-DGBARECOMP_BUILD_ORACLE=ON). Embeds libmgba

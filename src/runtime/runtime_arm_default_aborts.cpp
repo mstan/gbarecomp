@@ -27,6 +27,7 @@
 #include "runtime_arm.h"
 #include "symbol_lookup.h"
 #include "self_heal.h"
+#include "overlay_loader.h"
 #include "arm_cpu_bridge.h"
 #include "runtime_bus_bridge.h"
 
@@ -80,31 +81,50 @@ std::uint32_t self_heal_distinct_misses() {
 std::uint64_t self_heal_interpreted_insns() { return g_interp_insns; }
 
 void self_heal_write_report(const char* frag_path) {
-    if (g_misses.empty()) {
-        std::printf("self_heal_coverage=FULLY_STATIC "
-                    "dispatch_misses=0 interpreted_insns=0\n");
+    // Stage-2: a warm-cache run can heal PCs to native with ZERO misses this
+    // session (the overlay tier catches them before the bridge). Healed-from-
+    // cache is STILL NOT fully static (PRINCIPLES.md "Coverage honesty is
+    // load-bearing"), so the banner must factor in heals, not just misses.
+    std::uint64_t healed = 0, native_calls = 0, inflight = 0, failed = 0;
+    gbarecomp::overlay_counters(&healed, &native_calls, &inflight, &failed);
+
+    if (g_misses.empty() && healed == 0) {
+        std::printf("self_heal_coverage=FULLY_STATIC dispatch_misses=0 "
+                    "interpreted_insns=0 healed_native=0\n");
         return;
     }
 
     // Coverage honesty: this run was NOT fully static.
     std::printf("self_heal_coverage=NOT_STATIC dispatch_misses=%zu "
-                "interpreted_insns=%llu\n",
+                "interpreted_insns=%llu healed_native=%llu native_calls=%llu "
+                "inflight=%llu failed=%llu\n",
                 g_misses.size(),
-                static_cast<unsigned long long>(g_interp_insns));
-    std::printf("  (the interpreter bridged %zu distinct PC(s) this session; "
-                "see %s for [[extra_func]] proposals — human-review + merge, "
-                "never auto-merged)\n",
-                g_misses.size(), frag_path ? frag_path : "(none)");
+                static_cast<unsigned long long>(g_interp_insns),
+                static_cast<unsigned long long>(healed),
+                static_cast<unsigned long long>(native_calls),
+                static_cast<unsigned long long>(inflight),
+                static_cast<unsigned long long>(failed));
+    if (!g_misses.empty()) {
+        std::printf("  (the interpreter bridged %zu distinct PC(s) this session; "
+                    "see %s for [[extra_func]] proposals — human-review + merge, "
+                    "never auto-merged)\n",
+                    g_misses.size(), frag_path ? frag_path : "(none)");
+    }
     for (const auto& kv : g_misses) {
         std::uint32_t off = 0;
         const char* sym = gba_symbol_lookup(kv.first, &off);
-        std::printf("    bridged 0x%08X (%s) x%llu%s%s\n",
+        std::uint64_t ncalls = 0;
+        const bool is_healed =
+            gbarecomp::overlay_query(kv.first, kv.second.thumb, &ncalls);
+        std::printf("    bridged 0x%08X (%s) x%llu%s%s%s\n",
                     kv.first, kv.second.thumb ? "thumb" : "arm",
                     static_cast<unsigned long long>(kv.second.count),
+                    is_healed ? " [HEALED->native]" : "",
                     sym ? " near " : "", sym ? sym : "");
+        (void)ncalls;
     }
 
-    if (!frag_path) return;
+    if (g_misses.empty() || !frag_path) return;
     std::FILE* f = std::fopen(frag_path, "w");
     if (!f) {
         std::fprintf(stderr,
@@ -131,6 +151,44 @@ void self_heal_write_report(const char* frag_path) {
             static_cast<unsigned long long>(kv.second.count));
     }
     std::fclose(f);
+}
+
+std::string self_heal_misses_json() {
+    std::uint64_t healed = 0, native_calls = 0, inflight = 0, failed = 0;
+    gbarecomp::overlay_counters(&healed, &native_calls, &inflight, &failed);
+
+    std::string out;
+    char buf[320];
+    std::snprintf(buf, sizeof(buf),
+        "{\"ok\":true,\"enabled\":%s,\"distinct_misses\":%zu,"
+        "\"interpreted_insns\":%llu,\"healed_native\":%llu,"
+        "\"native_calls\":%llu,\"inflight\":%llu,\"failed\":%llu,\"misses\":[",
+        gbarecomp::overlay_enabled() ? "true" : "false",
+        g_misses.size(),
+        static_cast<unsigned long long>(g_interp_insns),
+        static_cast<unsigned long long>(healed),
+        static_cast<unsigned long long>(native_calls),
+        static_cast<unsigned long long>(inflight),
+        static_cast<unsigned long long>(failed));
+    out += buf;
+
+    bool first = true;
+    for (const auto& kv : g_misses) {
+        std::uint64_t ncalls = 0;
+        const bool is_healed =
+            gbarecomp::overlay_query(kv.first, kv.second.thumb, &ncalls);
+        std::snprintf(buf, sizeof(buf),
+            "%s{\"pc\":\"0x%08X\",\"mode\":\"%s\",\"bridged\":%llu,"
+            "\"healed\":%s,\"native_calls\":%llu}",
+            first ? "" : ",", kv.first, kv.second.thumb ? "thumb" : "arm",
+            static_cast<unsigned long long>(kv.second.count),
+            is_healed ? "true" : "false",
+            static_cast<unsigned long long>(ncalls));
+        out += buf;
+        first = false;
+    }
+    out += "]}";
+    return out;
 }
 
 }  // namespace gbarecomp
@@ -204,6 +262,14 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     }
 
     record_and_log_miss(entry_pc, entry_thumb);
+
+    // Stage-2 self-heal: enqueue a background compile of this function so the
+    // NEXT hit dispatches to native code instead of re-bridging. No-op when the
+    // recompiler is disabled (GBARECOMP_SELFHEAL_RECOMPILE unset) or when the PC
+    // is already healed / in flight / known-failed. This first hit still bridges
+    // below (the compile is async); native takes over once the DLL lands and the
+    // game thread drains it into the dispatch table.
+    gbarecomp::overlay_request_compile(entry_pc, entry_thumb);
 
     // ── (1) Stop-address contract ──────────────────────────────────
     const std::uint32_t entry_depth = runtime_call_stack_depth();

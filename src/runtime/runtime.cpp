@@ -31,6 +31,7 @@
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
 #include "self_heal.h"
+#include "overlay_loader.h"
 #include "sha1.h"
 #include "snapshot.h"
 #include "tcp_debug_server.h"
@@ -800,6 +801,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     runtime_init(&bus);
     reset_recomp_cpu();
     self_heal_reset();  // fresh coverage tally for this machine bring-up
+    // Stage-2 self-heal: wire the on-the-fly recompiler (gated behind
+    // GBARECOMP_SELFHEAL_RECOMPILE; no-op + a clear banner when off). The cache
+    // is keyed by the cart SHA-1 so a different ROM gets a fresh DLL set; the
+    // BIOS snapshot is the immutable code image for BIOS-region heals.
+    gbarecomp::overlay_loader_init("recomp_cache", rom_sha1, &bios);
 
     // ── Recompiler exec gate ──────────────────────────────────────
     //
@@ -860,6 +866,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     auto step_once = [&]() -> bool {
         last_step_cycles = 0;
+        // Game-thread-only: fold any worker-finished native overlays into the
+        // dispatch table so the next runtime_dispatch can use them. Cheap when
+        // idle (a single atomic load); see overlay_loader.cpp.
+        gbarecomp::overlay_drain_ready();
         if (bus.io().halted()) {
             ++halt_steps;
             uint32_t idle_budget = gba::GbaPpu::kCyclesPerFrame;
@@ -947,6 +957,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         ctx.fp_save = [](const std::string& p) {
             return runtime_fp_save_file(p.c_str());
         };
+        ctx.misses_query = []() {
+            return gbarecomp::self_heal_misses_json();
+        };
         // The recomp vectors IRQs in runtime_irq (runtime_arm.cpp), called from
         // runtime_tick — NOT in this run loop — so the local irq_entries never
         // increments. Surface the authoritative global counter from the actual
@@ -962,6 +975,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         ctx.sync_frames = &vblank_count;
         bool ok = server.run(args.tcp_port, ctx);
         bool save_ok = flush_save();
+        gbarecomp::overlay_loader_shutdown();  // join worker + drain before banner
         emit_exit_diagnostics();
         runtime_shutdown();
         return (ok && save_ok) ? 0 : 1;
@@ -978,11 +992,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             std::fprintf(stderr,
                          "[gbarecomp:runtime] --window requested but SDL2 "
                          "is not available in this build\n");
+            gbarecomp::overlay_loader_shutdown();
             runtime_shutdown();
             return 1;
         }
         if (!win.open(args.scale, GBARECOMP_WINDOW_TITLE,
                       args.screen.empty() ? nullptr : args.screen.c_str())) {
+            gbarecomp::overlay_loader_shutdown();
             runtime_shutdown();
             return 1;
         }
@@ -1125,6 +1141,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 count_nonzero(bus.vram_ptr(), 96 * 1024),
                 count_nonzero(bus.oam_ptr(), 1024));
 
+    gbarecomp::overlay_loader_shutdown();  // join worker + drain before banner
     emit_exit_diagnostics();
     runtime_shutdown();
     return save_ok ? 0 : 1;

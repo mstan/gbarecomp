@@ -190,6 +190,14 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     codegen_test::g_last_dispatch_target = target_pc;
 }
 
+// Stage-2 self-heal third dispatch tier. The L1 harness links only
+// gbarecomp_armv4t (not the runtime lib that defines the real one), so supply a
+// null stub: no overlay is ever healed under test, every dispatch falls through
+// to the recorder above.
+extern "C" int overlay_try_dispatch(uint32_t /*pc*/, int /*thumb*/) {
+    return 0;
+}
+
 extern "C" void runtime_unimplemented_op(const char* op_name,
                                           uint32_t pc) {
     codegen_test::g_unimplemented_called = true;

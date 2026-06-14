@@ -1,0 +1,256 @@
+// overlay_compile.cpp — see overlay_compile.h.
+
+#include "overlay_compile.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <vector>
+
+#include "overlay_emit.h"   // emit_overlay_c
+#include "crc32.h"          // gba::crc32
+
+#ifdef _WIN32
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#endif
+
+// Baked at configure time (target_compile_definitions): the gbarecomp source
+// root, so the runtime compiler can find the overlay shim headers
+// (overlay_runtime_arm.h / overlay_abi.h in src/runtime, runtime_arm_types.h in
+// src/armv4t) without any source-tree discovery at runtime. Per the plan's
+// scope, a portable/bundled toolchain + header embedding is Stage-2b deferred.
+#ifndef GBARECOMP_SRC_DIR
+#  define GBARECOMP_SRC_DIR "."
+#endif
+
+namespace fs = std::filesystem;
+
+namespace gbarecomp {
+
+namespace {
+
+// The C++ compiler used to build overlay DLLs. The dev machine has msys2
+// mingw64 g++ on PATH at run time (the runtime exits 127 without it anyway);
+// GBARECOMP_HEAL_CXX overrides for non-default installs.
+std::string gxx_path() {
+    if (const char* e = std::getenv("GBARECOMP_HEAL_CXX")) {
+        if (e[0]) return e;
+    }
+    return "C:/msys64/mingw64/bin/g++.exe";
+}
+
+#ifdef _WIN32
+// Spawn a child process (NOT system()), redirect stdout+stderr to logpath,
+// block until exit, return the exit code (-1 on spawn failure).
+int run_process(const std::string& cmdline, const std::string& logpath,
+                std::string* err) {
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = nullptr;
+
+    HANDLE hlog = CreateFileA(logpath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                              &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE hin = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ, &sa,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput  = hin;
+    si.hStdOutput = hlog;
+    si.hStdError  = hlog;
+
+    PROCESS_INFORMATION pi{};
+    std::vector<char> cl(cmdline.begin(), cmdline.end());
+    cl.push_back('\0');
+
+    BOOL ok = CreateProcessA(nullptr, cl.data(), nullptr, nullptr,
+                             /*bInheritHandles=*/TRUE, CREATE_NO_WINDOW,
+                             nullptr, nullptr, &si, &pi);
+    if (!ok) {
+        if (err) *err = "CreateProcess(g++) failed: " +
+                        std::to_string(GetLastError());
+        if (hlog != INVALID_HANDLE_VALUE) CloseHandle(hlog);
+        if (hin  != INVALID_HANDLE_VALUE) CloseHandle(hin);
+        return -1;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    if (hlog != INVALID_HANDLE_VALUE) CloseHandle(hlog);
+    if (hin  != INVALID_HANDLE_VALUE) CloseHandle(hin);
+    return static_cast<int>(code);
+}
+
+bool load_and_resolve(const std::string& dll, uint32_t pc,
+                      const GbaOverlayCallbacks* cb,
+                      void** out_module, void (**out_fn)(void),
+                      std::string* err) {
+    HMODULE h = LoadLibraryA(dll.c_str());
+    if (!h) {
+        if (err) *err = "LoadLibrary(" + dll + ") failed: " +
+                        std::to_string(GetLastError());
+        return false;
+    }
+    auto abi = reinterpret_cast<uint32_t (*)(void)>(
+        reinterpret_cast<void*>(GetProcAddress(h, "overlay_abi")));
+    if (!abi || abi() != GBA_OVERLAY_ABI_VERSION) {
+        if (err) *err = "ABI mismatch in " + dll + " (dll=" +
+                        std::to_string(abi ? abi() : 0u) + " runtime=" +
+                        std::to_string(GBA_OVERLAY_ABI_VERSION) +
+                        ") — rejecting + deleting stale cache entry";
+        FreeLibrary(h);
+        DeleteFileA(dll.c_str());
+        return false;
+    }
+    auto init = reinterpret_cast<void (*)(const GbaOverlayCallbacks*)>(
+        reinterpret_cast<void*>(GetProcAddress(h, "overlay_init")));
+    if (!init) {
+        if (err) *err = "no overlay_init in " + dll;
+        FreeLibrary(h);
+        return false;
+    }
+    init(cb);
+
+    char fname[24];
+    std::snprintf(fname, sizeof(fname), "func_%08X", pc);
+    auto fn = reinterpret_cast<void (*)(void)>(
+        reinterpret_cast<void*>(GetProcAddress(h, fname)));
+    if (!fn) {
+        if (err) *err = std::string("no ") + fname + " export in " + dll;
+        FreeLibrary(h);
+        return false;
+    }
+    *out_module = reinterpret_cast<void*>(h);
+    *out_fn = fn;
+    return true;
+}
+#else
+int run_process(const std::string& cmdline, const std::string& logpath,
+                std::string*) {
+    std::string c = cmdline + " > \"" + logpath + "\" 2>&1";
+    return std::system(c.c_str());
+}
+bool load_and_resolve(const std::string&, uint32_t, const GbaOverlayCallbacks*,
+                      void**, void (**)(void), std::string* err) {
+    if (err) *err = "overlay loading unimplemented on this platform";
+    return false;
+}
+#endif
+
+}  // namespace
+
+bool overlay_compile_one(const OverlayWorkItem& w,
+                         const std::string& cache_dir,
+                         const GbaOverlayCallbacks* cb,
+                         bool compile_if_missing,
+                         OverlayCompiled* out,
+                         std::string* err) {
+    if (!w.bytes || w.size == 0) {
+        if (err) *err = "no code image for the overlay function";
+        return false;
+    }
+
+    // Discover the function extent + emit its C against the live image. The
+    // single-seed finder yields the same instruction range the offline corpus
+    // would, which is what makes the healed body's per-instruction fingerprint
+    // byte-identical to the static build.
+    uint32_t end = 0;
+    std::string c_text =
+        emit_overlay_c(w.pc, w.thumb, w.bytes, w.size, w.base, &end);
+    if (c_text.empty() || end <= w.pc) {
+        if (err) *err = "function finder found no entry at the miss PC";
+        return false;
+    }
+
+    // CRC32 of the compiled-from bytes [pc, end) — keys the cache filename so a
+    // changed image produces a distinct file (a stale DLL is simply orphaned).
+    const uint32_t crc =
+        gba::crc32(w.bytes + (w.pc - w.base), end - w.pc);
+
+    char stem[40];
+    std::snprintf(stem, sizeof(stem), "%08X_%08X_%c",
+                  w.pc, crc, w.thumb ? 't' : 'a');
+    const fs::path dir(cache_dir);
+    const fs::path dll = dir / (std::string(stem) + ".dll");
+
+    std::error_code ec;
+    if (!fs::exists(dll, ec)) {
+        if (!compile_if_missing) {
+            // Warm-scan, load-only: not on disk → let it heal at runtime.
+            if (err) *err = "no cached DLL (load-only)";
+            return false;
+        }
+        fs::create_directories(dir, ec);
+
+        const fs::path cpath   = dir / (std::string(stem) + ".c");
+        const fs::path logpath = dir / (std::string(stem) + ".log");
+        const fs::path dlltmp  = dir / (std::string(stem) + ".dll.tmp");
+
+        {
+            std::FILE* f = std::fopen(cpath.string().c_str(), "wb");
+            if (!f) {
+                if (err) *err = "cannot write " + cpath.string();
+                return false;
+            }
+            std::fwrite(c_text.data(), 1, c_text.size(), f);
+            std::fclose(f);
+        }
+
+        const std::string src = GBARECOMP_SRC_DIR;
+        std::string cmd =
+            "\"" + gxx_path() + "\""
+            " -O2 -std=gnu++17 -fno-exceptions -fno-rtti -shared"
+            " -I\"" + src + "/src/runtime\""
+            " -I\"" + src + "/src/armv4t\""
+            " -o \"" + dlltmp.generic_string() + "\""
+            // -x c++: the emitted body is C++ (extern \"C\" blocks, the shim's
+            // static-inline thunks) and must match the static corpus's C++
+            // semantics exactly. Explicit so it never depends on the driver's
+            // .c-suffix handling.
+            " -x c++ \"" + cpath.generic_string() + "\""
+            " -Wl,--export-all-symbols";
+
+        const int rc = run_process(cmd, logpath.string(), err);
+        if (rc != 0) {
+            if (err) {
+                *err = "g++ exit " + std::to_string(rc) + " compiling " +
+                       cpath.string() + " — see " + logpath.string();
+            }
+            fs::remove(dlltmp, ec);
+            return false;
+        }
+        // Atomic publish: only a fully-linked DLL ever appears at the final path.
+        fs::rename(dlltmp, dll, ec);
+        if (ec) {
+            // A racing producer may have published first; tolerate that.
+            if (!fs::exists(dll)) {
+                if (err) *err = "rename " + dlltmp.string() + " -> " +
+                                dll.string() + " failed: " + ec.message();
+                return false;
+            }
+            fs::remove(dlltmp, ec);
+        }
+    }
+
+    void* module = nullptr;
+    void (*fn)(void) = nullptr;
+    if (!load_and_resolve(dll.string(), w.pc, cb, &module, &fn, err)) {
+        return false;
+    }
+
+    out->pc     = w.pc;
+    out->thumb  = w.thumb;
+    out->crc    = crc;
+    out->end    = end;
+    out->module = module;
+    out->fn     = fn;
+    return true;
+}
+
+}  // namespace gbarecomp

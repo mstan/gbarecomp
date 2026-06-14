@@ -42,6 +42,14 @@ extern "C" const unsigned kDispatchTableLen;
 extern "C" const DispatchEntry kBiosDispatchTable[];
 extern "C" const unsigned kBiosDispatchTableLen;
 
+// Stage-2 self-heal third dispatch tier. Defined in the runtime lib
+// (src/runtime/overlay_loader.cpp); test binaries that link only
+// gbarecomp_armv4t supply a null-returning stub (tests/codegen/stubs.cpp).
+// runtime_dispatch consults it after the static tables miss; returns 1 iff a
+// healed native overlay ran. armv4t must not depend on the runtime lib, so the
+// link is a plain extern "C" symbol, mirroring runtime_dispatch_miss.
+extern "C" int overlay_try_dispatch(uint32_t pc, int thumb);
+
 // ── CPU state ──────────────────────────────────────────────────────
 
 extern "C" ArmCpuState g_cpu = {};
@@ -572,6 +580,12 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
         fn = lookup_in(kDispatchTable, kDispatchTableLen, pc, thumb);
     }
     if (fn) { fn(); return; }
+    // Stage-2 self-heal: third dispatch tier. After the static tables miss,
+    // consult the runtime-healed native overlays before bridging. Defined in
+    // src/runtime/overlay_loader.cpp (a null stub in tests/codegen/stubs.cpp,
+    // since armv4t must not depend on the runtime lib). When the feature is
+    // off this is a single bool check and returns 0.
+    if (overlay_try_dispatch(pc, thumb ? 1 : 0)) return;
     runtime_dispatch_miss(target_pc);
 }
 

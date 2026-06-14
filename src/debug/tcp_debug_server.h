@@ -74,6 +74,11 @@ public:
         uint64_t* cycles_elapsed     = nullptr;
         uint32_t* last_step_cycles   = nullptr;
         uint64_t* sync_frames        = nullptr;
+        // Stage-2 self-heal: returns a JSON snapshot of the live dispatch-miss
+        // / heal state (bridged PCs, which have healed to native, native-call
+        // counts). Wired in runtime.cpp to gbarecomp::self_heal_misses_json so
+        // the debug lib stays independent of the runtime lib.
+        std::function<std::string()> misses_query;
     };
 
     TcpDebugServer();
