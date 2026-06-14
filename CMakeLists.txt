@@ -493,9 +493,20 @@ if(GBARECOMP_SELFHEAL_MC_DIR)
             ENVIRONMENT "GBARECOMP_ROOT=${CMAKE_CURRENT_SOURCE_DIR};MC_DIR=${GBARECOMP_SELFHEAL_MC_DIR}"
             SKIP_RETURN_CODE 77
             TIMEOUT 2400)
+        # selfheal_coverage_sweep — drives the built MC from every savestate with
+        # the self-heal recompiler on and asserts FULLY_STATIC for each scene
+        # (the doctrine's "done"). Surfaces remaining finder gaps; doubles as a
+        # coverage regression guard. Same opt-in / SKIP-77 contract.
+        add_test(NAME selfheal_coverage_sweep
+            COMMAND ${BASH_EXE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/selfheal/coverage_sweep.sh)
+        set_tests_properties(selfheal_coverage_sweep PROPERTIES
+            ENVIRONMENT "GBARECOMP_ROOT=${CMAKE_CURRENT_SOURCE_DIR};MC_DIR=${GBARECOMP_SELFHEAL_MC_DIR}"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 2400)
     else()
         message(STATUS "gbarecomp: bash not found; skipping "
-                       "selfheal_stage2_bios_identical test")
+                       "selfheal_stage2_bios_identical + selfheal_coverage_sweep")
     endif()
 endif()
 
