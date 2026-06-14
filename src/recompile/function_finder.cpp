@@ -258,6 +258,13 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         // emitter size the table precisely instead of guessing.
         bool     bound_known = false;
         uint32_t max_index   = 0;
+        // The source index register this scale was derived from (the Rm of
+        // the `LSL`). When the switch guard's `CMP index,#N` comes AFTER the
+        // scale (common — the index is scaled into a scratch reg, e.g.
+        // `lsl r0,r4,#2; mov ip,r0; ... cmp r4,#8`), bound_known is still
+        // false at scale time; the table-former re-checks reg_bound[src_reg]
+        // so the late bound still sizes the table. 0xFF = no known source.
+        uint8_t  src_reg = 0xFF;
     };
     RegScaled reg_scaled[16];
     struct RegTableAddr {  // Rd = base + (scaled index)
@@ -1279,6 +1286,18 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             invalidate_sym_base(ins.block.rn);
         }
 
+        // Snapshot Rd's tracked constant BEFORE the const-tracker below
+        // clears it. The jump-table-address former (further down) reads the
+        // base operand's constant; for the 2-operand fold `ADD Rd,Rd,Rm`
+        // (Rd==Rn, e.g. THUMB `add r0,ip`) the base lives in Rd, which the
+        // tracker is about to invalidate. Reading this snapshot for the
+        // Rd operand recovers the pre-instruction base. (Rd is the only
+        // register the const-tracker mutates this step, so other operands
+        // are unaffected.)
+        const bool     rd_was_const = (ins.rd < 16) && reg_const[ins.rd].known;
+        const uint32_t rd_const_val =
+            (ins.rd < 16) ? reg_const[ins.rd].value : 0u;
+
         // Update the narrow constant tracker. Do this AFTER the
         // BX check above (we want to read the value as-of the BX,
         // not after the BX clears it).
@@ -1383,6 +1402,29 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         if (ins.rd < 16) {
             bool set_scaled = false, set_table = false;
             const armv4t::Op2& o = ins.op2;
+            // Base operand's tracked constant, reading the pre-instruction
+            // snapshot for Rd (rd_was_const/rd_const_val) so a 2-operand
+            // fold `ADD Rd,Rd,Rm` can still recover the base Rd held before
+            // the const-tracker cleared it.
+            auto base_known = [&](uint8_t r) {
+                return (r == ins.rd) ? rd_was_const : reg_const[r].known;
+            };
+            auto base_val = [&](uint8_t r) {
+                return (r == ins.rd) ? rd_const_val : reg_const[r].value;
+            };
+            auto rom_const = [&](uint8_t r) {
+                return base_known(r) && addr_in_rom(base_val(r));
+            };
+            // Resolve a scaled index's range bound, falling back to the
+            // source index register's CMP bound when the switch guard came
+            // AFTER the scale (so bound_known is still false on the scale).
+            auto scaled_bound = [&](const RegScaled& s,
+                                    bool* known, uint32_t* maxi) {
+                if (s.bound_known) { *known = true; *maxi = s.max_index; }
+                else if (s.src_reg < 16 && reg_bound[s.src_reg].known) {
+                    *known = true; *maxi = reg_bound[s.src_reg].max_index;
+                } else { *known = false; }
+            };
             if (ins.op == armv4t::IrOp::MOV &&
                 o.kind == armv4t::Op2::Kind::Shifted &&
                 !o.shifted.by_register &&
@@ -1392,27 +1434,43 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 reg_scaled[ins.rd].known = true;
                 reg_scaled[ins.rd].shift = o.shifted.imm_or_rs;
                 reg_scaled[ins.rd].bound_known = false;
-                if (o.shifted.rm < 16 && reg_bound[o.shifted.rm].known) {
+                reg_scaled[ins.rd].src_reg = o.shifted.rm;
+                if (reg_bound[o.shifted.rm].known) {
                     reg_scaled[ins.rd].bound_known = true;
                     reg_scaled[ins.rd].max_index =
                         reg_bound[o.shifted.rm].max_index;
                 }
                 set_scaled = true;
+            } else if (ins.op == armv4t::IrOp::MOV &&
+                       o.kind == armv4t::Op2::Kind::Shifted &&
+                       !o.shifted.by_register &&
+                       o.shifted.type == armv4t::ShiftType::LSL &&
+                       o.shifted.imm_or_rs == 0 && o.shifted.rm < 16 &&
+                       o.shifted.rm != ins.rd) {
+                // Plain register move `MOV Rd, Rm` (e.g. THUMB `mov ip,r0`)
+                // staging a scaled switch index through a scratch register.
+                // Propagate the scaled/table state so a later `ADD base,Rd`
+                // still forms the table. (rm != rd guards a self-move.)
+                const uint8_t rm = o.shifted.rm;
+                if (reg_scaled[rm].known) {
+                    reg_scaled[ins.rd] = reg_scaled[rm];
+                    set_scaled = true;
+                }
+                if (reg_table[rm].known) {
+                    reg_table[ins.rd] = reg_table[rm];
+                    set_table = true;
+                }
             } else if (ins.op == armv4t::IrOp::ADD &&
                        o.kind == armv4t::Op2::Kind::Shifted &&
                        !o.shifted.by_register && o.shifted.rm < 16 &&
                        ins.rn < 16) {
                 const uint8_t rm = o.shifted.rm;
-                auto rom_const = [&](uint8_t r) {
-                    return reg_const[r].known &&
-                           addr_in_rom(reg_const[r].value);
-                };
                 if (o.shifted.type == armv4t::ShiftType::LSL &&
                     o.shifted.imm_or_rs > 0) {
                     // One-instruction scaled add: ADD Rd, Rbase, Ri LSL#k
                     // (Ri is the inline-scaled index; bound rides on it.)
                     if (rom_const(ins.rn)) {
-                        reg_table[ins.rd] = {true, reg_const[ins.rn].value,
+                        reg_table[ins.rd] = {true, base_val(ins.rn),
                                              1u << o.shifted.imm_or_rs};
                         if (reg_bound[rm].known) {
                             reg_table[ins.rd].bound_known = true;
@@ -1422,24 +1480,26 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                         set_table = true;
                     }
                 } else if (o.shifted.imm_or_rs == 0) {
-                    // Plain reg add: one side a ROM-pointer base, the
-                    // other a previously-scaled index (bound carried).
+                    // Plain reg add: one side a ROM-pointer base, the other a
+                    // previously-scaled index (bound carried on the scale, or
+                    // recovered from the index's source CMP bound).
+                    bool bk = false; uint32_t mi = 0;
                     if (rom_const(ins.rn) && reg_scaled[rm].known) {
-                        reg_table[ins.rd] = {true, reg_const[ins.rn].value,
+                        reg_table[ins.rd] = {true, base_val(ins.rn),
                                              1u << reg_scaled[rm].shift};
-                        if (reg_scaled[rm].bound_known) {
+                        scaled_bound(reg_scaled[rm], &bk, &mi);
+                        if (bk) {
                             reg_table[ins.rd].bound_known = true;
-                            reg_table[ins.rd].max_index =
-                                reg_scaled[rm].max_index;
+                            reg_table[ins.rd].max_index = mi;
                         }
                         set_table = true;
                     } else if (rom_const(rm) && reg_scaled[ins.rn].known) {
-                        reg_table[ins.rd] = {true, reg_const[rm].value,
+                        reg_table[ins.rd] = {true, base_val(rm),
                                              1u << reg_scaled[ins.rn].shift};
-                        if (reg_scaled[ins.rn].bound_known) {
+                        scaled_bound(reg_scaled[ins.rn], &bk, &mi);
+                        if (bk) {
                             reg_table[ins.rd].bound_known = true;
-                            reg_table[ins.rd].max_index =
-                                reg_scaled[ins.rn].max_index;
+                            reg_table[ins.rd].max_index = mi;
                         }
                         set_table = true;
                     }
