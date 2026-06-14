@@ -98,6 +98,8 @@ struct Args {
     bool quiet = false;
     bool window = false;
     std::string dump_bmp;
+    std::string dump_png;    // --dump-png: final framebuffer as PNG (preferred)
+    std::string load_state;  // --load-state <path>: headless savestate load
     // [video] screen = raw|unlit|frontlit|backlit|classic — present-time
     // color simulation (see color_lut). Empty = raw (passthrough). The
     // GBARECOMP_SCREEN env var overrides this at launch.
@@ -270,6 +272,100 @@ bool write_bmp(const std::string& path, const uint8_t* rgb,
     return static_cast<bool>(f);
 }
 
+// Minimal, dependency-free PNG writer (8-bit RGB). Uses stored/uncompressed
+// DEFLATE blocks so we need no zlib — just a local CRC-32 (PNG/zlib IEEE
+// poly) and Adler-32. Mirrors the spirit of write_bmp; preferred output for
+// visual inspection since the Read tool renders PNG but not BMP.
+bool write_png(const std::string& path, const uint8_t* rgb,
+               uint32_t w, uint32_t h) {
+    auto crc32 = [](const uint8_t* p, std::size_t n, uint32_t crc) -> uint32_t {
+        crc = ~crc;
+        for (std::size_t i = 0; i < n; ++i) {
+            crc ^= p[i];
+            for (int k = 0; k < 8; ++k)
+                crc = (crc >> 1) ^ (0xEDB88320u & (~(crc & 1u) + 1u));
+        }
+        return ~crc;
+    };
+    std::vector<uint8_t> out;
+    auto put_be32 = [&](uint32_t v) {
+        out.push_back(static_cast<uint8_t>(v >> 24));
+        out.push_back(static_cast<uint8_t>(v >> 16));
+        out.push_back(static_cast<uint8_t>(v >> 8));
+        out.push_back(static_cast<uint8_t>(v));
+    };
+    auto chunk = [&](const char tag[4], const std::vector<uint8_t>& data) {
+        put_be32(static_cast<uint32_t>(data.size()));
+        std::size_t type_at = out.size();
+        out.insert(out.end(), tag, tag + 4);
+        out.insert(out.end(), data.begin(), data.end());
+        out.push_back(0); out.push_back(0); out.push_back(0); out.push_back(0);
+        uint32_t c = crc32(out.data() + type_at, 4 + data.size(), 0);
+        out[out.size() - 4] = static_cast<uint8_t>(c >> 24);
+        out[out.size() - 3] = static_cast<uint8_t>(c >> 16);
+        out[out.size() - 2] = static_cast<uint8_t>(c >> 8);
+        out[out.size() - 1] = static_cast<uint8_t>(c);
+    };
+
+    // PNG signature.
+    const uint8_t sig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    out.insert(out.end(), sig, sig + 8);
+
+    // IHDR: width, height, bit depth 8, color type 2 (truecolor RGB).
+    std::vector<uint8_t> ihdr;
+    auto ihdr_be32 = [&](uint32_t v) {
+        ihdr.push_back(static_cast<uint8_t>(v >> 24));
+        ihdr.push_back(static_cast<uint8_t>(v >> 16));
+        ihdr.push_back(static_cast<uint8_t>(v >> 8));
+        ihdr.push_back(static_cast<uint8_t>(v));
+    };
+    ihdr_be32(w); ihdr_be32(h);
+    ihdr.push_back(8); ihdr.push_back(2);
+    ihdr.push_back(0); ihdr.push_back(0); ihdr.push_back(0);
+    chunk("IHDR", ihdr);
+
+    // Raw filtered scanlines: each row prefixed with filter byte 0 (None).
+    std::vector<uint8_t> raw;
+    raw.reserve(static_cast<std::size_t>(h) * (1 + static_cast<std::size_t>(w) * 3));
+    for (uint32_t y = 0; y < h; ++y) {
+        raw.push_back(0);
+        raw.insert(raw.end(), rgb + static_cast<std::size_t>(y) * w * 3,
+                   rgb + static_cast<std::size_t>(y + 1) * w * 3);
+    }
+
+    // zlib stream: 2-byte header + stored DEFLATE blocks + Adler-32 of raw.
+    std::vector<uint8_t> zlib;
+    zlib.push_back(0x78); zlib.push_back(0x01);
+    std::size_t off = 0;
+    while (off < raw.size() || raw.empty()) {
+        std::size_t n = std::min<std::size_t>(raw.size() - off, 65535);
+        bool final = (off + n >= raw.size());
+        zlib.push_back(final ? 1 : 0);
+        zlib.push_back(static_cast<uint8_t>(n & 0xFF));
+        zlib.push_back(static_cast<uint8_t>((n >> 8) & 0xFF));
+        zlib.push_back(static_cast<uint8_t>(~n & 0xFF));
+        zlib.push_back(static_cast<uint8_t>((~n >> 8) & 0xFF));
+        zlib.insert(zlib.end(), raw.begin() + off, raw.begin() + off + n);
+        off += n;
+        if (final) break;
+    }
+    uint32_t a1 = 1, a2 = 0;
+    for (uint8_t b : raw) { a1 = (a1 + b) % 65521; a2 = (a2 + a1) % 65521; }
+    uint32_t adler = (a2 << 16) | a1;
+    zlib.push_back(static_cast<uint8_t>(adler >> 24));
+    zlib.push_back(static_cast<uint8_t>(adler >> 16));
+    zlib.push_back(static_cast<uint8_t>(adler >> 8));
+    zlib.push_back(static_cast<uint8_t>(adler));
+    chunk("IDAT", zlib);
+    chunk("IEND", {});
+
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return false;
+    f.write(reinterpret_cast<const char*>(out.data()),
+            static_cast<std::streamsize>(out.size()));
+    return static_cast<bool>(f);
+}
+
 bool write_file(const std::string& path, const std::vector<uint8_t>& bytes,
                 std::string* err) {
     std::filesystem::path p(path);
@@ -369,6 +465,7 @@ void find_config_arg(int argc, char** argv, Args* args) {
         if ((s == "--bios" || s == "--rom" || s == "--bios-sha1" ||
              s == "--rom-sha1" || s == "--steps" || s == "--frames" ||
              s == "--scale" || s == "--tcp" || s == "--dump-bmp" ||
+             s == "--dump-png" || s == "--load-state" ||
              s == "--save" || s == "--save-path") &&
             i + 1 < argc) {
             ++i;
@@ -502,6 +599,18 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             const char* v = need_value("--dump-bmp");
             if (!v) return false;
             args->dump_bmp = v;
+            continue;
+        }
+        if (s == "--dump-png") {
+            const char* v = need_value("--dump-png");
+            if (!v) return false;
+            args->dump_png = v;
+            continue;
+        }
+        if (s == "--load-state") {
+            const char* v = need_value("--load-state");
+            if (!v) return false;
+            args->load_state = v;
             continue;
         }
         if (s == "--save" || s == "--save-path") {
@@ -1063,11 +1172,77 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         ? (args.steps > 16 ? args.steps : std::numeric_limits<int>::max() / 2)
         : args.steps;
 
+    // Headless savestate load (--load-state <path>): boot fresh from the BIOS
+    // reset, then restore a saved gameplay state before stepping. Lets a
+    // non-windowed run jump straight to gameplay (e.g. to exercise a mid-run
+    // self-heal at a deep-gameplay finder gap) without driving blind input
+    // through the intro. do_savestate_load realigns the frame counter and
+    // re-origins the fingerprint clock at the load point.
+    if (!args.load_state.empty()) {
+        std::string e;
+        if (do_savestate_load(args.load_state, e)) {
+            std::printf("savestate_loaded path=\"%s\" pc=0x%08x frame=%llu\n",
+                        args.load_state.c_str(), g_cpu.R[15],
+                        static_cast<unsigned long long>(ppu.frame_count()));
+            std::fflush(stdout);
+        } else {
+            std::fprintf(stderr,
+                         "[gbarecomp:runtime] --load-state \"%s\" failed: %s\n",
+                         args.load_state.c_str(), e.c_str());
+            gbarecomp::overlay_loader_shutdown();
+            runtime_shutdown();
+            return 1;
+        }
+    }
+
+    // Deterministic demo-input driver for headless runs (opt-in via
+    // GBARECOMP_DEMO_INPUT). A no-input headless run idles on the
+    // title/file-select screen and never reaches the indirect-dispatch-
+    // heavy gameplay code (e.g. the genuine finder gaps the self-heal
+    // surfaces). This synthesizes a reproducible, frame-indexed button
+    // track — each button held 6 frames then released 6 (edge-triggered
+    // menus need the release) — cycling Start/A to clear menus + select
+    // the loaded save, and directions/B to move + interact in-world.
+    // Ported from tools/bios_smoke (Stage 0.2) so the input is identical
+    // across the interpreter profiler and this recompiled runtime. Has no
+    // effect on --window (host keyboard wins) or verify/oracle runs.
+    const bool demo_input =
+        !args.window && std::getenv("GBARECOMP_DEMO_INPUT") != nullptr;
+    auto demo_keyinput_for_frame = [](uint64_t frame) -> uint16_t {
+        enum : uint16_t {
+            KEY_A = 1u << 0, KEY_B = 1u << 1, KEY_START = 1u << 3,
+            KEY_RIGHT = 1u << 4, KEY_LEFT = 1u << 5,
+            KEY_UP = 1u << 6, KEY_DOWN = 1u << 7,
+        };
+        static const uint16_t kButtons[] = {
+            KEY_START, KEY_A, KEY_A, KEY_DOWN, KEY_A, KEY_RIGHT,
+            KEY_B, KEY_A, KEY_LEFT, KEY_A, KEY_UP, KEY_B,
+        };
+        if (((frame / 6) & 1u) != 0u) return 0x03FFu;  // release phase
+        const uint16_t btn = kButtons[(frame / 12) %
+            (sizeof(kButtons) / sizeof(kButtons[0]))];
+        return static_cast<uint16_t>(0x03FFu & ~btn);  // KEYINPUT active-low
+    };
+    uint64_t demo_last_frame = ~uint64_t{0};
+
+    // Headless --frames is a count of frames to run from where we start, not
+    // an absolute PPU frame index — so a --load-state run executes args.frames
+    // more frames past the restored frame counter instead of breaking on the
+    // first step when the loaded index already exceeds the cap.
+    const uint64_t headless_base_frame = ppu.frame_count();
+
     int dispatches_since_pump = 0;
     if (args.window) pump_host_input();
 
     for (int i = 0; i < step_budget && !host_quit; ++i) {
         if (!step_once()) break;
+        if (demo_input) {
+            const uint64_t fc = ppu.frame_count();
+            if (fc != demo_last_frame) {
+                demo_last_frame = fc;
+                bus.io().set_keyinput(demo_keyinput_for_frame(fc));
+            }
+        }
         if (args.window) {
             ++dispatches_since_pump;
             if (dispatches_since_pump >= 512) {
@@ -1101,7 +1276,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             }
         }
         if (!args.window && args.frames >= 0 &&
-            ppu.frame_count() >= static_cast<uint64_t>(args.frames)) {
+            ppu.frame_count() - headless_base_frame >=
+                static_cast<uint64_t>(args.frames)) {
             break;
         }
     }
@@ -1109,7 +1285,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     bool save_ok = flush_save();
 
-    if (!args.dump_bmp.empty()) {
+    if (!args.dump_bmp.empty() || !args.dump_png.empty()) {
         std::vector<uint8_t> fb(gba::GbaPpu::kFramebufferBytes, 0);
         if (ppu.has_latched_framebuffer()) {
             std::memcpy(fb.data(), ppu.latched_framebuffer(), fb.size());
@@ -1117,11 +1293,19 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             ppu.render(fb.data(), bus.io().read16(0x000), bus.io().raw(),
                        bus.vram_ptr(), bus.oam_ptr(), bus.pal_ptr());
         }
-        if (!write_bmp(args.dump_bmp, fb.data(), gba::GbaPpu::kScreenWidth,
+        if (!args.dump_bmp.empty() &&
+            !write_bmp(args.dump_bmp, fb.data(), gba::GbaPpu::kScreenWidth,
                        gba::GbaPpu::kScreenHeight)) {
             std::fprintf(stderr,
                          "[gbarecomp:runtime] failed to write %s\n",
                          args.dump_bmp.c_str());
+        }
+        if (!args.dump_png.empty() &&
+            !write_png(args.dump_png, fb.data(), gba::GbaPpu::kScreenWidth,
+                       gba::GbaPpu::kScreenHeight)) {
+            std::fprintf(stderr,
+                         "[gbarecomp:runtime] failed to write %s\n",
+                         args.dump_png.c_str());
         }
     }
 
