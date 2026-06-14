@@ -234,7 +234,7 @@ std::string self_heal_misses_json() {
         "\"healed_native\":%llu,\"native_calls\":%llu,\"inflight\":%llu,"
         "\"failed\":%llu,\"jump_table_candidate_regions\":%zu,\"misses\":[",
         fully_static ? "FULLY_STATIC" : "NOT_STATIC",
-        gbarecomp::overlay_enabled() ? "true" : "false",
+        gbarecomp::overlay_was_enabled() ? "true" : "false",
         g_misses.size(),
         static_cast<unsigned long long>(g_interp_insns),
         static_cast<unsigned long long>(healed),

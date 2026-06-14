@@ -52,6 +52,7 @@ struct ReadyEntry {
 
 // ── State ──────────────────────────────────────────────────────────
 bool                     s_active = false;     // feature on AND inited
+bool                     s_ever_active = false;  // ever inited this session (sticky)
 std::string              s_cache_dir;          // cache_root/<image_sha1>
 std::vector<uint8_t>     s_bios_bytes;         // 16 KB BIOS snapshot (base 0)
 GbaOverlayCallbacks      g_callbacks{};
@@ -270,6 +271,7 @@ void overlay_loader_init(const std::string& cache_root,
 
     fill_callbacks();
     s_active = true;
+    s_ever_active = true;  // sticky: survives shutdown for the exit report
 
     const int warm = warm_load_cache();
     s_stop.store(false);
@@ -352,6 +354,11 @@ void overlay_counters(uint64_t* healed_native, uint64_t* native_calls_total,
 }
 
 bool overlay_enabled() { return s_active; }
+
+// Sticky: true once the heal feature initialized this session, and stays true
+// after overlay_loader_shutdown() so the exit coverage report (which runs
+// after shutdown drains/joins the worker) honestly states the feature was on.
+bool overlay_was_enabled() { return s_ever_active; }
 
 }  // namespace gbarecomp
 

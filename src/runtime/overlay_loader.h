@@ -75,7 +75,13 @@ bool overlay_query(uint32_t pc, bool thumb, uint64_t* native_calls);
 void overlay_counters(uint64_t* healed_native, uint64_t* native_calls_total,
                       uint64_t* inflight, uint64_t* failed);
 
-// True if the self-heal recompiler is enabled this session.
+// True if the self-heal recompiler is currently active (init'd, not yet shut
+// down). Reads false after overlay_loader_shutdown().
 bool overlay_enabled();
+
+// True once the heal feature initialized this session; stays true after
+// shutdown, so the exit coverage report states it honestly (the loader is
+// torn down before the report runs). Prefer this for end-of-run summaries.
+bool overlay_was_enabled();
 
 }  // namespace gbarecomp
