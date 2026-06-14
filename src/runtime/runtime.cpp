@@ -1211,8 +1211,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // Ported from tools/bios_smoke (Stage 0.2) so the input is identical
     // across the interpreter profiler and this recompiled runtime. Has no
     // effect on --window (host keyboard wins) or verify/oracle runs.
-    const bool demo_input =
-        !args.window && std::getenv("GBARECOMP_DEMO_INPUT") != nullptr;
+    // GBARECOMP_DEMO_INPUT modes: unset = off; "walk" = sustained-direction
+    // overworld walker (crosses screen boundaries to surface transition-time
+    // finder gaps); any other value = the menu/masher track.
+    const char* demo_env = std::getenv("GBARECOMP_DEMO_INPUT");
+    const bool demo_input = !args.window && demo_env != nullptr;
+    const bool demo_walk = demo_env && std::strcmp(demo_env, "walk") == 0;
     auto demo_keyinput_for_frame = [](uint64_t frame) -> uint16_t {
         enum : uint16_t {
             KEY_A = 1u << 0, KEY_B = 1u << 1, KEY_START = 1u << 3,
@@ -1226,6 +1230,21 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (((frame / 6) & 1u) != 0u) return 0x03FFu;  // release phase
         const uint16_t btn = kButtons[(frame / 12) %
             (sizeof(kButtons) / sizeof(kButtons[0]))];
+        return static_cast<uint16_t>(0x03FFu & ~btn);  // KEYINPUT active-low
+    };
+    // Walk track: HOLD one direction long enough to cross a screen (~180
+    // frames at ~1px/frame over a 240px screen), cycling R/D/L/U so the
+    // player wanders through screen transitions in every direction. A brief
+    // A tap every 60 frames dismisses incidental text / transition prompts.
+    auto walk_keyinput_for_frame = [](uint64_t frame) -> uint16_t {
+        enum : uint16_t {
+            KEY_A = 1u << 0, KEY_RIGHT = 1u << 4, KEY_LEFT = 1u << 5,
+            KEY_UP = 1u << 6, KEY_DOWN = 1u << 7,
+        };
+        static const uint16_t kDirs[] = { KEY_RIGHT, KEY_DOWN, KEY_LEFT, KEY_UP };
+        constexpr uint64_t kHold = 180;
+        uint16_t btn = kDirs[(frame / kHold) % 4];
+        if ((frame % 60) < 2) btn |= KEY_A;
         return static_cast<uint16_t>(0x03FFu & ~btn);  // KEYINPUT active-low
     };
     uint64_t demo_last_frame = ~uint64_t{0};
@@ -1245,7 +1264,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             const uint64_t fc = ppu.frame_count();
             if (fc != demo_last_frame) {
                 demo_last_frame = fc;
-                bus.io().set_keyinput(demo_keyinput_for_frame(fc));
+                bus.io().set_keyinput(demo_walk ? walk_keyinput_for_frame(fc)
+                                                : demo_keyinput_for_frame(fc));
             }
         }
         if (args.window) {
