@@ -187,6 +187,7 @@ add_library(gbarecomp_runtime STATIC
     # runtime_unimplemented_op. Test binaries that link only
     # gbarecomp_armv4t (not gbarecomp_runtime) supply their own.
     src/runtime/runtime_arm_default_aborts.cpp
+    src/runtime/self_heal_cluster.cpp
     # BIOS dispatch table — placeholder until `gba_recompile --bios`
     # is run, real bios_recompiled.cpp is gitignored and linked
     # opt-in via GBARECOMP_HAVE_BIOS_RECOMP below.
@@ -377,6 +378,14 @@ enable_testing()
 add_executable(decoder_smoke tests/armv4t/decoder_smoke.cpp)
 target_link_libraries(decoder_smoke PRIVATE gbarecomp_armv4t)
 add_test(NAME decoder_smoke COMMAND decoder_smoke)
+
+# Self-heal proposal clustering — pure logic, links only the standalone
+# clustering TU (no runtime/bus/overlay dependencies).
+add_executable(selfheal_cluster_test
+    tests/selfheal/cluster_test.cpp
+    src/runtime/self_heal_cluster.cpp)
+target_include_directories(selfheal_cluster_test PRIVATE src/runtime)
+add_test(NAME selfheal_cluster_test COMMAND selfheal_cluster_test)
 
 add_executable(interpreter_smoke tests/armv4t/interpreter_smoke.cpp)
 target_link_libraries(interpreter_smoke PRIVATE gbarecomp_armv4t)

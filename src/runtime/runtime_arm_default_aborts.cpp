@@ -104,11 +104,34 @@ void self_heal_write_report(const char* frag_path) {
                 static_cast<unsigned long long>(native_calls),
                 static_cast<unsigned long long>(inflight),
                 static_cast<unsigned long long>(failed));
+    // Build the PC-sorted miss list (std::map already orders by PC) and group
+    // it once for both the banner summary and the frag: a tight run of
+    // same-mode misses is the signature of a computed-jump switch's case
+    // targets the finder couldn't size (the Kid_Head lesson,
+    // 0x08062894..0x08062920). kJtMaxGap spans an un-hit case block between
+    // two hit targets without merging genuinely separate functions.
+    constexpr std::uint32_t kJtMaxGap = 0x80;  // bytes between case targets
+    constexpr std::size_t   kJtMinRun = 3;     // run length to call it a table
+    std::vector<gbarecomp::SelfHealMiss> sorted;
+    sorted.reserve(g_misses.size());
+    for (const auto& kv : g_misses)
+        sorted.push_back({kv.first, kv.second.thumb, kv.second.count});
+    const auto clusters =
+        gbarecomp::self_heal_cluster_misses(sorted, kJtMaxGap, kJtMinRun);
+    std::size_t jt_candidates = 0;
+    for (const auto& c : clusters)
+        if (c.jump_table_candidate) ++jt_candidates;
+
     if (!g_misses.empty()) {
         std::printf("  (the interpreter bridged %zu distinct PC(s) this session; "
-                    "see %s for [[extra_func]] proposals — human-review + merge, "
-                    "never auto-merged)\n",
+                    "see %s for [[extra_func]] / [[jump_table]] proposals — "
+                    "human-review + merge, never auto-merged)\n",
                     g_misses.size(), frag_path ? frag_path : "(none)");
+        if (jt_candidates) {
+            std::printf("  %zu jump-table candidate region(s) flagged — prefer a "
+                        "sized [[jump_table]] over the per-PC [[extra_func]] "
+                        "runs.\n", jt_candidates);
+        }
     }
     for (const auto& kv : g_misses) {
         std::uint32_t off = 0;
@@ -137,18 +160,43 @@ void self_heal_write_report(const char* frag_path) {
         "# These guest PCs were reached by runtime_dispatch with no generated\n"
         "# function and were bridged through the interpreter this session.\n"
         "# A HUMAN reviews these and merges the genuine ones into the binary's\n"
-        "# config ([functions] / [[extra_func]]); this file is NEVER\n"
-        "# auto-merged (PRINCIPLES.md \"Never auto-write game.toml\").\n"
+        "# config; this file is NEVER auto-merged (PRINCIPLES.md \"Never\n"
+        "# auto-write game.toml\").\n"
+        "#\n"
+        "# Proposal shapes:\n"
+        "#   [[extra_func]]  — a standalone missed function entry.\n"
+        "#   [[jump_table]]  — flagged in a comment when a tight run of\n"
+        "#       consecutive same-mode misses looks like a computed-jump\n"
+        "#       switch's case targets. Sizing the table covers the whole\n"
+        "#       switch in ONE entry; prefer it over the per-case [[extra_func]].\n"
         "# BIOS PCs (< 0x4000) belong in bios/gba_bios.toml; cart PCs in the\n"
         "# game's game.toml.\n\n");
-    for (const auto& kv : g_misses) {
-        std::fprintf(f,
-            "[[extra_func]]\n"
-            "addr = 0x%08X\n"
-            "mode = \"%s\"\n"
-            "note = \"proposed from Stage-1 self-heal miss-log; bridged x%llu\"\n\n",
-            kv.first, kv.second.thumb ? "thumb" : "arm",
-            static_cast<unsigned long long>(kv.second.count));
+    for (const auto& c : clusters) {
+        if (c.jump_table_candidate) {
+            std::fprintf(f,
+                "# ── JUMP-TABLE CANDIDATE: %zu consecutive %s misses in "
+                "[0x%08X, 0x%08X] ──\n"
+                "# Likely the case targets of a computed-jump switch the finder\n"
+                "# could not size. PREFER one sized [[jump_table]] over the %zu\n"
+                "# [[extra_func]] below: find the abs32 table base (the\n"
+                "# `ldr rT,[pc,#..]; add rT,index<<2; ldr/mov pc` dispatcher) and\n"
+                "# add `[[jump_table]] addr=<base> stride=4 count=<CMP bound> "
+                "format=\"abs32\" entries_mode=\"auto\"`.\n",
+                c.end - c.begin, sorted[c.begin].thumb ? "thumb" : "arm",
+                sorted[c.begin].pc, sorted[c.end - 1].pc, c.end - c.begin);
+        }
+        for (std::size_t k = c.begin; k < c.end; ++k) {
+            std::fprintf(f,
+                "[[extra_func]]\n"
+                "addr = 0x%08X\n"
+                "mode = \"%s\"\n"
+                "note = \"proposed from self-heal miss-log; bridged x%llu%s\"\n\n",
+                sorted[k].pc, sorted[k].thumb ? "thumb" : "arm",
+                static_cast<unsigned long long>(sorted[k].count),
+                c.jump_table_candidate
+                  ? "; part of a JUMP-TABLE CANDIDATE (prefer a sized [[jump_table]])"
+                  : "");
+        }
     }
     std::fclose(f);
 }

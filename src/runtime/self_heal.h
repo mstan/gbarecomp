@@ -16,8 +16,10 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace gbarecomp {
 
@@ -35,9 +37,40 @@ std::uint32_t self_heal_distinct_misses();
 std::uint64_t self_heal_interpreted_insns();
 
 // Emit the coverage-honesty banner to stdout and, if any misses occurred and
-// frag_path is non-null, write the reviewed proposal fragment (a set of
-// [[extra_func]] entries) to frag_path. NEVER merges into game.toml.
+// frag_path is non-null, write the reviewed proposal fragment to frag_path:
+// [[extra_func]] entries, plus a [[jump_table]]-candidate comment over any
+// tight run of misses that looks like a computed-jump switch's case targets
+// (see self_heal_cluster_misses). NEVER merges into game.toml.
 void self_heal_write_report(const char* frag_path);
+
+// ── Jump-table-aware proposal clustering ───────────────────────────
+// One bridged miss, for the proposal/coverage report.
+struct SelfHealMiss {
+    std::uint32_t pc    = 0;
+    bool          thumb = false;
+    std::uint64_t count = 0;  // times bridged this session
+};
+
+// A maximal run of adjacent misses in a PC-sorted list. When
+// `jump_table_candidate`, the run's members are tightly-spaced same-mode
+// misses that look like the case targets of a computed-jump switch the
+// finder could not size (e.g. Minish Cap Kid_Head's fragments in
+// 0x08062894..0x08062920) — review should prefer ONE sized [[jump_table]]
+// over merging the individual [[extra_func]] entries.
+struct SelfHealCluster {
+    std::size_t begin = 0;   // [begin, end) indices into the sorted input
+    std::size_t end   = 0;
+    bool jump_table_candidate = false;
+};
+
+// Group a PC-SORTED miss list into adjacency clusters. A run of at least
+// `min_run` same-mode misses, each within `max_gap` bytes of its
+// predecessor, is flagged jump_table_candidate. Every input index lands in
+// exactly one returned cluster (singletons included). Pure / no I/O — unit
+// tested (tests/selfheal/cluster_test.cpp) independently of the runtime.
+std::vector<SelfHealCluster> self_heal_cluster_misses(
+    const std::vector<SelfHealMiss>& sorted_misses,
+    std::uint32_t max_gap, std::size_t min_run);
 
 // JSON snapshot of the live miss/heal state for the TCP `misses` command:
 // aggregate counters (distinct misses, interpreted insns, healed-to-native,
