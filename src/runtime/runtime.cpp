@@ -1,13 +1,16 @@
 // runtime.cpp - shared BIOS+ROM runner for generated game binaries.
 //
-// This translation unit is intentionally interpreter-free. Per
-// PRINCIPLES.md "Interpreter is informative, never load-bearing
-// (SHOWSTOPPER)", the exec path here is recompiler-only: it
-// initializes the recomp ABI state (g_cpu via runtime_arm.h) and
-// calls runtime_dispatch(pc). If the recompiler hasn't lowered an
-// IrOp or hasn't discovered a function, the appropriate runtime_*
-// helper aborts loudly — that abort is the gate. Never paper over
-// it by routing to armv4t::Interpreter.
+// This translation unit is itself interpreter-free: it initializes the
+// recomp ABI state (g_cpu via runtime_arm.h) and drives execution by
+// calling runtime_dispatch(pc). Two distinct gaps are handled very
+// differently downstream (per PRINCIPLES.md "Honest self-healing"):
+//   * a CODEGEN gap (unlowered IrOp) → runtime_unimplemented_op aborts
+//     loudly; that abort is the gate, never papered over.
+//   * a DISPATCH gap (undiscovered/excluded function) → runtime_dispatch_miss
+//     SELF-HEALS: it bridges the call through the reference interpreter,
+//     loudly logs it, and records it for a reviewed TOML proposal. The run
+//     is reported as NOT fully static until coverage closes (see the
+//     self-heal coverage banner emitted at exit).
 //
 // Scaffolding kept across the carve from Codex's spike: TOML config
 // loader, CLI parser, BIOS+ROM SHA verification, ROM header parse,
@@ -27,6 +30,7 @@
 #include "host_window.h"
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
+#include "self_heal.h"
 #include "sha1.h"
 #include "snapshot.h"
 #include "tcp_debug_server.h"
@@ -795,6 +799,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     set_active_ppu(&ppu);
     runtime_init(&bus);
     reset_recomp_cpu();
+    self_heal_reset();  // fresh coverage tally for this machine bring-up
 
     // ── Recompiler exec gate ──────────────────────────────────────
     //
@@ -835,6 +840,22 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     auto sync_frame_counter = [&]() {
         vblank_count = ppu.frame_count();
+    };
+
+    // Emitted once at shutdown on every exit path: the self-heal coverage
+    // banner (+ reviewed TOML proposal) and, when GBARECOMP_FP_SAVE names a
+    // path, a dump of the always-on per-instruction fingerprint ring. The fp
+    // ring records from machine reset (no arm-then-run gap), so this is a
+    // pure query of recorded history — two builds run identically diff
+    // bit-for-bit on these files. (Arm with GBARECOMP_INSN_TRACE=1.)
+    auto emit_exit_diagnostics = [&]() {
+        const char* frag = std::getenv("GBARECOMP_MISS_FRAG");
+        gbarecomp::self_heal_write_report(
+            frag ? frag : "recomp_master_misses.toml.frag");
+        if (const char* fp = std::getenv("GBARECOMP_FP_SAVE")) {
+            uint32_t n = runtime_fp_save_file(fp);
+            std::printf("fp_ring_saved path=\"%s\" records=%u\n", fp, n);
+        }
     };
 
     auto step_once = [&]() -> bool {
@@ -941,6 +962,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         ctx.sync_frames = &vblank_count;
         bool ok = server.run(args.tcp_port, ctx);
         bool save_ok = flush_save();
+        emit_exit_diagnostics();
         runtime_shutdown();
         return (ok && save_ok) ? 0 : 1;
     }
@@ -1103,6 +1125,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 count_nonzero(bus.vram_ptr(), 96 * 1024),
                 count_nonzero(bus.oam_ptr(), 1024));
 
+    emit_exit_diagnostics();
     runtime_shutdown();
     return save_ok ? 0 : 1;
 }

@@ -121,6 +121,21 @@ target_include_directories(gbarecomp_armv4t PUBLIC src/armv4t)
 set_property(TARGET gbarecomp_armv4t PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# recompile_core — function discovery + per-function codegen, as a LIBRARY.
+# Extracted from tools/gba_recompile so the SAME emitter serves both the
+# offline corpus build (the tool) and the Stage-2 runtime self-healing
+# recompiler (a dispatch miss → emit one function → gcc → DLL). Depends only
+# on armv4t (decoder/IR/codegen); must NOT depend on src/gba or src/runtime.
+# ─────────────────────────────────────────────────────────────────────────────
+add_library(gbarecomp_recompile_core STATIC
+    src/recompile/function_finder.cpp
+    src/recompile/emit_function.cpp
+)
+target_include_directories(gbarecomp_recompile_core PUBLIC src/recompile)
+target_link_libraries(gbarecomp_recompile_core PUBLIC gbarecomp_armv4t)
+set_property(TARGET gbarecomp_recompile_core PROPERTY POSITION_INDEPENDENT_CODE ON)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # gba — GBA-specific bus, IO, IRQ, DMA, timers, PPU, audio, input, save, BIOS.
 # Aggressively GBA-specific. Depends on armv4t for CPU types.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,6 +176,7 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/generated_dispatch.cpp
     src/runtime/runtime_bus_bridge.cpp
     src/runtime/arm_cpu_bridge.cpp
+    src/runtime/overlay_emit.cpp
     src/runtime/host_platform.cpp
     src/runtime/host_window.cpp
     src/runtime/color_lut.cpp
@@ -191,7 +207,8 @@ else()
                    "to populate.")
 endif()
 target_include_directories(gbarecomp_runtime PUBLIC src/runtime)
-target_link_libraries(gbarecomp_runtime PUBLIC gbarecomp_gba gbarecomp_debug)
+target_link_libraries(gbarecomp_runtime PUBLIC
+    gbarecomp_gba gbarecomp_debug gbarecomp_recompile_core)
 set_property(TARGET gbarecomp_runtime PROPERTY POSITION_INDEPENDENT_CODE ON)
 if(GBARECOMP_SDL2_OK)
     target_compile_definitions(gbarecomp_runtime PUBLIC GBARECOMP_HAVE_SDL2)
@@ -242,13 +259,13 @@ target_link_libraries(gba_scan PRIVATE gbarecomp_armv4t gbarecomp_gba)
 
 add_executable(gba_recompile
     tools/gba_recompile/main.cpp
-    tools/gba_recompile/function_finder.cpp
     tools/gba_recompile/config.cpp)
 target_include_directories(gba_recompile PRIVATE
     tools/gba_recompile
     src/armv4t
     third_party/tomlpp)
-target_link_libraries(gba_recompile PRIVATE gbarecomp_armv4t gbarecomp_gba)
+target_link_libraries(gba_recompile PRIVATE
+    gbarecomp_recompile_core gbarecomp_armv4t gbarecomp_gba)
 
 add_executable(symbol_import tools/symbol_import/main.cpp)
 target_link_libraries(symbol_import PRIVATE gbarecomp_armv4t)
