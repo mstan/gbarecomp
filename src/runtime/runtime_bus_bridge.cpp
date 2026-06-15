@@ -112,6 +112,9 @@ void trace_unmapped_read(uint32_t addr, uint32_t value, uint32_t width) {
 void sync_bios_access() {
     if (g_active_bus) {
         g_active_bus->set_bios_access_enabled(g_cpu.R[15] < 0x00004000u);
+        // Stash the live PC so an unmapped (open-bus) read returns the CURRENT
+        // prefetch of the executing code (GBATEK open-bus). MC-HP-002.
+        g_active_bus->note_pc(g_cpu.R[15], (g_cpu.cpsr & CPSR_T_BIT) != 0);
     }
 }
 
@@ -137,22 +140,87 @@ static void dump_hang_state(const char* reason) {
     if (!g_active_bus) return;
     std::string m4a;
     gba::mp2k_dump_live(*g_active_bus, m4a);
+
+    // Full CPU register snapshot — the hang is a busy loop, so r0..r15 pin the
+    // object/pointer it is walking (MC-HP-002: UpdateAnimationVariableFrames
+    // walks a corrupt frame-list pointer r1 = *(animObj+0x5c)). Also dump the
+    // candidate animation object (r0) and the word it loads at +0x5c so the
+    // corrupt value is attributable without a second run.
+    char regs[512];
+    int n = 0;
+    for (int i = 0; i < 16; ++i) {
+        n += std::snprintf(regs + n, sizeof(regs) - n, "r%d=0x%08X ",
+                           i, g_cpu.R[i]);
+    }
+    uint32_t r0 = g_cpu.R[0];
+    uint32_t cmdptr = g_active_bus->read32(r0 + 0x5cu);
+    char objbuf[256];
+    int m = std::snprintf(objbuf, sizeof(objbuf),
+                          "obj@r0=0x%08X  *(r0+0x5c)=0x%08X  obj[0x00..0x60]:",
+                          r0, cmdptr);
+    for (uint32_t off = 0; off < 0x60u && m < (int)sizeof(objbuf) - 4; off += 4) {
+        m += std::snprintf(objbuf + m, sizeof(objbuf) - m, " %08X",
+                           g_active_bus->read32(r0 + off));
+    }
+
     std::fprintf(stderr,
-                 "\n[hang-watchdog] %s\n"
-                 "  pc=0x%08X cycles=%llu vblank_starts=%llu\n"
-                 "  m4a=%s\n",
-                 reason, g_cpu.R[15],
+                 "\n[hang-watchdog] %s\n  pc=0x%08X cpsr=0x%08X cycles=%llu "
+                 "vblank_starts=%llu\n  %s\n  %s\n  m4a=%s\n",
+                 reason, g_cpu.R[15], g_cpu.cpsr,
                  static_cast<unsigned long long>(g_runtime_cycles),
                  static_cast<unsigned long long>(g_runtime_vblank_starts),
-                 m4a.c_str());
+                 regs, objbuf, m4a.c_str());
     if (FILE* f = std::fopen("hang_dump.log", "w")) {
         std::fprintf(f,
-                     "reason=%s\npc=0x%08X\ncycles=%llu\nvblank_starts=%llu\nm4a=%s\n",
-                     reason, g_cpu.R[15],
+                     "reason=%s\npc=0x%08X\ncpsr=0x%08X\ncycles=%llu\n"
+                     "vblank_starts=%llu\nregs=%s\n%s\nm4a=%s\n",
+                     reason, g_cpu.R[15], g_cpu.cpsr,
                      static_cast<unsigned long long>(g_runtime_cycles),
                      static_cast<unsigned long long>(g_runtime_vblank_starts),
-                     m4a.c_str());
+                     regs, objbuf, m4a.c_str());
         std::fclose(f);
+    }
+
+    // Self-documenting execution history: dump the tail of the always-on
+    // per-instruction fingerprint ring so the PCs the game thread executed
+    // leading INTO the freeze are on disk (PRINCIPLES.md "always-on ring
+    // first" — query the ring for the window, never arm-then-capture). This
+    // is what distinguishes a native cart spin (a small cycling PC set) from a
+    // marching pointer walk (monotonic PC/addr) from an interp-bridge over RAM
+    // code (PCs in 0x02/0x03) WITHOUT a second run. Requires GBARECOMP_INSN_TRACE
+    // armed at launch; harmlessly writes 0 records if the ring is empty.
+    uint32_t fpn = runtime_fp_save_tail_csv("hang_fp_tail.csv", 16384);
+    std::fprintf(stderr, "[hang-watchdog] wrote hang_fp_tail.csv (%u records); "
+                 "arm GBARECOMP_INSN_TRACE=1 if 0.\n", fpn);
+
+    // Recent mem-write/branch trace ring (ALWAYS-ON — emitted unconditionally by
+    // codegen, independent of GBARECOMP_INSN_TRACE). A busy-spin freeze loop
+    // performs only reads, so this ring is FROZEN at the instant the spin began:
+    // it still holds the WRITES that produced the corrupt state the loop chokes
+    // on (e.g. whoever wrote the bad pointer being walked). Dumping it makes the
+    // writer of a wrong value attributable from the freeze alone — trace-the-
+    // writer without a second run (PRINCIPLES.md "find the first divergence").
+    {
+        static RuntimeTraceEntry tr[4096];
+        uint32_t ntr = runtime_trace_copy_recent(tr, 4096);
+        if (FILE* tf = std::fopen("hang_trace.csv", "w")) {
+            std::fprintf(tf, "seq,cycles,kind,pc,addr,value,aux,"
+                             "r0,r1,r2,r3,r4,r5,r12,sp,lr\n");
+            for (uint32_t i = 0; i < ntr; ++i) {
+                const RuntimeTraceEntry& e = tr[i];
+                std::fprintf(tf,
+                    "%u,%llu,%u,0x%08X,0x%08X,0x%08X,0x%X,"
+                    "0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X\n",
+                    e.seq, static_cast<unsigned long long>(e.cycles), e.kind,
+                    e.pc, e.addr, e.value, e.aux, e.r0, e.r1, e.r2, e.r3,
+                    e.r4, e.r5, e.r12, e.r13, e.r14);
+            }
+            std::fclose(tf);
+            std::fprintf(stderr,
+                "[hang-watchdog] wrote hang_trace.csv (%u mem-write/branch "
+                "records — frozen at spin onset; find the corrupt-value writer "
+                "here).\n", ntr);
+        }
     }
 }
 
@@ -270,6 +338,7 @@ extern "C" void runtime_tick(uint32_t cycles) {
     tick_devices(bus, ppu, cycles);
 
     if (bus->io().irq_pending() && (g_cpu.cpsr & CPSR_I_BIT) == 0) {
+        g_runtime_irq_from_halt = bus->io().halted() ? 1u : 0u;
         if (bus->io().halted()) {
             // Wake-from-HALT IRQ latency. The ARM7TDMI does not vector the
             // instant the IRQ pends out of HALT, and the interpreter oracle
@@ -280,7 +349,15 @@ extern "C" void runtime_tick(uint32_t cycles) {
             // Pump the devices for the latency window WITHOUT re-taking the
             // IRQ (tick_devices, not runtime_tick), then vector — matching the
             // oracle exactly. Newly-pended bits stay in IF for the next check.
+            // These wake-delay cycles really elapse on hardware, so they must
+            // also advance the cumulative cycle clock (the oracle's pump_step
+            // counts them in cycles_elapsed). Omitting this left g_runtime_cycles
+            // 7 cyc/IRQ short of the oracle, growing the fingerprint cycle skew
+            // by -7/IRQ (the MC-HP-002 cycle drift) — cosmetic for execution
+            // (the PPU/audio above are ticked regardless) but it broke cycle-
+            // aligned diffing.
             bus->io().clear_halt();
+            g_runtime_cycles += gba::kIrqWakeDelayCycles;
             tick_devices(bus, ppu, gba::kIrqWakeDelayCycles);
         }
         runtime_irq(g_cpu.R[15]);
@@ -289,6 +366,19 @@ extern "C" void runtime_tick(uint32_t cycles) {
 
 extern "C" bool runtime_should_yield(void) {
     auto* bus = gbarecomp::g_active_bus;
+
+    // ── BIOS open-bus prefetch latch (MC-HP-002) ─────────────────────────
+    // Called once per guest instruction (the generated prologue calls this with
+    // g_cpu.R[15] == the current PC). While PC is in the BIOS, keep the bus's
+    // biosPrefetch latch current; when the BIOS hands control to the cart it
+    // then holds the prefetch at the exit instruction — exactly what a later
+    // cart read of the protected BIOS region must return (mGBA biosPrefetch;
+    // for the GBA SWI return at BIOS 0x188 that is mem[0x190]=0xE3A02004). A
+    // single compare per instruction; the image read happens only inside the
+    // BIOS. See gba_bus.cpp prefetch_word / the open-bus read paths.
+    if (bus && g_cpu.R[15] < 0x00004000u)
+        bus->latch_bios_prefetch(g_cpu.R[15], (g_cpu.cpsr & CPSR_T_BIT) != 0);
+
     bool halted = bus && bus->io().halted();
 
     // ── Always-on hang watchdog ──────────────────────────────────────

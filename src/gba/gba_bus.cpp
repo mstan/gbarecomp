@@ -75,13 +75,43 @@ bool is_eeprom_addr(uint32_t addr, const GbaSave& save) {
 // Reads
 // ─────────────────────────────────────────────────────────────────────
 
+// GBA open-bus: the value a protected-BIOS / unmapped read returns is the
+// recently pre-fetched opcode. We read it straight from the BIOS/ROM image at
+// the prefetch slot (ARM: word at PC+8; THUMB: the PC+4 halfword mirrored into
+// both halves, per GBATEK). The prefetch source is the same image the CPU is
+// fetching from — never recurse through the bus accessors.
+uint32_t GbaBus::prefetch_word(uint32_t pc, bool thumb) const {
+    auto code32 = [&](uint32_t a) -> uint32_t {
+        if (a < 0x00004000u) return bios_ ? bios_->read32(a & 0x3FFFu) : 0u;
+        if (rom_ && a >= 0x08000000u) {
+            uint32_t o = a - 0x08000000u;
+            if (o + 3u < rom_size_) return load_u32(&rom_[o]);
+        }
+        return 0u;
+    };
+    auto code16 = [&](uint32_t a) -> uint16_t {
+        if (a < 0x00004000u) return bios_ ? bios_->read16(a & 0x3FFFu) : uint16_t{0};
+        if (rom_ && a >= 0x08000000u) {
+            uint32_t o = a - 0x08000000u;
+            if (o + 1u < rom_size_) return load_u16(&rom_[o]);
+        }
+        return 0u;
+    };
+    if (thumb) {
+        uint32_t h = code16(pc + 4u);
+        return h | (h << 16);
+    }
+    return code32(pc + 8u);
+}
+
 uint8_t GbaBus::read8(uint32_t addr) {
     auto region = classify(addr);
     auto off    = resolve_offset(addr, region);
     switch (region) {
         case Region::Bios:
-            return (bios_ && bios_access_enabled_)
-                ? bios_->read8(static_cast<uint32_t>(off)) : 0;
+            if (bios_ && bios_access_enabled_)
+                return bios_->read8(static_cast<uint32_t>(off));
+            return static_cast<uint8_t>(bios_prefetch_ >> (8u * (addr & 3u)));
         case Region::Ewram: return ewram_[off];
         case Region::Iwram: return iwram_[off];
         case Region::Pal:   return pal_[off];
@@ -109,10 +139,14 @@ uint8_t GbaBus::read8(uint32_t addr) {
         case Region::Io:
             return io_dispatch_.read8(static_cast<uint32_t>(off));
         case Region::Save:
-        case Region::OpenBus:
-        case Region::Unknown:
             log_unmapped(addr, 0, false, 1);
             return 0;
+        case Region::OpenBus:
+        case Region::Unknown: {
+            uint32_t ob = prefetch_word(open_bus_pc_, open_bus_thumb_);
+            log_unmapped(addr, ob, false, 1);
+            return static_cast<uint8_t>(ob >> (8u * (addr & 3u)));
+        }
     }
     return 0;
 }
@@ -122,8 +156,9 @@ uint16_t GbaBus::read16(uint32_t addr) {
     auto off    = resolve_offset(addr, region);
     switch (region) {
         case Region::Bios:
-            return (bios_ && bios_access_enabled_)
-                ? bios_->read16(static_cast<uint32_t>(off)) : 0;
+            if (bios_ && bios_access_enabled_)
+                return bios_->read16(static_cast<uint32_t>(off));
+            return static_cast<uint16_t>(bios_prefetch_ >> (8u * (addr & 2u)));
         case Region::Ewram: return load_u16(&ewram_[off]);
         case Region::Iwram: return load_u16(&iwram_[off]);
         case Region::Pal:   return load_u16(&pal_[off]);
@@ -146,10 +181,14 @@ uint16_t GbaBus::read16(uint32_t addr) {
         case Region::Io:
             return io_dispatch_.read16(static_cast<uint32_t>(off));
         case Region::Save:
-        case Region::OpenBus:
-        case Region::Unknown:
             log_unmapped(addr, 0, false, 2);
             return 0;
+        case Region::OpenBus:
+        case Region::Unknown: {
+            uint32_t ob = prefetch_word(open_bus_pc_, open_bus_thumb_);
+            log_unmapped(addr, ob, false, 2);
+            return static_cast<uint16_t>(ob >> (8u * (addr & 2u)));
+        }
     }
     return 0;
 }
@@ -165,7 +204,7 @@ uint32_t GbaBus::read32(uint32_t addr) {
                 last_fetched_ = v;
                 return v;
             }
-            return 0;
+            return bios_prefetch_;
         case Region::Ewram: return load_u32(&ewram_[off]);
         case Region::Iwram: return load_u32(&iwram_[off]);
         case Region::Pal:   return load_u32(&pal_[off]);
@@ -191,10 +230,14 @@ uint32_t GbaBus::read32(uint32_t addr) {
         case Region::Io:
             return io_dispatch_.read32(static_cast<uint32_t>(off));
         case Region::Save:
-        case Region::OpenBus:
-        case Region::Unknown:
             log_unmapped(addr, 0, false, 4);
             return 0;
+        case Region::OpenBus:
+        case Region::Unknown: {
+            uint32_t ob = prefetch_word(open_bus_pc_, open_bus_thumb_);
+            log_unmapped(addr, ob, false, 4);
+            return ob;
+        }
     }
     return 0;
 }

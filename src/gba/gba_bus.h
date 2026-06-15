@@ -46,6 +46,29 @@ public:
     }
     bool bios_access_enabled() const { return bios_access_enabled_; }
 
+    // ── Open-bus prefetch model (GBATEK "Reading from Unused/BIOS Memory") ──
+    // The GBA has no pull resistors on the data bus: a read of the protected
+    // BIOS region (00000000-00003FFF from outside the BIOS) or of any unmapped
+    // address returns the most recently PRE-FETCHED opcode, not 0. Games rely on
+    // it (MC-HP-002: a NULL-animation-group deref reads the BIOS region; the
+    // open-bus value's high byte has bit7 set, so the frame-list walker
+    // terminates — returning 0 made it march forever).
+    //
+    // latch_bios_prefetch() is called once per guest instruction WHILE PC is in
+    // the BIOS, so when the BIOS hands control to the cart, bios_prefetch_ holds
+    // the prefetch at the exit instruction (== mGBA's biosPrefetch; for the GBA
+    // SWI return at BIOS 0x188 that is mem[0x190]=0xE3A02004). note_pc() stashes
+    // the live PC each bus access so an UNMAPPED read returns the CURRENT
+    // prefetch (the executing code's $+8/$+4 word).
+    void latch_bios_prefetch(uint32_t pc, bool thumb) {
+        bios_prefetch_ = prefetch_word(pc, thumb);
+    }
+    void note_pc(uint32_t pc, bool thumb) {
+        open_bus_pc_ = pc;
+        open_bus_thumb_ = thumb;
+    }
+    uint32_t bios_open_bus() const { return bios_prefetch_; }
+
     // Wire up the cartridge ROM bytes. The bus does NOT take
     // ownership; the caller must keep the buffer alive.
     void set_rom(const uint8_t* rom_bytes, std::size_t rom_size) {
@@ -142,11 +165,20 @@ public:
     void deserialize(gbarecomp::debug::SnapshotReader& r);
 
 private:
+    // The opcode word the CPU would have prefetched at `pc` ($+8 in ARM, the
+    // $+4 halfword mirrored into both halves in THUMB), read from the BIOS or
+    // ROM image. Drives the open-bus model above. 0 when the prefetch source
+    // is itself unmapped.
+    uint32_t prefetch_word(uint32_t pc, bool thumb) const;
+
     const GbaBios* bios_ = nullptr;
     const uint8_t* rom_  = nullptr;
     std::size_t    rom_size_ = 0;
     bool           bios_access_enabled_ = true;
     bool           audio_shadow_request_ = false;
+    uint32_t       bios_prefetch_ = 0;   // latched BIOS open-bus value
+    uint32_t       open_bus_pc_   = 0;   // live PC for unmapped open-bus
+    bool           open_bus_thumb_ = false;
 
     std::array<uint8_t, 256 * 1024> ewram_{};
     std::array<uint8_t,  32 * 1024> iwram_{};

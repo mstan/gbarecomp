@@ -159,6 +159,24 @@ uint32_t runtime_fp_count(void);
 // header {u32 magic 'GFP1', u32 entry_size, u64 count} followed by `count`
 // RuntimeFpEntry records. Returns the number of records written (0 on error).
 uint32_t runtime_fp_save_file(const char* path);
+// Dump the LAST `n` fingerprint records (oldest-first in the window) as CSV
+// (idx,cycles,pc,cpsr,r0..r15). The hang watchdog calls this on trip so the
+// execution history leading into a freeze is on disk with no live interaction
+// (n==0 → whole ring). Requires GBARECOMP_INSN_TRACE armed. Returns records.
+uint32_t runtime_fp_save_tail_csv(const char* path, uint32_t n);
+// Dedicated always-on IRQ-vector log (MC-HP-002): one entry per IRQ vectoring,
+// dumped as CSV. Armed by env GBARECOMP_IRQ_LOG. g_runtime_irq_from_halt is set
+// by runtime_tick's wake-from-HALT path so each log entry records whether the
+// vector woke the CPU from HALT.
+void runtime_irq_log_record(uint32_t src, uint32_t ret, uint32_t cpsr);
+uint32_t runtime_irq_log_save_file(const char* path);
+extern uint32_t g_runtime_irq_from_halt;
+// SWI log (milestone-PC sequence): every SWI with cycle + caller + r0/r1 +
+// BIOS IntrWait flags (0x03007FF8). Armed by env GBARECOMP_SWI_LOG.
+void runtime_swi_log_record(uint32_t imm, uint32_t ret, uint32_t r0,
+                            uint32_t r1, uint32_t r2, uint32_t lr,
+                            uint32_t iwflags);
+uint32_t runtime_swi_log_save_file(const char* path);
 uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
                                    uint32_t max_entries);
 void runtime_tick(uint32_t cycles);

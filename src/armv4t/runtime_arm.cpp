@@ -284,10 +284,13 @@ extern "C" uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
 extern "C" unsigned g_runtime_insn_trace = 0;
 
 namespace {
-// ~1M instructions of history. At ~125k instr/PPU-frame this covers ~8 frames,
-// comfortably spanning the MC-HP-002 f40 onset and the f48 spin. 80 bytes/entry
-// → ~80 MB, only touched when armed.
-constexpr uint32_t kFpSize = 1u << 20;
+// ~8M instructions of history (~60+ PPU-frames). The recomp runs several frames
+// ahead of the interp oracle in cumulative cycle (boot step_frame overshoot), so
+// a 1M (~8-frame) ring barely overlapped the interp's at the same frame number;
+// the MC-HP-002 divergence onset (~f3644, deep in the run) needs a wider window
+// so one dump spans both the pre-divergence anchor and the first divergent insn.
+// 80 bytes/entry → ~640 MB, only touched when armed (GBARECOMP_INSN_TRACE=1).
+constexpr uint32_t kFpSize = 1u << 23;
 RuntimeFpEntry* g_fp = nullptr;       // lazily allocated on first arm
 uint32_t        g_fp_write = 0;
 uint32_t        g_fp_count = 0;
@@ -331,6 +334,142 @@ extern "C" uint32_t runtime_fp_save_file(const char* path) {
     }
     std::fclose(f);
     return g_fp_count;
+}
+
+// Dump the LAST `n` fingerprint records (oldest-first within the window) as a
+// human-readable CSV. This is the freeze's self-documenting execution history:
+// the always-on hang watchdog calls it the moment it trips, so the PCs the
+// game thread executed leading INTO the freeze are on disk without any live
+// interaction (PRINCIPLES.md "always-on ring first" — query the ring for the
+// window of interest, never arm-then-capture). Returns records written.
+// Requires GBARECOMP_INSN_TRACE armed (else the ring is empty → 0). Caller is
+// the game thread at the watchdog trip, so this is single-threaded w.r.t. the
+// ring writes.
+extern "C" uint32_t runtime_fp_save_tail_csv(const char* path, uint32_t n) {
+    if (!path || !g_fp || g_fp_count == 0) return 0;
+    if (n == 0 || n > g_fp_count) n = g_fp_count;
+    std::FILE* f = std::fopen(path, "w");
+    if (!f) return 0;
+    std::fprintf(f, "idx,cycles,pc,cpsr,r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,"
+                    "r12,sp,lr,r15\n");
+    // The most recent record is at (g_fp_write-1); walk back n, then forward.
+    uint32_t start = (g_fp_write + kFpSize - n) % kFpSize;
+    for (uint32_t i = 0; i < n; ++i) {
+        const RuntimeFpEntry& e = g_fp[(start + i) % kFpSize];
+        std::fprintf(f, "%u,%llu,0x%08X,0x%08X", i,
+                     static_cast<unsigned long long>(e.cycles), e.pc, e.cpsr);
+        for (int k = 0; k < 16; ++k) std::fprintf(f, ",0x%08X", e.r[k]);
+        std::fputc('\n', f);
+    }
+    std::fclose(f);
+    return n;
+}
+
+// ── IRQ-vector log (MC-HP-002) ─────────────────────────────────────
+// A dedicated, always-on, cycle-stamped log of EVERY IRQ vectoring. The
+// general trace ring (4096) is diluted by mem-writes (thousands/frame) so it
+// spans only a fraction of a frame; this log records one entry per IRQ vector
+// (~1-2/frame) so it spans ~10^4 frames — enough to find, on a fresh boot, the
+// frame where the recomp vectors an EXTRA VBlank IRQ vs the interp oracle (the
+// one-extra-M4A-tick that drifts the sequencer into the f3656 spin). The
+// `from_halt` flag distinguishes the wake-from-HALT delayed path from the
+// running immediate path. Dumped as CSV on exit when GBARECOMP_IRQ_LOG is set.
+namespace {
+constexpr uint32_t kIrqLogSize = 1u << 17;   // 131072 vectors (~32k+ frames)
+struct IrqLogEntry { unsigned long long cycles; uint32_t src; uint32_t ret;
+                     uint32_t cpsr; uint32_t from_halt; };
+IrqLogEntry* g_irq_log = nullptr;
+uint32_t     g_irq_log_write = 0;
+uint32_t     g_irq_log_count = 0;
+}  // namespace
+// Set by runtime_tick's wake-from-HALT path just before runtime_irq; cleared
+// after. Tells the log whether this vector woke the CPU from HALT.
+extern "C" uint32_t g_runtime_irq_from_halt = 0;
+
+extern "C" void runtime_irq_log_record(uint32_t src, uint32_t ret, uint32_t cpsr) {
+    static int armed = -1;
+    if (armed < 0) armed = std::getenv("GBARECOMP_IRQ_LOG") ? 1 : 0;
+    if (!armed) return;
+    if (!g_irq_log) {
+        g_irq_log = static_cast<IrqLogEntry*>(
+            std::calloc(kIrqLogSize, sizeof(IrqLogEntry)));
+        if (!g_irq_log) { armed = 0; return; }
+    }
+    IrqLogEntry& e = g_irq_log[g_irq_log_write];
+    e.cycles = g_runtime_cycles;
+    e.src = src;
+    e.ret = ret;
+    e.cpsr = cpsr;
+    e.from_halt = g_runtime_irq_from_halt;
+    g_irq_log_write = (g_irq_log_write + 1u) % kIrqLogSize;
+    if (g_irq_log_count < kIrqLogSize) ++g_irq_log_count;
+}
+
+extern "C" uint32_t runtime_irq_log_save_file(const char* path) {
+    if (!path || !g_irq_log || g_irq_log_count == 0) return 0;
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f) return 0;
+    std::fprintf(f, "seq,cycles,src,ret,cpsr,from_halt\n");
+    uint32_t start = (g_irq_log_write + kIrqLogSize - g_irq_log_count) % kIrqLogSize;
+    for (uint32_t i = 0; i < g_irq_log_count; ++i) {
+        const IrqLogEntry& e = g_irq_log[(start + i) % kIrqLogSize];
+        std::fprintf(f, "%u,%llu,0x%04x,0x%08x,0x%08x,%u\n",
+                     i, e.cycles, e.src, e.ret, e.cpsr, e.from_halt);
+    }
+    std::fclose(f);
+    return g_irq_log_count;
+}
+
+// ── SWI log (MC-HP-002 milestone-PC sequence) ──────────────────────
+// Always-on, cycle-stamped log of every SWI (BIOS call). VBlankIntrWait is
+// SWI 5; it runs once per main-loop iteration, so its sequence IS the main-loop
+// cadence. Per recomp-template "use the oracle as an order + state + caller
+// reference": we capture cycle + caller(ret) + r0/r1 args + the BIOS IntrWait
+// flags at 0x03007FF8, so a recomp-vs-interp SWI-5 sequence diff shows an EXTRA
+// main-loop iteration (the recomp's 1-frame-ahead slip ~f272) and the IntrWait
+// flag state that produced it. Armed by env GBARECOMP_SWI_LOG; CSV on exit.
+namespace {
+constexpr uint32_t kSwiLogSize = 1u << 17;
+struct SwiLogEntry { unsigned long long cycles; uint32_t imm; uint32_t ret;
+                     uint32_t r0; uint32_t r1; uint32_t r2; uint32_t lr;
+                     uint32_t iwflags; };
+SwiLogEntry* g_swi_log = nullptr;
+uint32_t     g_swi_log_write = 0;
+uint32_t     g_swi_log_count = 0;
+}  // namespace
+
+extern "C" void runtime_swi_log_record(uint32_t imm, uint32_t ret, uint32_t r0,
+                                       uint32_t r1, uint32_t r2, uint32_t lr,
+                                       uint32_t iwflags) {
+    static int armed = -1;
+    if (armed < 0) armed = std::getenv("GBARECOMP_SWI_LOG") ? 1 : 0;
+    if (!armed) return;
+    if (!g_swi_log) {
+        g_swi_log = static_cast<SwiLogEntry*>(
+            std::calloc(kSwiLogSize, sizeof(SwiLogEntry)));
+        if (!g_swi_log) { armed = 0; return; }
+    }
+    SwiLogEntry& e = g_swi_log[g_swi_log_write];
+    e.cycles = g_runtime_cycles;
+    e.imm = imm; e.ret = ret; e.r0 = r0; e.r1 = r1; e.r2 = r2; e.lr = lr;
+    e.iwflags = iwflags;
+    g_swi_log_write = (g_swi_log_write + 1u) % kSwiLogSize;
+    if (g_swi_log_count < kSwiLogSize) ++g_swi_log_count;
+}
+
+extern "C" uint32_t runtime_swi_log_save_file(const char* path) {
+    if (!path || !g_swi_log || g_swi_log_count == 0) return 0;
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f) return 0;
+    std::fprintf(f, "seq,cycles,imm,ret,r0,r1,r2,lr,iwflags\n");
+    uint32_t start = (g_swi_log_write + kSwiLogSize - g_swi_log_count) % kSwiLogSize;
+    for (uint32_t i = 0; i < g_swi_log_count; ++i) {
+        const SwiLogEntry& e = g_swi_log[(start + i) % kSwiLogSize];
+        std::fprintf(f, "%u,%llu,%u,0x%08x,0x%08x,0x%08x,0x%08x,0x%08x,0x%08x\n",
+                     i, e.cycles, e.imm, e.ret, e.r0, e.r1, e.r2, e.lr, e.iwflags);
+    }
+    std::fclose(f);
+    return g_swi_log_count;
 }
 
 // ── Bus binding ────────────────────────────────────────────────────
@@ -867,6 +1006,8 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     uint32_t return_address = g_cpu.R[15];
     uint32_t saved_cpsr     = g_cpu.cpsr;
     runtime_trace_event(RUNTIME_TRACE_SWI, return_address, swi_imm, saved_cpsr, 0);
+    runtime_swi_log_record(swi_imm, return_address, g_cpu.R[0], g_cpu.R[1],
+                           g_cpu.R[2], g_cpu.R[14], bus_read_u32(0x03007FF8u));
 
     // Switch to SVC mode. SPSR_svc gets the pre-SWI CPSR. LR_svc gets
     // the return address. R8..R12 don't change unless leaving FIQ.
@@ -945,6 +1086,7 @@ extern "C" void runtime_irq(uint32_t return_address) {
     uint32_t irq_src = bus_read_u16(0x04000200u) & bus_read_u16(0x04000202u);
     runtime_trace_event(RUNTIME_TRACE_IRQ, return_address, irq_src, saved_cpsr,
                         g_irq_nest_depth);
+    runtime_irq_log_record(irq_src, return_address, saved_cpsr);
 
     uint32_t new_cpsr =
         (saved_cpsr & ~(0x1Fu | CPSR_T_BIT))
