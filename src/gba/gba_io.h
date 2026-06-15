@@ -139,6 +139,15 @@ public:
     // Called internally when CNT_H is written with enable+mode=0.
     void run_immediate_dma(int channel);
 
+    // Run all channels armed for a timed start mode (1=VBlank, 2=HBlank), one
+    // transfer block each, advancing the running SAD/DAD across triggers.
+    // Called per VBlank-start / per visible-line HBlank-start by the device
+    // tick. Repeat (CNT_H bit9) keeps the channel armed (reloading DAD when
+    // dest_ctrl==3); otherwise the enable bit is cleared. This delivers the
+    // per-scanline WIN0H table that draws a transition's circular iris
+    // (MC-HP-003) — without it WIN0H gets one value and the iris is a rectangle.
+    void run_timed_dma(int start_mode);
+
     // Host-side input update. The low 10 bits are GBA KEYINPUT
     // (active-low: 1 = released, 0 = pressed). Stored directly into
     // the IO backing so the next CPU read sees the current state.

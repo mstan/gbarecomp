@@ -310,10 +310,18 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
                                  bus->vram_ptr(),
                                  bus->oam_ptr(),
                                  bus->pal_ptr());
+            // HBlank-timed DMA fires on each visible-line HBlank — AFTER the
+            // line is rendered, so line N used the value the previous HBlank's
+            // DMA loaded (matching the HBlank-IRQ ordering below and hardware:
+            // the DMA at HBlank N loads the register used by line N+1). This is
+            // what walks the per-scanline WIN0H circle table for the transition
+            // iris (MC-HP-003).
+            bus->io().run_timed_dma(2);
         }
         if (events.vblank_started) {
             ppu->mark_framebuffer_latched();
             ++g_runtime_vblank_starts;
+            bus->io().run_timed_dma(1);   // VBlank-timed DMA
         }
         if (events.vblank_started && (ds & 0x0008u)) {
             bus->io().request_irq(gba::GbaIo::IrqVBlank);

@@ -180,6 +180,69 @@ void GbaIo::run_immediate_dma(int channel) {
     }
 }
 
+// VBlank/HBlank-timed DMA. The CNT_H enable + running SAD/DAD were latched on
+// the rising enable edge (write16); here we actually transfer, once per trigger
+// (per VBlank-start for mode 1, per visible-line HBlank-start for mode 2). The
+// running SAD/DAD (dma_next_source_/dest_) carry across triggers, so an HBlank
+// channel walks a per-scanline source table — e.g. the WIN0H circle table that
+// draws a transition iris (MC-HP-003). Sound-FIFO mode 3 is handled separately
+// (run_sound_fifo_dma); DMA3 video-capture mode 3 is not modeled.
+void GbaIo::run_timed_dma(int start_mode) {
+    if (!bus_) return;
+    static long long dma_watch = -2;
+    if (dma_watch == -2) {
+        const char* e = std::getenv("GBARECOMP_DMA_WATCH_ADDR");
+        dma_watch = e ? static_cast<long long>(std::strtoull(e, nullptr, 0)) : -1;
+    }
+    for (int channel = 0; channel < 4; ++channel) {
+        uint32_t base  = 0xB0u + static_cast<uint32_t>(channel) * 12u;
+        uint16_t cnt_h = load_u16(&io_[base + 10]);
+        if ((cnt_h & 0x8000u) == 0) continue;                 // not enabled
+        if (static_cast<int>((cnt_h >> 12) & 0x3u) != start_mode) continue;
+
+        uint32_t cnt_l = load_u16(&io_[base + 8]);
+        uint32_t word_count = cnt_l ? cnt_l : ((channel == 3) ? 0x10000u : 0x4000u);
+        bool transfer_32   = (cnt_h & 0x0400u) != 0;
+        uint32_t step      = transfer_32 ? 4u : 2u;
+        uint32_t dest_ctrl = (cnt_h >> 5) & 0x3u;   // 0 inc,1 dec,2 fixed,3 inc+reload
+        uint32_t src_ctrl  = (cnt_h >> 7) & 0x3u;   // 0 inc,1 dec,2 fixed
+
+        uint32_t s = dma_next_source_[channel];
+        uint32_t d = dma_next_dest_[channel];
+        for (uint32_t k = 0; k < word_count; ++k) {
+            if (transfer_32) bus_->write32(d, bus_->read32(s));
+            else             bus_->write16(d, bus_->read16(s));
+            if (dma_watch >= 0 && d == static_cast<uint32_t>(dma_watch)) {
+                uint32_t v = transfer_32 ? bus_->read32(d) : bus_->read16(d);
+                std::fprintf(stderr,
+                    "[dma-watch:timed] mode=%d ch=%d dad=0x%08X src=0x%08X "
+                    "val=0x%08X size=%u word=%u/%u cnt_h=0x%04X\n",
+                    start_mode, channel, d, s, v, step, k, word_count, cnt_h);
+            }
+            if (src_ctrl == 0) s += step; else if (src_ctrl == 1) s -= step;
+            if (dest_ctrl == 0 || dest_ctrl == 3) d += step;
+            else if (dest_ctrl == 1) d -= step;
+        }
+        ++dma_runs_[channel];
+        dma_words_[channel] += word_count;
+        dma_next_source_[channel] = s;
+
+        const bool repeat = (cnt_h & 0x0200u) != 0;
+        if (repeat) {
+            // Re-arm for the next trigger. dest_ctrl==3 (inc+reload) reloads DAD
+            // from the register each repeat; otherwise the running DAD carries on.
+            dma_next_dest_[channel] = (dest_ctrl == 3)
+                ? (load_u32(&io_[base + 4]) & 0x0FFFFFFFu) : d;
+        } else {
+            dma_next_dest_[channel] = d;
+            store_u16(&io_[base + 10], static_cast<uint16_t>(cnt_h & ~0x8000u));
+        }
+        if (cnt_h & 0x4000u) {
+            request_irq(static_cast<uint16_t>(1u << (8 + channel)));
+        }
+    }
+}
+
 void GbaIo::run_sound_fifo_dma(int channel) {
     if (!bus_ || channel < 1 || channel > 2) return;
     uint32_t base = 0xB0u + static_cast<uint32_t>(channel) * 12u;
