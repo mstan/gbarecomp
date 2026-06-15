@@ -37,7 +37,10 @@
 #include "tcp_debug_server.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -45,9 +48,11 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 // Authoritative IRQ-entry counter, incremented in runtime_irq (runtime_arm.cpp)
@@ -976,6 +981,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             uint32_t n = runtime_fp_save_file(fp);
             std::printf("fp_ring_saved path=\"%s\" records=%u\n", fp, n);
         }
+        if (const char* il = std::getenv("GBARECOMP_IRQ_LOG")) {
+            uint32_t n = runtime_irq_log_save_file(il);
+            std::printf("irq_log_saved path=\"%s\" records=%u\n", il, n);
+        }
+        if (const char* sl = std::getenv("GBARECOMP_SWI_LOG")) {
+            uint32_t n = runtime_swi_log_save_file(sl);
+            std::printf("swi_log_saved path=\"%s\" records=%u\n", sl, n);
+        }
     };
 
     auto step_once = [&]() -> bool {
@@ -1054,7 +1067,135 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         return true;
     };
 
+    // ── Differential-oracle WRAM trace (gbaref/snesref/mdref method) ──
+    // GBARECOMP_WRAM_TRACE=path emits one JSONL record per changed work-RAM byte
+    // per frame — the SAME shape gbaref (the libretro GBA reference) writes — so
+    // oracle/ref_diff.py can diff the recompiled run against a known-good core
+    // WITHOUT savestate alignment or scripted boot (diff by value/order, not
+    // frame). Defined BEFORE the TCP block so it fires in ALL drive modes — TCP
+    // (each step), windowed play, and headless — at full region parity. The
+    // interpreter (bios_smoke) shares src/gba/* device models with this runtime
+    // so it can't arbitrate device/bus bugs — gbaref can. Range-limit with
+    // GBARECOMP_WRAM_TRACE_LO/_HI (GBA absolute addresses).
+    std::FILE* wram_trace_log = nullptr;
+    uint32_t wram_trace_lo = 0x00000000u, wram_trace_hi = 0xFFFFFFFFu;
+    bool wram_trace_primed = false;
+    uint64_t wram_trace_frame = 0;
+    uint64_t wram_last_traced = ppu.frame_count();
+    // Full-parity region set: every WRITABLE GBA region mGBA exposes via its
+    // libretro memory map, so gbaref and this trace cover the same address space
+    // (BIOS/ROM are const — skipped). base, host ptr, length, prev-frame shadow.
+    struct TraceRegion { uint32_t base; const uint8_t* ptr; std::size_t len;
+                         std::vector<uint8_t> prev; };
+    std::vector<TraceRegion> wram_regions;
+    if (const char* wp = std::getenv("GBARECOMP_WRAM_TRACE")) {
+        wram_trace_log = std::fopen(wp[0] ? wp : "gbarecomp_trace.jsonl", "w");
+        if (const char* lo = std::getenv("GBARECOMP_WRAM_TRACE_LO"))
+            wram_trace_lo = static_cast<uint32_t>(std::strtoul(lo, nullptr, 0));
+        if (const char* hi = std::getenv("GBARECOMP_WRAM_TRACE_HI"))
+            wram_trace_hi = static_cast<uint32_t>(std::strtoul(hi, nullptr, 0));
+        auto reg = [&](uint32_t base, const uint8_t* ptr, std::size_t len) {
+            // Only materialize regions overlapping [lo,hi] to keep traces small.
+            if (base > wram_trace_hi || base + len <= wram_trace_lo) return;
+            wram_regions.push_back({base, ptr, len, std::vector<uint8_t>(len, 0)});
+        };
+        reg(0x02000000u, bus.ewram_ptr(),   256 * 1024);
+        reg(0x03000000u, bus.iwram_ptr(),    32 * 1024);
+        reg(0x04000000u, bus.io().raw(),     gba::GbaIo::kIoSize);
+        reg(0x05000000u, bus.pal_ptr(),       1 * 1024);
+        reg(0x06000000u, bus.vram_ptr(),     96 * 1024);
+        reg(0x07000000u, bus.oam_ptr(),       1 * 1024);
+    }
+    auto wram_trace_tick = [&]() {
+        if (!wram_trace_log) return;
+        for (auto& rg : wram_regions) {
+            for (std::size_t i = 0; i < rg.len; ++i) {
+                uint8_t v = rg.ptr[i];
+                if (v != rg.prev[i]) {
+                    uint32_t a = rg.base + static_cast<uint32_t>(i);
+                    if (wram_trace_primed && a >= wram_trace_lo && a <= wram_trace_hi)
+                        std::fprintf(wram_trace_log,
+                            "{\"f\":%llu,\"adr\":\"0x%08x\",\"old\":\"0x%02x\","
+                            "\"val\":\"0x%02x\"}\n",
+                            static_cast<unsigned long long>(wram_trace_frame),
+                            a, rg.prev[i], v);
+                    rg.prev[i] = v;
+                }
+            }
+        }
+        wram_trace_primed = true;
+        ++wram_trace_frame;
+        // Flush every frame: when the bug HANGS, no further frame presents, so
+        // the process is killed — the last pre-hang frame must already be on disk.
+        std::fflush(wram_trace_log);
+    };
+
     if (args.tcp_port > 0) {
+        // ── Free-run threading model ───────────────────────────────────────
+        // The game CORE runs on a dedicated thread; the TCP server runs on THIS
+        // (main) thread. Synchronous `step` (oracle lockstep) signals the game
+        // thread and waits — same observable behavior as before, so existing
+        // diff/lockstep scripts are unaffected. `continue` lets the game
+        // free-run, which frees the server thread to answer OBSERVATION commands
+        // (registers / read_* / symbol / misses) WHILE the game thread is wedged
+        // in a busy-spin freeze — a hung core stays fully introspectable (the
+        // MC-HP-002 need; before this, a never-returning step took the whole
+        // debugger down with it). Observation reads g_cpu/bus racily: aligned
+        // 32-bit reads are tear-free on x86, and the GBARECOMP_SAMPLE sampler
+        // already relies on exactly this. Mutating ops (savestate/load) require
+        // the game PARKED at a frame boundary (the only place the host
+        // call-return stack is consistent) — enforced by park_and_wait below.
+        enum RunState { RS_PAUSED = 0, RS_RUNNING = 1, RS_STEP = 2, RS_QUIT = 3 };
+        std::mutex              ctl_m;
+        std::condition_variable ctl_cv;
+        int  ctl_state     = RS_PAUSED;
+        bool ctl_parked    = true;
+        bool ctl_step_done = false;
+        bool ctl_step_ok   = true;
+
+        std::thread game_thread([&]() {
+            for (;;) {
+                int st;
+                {
+                    std::unique_lock<std::mutex> lk(ctl_m);
+                    ctl_parked = (ctl_state == RS_PAUSED);
+                    if (ctl_parked) ctl_cv.notify_all();
+                    ctl_cv.wait_for(lk, std::chrono::milliseconds(4),
+                                    [&] { return ctl_state != RS_PAUSED; });
+                    st = ctl_state;
+                }
+                if (st == RS_QUIT) break;
+                if (st == RS_PAUSED) continue;
+                // RS_RUNNING / RS_STEP: run one frame. May wedge inside a freeze
+                // (step_frame never returns); the server thread stays live for
+                // observation regardless. set_keyinput writes bus.io directly and
+                // persists, so input set before `continue` holds across frames.
+                bool ok = step_frame();
+                if (ok) wram_trace_tick();
+                std::lock_guard<std::mutex> lk(ctl_m);
+                if (st == RS_STEP) {
+                    ctl_step_ok   = ok;
+                    ctl_step_done = true;
+                    ctl_state     = RS_PAUSED;
+                    ctl_cv.notify_all();
+                } else if (!ok) {           // RUNNING hit an abnormal stop → park
+                    ctl_state = RS_PAUSED;
+                    ctl_cv.notify_all();
+                }
+            }
+        });
+
+        // Park the game at a frame boundary (best-effort, timeout). Returns true
+        // if parked; false if the core is wedged/running past the timeout (then a
+        // mutating op must refuse — you cannot snapshot a mid-dispatch hung core).
+        auto park_and_wait = [&](int timeout_ms) -> bool {
+            std::unique_lock<std::mutex> lk(ctl_m);
+            if (ctl_state == RS_RUNNING) ctl_state = RS_PAUSED;
+            ctl_cv.notify_all();
+            return ctl_cv.wait_for(lk, std::chrono::milliseconds(timeout_ms),
+                                   [&] { return ctl_parked; });
+        };
+
         debug::TcpDebugServer server;
         debug::TcpDebugServer::Context ctx;
         // ctx.cpu is the armv4t interpreter CPU type; the recomp
@@ -1064,15 +1205,60 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         ctx.runtime_trace_copy = runtime_trace_copy_recent;
         ctx.bus = &bus;
         ctx.ppu = &ppu;
-        ctx.step = step_frame;
+        // Synchronous step: drive ONE frame on the game thread and wait for it.
+        // Same observable semantics as the old in-line step (the WRAM trace fires
+        // on the game thread inside step). Oracle lockstep scripts are unaffected.
+        ctx.step = [&]() -> bool {
+            std::unique_lock<std::mutex> lk(ctl_m);
+            ctl_step_done = false;
+            ctl_state     = RS_STEP;
+            ctl_cv.notify_all();
+            ctl_cv.wait(lk, [&] { return ctl_step_done; });
+            return ctl_step_ok;
+        };
         ctx.step_inst = step_once;
-        ctx.savestate_save = do_savestate_save;
-        ctx.savestate_load = do_savestate_load;
+        ctx.savestate_save = [&](const std::string& p, std::string& e) -> bool {
+            if (!park_and_wait(2000)) {
+                e = "core not parked (running/wedged) — pause first";
+                return false;
+            }
+            return do_savestate_save(p, e);
+        };
+        ctx.savestate_load = [&](const std::string& p, std::string& e) -> bool {
+            if (!park_and_wait(2000)) {
+                e = "core not parked (running/wedged) — pause first";
+                return false;
+            }
+            return do_savestate_load(p, e);
+        };
         ctx.fp_save = [](const std::string& p) {
             return runtime_fp_save_file(p.c_str());
         };
         ctx.misses_query = []() {
             return gbarecomp::self_heal_misses_json();
+        };
+        ctx.resume = [&]() {
+            std::lock_guard<std::mutex> lk(ctl_m);
+            ctl_state = RS_RUNNING;
+            ctl_cv.notify_all();
+        };
+        ctx.pause = [&]() { park_and_wait(2000); };
+        ctx.run_status = [&]() -> std::string {
+            int st; bool pk;
+            { std::lock_guard<std::mutex> lk(ctl_m); st = ctl_state; pk = ctl_parked; }
+            const char* name = st == RS_RUNNING ? "running"
+                             : st == RS_STEP    ? "stepping"
+                             : st == RS_QUIT    ? "quit" : "paused";
+            char buf[192];
+            std::snprintf(buf, sizeof(buf),
+                "{\"ok\":true,\"run\":\"%s\",\"parked\":%s,\"pc\":\"0x%08X\","
+                "\"cpsr\":\"0x%08X\",\"frame\":%llu,\"vblank_starts\":%llu}",
+                name, pk ? "true" : "false",
+                static_cast<unsigned>(g_cpu.R[15]),
+                static_cast<unsigned>(g_cpu.cpsr),
+                static_cast<unsigned long long>(ppu.frame_count()),
+                static_cast<unsigned long long>(g_runtime_vblank_starts));
+            return std::string(buf);
         };
         // The recomp vectors IRQs in runtime_irq (runtime_arm.cpp), called from
         // runtime_tick — NOT in this run loop — so the local irq_entries never
@@ -1084,10 +1270,26 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         ctx.halt_steps = &halt_steps;
         ctx.vblank_irqs_raised = &vblank_irqs_raised;
         ctx.steps = &taken;
-        ctx.cycles_elapsed = &cycles_elapsed;
+        // The recomp's authoritative cycle clock is g_runtime_cycles (ticked in
+        // runtime_tick, used by the fp ring) — NOT the local `cycles_elapsed`,
+        // which only grows in the HALT idle pump (pump_idle) and stays ~0 on the
+        // TCP dispatch path. Surface the real clock so cross-engine cycle diffs
+        // (oracle/cycle_onset.py) align with the interp's cycles_elapsed.
+        // (The local `cycles_elapsed` is still used by the save-state ctx.)
+        ctx.cycles_elapsed = reinterpret_cast<uint64_t*>(&g_runtime_cycles);
         ctx.last_step_cycles = &last_step_cycles;
         ctx.sync_frames = &vblank_count;
         bool ok = server.run(args.tcp_port, ctx);
+        // Server returned (client sent `quit`). Stop the game thread. If it is
+        // wedged in a freeze it will not observe RS_QUIT until the frame returns
+        // (it never will) — but a clean quit is always issued while parked, so
+        // join() returns; a wedged session is ended with taskkill instead.
+        {
+            std::lock_guard<std::mutex> lk(ctl_m);
+            ctl_state = RS_QUIT;
+            ctl_cv.notify_all();
+        }
+        if (game_thread.joinable()) game_thread.join();
         bool save_ok = flush_save();
         gbarecomp::overlay_loader_shutdown();  // join worker + drain before banner
         emit_exit_diagnostics();
@@ -1298,6 +1500,15 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 // Pace to real GBA time. Decoupled from monitor vsync
                 // (MC-HP-004); hold Tab to uncap (fast-forward).
                 if (pacer) pacer->wait_for_next_frame();
+            }
+        }
+        // Differential-oracle WRAM trace fires on frame advance in BOTH windowed
+        // and headless modes (the present block above only runs windowed).
+        if (wram_trace_log) {
+            uint64_t fc_now = ppu.frame_count();
+            if (fc_now != wram_last_traced) {
+                wram_last_traced = fc_now;
+                wram_trace_tick();
             }
         }
         if (!args.window && args.frames >= 0 &&

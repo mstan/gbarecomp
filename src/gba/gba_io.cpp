@@ -3,6 +3,7 @@
 #include "gba_io.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_set>
 
@@ -136,6 +137,18 @@ void GbaIo::run_immediate_dma(int channel) {
     ++dma_runs_[channel];
     dma_words_[channel] += word_count;
 
+    // Always-on DMA-write watchpoint (MC-HP-002). DMA writes go straight through
+    // bus_->write*, bypassing the recompiled-code runtime_trace path, so the CPU
+    // mem-write watchpoint can't see them. When GBARECOMP_DMA_WATCH_ADDR falls in
+    // a transfer's dest range, report the channel/source/dest/value so a corrupt
+    // value landing in RAM via DMA (e.g. an animation frame-pointer) is
+    // attributable. Pure observation. -1 = disabled.
+    static long long dma_watch = -2;
+    if (dma_watch == -2) {
+        const char* e = std::getenv("GBARECOMP_DMA_WATCH_ADDR");
+        dma_watch = e ? static_cast<long long>(std::strtoull(e, nullptr, 0)) : -1;
+    }
+
     uint32_t s = sad;
     uint32_t d = dad;
     for (uint32_t k = 0; k < word_count; ++k) {
@@ -143,6 +156,13 @@ void GbaIo::run_immediate_dma(int channel) {
             bus_->write32(d, bus_->read32(s));
         } else {
             bus_->write16(d, bus_->read16(s));
+        }
+        if (dma_watch >= 0 && d == static_cast<uint32_t>(dma_watch)) {
+            uint32_t v = transfer_32 ? bus_->read32(d) : bus_->read16(d);
+            std::fprintf(stderr,
+                "[dma-watch] ch=%d dad=0x%08X (hit 0x%08X) src=0x%08X val=0x%08X "
+                "size=%u word=%u/%u cnt_h=0x%04X\n",
+                channel, dad, d, s, v, step, k, word_count, cnt_h);
         }
         step_addr(s, src_ctrl);
         step_addr(d, dest_ctrl);

@@ -467,6 +467,27 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         out = buf;
         return;
     }
+    // Free-run control. `continue`/`pause` are NON-BLOCKING: they set the game
+    // thread's run-state and return immediately, so the server (this thread)
+    // stays free to answer observation commands while the game free-runs — even
+    // while it is wedged in a busy-spin freeze (observe-the-hung-core). Place
+    // these BEFORE the generic readers so the short tokens match first.
+    if (contains("\"continue\"") || contains("\"resume\"")) {
+        if (ctx.resume) ctx.resume();
+        out = "{\"ok\":true,\"run\":\"running\"}";
+        return;
+    }
+    if (contains("\"pause\"")) {
+        if (ctx.pause) ctx.pause();
+        out = ctx.run_status ? ctx.run_status()
+                             : std::string("{\"ok\":true,\"run\":\"paused\"}");
+        return;
+    }
+    if (contains("\"run_status\"")) {
+        out = ctx.run_status ? ctx.run_status()
+                             : std::string("{\"ok\":false,\"error\":\"no run_status\"}");
+        return;
+    }
     if (contains("\"read_oam\"")) {
         if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
         cmd_read_region(ctx.bus->oam_ptr(), 1024, req, out, 0x07000000u);

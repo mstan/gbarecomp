@@ -79,6 +79,16 @@ public:
         // counts). Wired in runtime.cpp to gbarecomp::self_heal_misses_json so
         // the debug lib stays independent of the runtime lib.
         std::function<std::string()> misses_query;
+        // Free-run control (game core on its own thread; server on the main
+        // thread). `resume` frees the server to answer OBSERVATION commands
+        // while the game thread is busy/wedged — the whole point: a hung core
+        // stays introspectable. `pause` parks the game at a frame boundary
+        // (waits, best-effort). `run_status` reports the live run-state. `step`
+        // stays synchronous (signals the game thread and waits) for oracle
+        // lockstep. All optional — null in single-threaded / non-TCP harnesses.
+        std::function<void()>        resume;       // free-run (continue)
+        std::function<void()>        pause;        // park at frame boundary
+        std::function<std::string()> run_status;   // JSON: run-state/parked/pc
     };
 
     TcpDebugServer();

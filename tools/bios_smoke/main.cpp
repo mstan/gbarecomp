@@ -20,6 +20,7 @@
 #include <cstring>
 #include <string>
 
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <vector>
@@ -284,6 +285,27 @@ int main(int argc, char** argv) {
         bus.set_rom(rom_bytes.data(), rom_bytes.size());
         if (header.save_type == gba::SaveType::EEPROM) {
             bus.save().configure_eeprom(8 * 1024);
+            // Oracle fidelity: the recomp loads <rom>.sav into EEPROM, so an
+            // oracle that boots with empty EEPROM takes a DIFFERENT game path at
+            // the first save read (DataDoubleReadWithStatus) and every later
+            // recomp-vs-oracle diff is two different game moments. Load the same
+            // .sav so the oracle matches. Gated by GBARECOMP_LOAD_SAV to keep
+            // existing empty-save smoke runs unchanged.
+            if (std::getenv("GBARECOMP_LOAD_SAV")) {
+                std::filesystem::path sp(args.rom);
+                sp.replace_extension(".sav");
+                std::error_code ec;
+                if (std::filesystem::exists(sp, ec)) {
+                    std::ifstream sf(sp, std::ios::binary);
+                    std::vector<uint8_t> sb((std::istreambuf_iterator<char>(sf)),
+                                            std::istreambuf_iterator<char>());
+                    if (!sb.empty() && sb.size() <= bus.save().eeprom_size()) {
+                        bus.save().load_eeprom_bytes(sb.data(), sb.size());
+                        std::printf("save_loaded(interp) path=\"%s\" size=%zu\n",
+                                    sp.string().c_str(), sb.size());
+                    }
+                }
+            }
         }
         if (!args.quiet) {
             std::printf("rom_loaded %s size=%zu save=%d\n",
@@ -305,6 +327,26 @@ int main(int argc, char** argv) {
     uint64_t cycles_elapsed = 0;
     uint32_t last_step_cycles = 0;
     bool frame_just_completed = false;
+
+    // MC-HP-002 IRQ-vector log, mirroring the recomp's runtime_irq_log
+    // (GBARECOMP_IRQ_LOG). One CSV row per IRQ vectoring so the recomp's and
+    // interp's IRQ delivery (VBlank cycle timing, VCount onset) can be diffed
+    // apples-to-apples. Armed by the same env var; dumped on TCP-server exit.
+    const bool irq_log_on = std::getenv("GBARECOMP_IRQ_LOG") != nullptr;
+    struct IrqLogRow { uint64_t cycles; uint32_t src; uint32_t ret;
+                       uint32_t cpsr; uint32_t from_halt; };
+    std::vector<IrqLogRow> irq_log;
+    const bool swi_log_on = std::getenv("GBARECOMP_SWI_LOG") != nullptr;
+    struct SwiLogRow { uint64_t cycles; uint32_t imm; uint32_t ret;
+                       uint32_t r0; uint32_t r1; uint32_t r2; uint32_t lr;
+                       uint32_t iwflags; };
+    std::vector<SwiLogRow> swi_log;
+    auto log_irq = [&](uint32_t from_halt) {
+        if (!irq_log_on) return;
+        uint32_t src = static_cast<uint32_t>(bus.read16(0x04000200u) &
+                                             bus.read16(0x04000202u));
+        irq_log.push_back({cycles_elapsed, src, cpu.R[15], 0u, from_halt});
+    };
     auto pump_ppu = [&](uint32_t cycles) {
         uint32_t remaining = cycles;
         while (remaining != 0) {
@@ -387,7 +429,7 @@ int main(int argc, char** argv) {
         const char* it = std::getenv("GBARECOMP_INSN_TRACE");
         return it && it[0] && it[0] != '0';
     }();
-    constexpr size_t kFpSize = 1u << 20;  // ~1M instructions, matches the recomp
+    constexpr size_t kFpSize = 1u << 23;  // ~8M instructions, matches the recomp
     std::vector<RuntimeFpEntry> fp_ring;
     size_t fp_write = 0, fp_count = 0;
     if (fp_armed) fp_ring.resize(kFpSize);
@@ -518,7 +560,9 @@ int main(int argc, char** argv) {
         };
 
         if (bus.io().irq_pending() && !cpu.cpsr.i) {
+            uint32_t was_halted = bus.io().halted() ? 1u : 0u;
             if (bus.io().halted()) bus.io().clear_halt();
+            log_irq(was_halted);
             armv4t::Interpreter::enter_irq(cpu, cpu.R[15]);
             ++irq_entries;
         }
@@ -533,6 +577,7 @@ int main(int argc, char** argv) {
             if (bus.io().irq_pending() && !cpu.cpsr.i) {
                 pump_step(kGbaIrqDelayCycles);
                 bus.io().clear_halt();
+                log_irq(1u);
                 armv4t::Interpreter::enter_irq(cpu, cpu.R[15]);
                 ++irq_entries;
             } else {
@@ -560,6 +605,12 @@ int main(int argc, char** argv) {
         uint32_t insn_cycles = 1;
         auto r = armv4t::Interpreter::step(cpu, bus, insn, &insn_cycles);
         if (r == armv4t::Interpreter::Result::Swi) {
+            if (swi_log_on) {
+                uint32_t imm = cpu.thumb ? (bus.read16(pc) & 0xFFu)
+                                         : (bus.read32(pc) & 0x00FFFFFFu);
+                swi_log.push_back({cycles_elapsed, imm, pc, cpu.R[0], cpu.R[1],
+                                   cpu.R[2], cpu.R[14], bus.read32(0x03007FF8u)});
+            }
             uint32_t next_pc = pc + (cpu.thumb ? 2u : 4u);
             armv4t::Interpreter::enter_swi(cpu, next_pc, cpu.thumb);
             ++swi_entries;
@@ -677,6 +728,39 @@ int main(int argc, char** argv) {
         srv_ctx.last_step_cycles   = &last_step_cycles;
         srv_ctx.sync_frames        = &vblank_count;
         server.run(args.tcp_port, srv_ctx);
+        if (irq_log_on) {
+            const char* p = std::getenv("GBARECOMP_IRQ_LOG");
+            // Interp writes a sibling file (…_interp.csv) so it never clobbers
+            // the recomp's CSV when both share the env var.
+            std::string path = std::string(p) + ".interp.csv";
+            if (FILE* f = std::fopen(path.c_str(), "wb")) {
+                std::fprintf(f, "seq,cycles,src,ret,cpsr,from_halt\n");
+                for (size_t i = 0; i < irq_log.size(); ++i) {
+                    const auto& e = irq_log[i];
+                    std::fprintf(f, "%zu,%llu,0x%04x,0x%08x,0x%08x,%u\n",
+                                 i, (unsigned long long)e.cycles, e.src, e.ret,
+                                 e.cpsr, e.from_halt);
+                }
+                std::fclose(f);
+                std::printf("irq_log_saved(interp) path=\"%s\" records=%zu\n",
+                            path.c_str(), irq_log.size());
+            }
+        }
+        if (swi_log_on) {
+            std::string path = std::string(std::getenv("GBARECOMP_SWI_LOG")) + ".interp.csv";
+            if (FILE* f = std::fopen(path.c_str(), "wb")) {
+                std::fprintf(f, "seq,cycles,imm,ret,r0,r1,r2,lr,iwflags\n");
+                for (size_t i = 0; i < swi_log.size(); ++i) {
+                    const auto& e = swi_log[i];
+                    std::fprintf(f, "%zu,%llu,%u,0x%08x,0x%08x,0x%08x,0x%08x,0x%08x,0x%08x\n",
+                                 i, (unsigned long long)e.cycles, e.imm, e.ret,
+                                 e.r0, e.r1, e.r2, e.lr, e.iwflags);
+                }
+                std::fclose(f);
+                std::printf("swi_log_saved(interp) path=\"%s\" records=%zu\n",
+                            path.c_str(), swi_log.size());
+            }
+        }
         return 0;
     }
 

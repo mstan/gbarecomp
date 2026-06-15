@@ -1,0 +1,17 @@
+# Build output + locally-supplied, separately-licensed runtime deps.
+gbaref.exe
+*.obj
+*.o
+SDL2.dll
+*_libretro.dll
+mgba_libretro.dll
+# Captures / states
+*.jsonl
+gbaref_state_*.bin
+*.wav
+# BIOS image (copyright — supplied locally, never committed)
+gba_bios.bin
+# point-in-time RAM dumps (D key)
+gbaref_*wram_f*.bin
+gbaref_run.log
+*.srm
