@@ -330,19 +330,50 @@ void render_scanline_internal(uint8_t* rgb,
         bool valid = false;
     };
 
+    // ── Windows (GBATEK "LCD I/O Windows") ──────────────────────────────
+    // window_control(x) returns the 6-bit per-pixel mask (BG0-3, OBJ, and bit5
+    // = color-special-effect enable) chosen by region, priority WIN0 > WIN1 >
+    // OBJ-window > outside. WIN0/WIN1 are COORDINATE windows: WINnH gives
+    // [X1,X2), WINnV gives [Y1,Y2). The per-scanline WIN0H the game rewrites
+    // each line is what carves the circular IRIS used by room transitions — it
+    // blanks everything outside the circle to the backdrop, hiding the room's
+    // VRAM/palette reload (MC-HP-003). With no window enabled, every layer is on.
+    const bool win0_en   = (dispcnt & 0x2000u) != 0;
+    const bool win1_en   = (dispcnt & 0x4000u) != 0;
+    const bool objwin_en = (dispcnt & 0x8000u) != 0;
+    const bool any_window = win0_en || win1_en || objwin_en;
+    uint16_t winin  = static_cast<uint16_t>(io[0x48] | (io[0x49] << 8));
     uint16_t winout = static_cast<uint16_t>(io[0x4A] | (io[0x4B] << 8));
+    // y within WINnV [Y1,Y2)? GBATEK: Y2>height or Y1>Y2 → Y2=height.
+    auto win_v_row = [&](uint32_t vreg) -> bool {
+        uint32_t v  = static_cast<uint32_t>(io[vreg] | (io[vreg + 1] << 8));
+        uint32_t y1 = (v >> 8) & 0xFFu, y2 = v & 0xFFu;
+        if (y2 > kScreenHeight || y1 > y2) y2 = kScreenHeight;
+        return y >= y1 && y < y2;
+    };
+    // x within WINnH [X1,X2)? GBATEK: X2>width or X1>X2 → X2=width.
+    auto win_h_in = [&](uint32_t hreg, uint32_t x) -> bool {
+        uint32_t h  = static_cast<uint32_t>(io[hreg] | (io[hreg + 1] << 8));
+        uint32_t x1 = (h >> 8) & 0xFFu, x2 = h & 0xFFu;
+        if (x2 > kScreenWidth || x1 > x2) x2 = kScreenWidth;
+        return x >= x1 && x < x2;
+    };
+    const bool win0_row = win0_en && win_v_row(0x44);
+    const bool win1_row = win1_en && win_v_row(0x46);
     bool obj_window_storage[GbaPpu::kScreenWidth] = {};
     bool* obj_window_mask = nullptr;
-    if (dispcnt & 0x8000u) {
+    if (objwin_en) {
         mark_obj_window_scanline(obj_window_storage, y, dispcnt, vram, oam,
                                  kScreenWidth, kScreenHeight);
         obj_window_mask = obj_window_storage;
     }
     auto window_control = [&](uint32_t x) -> uint16_t {
-        if (!obj_window_mask) return 0x3Fu;
-        return obj_window_mask[x]
-            ? static_cast<uint16_t>((winout >> 8) & 0x3Fu)
-            : static_cast<uint16_t>(winout & 0x3Fu);
+        if (!any_window) return 0x3Fu;
+        if (win0_row && win_h_in(0x40, x)) return winin & 0x3Fu;
+        if (win1_row && win_h_in(0x42, x)) return (winin >> 8) & 0x3Fu;
+        if (obj_window_mask && obj_window_mask[x])
+            return static_cast<uint16_t>((winout >> 8) & 0x3Fu);
+        return static_cast<uint16_t>(winout & 0x3Fu);
     };
     auto layer_enabled = [&](uint32_t x, uint32_t layer_bit) -> bool {
         return (window_control(x) & (1u << layer_bit)) != 0;
@@ -646,6 +677,9 @@ void render_scanline_internal(uint8_t* rgb,
         }
     }
 
+    // BLDY brightness coefficient (clamped to 16/16 = full).
+    uint32_t bldy = static_cast<uint32_t>(io[0x54] | (io[0x55] << 8)) & 0x1Fu;
+    if (bldy > 16u) bldy = 16u;
     for (uint32_t x = 0; x < kScreenWidth; ++x) {
         uint8_t* dst = row + x * 3;
         if (effect == 1 && (bldalpha & 0x1Fu) != 0 &&
@@ -655,6 +689,17 @@ void render_scanline_internal(uint8_t* rgb,
                                bldalpha & 0x1Fu,
                                (bldalpha >> 8) & 0x1Fu,
                                dst);
+        } else if ((effect == 2u || effect == 3u) && bldy != 0u && top[x].target1) {
+            // Brightness fade on first-target pixels (BLDCNT effect 2/3, gated by
+            // the window's color-effect-enable via top[x].target1):
+            //   brighten: I' = I + (255-I)*BLDY/16   darken: I' = I - I*BLDY/16
+            // Drives fade-to-white / fade-to-black room transitions (MC-HP-003).
+            for (int c = 0; c < 3; ++c) {
+                int v = top[x].rgb[c];
+                if (effect == 2u) v += ((255 - v) * static_cast<int>(bldy)) / 16;
+                else              v -= (v * static_cast<int>(bldy)) / 16;
+                dst[c] = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+            }
         } else {
             dst[0] = top[x].rgb[0];
             dst[1] = top[x].rgb[1];
