@@ -59,6 +59,11 @@ bool is_load(IrOp op) {
     return op == IrOp::LDR || op == IrOp::LDRB || op == IrOp::LDRH ||
            op == IrOp::LDRSB || op == IrOp::LDRSH;
 }
+bool is_mul_op(IrOp op) {
+    // 32-bit forms only; 64-bit long multiplies (UMULL/UMLAL/SMULL/SMLAL)
+    // need branchless 64-bit N/Z flag derivation — declined until added.
+    return op == IrOp::MUL || op == IrOp::MLA;
+}
 unsigned access_width(IrOp op) {
     switch (op) {
         case IrOp::LDRB: case IrOp::STRB: case IrOp::LDRSB: return 1;
@@ -348,6 +353,48 @@ bool emit_mem(struct sljit_compiler* C, const Instr& ins) {
     return true;
 }
 
+// ── Multiply (MUL/MLA). S0=&g_cpu; S1=result, S4=cyc. ──
+bool emit_mul(struct sljit_compiler* C, const Instr& ins) {
+    const unsigned rd = ins.rd, rn = ins.rn, rm = ins.rm, rs = ins.rs;
+
+    // cyc = base(1) + runtime_mul_cycles(operand, signed=1, extra). The
+    // multiplier operand is Rm on THUMB MUL, else Rs; MLA adds extra=1.
+    sljit_emit_op1(C, SLJIT_MOV32, SLJIT_S4, 0, SLJIT_IMM,
+                   static_cast<sljit_sw>(instr_cycle_base(ins.op)));
+    const unsigned cyc_operand =
+        (ins.op == IrOp::MUL && ins.thumb) ? rm : rs;
+    const unsigned extra = (ins.op == IrOp::MLA) ? 1u : 0u;
+    sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0,
+                   SLJIT_MEM1(SLJIT_S0), kRegOff(cyc_operand));
+    sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R1, 0, SLJIT_IMM, 1);  // signed_variant
+    sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R2, 0, SLJIT_IMM,
+                   static_cast<sljit_sw>(extra));
+    sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS3(32, 32, 32, 32),
+                     SLJIT_IMM, addr_of((const void*)&runtime_mul_cycles));
+    sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_R0, 0);
+
+    // result = Rm * Rs (+ Rn for MLA), low 32 bits.
+    sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(rm));
+    sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(rs));
+    sljit_emit_op2(C, SLJIT_MUL32, SLJIT_S1, 0, SLJIT_R0, 0, SLJIT_R1, 0);
+    if (ins.op == IrOp::MLA) {
+        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(rn));
+        sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_R2, 0);
+    }
+    sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(rd), SLJIT_S1, 0);
+
+    if (ins.set_flags) {  // MUL/MLA set N/Z only (C unchanged on ARMv4T).
+        sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S1, 0);
+        sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1V(32),
+                         SLJIT_IMM, addr_of((const void*)&arm_set_nz));
+    }
+
+    sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S4, 0);
+    sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1V(32),
+                     SLJIT_IMM, addr_of((const void*)&runtime_tick));
+    return true;
+}
+
 }  // namespace
 
 bool sljit_supports(const Instr& ins) {
@@ -372,6 +419,11 @@ bool sljit_supports(const Instr& ins) {
         }
         return true;
     }
+    if (is_mul_op(ins.op)) {  // R15 is unpredictable as a multiply operand
+        if (ins.rd == 15 || ins.rm == 15 || ins.rs == 15) return false;
+        if (ins.op == IrOp::MLA && ins.rn == 15) return false;
+        return true;
+    }
     return false;
 }
 
@@ -388,6 +440,7 @@ SljitFn emit_instr_sljit(const Instr& ins) {
     bool ok;
     if (is_dp_op(ins.op))       ok = emit_dp(C, ins);
     else if (is_mem_op(ins.op)) ok = emit_mem(C, ins);
+    else if (is_mul_op(ins.op)) ok = emit_mul(C, ins);
     else                        ok = false;
     if (!ok) { sljit_free_compiler(C); return SljitFn{}; }
 
