@@ -20,7 +20,8 @@ namespace gbarecomp {
 void set_active_bus(gba::GbaBus* bus);
 void set_active_ppu(gba::GbaPpu* ppu);
 
-// Retrieve the currently-bound bus, or nullptr if none.
+// Retrieve the currently-bound bus / ppu, or nullptr if none.
 gba::GbaBus* active_bus();
+gba::GbaPpu* active_ppu();
 
 }  // namespace gbarecomp

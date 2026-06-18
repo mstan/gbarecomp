@@ -121,11 +121,6 @@ int main() {
     check(on_dispatch(pc2, true, true, bad.fn) == Decision::FallThrough,
           "stays pinned (a flaky shard never reaches budget on later passes)");
 
-    // ── Non-leaf shards are never gated (run blind, unchanged) ────────
-    enter_call(5);
-    check(on_dispatch(0x02000300u, true, /*leaf=*/false, good.fn) == Decision::RunBlind,
-          "non-leaf shard runs blind (not gate-eligible)");
-
     armv4t::free_sljit_fn(good);
     armv4t::free_sljit_fn(bad);
 

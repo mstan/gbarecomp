@@ -121,8 +121,12 @@ void runtime_dispatch_miss(uint32_t target_pc);
 // on-miss bridge). Non-zero → stop there instead: the gate passes the entry LR,
 // since a function reached by a computed jump (not a BL) has no matching
 // call-return frame and the stack-top contract would mis-target and run away.
-void runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
-                              uint32_t forced_stop_pc);
+// max_instrs=0 → the default 200M abort-on-runaway; non-zero bounds the walk and
+// returns 0 (instead of aborting) if the stop isn't reached in that budget — the
+// gate uses this to fall back safely when its forced stop turns out wrong.
+// Returns 1 if it stopped cleanly at the stop address, 0 if it hit the budget.
+int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
+                             uint32_t forced_stop_pc, uint64_t max_instrs);
 
 // Direct generated BL calls use the host C stack for speed and clarity.
 // Return idioms (`bx lr`, `mov pc, lr`, `pop {..., pc}`) are only C

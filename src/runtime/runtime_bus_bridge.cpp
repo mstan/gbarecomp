@@ -141,6 +141,10 @@ gba::GbaBus* active_bus() {
     return g_active_bus;
 }
 
+gba::GbaPpu* active_ppu() {
+    return g_active_ppu;
+}
+
 // Always-on hang watchdog capture. Called once when the watchdog trips;
 // snapshots the live MP2K channel state (the MC-HP-002 spin walks a
 // corrupt voice pointer) to stderr and hang_dump.log next to the runner.

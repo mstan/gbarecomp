@@ -343,9 +343,14 @@ void record_and_log_miss(std::uint32_t pc, bool thumb) {
 // contract and per-instruction tick (IRQ self-delivery + SWI routing) as the
 // on-miss bridge, mutating g_cpu live. The miss log + heal enqueue belong to the
 // dispatch-miss handler (below), not here.
-extern "C" void runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
-                                         uint32_t forced_stop_pc) {
+extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
+                                        uint32_t forced_stop_pc,
+                                        std::uint64_t max_instrs) {
     using gbarecomp::active_bus;
+
+    // Instruction budget: 0 → the default 200M abort-on-runaway (the on-miss
+    // bridge); non-zero → a bounded gate pass that returns 0 instead of aborting.
+    const std::uint64_t cap = max_instrs != 0u ? max_instrs : kBridgeIterationCap;
 
     gba::GbaBus* bus = active_bus();
     if (!bus) {
@@ -462,7 +467,16 @@ extern "C" void runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
 
         if ((cpu.R[15] & ~1u) == stop_pc) break;
 
-        if (++iters > kBridgeIterationCap) {
+        if (++iters > cap) {
+            if (max_instrs != 0u) {
+                // Gate (bounded) mode: the validation's interp pass didn't reach
+                // its stop within the budget — almost always a wrong stop (a
+                // function reached via a computed jump whose LR points far up the
+                // call chain). Don't abort; return 0 so the gate restores the
+                // pre-call state and falls back to the normal dispatch path.
+                gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
+                return 0;
+            }
             gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
             std::fprintf(stderr,
                 "runtime_arm: SELF-HEAL bridge for 0x%08X exceeded %llu "
@@ -489,6 +503,7 @@ extern "C" void runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
     }
     // Control returns to the recompiled caller's BL site, which checks
     // g_cpu.R[15] == its pushed return address (== stop_pc) and continues.
+    return 1;
 }
 
 // runtime_dispatch_miss — Stage-1 self-healing entry: log the miss, enqueue a
@@ -499,7 +514,8 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     const bool entry_thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
     record_and_log_miss(entry_pc, entry_thumb);
     gbarecomp::overlay_request_compile(entry_pc, entry_thumb);
-    runtime_bridge_interpret(entry_pc, entry_thumb, /*forced_stop_pc=*/0u);
+    runtime_bridge_interpret(entry_pc, entry_thumb, /*forced_stop_pc=*/0u,
+                             /*max_instrs=*/0u);
 }
 
 extern "C" void runtime_unimplemented_op(const char* op_name,
