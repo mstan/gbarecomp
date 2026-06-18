@@ -69,7 +69,7 @@ bool decode_function(uint32_t pc, bool thumb, const uint8_t* bytes,
 bool overlay_sljit_produce(uint32_t pc, bool thumb,
                            const uint8_t* bytes, std::size_t size, uint32_t base,
                            void (**out_fn)(void), void** out_code,
-                           uint32_t* out_end) {
+                           uint32_t* out_end, bool* out_leaf) {
     std::vector<armv4t::Instr> prog;
     uint32_t end = 0;
     if (!decode_function(pc, thumb, bytes, size, base, prog, &end)) return false;
@@ -81,6 +81,15 @@ bool overlay_sljit_produce(uint32_t pc, bool thumb,
     *out_fn = fn.fn;
     *out_code = fn.code;
     *out_end = end;
+    if (out_leaf) {
+        // Leaf = no outgoing call (BL/BLX). Such a function returns via bx lr /
+        // pop {pc} / mov pc,lr and never re-enters dispatch from its body, so the
+        // P6 gate can shadow-validate it in isolation.
+        bool leaf = true;
+        for (const auto& in : prog)
+            if (in.is_call) { leaf = false; break; }
+        *out_leaf = leaf;
+    }
     return true;
 }
 

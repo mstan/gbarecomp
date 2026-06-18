@@ -23,12 +23,14 @@ namespace gbarecomp {
 // Produce a native shard for the function rooted at (pc, thumb) in the immutable
 // code image [bytes, bytes+size) based at `base`. On success: *out_fn = the host
 // entry, *out_code = the sljit code block (kept for the process lifetime; the OS
-// reclaims it at exit), *out_end = the function's exclusive end address; returns
-// true. Returns false on decline.
+// reclaims it at exit), *out_end = the function's exclusive end address,
+// *out_leaf = true iff the function makes no calls (BL/BLX — gate-eligible for
+// the P6 differential gate); returns true. Returns false on decline. out_leaf
+// may be null.
 bool overlay_sljit_produce(uint32_t pc, bool thumb,
                            const uint8_t* bytes, std::size_t size, uint32_t base,
                            void (**out_fn)(void), void** out_code,
-                           uint32_t* out_end);
+                           uint32_t* out_end, bool* out_leaf = nullptr);
 
 // True iff the function rooted at (pc, thumb) is discoverable AND every
 // instruction in its extent is lowerable by the emitter (sljit_supports). Used

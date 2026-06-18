@@ -17,6 +17,7 @@
 #include "overlay_abi.h"
 #include "overlay_compile.h"
 #include "overlay_sljit_heal.h"   // in-process sljit producer (toolchain-less)
+#include "sljit_gate.h"           // P6 differential gate (validate shard vs interp)
 #include "runtime_arm.h"          // g_cpu, g_runtime_*, every runtime/bus/arm fn
 #include "runtime_bus_bridge.h"   // active_bus
 #include "../gba/gba_bus.h"       // rom_ptr / rom_size
@@ -43,6 +44,7 @@ struct HealedEntry {
     uint32_t end = 0;
     uint64_t native_calls = 0;
     bool     sljit = false;      // produced in-process (no DLL) vs a gcc DLL
+    bool     leaf  = false;      // sljit only: makes no calls → P6-gate-eligible
 };
 
 // ── Worker → game-thread result ────────────────────────────────────
@@ -331,11 +333,12 @@ static bool register_sljit_heal(uint32_t pc, bool thumb, const uint8_t* bytes,
     void (*fn)(void) = nullptr;
     void* code = nullptr;
     uint32_t end = 0;
-    if (!overlay_sljit_produce(pc, thumb, bytes, size, base, &fn, &code, &end))
+    bool leaf = false;
+    if (!overlay_sljit_produce(pc, thumb, bytes, size, base, &fn, &code, &end, &leaf))
         return false;
     HealedEntry h;
     h.addr = pc; h.thumb = thumb; h.fn = fn; h.module = code;
-    h.end = end; h.sljit = true;
+    h.end = end; h.sljit = true; h.leaf = leaf;
     g_healed[heal_key(pc, thumb)] = h;
     ++s_sljit_healed;
     std::printf("self_heal: %s 0x%08X (%s) [0x%08X,0x%08X) — sljit native\n",
@@ -438,9 +441,24 @@ extern "C" int overlay_try_dispatch(uint32_t pc, int thumb) {
     auto it = gbarecomp::g_healed.find(
         gbarecomp::heal_key(pc, thumb != 0));
     if (it == gbarecomp::g_healed.end() || !it->second.fn) return 0;
-    ++it->second.native_calls;
+    gbarecomp::HealedEntry& e = it->second;
+
+    // P6 differential gate (default off): for an sljit shard not yet promoted,
+    // run the interpreter pass (kept result) + validate the shard against it.
+    if (e.sljit && gbarecomp::sljit_gate::enabled()) {
+        switch (gbarecomp::sljit_gate::on_dispatch(pc, thumb != 0, e.leaf, e.fn)) {
+            case gbarecomp::sljit_gate::Decision::FallThrough:
+                return 0;  // pinned → the interpreter bridge runs it
+            case gbarecomp::sljit_gate::Decision::Handled:
+                return 1;  // gate already executed the function (via interp)
+            case gbarecomp::sljit_gate::Decision::RunBlind:
+                break;     // promoted / not gate-eligible → run native below
+        }
+    }
+
+    ++e.native_calls;
     ++gbarecomp::s_native_calls_total;
-    it->second.fn();
+    e.fn();
     return 1;
 }
 

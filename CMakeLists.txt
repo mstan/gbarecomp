@@ -220,6 +220,7 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/overlay_loader.cpp
     src/runtime/overlay_compile.cpp
     src/runtime/overlay_sljit_heal.cpp
+    src/runtime/sljit_gate.cpp
     src/runtime/host_platform.cpp
     src/runtime/host_window.cpp
     src/runtime/color_lut.cpp
