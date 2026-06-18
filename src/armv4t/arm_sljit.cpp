@@ -457,6 +457,43 @@ SljitFn emit_instr_sljit(const Instr& ins) {
     return out;
 }
 
+SljitFn emit_block_sljit(const Instr* ins, unsigned count) {
+    if (count == 0) return SljitFn{};
+    for (unsigned i = 0; i < count; ++i)
+        if (!sljit_supports(ins[i])) return SljitFn{};
+
+    struct sljit_compiler* C = sljit_create_compiler(nullptr);
+    if (!C) return SljitFn{};
+
+    // One enter; S0 = &g_cpu shared by every leaf. State between instructions
+    // lives in g_cpu (memory-backed), so the leaves compose without any
+    // cross-instruction register coordination.
+    sljit_emit_enter(C, 0, SLJIT_ARGS0V(), 4, 5, 0);
+    sljit_emit_op1(C, SLJIT_MOV, SLJIT_S0, 0, SLJIT_IMM, addr_of(&g_cpu));
+
+    for (unsigned i = 0; i < count; ++i) {
+        const Instr& in = ins[i];
+        bool ok;
+        if (is_dp_op(in.op))       ok = emit_dp(C, in);
+        else if (is_mem_op(in.op)) ok = emit_mem(C, in);
+        else if (is_mul_op(in.op)) ok = emit_mul(C, in);
+        else                       ok = false;
+        if (!ok) { sljit_free_compiler(C); return SljitFn{}; }
+    }
+
+    sljit_emit_return_void(C);
+    void* code = sljit_generate_code(C, 0, nullptr);
+    sljit_uw size = sljit_get_generated_code_size(C);
+    sljit_free_compiler(C);
+    if (!code) return SljitFn{};
+
+    SljitFn out;
+    out.fn = reinterpret_cast<void (*)(void)>(code);
+    out.code = code;
+    out.code_size = static_cast<unsigned long>(size);
+    return out;
+}
+
 void free_sljit_fn(const SljitFn& f) {
     if (f.code) sljit_free_code(f.code, nullptr);
 }

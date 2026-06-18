@@ -525,6 +525,21 @@ target_link_libraries(sljit_codegen_tests PRIVATE
     gbarecomp_sljit_emit gbarecomp_armv4t)
 add_test(NAME sljit_codegen_tests COMMAND sljit_codegen_tests)
 
+# sljit_block_tests — whole-function composition (P5). Synthesizes instruction
+# sequences and diffs the JIT'd block (emit_block_sljit) vs the interpreter
+# stepping each, proving leaves chain through g_cpu with correct cycle totals.
+# Reuses tests/codegen/stubs.cpp (runtime_tick + bus). See SLJIT.md §5.1.
+add_executable(sljit_block_tests
+    tests/sljit/block_test.cpp
+    tests/codegen/stubs.cpp
+)
+target_include_directories(sljit_block_tests PRIVATE
+    tests/codegen
+    src/armv4t)
+target_link_libraries(sljit_block_tests PRIVATE
+    gbarecomp_sljit_emit gbarecomp_armv4t)
+add_test(NAME sljit_block_tests COMMAND sljit_block_tests)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # selfheal_stage2_bios_identical — Stage-2 GFP1 byte-identity gate. Proves a
 # healed-to-native BIOS function (0xBA4 exclude fixture) executes instruction-

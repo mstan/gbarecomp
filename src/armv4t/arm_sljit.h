@@ -42,6 +42,15 @@ struct SljitFn {
 // control flow. Returns fn=null when the op/shape is not yet lowered.
 SljitFn emit_instr_sljit(const Instr& ins);
 
+// Compose `count` supported leaf instructions into ONE straight-line host
+// function (no control flow yet). The whole-function producer's first
+// composition step: it proves the per-instruction leaves chain correctly —
+// register/memory state flows through g_cpu, per-instruction cycles accumulate.
+// Declines (fn=null) if ANY instruction is unsupported. The faithful
+// per-instruction prologue (R15/yield/fingerprint) and branches/terminators
+// land in the next P5 steps.
+SljitFn emit_block_sljit(const Instr* ins, unsigned count);
+
 // Release a compiled shard (sljit_free_code). Safe on a declined (null) result.
 void free_sljit_fn(const SljitFn& f);
 
