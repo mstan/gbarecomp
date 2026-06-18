@@ -881,6 +881,18 @@ const TestCase kTestCases[] = {
       {0x201u, 0, 0, 0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
       (1u<<5) | MODE_SYSTEM, nullptr, 0, true, 0, 0 },
 
+    // ── ARM mov pc, lr — the AAPCS return idiom (C-return path) ───
+    //   MOV r15, r14 (0xE1A0F00E): pc = lr & ~3, then should_return/dispatch.
+    { "arm_mov_pc_lr", false, 0x100u, 0xE1A0F00Eu,
+      {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0x08001000u, 0x100u},
+      MODE_SYSTEM, nullptr, 0, /*branches*/ true, 0, 0 },
+
+    // ── ARM add pc, r0, #8 — computed jump (dispatch path) ────────
+    //   ADD r15, r0, #8 (0xE280F008): pc = (r0 + 8) & ~3, dispatch.
+    { "arm_add_pc_imm", false, 0x100u, 0xE280F008u,
+      {0x08002000u,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, /*branches*/ true, 0, 0 },
+
     // ── THUMB fmt3 CMP imm (CMP r0, #5) ───────────────────────────
     //   word = 0x2805
     { "thumb_cmp_imm", true, 0x100u, 0x00002805u,

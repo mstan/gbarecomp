@@ -22,7 +22,12 @@ bool body_supported(const Instr& ins) {
             if (ins.op2.shifted.by_register) return false;  // register count → later
             if (ins.op2.shifted.rm == 15) return false;     // PC operand → later
         }
-        if (!is_test_op(ins.op) && ins.rd == 15) return false;
+        if (!is_test_op(ins.op) && ins.rd == 15) {
+            // PC-write DP (mov pc, lr / computed jump) IS supported — see
+            // emit_dp. But S=1 (MOVS pc = exception return / SPSR restore)
+            // needs privileged-mode SPSR handling → later.
+            if (ins.set_flags) return false;
+        }
         if (uses_rn(ins.op) && ins.rn == 15) return false;
         return true;
     }

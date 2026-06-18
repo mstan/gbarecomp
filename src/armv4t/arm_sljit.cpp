@@ -15,10 +15,12 @@
 //   P7b:       + PC-relative LDR literal (LDR rd, [pc, #imm], rd!=15) — base
 //              baked as the pc-pipeline constant; no-writeback pre-indexed only.
 //   P7c:       + LDRSH (runtime ea&1 branch: sext8 on the odd byte else sext16).
+//   P7d:       + PC-write DP (rd==15, S=0): mov pc,lr return idiom (C-return) /
+//              computed jump (dispatch); exits the function like a branch.
 // Still DECLINED (precision over recall → caller runs gcc / interpreter):
 //   register-COUNT shifts, non-LSL reg offsets, long multiplies, PSR/SWI,
-//   R15 as a value operand / PC-write loads, LDM/STM s_bit + empty-list +
-//   PC base.
+//   R15 as a value operand, S=1 PC-write (exception return), PC-write loads,
+//   LDM/STM s_bit + empty-list + PC base.
 //
 // Parity is by construction: value/carry/address/flag math mirrors
 // arm_codegen.cpp, and the per-instruction prologue/epilogue mirrors
@@ -64,9 +66,13 @@ void emit_cpsr_c(struct sljit_compiler* C, sljit_s32 dst) {
 }
 
 // ── Data processing. S0=&g_cpu; S1=result, S2=Rn, S3=Op2, S4=Op2 carry.
-// cyc is a fixed 1S (no register-count-shift surcharge; no PC write), already
-// the S5 baseline set by emit_one_body, so emit_dp leaves S5 untouched. ──
-bool emit_dp(struct sljit_compiler* C, const Instr& ins) {
+// cyc baseline (1S) is set by emit_one_body and normally left untouched — EXCEPT
+// a PC write (rd==15, S=0): like a branch it adds the +2 non-branch refill, ticks
+// S5, then exits the function via ret_jumps (the `mov pc, lr` return idiom
+// C-returns through runtime_call_should_return; any other PC write dispatches).
+// S=1 PC writes (MOVS pc = exception return) are declined upstream. ──
+bool emit_dp(struct sljit_compiler* C, const Instr& ins,
+             std::vector<struct sljit_jump*>& ret_jumps) {
     const IrOp op = ins.op;
     const bool test = is_test_op(op);
     const bool logical = is_logical_op(op);
@@ -178,6 +184,36 @@ bool emit_dp(struct sljit_compiler* C, const Instr& ins) {
             sljit_emit_op2(C, SLJIT_SUB32, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
             sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_R0, 0); break;
         default: return false;
+    }
+
+    if (!test && ins.rd == 15) {
+        // PC write (S=0; the result is in S1). Mask (ARM ~3, THUMB ~1), set R15,
+        // add the +2 pipeline refill, tick, and exit the function like a branch.
+        sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM,
+                       ins.thumb ? kM1 : kM3);
+        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(15), SLJIT_R0, 0);
+        sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_IMM, 2);
+        sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S5, 0);
+        sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1V(32),
+                         SLJIT_IMM, addr_of((const void*)&runtime_tick));
+        // `mov pc, lr` (plain R14 move, no shift) is the AAPCS return idiom.
+        const bool is_lr_return =
+            (op == IrOp::MOV && ins.op2.kind == Op2::Kind::Shifted &&
+             ins.op2.shifted.rm == 14 && !ins.op2.shifted.by_register &&
+             ins.op2.shifted.imm_or_rs == 0);
+        if (is_lr_return) {
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(15));
+            sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1(32, 32),
+                             SLJIT_IMM, addr_of((const void*)&runtime_call_should_return));
+            sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 0xFF);
+            ret_jumps.push_back(
+                sljit_emit_cmp(C, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
+        }
+        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(15));
+        sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1V(32),
+                         SLJIT_IMM, addr_of((const void*)&runtime_dispatch));
+        ret_jumps.push_back(sljit_emit_jump(C, SLJIT_JUMP));
+        return true;  // S=0 → no flags; function exits here.
     }
 
     if (!test)
@@ -695,7 +731,7 @@ bool emit_one_body(struct sljit_compiler* C, const Instr& ins,
 
     bool ok;
     if (is_branch_op(ins.op))     ok = emit_branch_body(C, ins, ret_jumps, fn);
-    else if (is_dp_op(ins.op))    ok = emit_dp(C, ins);
+    else if (is_dp_op(ins.op))    ok = emit_dp(C, ins, ret_jumps);
     else if (is_mem_op(ins.op))   ok = emit_mem(C, ins);
     else if (is_mul_op(ins.op))   ok = emit_mul(C, ins);
     else if (is_block_op(ins.op)) ok = emit_block_transfer(C, ins, ret_jumps);
