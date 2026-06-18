@@ -51,6 +51,16 @@ extern "C" unsigned long long g_runtime_vblank_starts = 0;
 // so the recomp and the bios_smoke interp oracle align by identical cycles.
 extern "C" unsigned long long g_runtime_cycles = 0;
 
+// P6 sljit differential gate — shadow-tick mode. While g_runtime_shadow_tick is
+// set (only during a healed shard's throwaway VALIDATION re-run), runtime_tick
+// accumulates the shard's cycle cost into g_runtime_shadow_cycles and does
+// NOTHING else: no device pump, no IRQ delivery, no real-clock advance — because
+// the interpreter pass (the kept result) already pumped those for this window.
+// Without this the shard's re-run would double-pump the PPU/audio/timers and
+// re-deliver IRQs. Default 0 → normal play / the gcc path are untouched.
+extern "C" unsigned          g_runtime_shadow_tick   = 0;
+extern "C" unsigned long long g_runtime_shadow_cycles = 0;
+
 namespace gbarecomp {
 
 static gba::GbaBus* g_active_bus = nullptr;
@@ -338,6 +348,11 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
 }
 
 extern "C" void runtime_tick(uint32_t cycles) {
+    // P6 shadow-tick: a healed shard's validation re-run only accumulates its
+    // cycle cost (for the cycle diff); the interpreter pass already pumped the
+    // devices / delivered IRQs for this window, so do nothing else here.
+    if (g_runtime_shadow_tick) { g_runtime_shadow_cycles += cycles; return; }
+
     auto* bus = gbarecomp::g_active_bus;
     auto* ppu = gbarecomp::g_active_ppu;
     if (!bus || !ppu || cycles == 0) return;

@@ -336,32 +336,26 @@ void record_and_log_miss(std::uint32_t pc, bool thumb) {
 // Every interpreted instruction is fingerprinted into the SAME always-on ring
 // the generated prologue uses (runtime_insn_fp), so a bridged run diffs
 // bit-identically against a non-excluded build.
-extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
+// runtime_bridge_interpret — the interpret-the-missed-subtree core, factored out
+// of runtime_dispatch_miss so the P6 sljit differential gate can reuse it as its
+// "interpreter pass": the kept, correct result a healed shard is validated
+// against. Interprets from (entry_pc, entry_thumb) using the SAME stop-address
+// contract and per-instruction tick (IRQ self-delivery + SWI routing) as the
+// on-miss bridge, mutating g_cpu live. The miss log + heal enqueue belong to the
+// dispatch-miss handler (below), not here.
+extern "C" void runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb) {
     using gbarecomp::active_bus;
 
     gba::GbaBus* bus = active_bus();
-    const std::uint32_t entry_pc = target_pc & ~1u;
-    const bool entry_thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
-
     if (!bus) {
         // No bus bound (e.g. a unit harness that didn't set one up): we
         // cannot bridge. Stay loud — this is not a self-healable state.
         std::fprintf(stderr,
-                     "runtime_arm: dispatch miss for pc=0x%08X with no active "
+                     "runtime_arm: bridge interpret for pc=0x%08X with no active "
                      "bus — cannot bridge.\n", entry_pc);
         runtime_trace_dump_recent(96);
         std::abort();
     }
-
-    record_and_log_miss(entry_pc, entry_thumb);
-
-    // Stage-2 self-heal: enqueue a background compile of this function so the
-    // NEXT hit dispatches to native code instead of re-bridging. No-op when the
-    // recompiler is disabled (GBARECOMP_SELFHEAL_RECOMPILE unset) or when the PC
-    // is already healed / in flight / known-failed. This first hit still bridges
-    // below (the compile is async); native takes over once the DLL lands and the
-    // game thread drains it into the dispatch table.
-    gbarecomp::overlay_request_compile(entry_pc, entry_thumb);
 
     // ── (1) Stop-address contract ──────────────────────────────────
     const std::uint32_t entry_depth = runtime_call_stack_depth();
@@ -489,6 +483,17 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     }
     // Control returns to the recompiled caller's BL site, which checks
     // g_cpu.R[15] == its pushed return address (== stop_pc) and continues.
+}
+
+// runtime_dispatch_miss — Stage-1 self-healing entry: log the miss, enqueue a
+// Stage-2 heal (so the NEXT hit dispatches native), then bridge through the
+// interpreter via runtime_bridge_interpret. See that function's note above.
+extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
+    const std::uint32_t entry_pc = target_pc & ~1u;
+    const bool entry_thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+    record_and_log_miss(entry_pc, entry_thumb);
+    gbarecomp::overlay_request_compile(entry_pc, entry_thumb);
+    runtime_bridge_interpret(entry_pc, entry_thumb);
 }
 
 extern "C" void runtime_unimplemented_op(const char* op_name,

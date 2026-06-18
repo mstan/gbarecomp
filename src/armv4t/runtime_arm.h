@@ -112,6 +112,14 @@ void runtime_dispatch(uint32_t target_pc);
 void runtime_dispatch_with_exchange(uint32_t target_pc);
 void runtime_dispatch_miss(uint32_t target_pc);
 
+// The interpret-the-missed-subtree core of the on-miss bridge, factored so the
+// P6 sljit differential gate can reuse it as its "interpreter pass" (the kept
+// result a healed shard is validated against). Interprets from (entry_pc,
+// entry_thumb) until control returns to the caller's pending return address,
+// mutating g_cpu live and ticking each instruction (IRQ self-delivery + SWI
+// routing exactly as in normal play).
+void runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb);
+
 // Direct generated BL calls use the host C stack for speed and clarity.
 // Return idioms (`bx lr`, `mov pc, lr`, `pop {..., pc}`) are only C
 // returns when they match the top direct-call return address; otherwise
@@ -188,6 +196,15 @@ bool runtime_should_yield(void);
 // at machine reset (runtime_trace_reset). Stamped onto every ring entry so the
 // recomp and interp oracle can be aligned by identical cycle counts. (MC-HP-002.)
 extern unsigned long long g_runtime_cycles;
+
+// P6 sljit differential gate — shadow-tick mode. While g_runtime_shadow_tick is
+// nonzero (only during a healed shard's throwaway validation re-run) runtime_tick
+// accumulates the cost into g_runtime_shadow_cycles and pumps nothing (the
+// interpreter pass already pumped devices / delivered IRQs). Default 0 → normal
+// play and the gcc path are untouched.
+extern unsigned          g_runtime_shadow_tick;
+extern unsigned long long g_runtime_shadow_cycles;
+
 // Debug PC breakpoint: when nonzero, runtime_should_yield() unwinds the
 // current runtime_dispatch the moment the guest PC equals this value.
 // Set via the TCP set_break_pc command; 0 = disabled. (MC-HP-002.)
