@@ -40,6 +40,13 @@ bool body_supported(const Instr& ins) {
         if (ins.op == IrOp::MLA && ins.rn == 15) return false;
         return true;
     }
+    if (is_block_op(ins.op)) {
+        const auto& b = ins.block;
+        if (b.rn == 15) return false;        // PC base → unpredictable, later
+        if (b.s_bit) return false;           // user-bank / SPSR / exc-return → later
+        if (b.reg_list == 0) return false;   // empty-list 0x40-stride corner → later
+        return true;  // LDM-with-PC (return idiom) IS supported — see emit_block_transfer
+    }
     if (is_branch_op(ins.op)) {
         if (ins.op == IrOp::BX && ins.rm == 15) return false;  // BX PC unpredictable
         return true;

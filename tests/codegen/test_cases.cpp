@@ -337,6 +337,44 @@ const TestCase kTestCases[] = {
         false, 0, 0,
     },
 
+    // ── POP {r4, pc} — the SP-based function-return idiom ────────────
+    //    LDMIA sp!, {r4, pc}: loads r4 then pc (bit0 cleared), writeback
+    //    sp += 8. Exits the shard via runtime_call_should_return /
+    //    runtime_dispatch on the popped PC.
+    {
+        "arm_pop_r4_pc",
+        false, 0x100u,
+        0xE8BD8010u,  // LDMIA sp!, {r4, pc}
+        {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0x2000u,0, 0x100u},
+        MODE_SYSTEM,
+        mem_block_ldm_pattern, 4,
+        true, 0, 0,
+    },
+
+    // ── LDM with PC, base != SP — a computed jump (dispatch, no return) ─
+    {
+        "arm_ldmia_pc_computed",
+        false, 0x100u,
+        0xE8B08002u,  // LDMIA r0!, {r1, pc}
+        {0x2000u,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM,
+        mem_block_ldm_pattern, 4,
+        true, 0, 0,
+    },
+
+    // ── Conditional LDM not taken (LDMEQ with Z=0) — cond-fail skip ───
+    //    Body is skipped: no transfer, no writeback, R[15] advances,
+    //    cyc == 1 (fetch). Marked non-branching like arm_bne_not_taken.
+    {
+        "arm_ldmeq_not_taken",
+        false, 0x100u,
+        0x08B00006u,  // LDMEQ r0!, {r1, r2}
+        {0x2000u,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM,  // Z=0 → EQ false
+        mem_block_ldm_pattern, 4,
+        false, 0, 0,
+    },
+
     {
         "arm_ldmia_empty_wb",
         false, 0x100u,
@@ -848,6 +886,12 @@ const TestCase kTestCases[] = {
       // sp starts at 0x3000 (above mem block range to avoid collision)
       {0, 0, 0, 0, 0x1000u, 0x2000u, 0, 0, 0,0,0,0, 0,0x3000u,0xCAFEu, 0x100u},
       (1u<<5) | MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+
+    // ── THUMB fmt14 POP {r4, pc}  (0xBD10) — return idiom ─────────
+    //    sp at 0x2000: r4 ← [0x2000], pc ← [0x2004] & ~1, sp += 8.
+    { "thumb_pop_r4_pc", true, 0x100u, 0x0000BD10u,
+      {0, 0, 0, 0, 0,0,0,0, 0,0,0,0, 0,0x2000u,0, 0x100u},
+      (1u<<5) | MODE_SYSTEM, mem_block_ldm_pattern, 4, /*branches*/ true, 0, 0 },
 
     // THUMB empty STM writes the aligned PC-store value and writebacks by 0x40.
     { "thumb_stmia_empty_wb_pc_store_align", true, 0x102u, 0x0000C000u,

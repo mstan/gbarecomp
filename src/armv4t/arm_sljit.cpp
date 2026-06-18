@@ -9,10 +9,12 @@
 //              runtime_should_yield bail, gated runtime_insn_fp fingerprint,
 //              CONDITIONAL execution via arm_cond_passes, shared-epilogue tick).
 //              The single-instruction and block/function paths share it.
+//   P7:        + block transfer (LDM/STM), incl. the POP {.., pc} return idiom
+//              (exits the function like a branch; SP base C-returns, else
+//              dispatches). Declines s_bit / empty-list / rn==15.
 // Still DECLINED (precision over recall → caller runs gcc / interpreter):
-//   branches/PC-writes, LDM/STM, register-COUNT shifts, non-LSL reg offsets,
-//   LDRSH, long multiplies, PSR/SWI, R15 operands. (Branches + intra-function
-//   labels + emit_function over an extent are the next P5 steps.)
+//   register-COUNT shifts, non-LSL reg offsets, LDRSH, long multiplies,
+//   PSR/SWI, R15 operands, LDM/STM s_bit + empty-list + PC base.
 //
 // Parity is by construction: value/carry/address/flag math mirrors
 // arm_codegen.cpp, and the per-instruction prologue/epilogue mirrors
@@ -337,6 +339,134 @@ bool emit_mul(struct sljit_compiler* C, const Instr& ins) {
     return true;
 }
 
+// ── Block transfer (LDM/STM). S0=&g_cpu; S1=running address, S2=final base
+// (writeback value), S5=cyc. Mirrors arm_codegen::emit_block_transfer and the
+// interpreter's LDM/STM execute path exactly: the base is read ONCE, registers
+// transfer in ascending order to ascending addresses, the first access is
+// non-sequential (N) and the rest sequential (S) — each access folds its
+// runtime_mem_cycles into S5. Declined upstream (arm_sljit_support): s_bit
+// (user-bank/SPSR/exception-return), an empty reg_list (the 0x40-stride
+// corner), and rn==15.
+//
+// STM never writes R15. LDM with R15 in the list is the function-return idiom
+// (POP {.., pc}): it adds the non-branch pipeline refill (+2), ticks the
+// accumulated cost, then exits the whole function — when the base is SP it
+// first asks runtime_call_should_return (C-return to the caller's body),
+// otherwise (a computed jump) it runtime_dispatches. That exit takes ret_jumps,
+// exactly like a branch; non-PC LDM/STM fall through to the shared epilogue.
+//
+// Like the existing emit_mem store path, this does NOT emit runtime_trace_event:
+// the sljit backend uniformly omits the watchpoint memory-write event (the
+// gcc-DLL / interpreter tiers carry production tracing). ──
+bool emit_block_transfer(struct sljit_compiler* C, const Instr& ins,
+                         std::vector<struct sljit_jump*>& ret_jumps) {
+    const auto& blk = ins.block;
+    const uint16_t list = blk.reg_list;
+
+    unsigned n = 0;
+    for (int r = 0; r < 16; ++r) if (list & (1u << r)) ++n;
+    const bool pc_in_list = (list & (1u << 15)) != 0;
+    const bool base_in_list = (list & (1u << blk.rn)) != 0;
+
+    // base = g_cpu.R[rn] (read once). S1 = start address; S2 = final base.
+    sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0,
+                   SLJIT_MEM1(SLJIT_S0), kRegOff(blk.rn));
+    if (blk.add) {
+        if (blk.pre_indexed)
+            sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S1, 0, SLJIT_R0, 0, SLJIT_IMM, 4);
+        else
+            sljit_emit_op1(C, SLJIT_MOV, SLJIT_S1, 0, SLJIT_R0, 0);
+        sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S2, 0, SLJIT_R0, 0, SLJIT_IMM, 4 * n);
+    } else {
+        const unsigned back = blk.pre_indexed ? 4u * n : 4u * (n - 1u);
+        sljit_emit_op2(C, SLJIT_SUB32, SLJIT_S1, 0, SLJIT_R0, 0, SLJIT_IMM, back);
+        sljit_emit_op2(C, SLJIT_SUB32, SLJIT_S2, 0, SLJIT_R0, 0, SLJIT_IMM, 4 * n);
+    }
+
+    // LDM that writes PC incurs the non-branch pipeline refill (+2). STM never
+    // writes PC; emit_one_body seeded S5 with instr_cycle_base only.
+    if (blk.load && pc_in_list)
+        sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_IMM, 2);
+
+    bool first = true;
+    for (int r = 0; r < 16; ++r) {
+        if (!(list & (1u << r))) continue;
+
+        // cyc += runtime_mem_cycles(addr & ~3, 4, first ? 0 : 1)
+        sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, kM3);
+        sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R1, 0, SLJIT_IMM, 4);
+        sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R2, 0, SLJIT_IMM, first ? 0 : 1);
+        sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS3(32, 32, 32, 32),
+                         SLJIT_IMM, addr_of((const void*)&runtime_mem_cycles));
+        sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_R0, 0);
+        first = false;
+
+        if (blk.load) {
+            sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, kM3);
+            sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1(32, 32),
+                             SLJIT_IMM, addr_of((const void*)&bus_read_u32));
+            // PC load forces bit 0 clear (ARMv4T LDM has no interworking).
+            if (r == 15)
+                sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, kM1);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(r),
+                           SLJIT_R0, 0);
+        } else {
+            sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, kM3);
+            if (r == 15) {
+                // STM stores the pipeline-ahead PC value (pc+12 ARM; the
+                // word-aligned pc+4+4 in THUMB). Statically known.
+                const uint32_t pcv = ins.thumb ? (((ins.pc + 4u) & ~2u) + 4u)
+                                               : (ins.pc + 12u);
+                sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R1, 0, SLJIT_IMM,
+                               static_cast<sljit_sw>(pcv));
+            } else {
+                // ARM "store base when not first in list" corner: a writeback
+                // STM stores the NEW base for Rn when lower-numbered regs precede
+                // it; otherwise the register's current value.
+                const bool wb_base = blk.writeback &&
+                                     static_cast<unsigned>(r) == blk.rn &&
+                                     (list & ((1u << r) - 1u)) != 0;
+                if (wb_base)
+                    sljit_emit_op1(C, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S2, 0);
+                else
+                    sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R1, 0,
+                                   SLJIT_MEM1(SLJIT_S0), kRegOff(r));
+            }
+            sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS2V(32, 32),
+                             SLJIT_IMM, addr_of((const void*)&bus_write_u32));
+        }
+
+        sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 4);
+    }
+
+    // Writeback (suppressed for LDM when the base register was itself loaded).
+    if (blk.writeback && !(blk.load && base_in_list))
+        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(blk.rn),
+                       SLJIT_S2, 0);
+
+    // LDM-with-PC exits the function. Tick the cost once, then C-return (SP
+    // base, matching a pending direct-call return) or dispatch the popped PC.
+    if (blk.load && pc_in_list) {
+        sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S5, 0);
+        sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1V(32),
+                         SLJIT_IMM, addr_of((const void*)&runtime_tick));
+        if (blk.rn == 13) {
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0,
+                           SLJIT_MEM1(SLJIT_S0), kRegOff(15));
+            sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1(32, 32),
+                             SLJIT_IMM, addr_of((const void*)&runtime_call_should_return));
+            sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 0xFF);
+            ret_jumps.push_back(
+                sljit_emit_cmp(C, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
+        }
+        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(15));
+        sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1V(32),
+                         SLJIT_IMM, addr_of((const void*)&runtime_dispatch));
+        ret_jumps.push_back(sljit_emit_jump(C, SLJIT_JUMP));
+    }
+    return true;
+}
+
 // Whole-function emit context: the function's PC range and the labels emitted
 // at backward-branch targets (pc → label). Null for the single-instruction and
 // block paths, where every transfer is external (dispatch).
@@ -516,19 +646,21 @@ bool emit_one_body(struct sljit_compiler* C, const Instr& ins,
         skip_body = sljit_emit_cmp(C, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
     }
 
-    // Exec cost (cond-pass path): instr_cycle_base + surcharges. The surcharge
-    // cases (register-count shifts, PC writes) are declined, so this is the
-    // base; mem/mul ADD their runtime component. The cond-fail path skips this
-    // and keeps the S5==1 fetch baseline.
+    // Exec cost (cond-pass path): instr_cycle_base + surcharges. The remaining
+    // surcharge cases (register-count shifts, non-block PC writes) are declined,
+    // so this is the base; mem/mul ADD their runtime component, and an LDM that
+    // writes PC adds its own +2 refill in emit_block_transfer. The cond-fail
+    // path skips this and keeps the S5==1 fetch baseline.
     sljit_emit_op1(C, SLJIT_MOV32, SLJIT_S5, 0, SLJIT_IMM,
                    static_cast<sljit_sw>(instr_cycle_base(ins.op)));
 
     bool ok;
-    if (is_branch_op(ins.op))   ok = emit_branch_body(C, ins, ret_jumps, fn);
-    else if (is_dp_op(ins.op))  ok = emit_dp(C, ins);
-    else if (is_mem_op(ins.op)) ok = emit_mem(C, ins);
-    else if (is_mul_op(ins.op)) ok = emit_mul(C, ins);
-    else                        ok = false;
+    if (is_branch_op(ins.op))     ok = emit_branch_body(C, ins, ret_jumps, fn);
+    else if (is_dp_op(ins.op))    ok = emit_dp(C, ins);
+    else if (is_mem_op(ins.op))   ok = emit_mem(C, ins);
+    else if (is_mul_op(ins.op))   ok = emit_mul(C, ins);
+    else if (is_block_op(ins.op)) ok = emit_block_transfer(C, ins, ret_jumps);
+    else                          ok = false;
     if (!ok) return false;
 
     // Epilogue: R15 = next; runtime_tick(cyc). A taken branch jumped to the

@@ -184,6 +184,15 @@ int main() {
             0xE5945000u,  // ldr  r5, [r4]
             0xE12FFF1Eu,  // bx   lr
         }, {0,0,0,0,0x400u,0,0,0,0,0,0,0,0,0, ext_lr, 0}},
+        // AAPCS leaf-with-frame: STM at entry, body, then the LDM-with-PC
+        // return idiom (POP {r4, pc}). lr is OUTSIDE the function, so the
+        // popped PC dispatches out → both sides stop at the same state.
+        {"push_body_pop_pc", {
+            0xE92D4010u,  // push {r4, lr}    (STMDB sp!, {r4, lr})
+            0xE3A04020u,  // mov  r4, #0x20
+            0xE5804000u,  // str  r4, [r0]
+            0xE8BD8010u,  // pop  {r4, pc}    (LDMIA sp!, {r4, pc})
+        }, {0x400u,0,0,0, 0xAAAAu,0,0,0, 0,0,0,0, 0,0x800u,ext_lr,0}},
     };
 
     int fails = 0, n = int(sizeof(fns) / sizeof(fns[0]));

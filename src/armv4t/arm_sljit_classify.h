@@ -37,6 +37,8 @@ inline bool is_mem_op(IrOp op) {
 
 inline bool is_mul_op(IrOp op) { return op == IrOp::MUL || op == IrOp::MLA; }
 
+inline bool is_block_op(IrOp op) { return op == IrOp::LDM || op == IrOp::STM; }
+
 inline bool is_branch_op(IrOp op) {
     return op == IrOp::B || op == IrOp::BX || op == IrOp::BL ||
            op == IrOp::BL_prefix || op == IrOp::BL_suffix;
