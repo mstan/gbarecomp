@@ -199,6 +199,16 @@ target_link_libraries(gbarecomp_gba PUBLIC gbarecomp_armv4t)
 set_property(TARGET gbarecomp_gba PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# heal_gate — P6 differential-gate primitives (snapshot/journal/diff). PURE:
+# depends only on gbarecomp_gba (GbaBus + ArmCpuState), no runtime globals, so
+# it unit-tests standalone and the runtime gate state machine layers on top.
+# ─────────────────────────────────────────────────────────────────────────────
+add_library(gbarecomp_heal_gate STATIC src/runtime/heal_gate.cpp)
+target_include_directories(gbarecomp_heal_gate PUBLIC src/runtime)
+target_link_libraries(gbarecomp_heal_gate PUBLIC gbarecomp_gba)
+set_property(TARGET gbarecomp_heal_gate PROPERTY POSITION_INDEPENDENT_CODE ON)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # runtime — what game binaries link against. Dispatch, host glue.
 # ─────────────────────────────────────────────────────────────────────────────
 add_library(gbarecomp_runtime STATIC
@@ -248,7 +258,8 @@ target_include_directories(gbarecomp_runtime PUBLIC src/runtime)
 target_compile_definitions(gbarecomp_runtime PRIVATE
     GBARECOMP_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(gbarecomp_runtime PUBLIC
-    gbarecomp_gba gbarecomp_debug gbarecomp_recompile_core gbarecomp_sljit_emit)
+    gbarecomp_gba gbarecomp_debug gbarecomp_recompile_core gbarecomp_sljit_emit
+    gbarecomp_heal_gate)
 set_property(TARGET gbarecomp_runtime PROPERTY POSITION_INDEPENDENT_CODE ON)
 if(GBARECOMP_SDL2_OK)
     target_compile_definitions(gbarecomp_runtime PUBLIC GBARECOMP_HAVE_SDL2)
@@ -449,6 +460,11 @@ add_test(NAME irq_tests COMMAND irq_tests)
 add_executable(ppu_smoke_tests tests/ppu_smoke/test_main.cpp)
 target_link_libraries(ppu_smoke_tests PRIVATE gbarecomp_gba)
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
+
+# P6 differential-gate primitives (offline; full-RAM snapshot/restore/diff).
+add_executable(heal_gate_tests tests/heal_gate/heal_gate_test.cpp)
+target_link_libraries(heal_gate_tests PRIVATE gbarecomp_heal_gate)
+add_test(NAME heal_gate_tests COMMAND heal_gate_tests)
 
 # sljit_smoke — P2 host-capability canary. JIT `f(a)=a+1234`, run it, check the
 # result. Proves the vendored JIT codegen + executable allocator work on this
