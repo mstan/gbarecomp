@@ -206,6 +206,7 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/overlay_emit.cpp
     src/runtime/overlay_loader.cpp
     src/runtime/overlay_compile.cpp
+    src/runtime/overlay_sljit_heal.cpp
     src/runtime/host_platform.cpp
     src/runtime/host_window.cpp
     src/runtime/color_lut.cpp
@@ -244,7 +245,7 @@ target_include_directories(gbarecomp_runtime PUBLIC src/runtime)
 target_compile_definitions(gbarecomp_runtime PRIVATE
     GBARECOMP_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(gbarecomp_runtime PUBLIC
-    gbarecomp_gba gbarecomp_debug gbarecomp_recompile_core)
+    gbarecomp_gba gbarecomp_debug gbarecomp_recompile_core gbarecomp_sljit_emit)
 set_property(TARGET gbarecomp_runtime PROPERTY POSITION_INDEPENDENT_CODE ON)
 if(GBARECOMP_SDL2_OK)
     target_compile_definitions(gbarecomp_runtime PUBLIC GBARECOMP_HAVE_SDL2)

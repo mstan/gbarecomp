@@ -16,6 +16,7 @@
 
 #include "overlay_abi.h"
 #include "overlay_compile.h"
+#include "overlay_sljit_heal.h"   // in-process sljit producer (toolchain-less)
 #include "runtime_arm.h"          // g_cpu, g_runtime_*, every runtime/bus/arm fn
 #include "runtime_bus_bridge.h"   // active_bus
 #include "../gba/gba_bus.h"       // rom_ptr / rom_size
@@ -37,10 +38,11 @@ struct HealedEntry {
     uint32_t addr  = 0;
     bool     thumb = false;
     void   (*fn)(void) = nullptr;
-    void*    module = nullptr;
+    void*    module = nullptr;   // gcc: HMODULE; sljit: the JIT code block
     uint32_t crc = 0;
     uint32_t end = 0;
     uint64_t native_calls = 0;
+    bool     sljit = false;      // produced in-process (no DLL) vs a gcc DLL
 };
 
 // ── Worker → game-thread result ────────────────────────────────────
@@ -62,6 +64,13 @@ std::unordered_map<uint64_t, HealedEntry> g_healed;
 std::unordered_set<uint64_t>              s_inflight;
 std::unordered_set<uint64_t>              s_failed;
 uint64_t                                  s_native_calls_total = 0;
+
+// Production backend for the heal tier. When sljit, a dispatch miss is healed
+// SYNCHRONOUSLY in-process (no toolchain, no DLL, no worker) — see
+// overlay_request_compile. Resolved once at init from GBARECOMP_HEAL_BACKEND
+// (=sljit), so the gcc DLL path stays the default + byte-identical.
+bool                                      s_use_sljit = false;
+uint64_t                                  s_sljit_healed = 0;
 
 // Cross-thread work/ready queues:
 std::mutex                  s_work_mtx;
@@ -273,12 +282,19 @@ void overlay_loader_init(const std::string& cache_root,
     s_active = true;
     s_ever_active = true;  // sticky: survives shutdown for the exit report
 
+    // Production backend: sljit (in-process, toolchain-less) when requested,
+    // else the gcc DLL path (default). gcc stays byte-identical.
+    {
+        const char* be = std::getenv("GBARECOMP_HEAL_BACKEND");
+        s_use_sljit = (be != nullptr && std::strcmp(be, "sljit") == 0);
+    }
+
     const int warm = warm_load_cache();
     s_stop.store(false);
     s_worker = std::thread(worker_main);
 
-    std::printf("self_heal_recompile=ENABLED cache=\"%s\" warm_loaded=%d\n",
-                s_cache_dir.c_str(), warm);
+    std::printf("self_heal_recompile=ENABLED backend=%s cache=\"%s\" warm_loaded=%d\n",
+                s_use_sljit ? "sljit" : "gcc", s_cache_dir.c_str(), warm);
 }
 
 void overlay_loader_shutdown() {
@@ -301,14 +317,45 @@ void overlay_request_compile(uint32_t pc, bool thumb) {
         return;
     }
 
-    OverlayWorkItem w;
-    w.pc = pc;
-    w.thumb = thumb;
-    if (!region_bytes(pc, &w.bytes, &w.size, &w.base)) {
+    const uint8_t* bytes = nullptr;
+    std::size_t size = 0;
+    uint32_t base = 0;
+    if (!region_bytes(pc, &bytes, &size, &base)) {
         // No immutable image (e.g. a RAM PC) — Stage 4 territory. Don't retry.
         s_failed.insert(key);
         return;
     }
+
+    if (s_use_sljit) {
+        // In-process JIT on the game thread: produce now, register now — the
+        // next hit of this PC dispatches native. No worker, no DLL, no toolchain.
+        void (*fn)(void) = nullptr;
+        void* code = nullptr;
+        uint32_t end = 0;
+        if (overlay_sljit_produce(pc, thumb, bytes, size, base, &fn, &code, &end)) {
+            HealedEntry h;
+            h.addr = pc; h.thumb = thumb; h.fn = fn; h.module = code;
+            h.end = end; h.sljit = true;
+            g_healed[key] = h;
+            ++s_sljit_healed;
+            std::printf("self_heal: sljit-JIT'd 0x%08X (%s) [0x%08X,0x%08X) "
+                        "— native next hit\n",
+                        pc, thumb ? "thumb" : "arm", pc, end);
+        } else {
+            // Emitter declined (an op it can't lower yet, or undiscoverable):
+            // stay on the honest interpreter bridge for this PC this session.
+            s_failed.insert(key);
+            std::printf("self_heal: sljit DECLINED 0x%08X (%s) — interp bridge "
+                        "(emitter gap; precision over recall)\n",
+                        pc, thumb ? "thumb" : "arm");
+        }
+        return;
+    }
+
+    // gcc path: hand the region to the worker thread for an async compile.
+    OverlayWorkItem w;
+    w.pc = pc; w.thumb = thumb;
+    w.bytes = bytes; w.size = size; w.base = base;
     s_inflight.insert(key);
     {
         std::lock_guard<std::mutex> lk(s_work_mtx);
