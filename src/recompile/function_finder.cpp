@@ -1574,6 +1574,9 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         return;  // do NOT push_back fn
     }
 
+    // Preserve the true (un-clamped) body-walk extent before run()'s
+    // "next function start" clamp truncates end_addr (see Function::walk_end_addr).
+    fn.walk_end_addr = fn.end_addr;
     functions_.push_back(std::move(fn));
 }
 

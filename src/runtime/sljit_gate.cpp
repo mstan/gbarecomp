@@ -70,7 +70,7 @@ void validate(uint32_t pc, bool thumb, void (*fn)(void), GateState& st) {
     if (depth0 == 0) {
         // Top-level (no pending return) — the rare vector case. Don't shadow-
         // validate it; just interpret (kept result) and pin.
-        runtime_bridge_interpret(pc, thumb);
+        runtime_bridge_interpret(pc, thumb, g_cpu.R[14] & ~1u);
         st.status = GateState::Status::Pinned;
         std::printf("sljit_gate: PIN 0x%08X (%s) — top-level dispatch, not "
                     "shadow-validatable\n", pc, thumb ? "thumb" : "arm");
@@ -85,11 +85,14 @@ void validate(uint32_t pc, bool thumb, void (*fn)(void), GateState& st) {
     heal_gate::StateSnapshot s0 =
         heal_gate::capture_full(g_cpu, g_runtime_cycles, *bus);
     const uint64_t irq0 = g_runtime_irq_entries;
+    // A self-contained leaf returns to LR; use it as the bridge stop (the
+    // call-return-stack contract is wrong for a computed-jump-reached function).
+    const uint32_t ret_lr = g_cpu.R[14] & ~1u;
 
     // ── Interpreter pass — the kept, correct result (live) ──
     heal_gate::Journal io_probe;
     io_probe.arm(*bus, heal_gate::Journal::Mode::Record);  // detect IO touch
-    runtime_bridge_interpret(pc, thumb);
+    runtime_bridge_interpret(pc, thumb, ret_lr);
     io_probe.disarm(*bus);
     const bool io  = io_probe.io_touched();
     const bool irq = (g_runtime_irq_entries != irq0);

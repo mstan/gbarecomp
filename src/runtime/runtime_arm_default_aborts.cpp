@@ -343,7 +343,8 @@ void record_and_log_miss(std::uint32_t pc, bool thumb) {
 // contract and per-instruction tick (IRQ self-delivery + SWI routing) as the
 // on-miss bridge, mutating g_cpu live. The miss log + heal enqueue belong to the
 // dispatch-miss handler (below), not here.
-extern "C" void runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb) {
+extern "C" void runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
+                                         uint32_t forced_stop_pc) {
     using gbarecomp::active_bus;
 
     gba::GbaBus* bus = active_bus();
@@ -361,7 +362,12 @@ extern "C" void runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb) {
     const std::uint32_t entry_depth = runtime_call_stack_depth();
     std::uint32_t stop_pc;
     bool top_level = (entry_depth == 0);
-    if (!top_level) {
+    if (forced_stop_pc != 0u) {
+        // Caller-supplied stop (the P6 gate passes the entry LR). A function
+        // reached by a computed jump has no matching call-return frame, so the
+        // stack-top contract below would mis-target and the walk would run away.
+        stop_pc = forced_stop_pc & ~1u;
+    } else if (!top_level) {
         stop_pc = runtime_call_stack_data()[entry_depth - 1] & ~1u;
     } else {
         // No pending direct-call return — a vector/top-level miss. This
@@ -493,7 +499,7 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     const bool entry_thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
     record_and_log_miss(entry_pc, entry_thumb);
     gbarecomp::overlay_request_compile(entry_pc, entry_thumb);
-    runtime_bridge_interpret(entry_pc, entry_thumb);
+    runtime_bridge_interpret(entry_pc, entry_thumb, /*forced_stop_pc=*/0u);
 }
 
 extern "C" void runtime_unimplemented_op(const char* op_name,

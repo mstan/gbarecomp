@@ -59,6 +59,13 @@ struct Function {
     // "next function start" once discovery is done; for the last
     // function in the corpus this stays at addr + 4 (placeholder).
     uint32_t end_addr;
+    // The exclusive end of the linear body walk, BEFORE end_addr is
+    // clamped to the next same-mode function start. The clamp truncates a
+    // function at any internal branch target the pessimistic finder also
+    // rooted (e.g. a loop head), which is fine for the static recompiler
+    // (it consolidates + dispatches per block) but WRONG for the sljit heal,
+    // which needs the whole contiguous extent. The heal uses this field.
+    uint32_t walk_end_addr;
     // The set of direct branch targets discovered inside this body
     // (B/BL/conditional B). Useful for codegen labeling and for
     // verifying CFG coverage.

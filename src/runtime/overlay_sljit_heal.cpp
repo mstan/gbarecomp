@@ -49,9 +49,13 @@ bool decode_function(uint32_t pc, bool thumb, const uint8_t* bytes,
             break;
         }
     }
-    if (!target || target->end_addr <= target->addr) return false;
+    // Use walk_end_addr (the true contiguous extent), NOT end_addr (which the
+    // finder clamps to the next function start — truncating at internal branch
+    // targets the pessimistic finder also rooted; see Function::walk_end_addr).
+    if (!target || target->walk_end_addr <= target->addr) return false;
+    const uint32_t end_addr = target->walk_end_addr;
 
-    for (uint32_t a = target->addr; a < target->end_addr;) {
+    for (uint32_t a = target->addr; a < end_addr;) {
         if (thumb) {
             prog.push_back(armv4t::ThumbDecoder::decode(read_u16(bytes, size, base, a), a));
             a += 2u;
@@ -60,7 +64,7 @@ bool decode_function(uint32_t pc, bool thumb, const uint8_t* bytes,
             a += 4u;
         }
     }
-    *out_end = target->end_addr;
+    *out_end = end_addr;
     return !prog.empty();
 }
 
@@ -82,12 +86,29 @@ bool overlay_sljit_produce(uint32_t pc, bool thumb,
     *out_code = fn.code;
     *out_end = end;
     if (out_leaf) {
-        // Leaf = no outgoing call (BL/BLX). Such a function returns via bx lr /
-        // pop {pc} / mov pc,lr and never re-enters dispatch from its body, so the
-        // P6 gate can shadow-validate it in isolation.
+        // Gate-eligible = SELF-CONTAINED: the function exits only via a return
+        // idiom, so the gate can shadow-validate it in isolation. Excluded:
+        //   - a call (BL/BLX, is_call),
+        //   - a COMPUTED transfer that isn't a return (BX rN / mov pc,rN / ldr pc
+        //     / jump table — is_indirect && !is_return),
+        //   - a DIRECT branch whose target escapes [pc, end) (a switch case label
+        //     / tail branch — the shard dispatches out of its extent).
+        // Any of these makes the shadow run dispatch a target derived from
+        // possibly-incompletely-restored state, which can run away (the crash we
+        // hit before this guard). Plain returns (bx lr / pop {pc}, is_return) and
+        // intra-extent branches (loops, if/else) stay eligible.
         bool leaf = true;
-        for (const auto& in : prog)
-            if (in.is_call) { leaf = false; break; }
+        for (const auto& in : prog) {
+            if (in.is_call || (in.is_indirect && !in.is_return)) {
+                leaf = false;
+                break;
+            }
+            if (in.is_branch && !in.is_indirect && in.branch_target != 0 &&
+                (in.branch_target < pc || in.branch_target >= end)) {
+                leaf = false;  // branch escapes the shard's extent
+                break;
+            }
+        }
         *out_leaf = leaf;
     }
     return true;

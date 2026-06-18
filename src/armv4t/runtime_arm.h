@@ -115,10 +115,14 @@ void runtime_dispatch_miss(uint32_t target_pc);
 // The interpret-the-missed-subtree core of the on-miss bridge, factored so the
 // P6 sljit differential gate can reuse it as its "interpreter pass" (the kept
 // result a healed shard is validated against). Interprets from (entry_pc,
-// entry_thumb) until control returns to the caller's pending return address,
-// mutating g_cpu live and ticking each instruction (IRQ self-delivery + SWI
-// routing exactly as in normal play).
-void runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb);
+// entry_thumb) until control returns to the stop address, mutating g_cpu live
+// and ticking each instruction (IRQ self-delivery + SWI routing exactly as in
+// normal play). forced_stop_pc=0 → use the call-return-stack contract (the
+// on-miss bridge). Non-zero → stop there instead: the gate passes the entry LR,
+// since a function reached by a computed jump (not a BL) has no matching
+// call-return frame and the stack-top contract would mis-target and run away.
+void runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
+                              uint32_t forced_stop_pc);
 
 // Direct generated BL calls use the host C stack for speed and clarity.
 // Return idioms (`bx lr`, `mov pc, lr`, `pop {..., pc}`) are only C
