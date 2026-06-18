@@ -94,6 +94,61 @@ int main() {
     StateSnapshot snapC = capture_full(cpu, cycles, bus);
     check(diff_full(snapB, snapC).clean, "identical captures diff clean");
 
+    // ── Journal strategy: record → rollback round-trips byte-for-byte.
+    //    The full-RAM diff is the oracle: a clean round-trip PROVES the
+    //    journal captured every write (a missed write wouldn't restore). ─
+    {
+        Journal jrn;
+        jrn.arm(bus, Journal::Mode::Record);
+        StateSnapshot j0 = capture_full(cpu, cycles, bus);
+
+        // Varied: several regions + widths + an OVERLAPPING double write to one
+        // address (rollback must restore the ORIGINAL, not the intermediate).
+        bus.write32(kEwram + 0x100u, 0x01020304u);
+        bus.write16(kEwram + 0x100u, 0x0000BEEFu);     // overlaps the low half
+        bus.write8 (kIwram + 0x004u, 0x0000007Fu);
+        bus.write32(0x05000000u + 0x20u, 0x0000FFFFu); // PAL
+        bus.write16(0x06000000u + 0x40u, 0x00001234u); // VRAM
+        bus.write32(0x07000000u + 0x08u, 0xCAFEBABEu); // OAM
+
+        StateSnapshot j1 = capture_full(cpu, cycles, bus);
+        check(!diff_full(j0, j1).clean, "journal: writes mutate RAM");
+        check(jrn.write_count() >= 6, "journal recorded the RAM writes");
+        check(!jrn.io_touched(), "journal: pure RAM writes are not device-touch");
+
+        jrn.rollback(bus);
+        jrn.disarm(bus);
+        StateSnapshot j2 = capture_full(cpu, cycles, bus);
+        check(diff_full(j0, j2).clean,
+              "journal rollback restores RAM byte-for-byte (vs full-RAM oracle)");
+    }
+
+    // ── Journal SHADOW mode traps device (IO) writes ─────────────────
+    {
+        constexpr uint32_t kDispcnt = 0x04000000u;
+        Journal rec;
+        rec.arm(bus, Journal::Mode::Record);
+        bus.write16(kDispcnt, 0x00000100u);  // applies in RECORD mode
+        rec.disarm(bus);
+        check(rec.io_touched(), "journal RECORD flags an IO write as device-touch");
+        uint16_t before = bus.read16(kDispcnt);
+
+        Journal shd;
+        shd.arm(bus, Journal::Mode::Shadow);
+        bus.write16(kDispcnt, 0x00000040u);  // must be TRAPPED (not applied)
+        shd.disarm(bus);
+        uint16_t after = bus.read16(kDispcnt);
+        check(shd.io_touched(), "journal SHADOW flags the device write");
+        check(after == before, "journal SHADOW traps (suppresses) the device write");
+    }
+
+    // ── Observer fully disarmed: normal writes are untouched ─────────
+    {
+        bus.write32(kEwram + 0x200u, 0x99887766u);
+        check(bus.read32(kEwram + 0x200u) == 0x99887766u,
+              "writes apply normally when no observer is armed");
+    }
+
     if (g_failures) {
         std::printf("heal_gate_tests: %d CHECK(S) FAILED\n", g_failures);
         return 1;

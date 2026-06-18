@@ -28,11 +28,8 @@
 #include <string>
 #include <vector>
 
+#include "gba_bus.h"            // gba::GbaBus, BusWriteObserver, BusWriteRegion
 #include "runtime_arm_types.h"  // ArmCpuState
-
-namespace gba {
-class GbaBus;
-}
 
 namespace gbarecomp::heal_gate {
 
@@ -70,5 +67,53 @@ struct StateDiff {
 // Compare two full-RAM snapshots: R0..R15 + CPSR + banked state + ticked cycles
 // + every RAM region. Caps `notes` so a wildly-divergent shard doesn't flood.
 StateDiff diff_full(const StateSnapshot& a, const StateSnapshot& b);
+
+// ── Journal strategy ──────────────────────────────────────────────────────
+// Records the RAM writes a pass makes (at the GbaBus write chokepoint, via the
+// BusWriteObserver hook) so the pass can be rolled back by replaying the inverse
+// — cost is proportional to the function's actual write footprint, not the
+// 386 KB of total RAM. The full-RAM strategy is its correctness oracle: a
+// record → rollback round-trip must restore byte-for-byte (the offline test
+// asserts exactly that), which proves no write was missed.
+class Journal : public gba::BusWriteObserver {
+public:
+    // RECORD: journal RAM writes and apply EVERYTHING (the interpreter pass —
+    //         its result is kept live, including device/IO side effects).
+    // SHADOW: journal RAM writes but TRAP device writes (don't apply) — the
+    //         shard validation pass, so a mis-compiled shard can't fire a stray
+    //         IO/DMA side effect during validation.
+    enum class Mode { Record, Shadow };
+
+    void arm(gba::GbaBus& bus, Mode mode);  // register as the bus's observer
+    void disarm(gba::GbaBus& bus);          // clear the bus's observer
+    void clear();                           // forget recorded writes + flags
+
+    bool on_bus_write(gba::BusWriteRegion region, uint32_t off, uint32_t addr,
+                      uint8_t width, uint32_t old_value,
+                      uint32_t new_value) override;
+
+    // Undo the recorded RAM writes — reverse order, writing each old value back
+    // directly to the region arrays (NOT via bus.write*, which would re-journal).
+    void rollback(gba::GbaBus& bus) const;
+
+    bool        io_touched() const { return io_touched_; }
+    uint32_t    io_first_addr() const { return io_first_addr_; }
+    std::size_t write_count() const { return ram_writes_.size(); }
+
+    struct Entry {
+        gba::BusWriteRegion region;
+        uint8_t  width;
+        uint32_t off;
+        uint32_t old_value;
+        uint32_t new_value;
+    };
+    const std::vector<Entry>& entries() const { return ram_writes_; }
+
+private:
+    std::vector<Entry> ram_writes_;
+    bool     io_touched_    = false;
+    uint32_t io_first_addr_ = 0;
+    Mode     mode_          = Mode::Record;
+};
 
 }  // namespace gbarecomp::heal_gate

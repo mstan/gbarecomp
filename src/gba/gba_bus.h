@@ -27,6 +27,26 @@ namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
 namespace gba {
 
+// Write-chokepoint observer for the P6 sljit differential gate. While one is
+// registered (gate validation only — null during all normal play and the gcc
+// path), GbaBus::write{8,16,32} notify it BEFORE applying each store, so the
+// gate can journal RAM writes (to roll a validation pass back) and detect/trap
+// device writes. Region ids 0..4 are the five writable RAM regions (old/new
+// meaningful, in the heal_gate GateRegion order EWRAM,IWRAM,PAL,VRAM,OAM);
+// Device is everything else (IO/Save/RTC/ROM/unmapped — side-effectful, old
+// undefined). on_bus_write returns true to SUPPRESS the store (the gate traps
+// device writes during a shard's shadow validation pass so a buggy shard can't
+// fire a stray DMA / IO poke).
+enum class BusWriteRegion : int {
+    Ewram = 0, Iwram = 1, Pal = 2, Vram = 3, Oam = 4, Device = 5
+};
+struct BusWriteObserver {
+    virtual ~BusWriteObserver() = default;
+    virtual bool on_bus_write(BusWriteRegion region, uint32_t off, uint32_t addr,
+                              uint8_t width, uint32_t old_value,
+                              uint32_t new_value) = 0;
+};
+
 class GbaBus : public MemoryBus {
 public:
     GbaBus();
@@ -164,7 +184,17 @@ public:
     void serialize(gbarecomp::debug::SnapshotWriter& w) const;
     void deserialize(gbarecomp::debug::SnapshotReader& r);
 
+    // Register (or clear, with nullptr) the P6 gate write observer. Null in all
+    // normal play / the gcc path → the hook is one predicted-untaken branch per
+    // store. Owned by the caller (the gate); GbaBus only holds the pointer.
+    void set_write_observer(BusWriteObserver* obs) { write_observer_ = obs; }
+
 private:
+    // Notify a registered write observer of a pending store; returns true if the
+    // store should be SUPPRESSED (device trap during shadow validation). Reads
+    // the pre-store value for RAM regions so the gate can journal/roll back.
+    bool observe_write(Region region, std::size_t off, uint32_t addr,
+                       uint8_t width, uint32_t new_value);
     // The opcode word the CPU would have prefetched at `pc` ($+8 in ARM, the
     // $+4 halfword mirrored into both halves in THUMB), read from the BIOS or
     // ROM image. Drives the open-bus model above. 0 when the prefetch source
@@ -193,6 +223,8 @@ private:
 
     uint32_t    last_fetched_   = 0;
     std::size_t unmapped_count_ = 0;
+
+    BusWriteObserver* write_observer_ = nullptr;  // P6 gate hook; null in play
 };
 
 }  // namespace gba

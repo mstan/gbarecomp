@@ -31,6 +31,21 @@ RegionView region_view(gba::GbaBus& bus, GateRegion r) {
     return {nullptr, 0, "?"};
 }
 
+// Map a journal's BusWriteRegion to its backing (ptr, size) for rollback.
+void region_ptr(gba::GbaBus& bus, gba::BusWriteRegion r, uint8_t*& p,
+                std::size_t& cap) {
+    switch (r) {
+        case gba::BusWriteRegion::Ewram: p = bus.ewram_ptr(); cap = 256u * 1024u; return;
+        case gba::BusWriteRegion::Iwram: p = bus.iwram_ptr(); cap =  32u * 1024u; return;
+        case gba::BusWriteRegion::Pal:   p = bus.pal_ptr();   cap =        1024u; return;
+        case gba::BusWriteRegion::Vram:  p = bus.vram_ptr();  cap =  96u * 1024u; return;
+        case gba::BusWriteRegion::Oam:   p = bus.oam_ptr();   cap =        1024u; return;
+        case gba::BusWriteRegion::Device: break;
+    }
+    p = nullptr;
+    cap = 0;
+}
+
 std::vector<uint8_t>& snapshot_region(StateSnapshot& s, GateRegion r) {
     switch (r) {
         case GateRegion::Ewram: return s.ewram;
@@ -135,6 +150,56 @@ StateDiff diff_full(const StateSnapshot& a, const StateSnapshot& b) {
         }
     }
     return d;
+}
+
+// ── Journal ────────────────────────────────────────────────────────────────
+
+void Journal::arm(gba::GbaBus& bus, Mode mode) {
+    clear();
+    mode_ = mode;
+    bus.set_write_observer(this);
+}
+
+void Journal::disarm(gba::GbaBus& bus) { bus.set_write_observer(nullptr); }
+
+void Journal::clear() {
+    ram_writes_.clear();
+    io_touched_ = false;
+    io_first_addr_ = 0;
+}
+
+bool Journal::on_bus_write(gba::BusWriteRegion region, uint32_t off,
+                           uint32_t addr, uint8_t width, uint32_t old_value,
+                           uint32_t new_value) {
+    if (region == gba::BusWriteRegion::Device) {
+        if (!io_touched_) {
+            io_touched_ = true;
+            io_first_addr_ = addr;
+        }
+        // RECORD (interp pass) applies device writes — they belong to the kept
+        // result. SHADOW (shard validation) traps them so a mis-compile can't
+        // fire a real IO/DMA side effect; the trap is itself a divergence signal.
+        return mode_ == Mode::Shadow;
+    }
+    ram_writes_.push_back({region, width, off, old_value, new_value});
+    return false;  // RAM writes always apply
+}
+
+void Journal::rollback(gba::GbaBus& bus) const {
+    // Reverse order so overlapping writes restore to the earliest old value.
+    for (auto it = ram_writes_.rbegin(); it != ram_writes_.rend(); ++it) {
+        uint8_t* p = nullptr;
+        std::size_t cap = 0;
+        region_ptr(bus, it->region, p, cap);
+        if (!p || it->off + it->width > cap) continue;
+        const uint32_t v = it->old_value;
+        p[it->off] = static_cast<uint8_t>(v);
+        if (it->width >= 2) p[it->off + 1] = static_cast<uint8_t>(v >> 8);
+        if (it->width >= 4) {
+            p[it->off + 2] = static_cast<uint8_t>(v >> 16);
+            p[it->off + 3] = static_cast<uint8_t>(v >> 24);
+        }
+    }
 }
 
 }  // namespace gbarecomp::heal_gate
