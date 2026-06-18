@@ -43,13 +43,19 @@ struct SljitFn {
 SljitFn emit_instr_sljit(const Instr& ins);
 
 // Compose `count` supported leaf instructions into ONE straight-line host
-// function (no control flow yet). The whole-function producer's first
-// composition step: it proves the per-instruction leaves chain correctly —
-// register/memory state flows through g_cpu, per-instruction cycles accumulate.
-// Declines (fn=null) if ANY instruction is unsupported. The faithful
-// per-instruction prologue (R15/yield/fingerprint) and branches/terminators
-// land in the next P5 steps.
+// function (no control flow). Used by the composition test; the faithful
+// per-instruction body runs but every transfer is external. Declines if ANY
+// instruction is unsupported.
 SljitFn emit_block_sljit(const Instr* ins, unsigned count);
+
+// The whole-function producer: compose a decoded function (`prog[0..count)`, in
+// program order) into one host function. Intra-function backward `B` branches
+// become direct sljit jumps (loops); every other transfer dispatches through
+// the runtime. The faithful per-instruction prologue/epilogue runs for each
+// instruction. Declines (fn=null) if ANY instruction is unsupported — precision
+// over recall, so the caller falls to gcc / the interpreter. This is the unit
+// the on-miss runtime producer (P5) registers into g_healed.
+SljitFn emit_function_sljit(const Instr* prog, unsigned count);
 
 // Release a compiled shard (sljit_free_code). Safe on a declined (null) result.
 void free_sljit_fn(const SljitFn& f);

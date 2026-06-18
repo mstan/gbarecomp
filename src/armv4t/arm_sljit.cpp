@@ -26,6 +26,7 @@
 #include "arm_sljit.h"
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 #include "runtime_arm.h"
@@ -380,16 +381,28 @@ bool emit_mul(struct sljit_compiler* C, const Instr& ins) {
     return true;
 }
 
+// Whole-function emit context: the function's PC range and the labels emitted
+// at backward-branch targets (pc → label). Null for the single-instruction and
+// block paths, where every transfer is external (dispatch).
+struct FnCtx {
+    uint32_t lo;
+    uint32_t hi;
+    std::unordered_map<uint32_t, struct sljit_label*>* labels;
+};
+
 // ── Branches. S0=&g_cpu; S1=target (BX/BL_suffix); S5=exec cost (set by
 // emit_one_body). Mirrors emit_branch with an EMPTY names_by_key (the overlay
 // model: every transfer goes through runtime_dispatch). A taken transfer ticks
 // the cost and appends a jump to ret_jumps (→ function return). Calls (BL /
 // BL_suffix) may instead FALL THROUGH: after the callee C-returns to the
 // pushed return address, control resumes in this function — so they zero S5
-// (already ticked) and let the epilogue advance R15. External targets only for
-// now; intra-function goto-to-label arrives with emit_function's two-pass. ──
+// (already ticked) and let the epilogue advance R15. A BACKWARD intra-function
+// B becomes a direct sljit jump to the target's label (the loop optimization
+// the C codegen does, avoiding re-dispatch recursion); everything else
+// dispatches. ──
 bool emit_branch_body(struct sljit_compiler* C, const Instr& ins,
-                      std::vector<struct sljit_jump*>& ret_jumps) {
+                      std::vector<struct sljit_jump*>& ret_jumps,
+                      const FnCtx* fn) {
     auto tick_s5 = [&]() {
         sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S5, 0);
         sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1V(32),
@@ -400,14 +413,25 @@ bool emit_branch_body(struct sljit_compiler* C, const Instr& ins,
     };
 
     switch (ins.op) {
-        case IrOp::B:
+        case IrOp::B: {
             sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, ins.branch_target);
             sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(15), SLJIT_R0, 0);
             tick_s5();
+            // Backward intra-function branch → jump to the already-emitted label.
+            if (fn && ins.branch_target >= fn->lo && ins.branch_target < fn->hi &&
+                ins.branch_target < ins.pc) {
+                auto it = fn->labels->find(ins.branch_target);
+                if (it != fn->labels->end() && it->second) {
+                    struct sljit_jump* j = sljit_emit_jump(C, SLJIT_JUMP);
+                    sljit_set_label(j, it->second);
+                    return true;
+                }
+            }
             sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, ins.branch_target);
             call1((const void*)&runtime_dispatch);
             ret_jumps.push_back(sljit_emit_jump(C, SLJIT_JUMP));
             return true;
+        }
 
         case IrOp::BX: {
             sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(ins.rm));
@@ -501,7 +525,7 @@ bool emit_branch_body(struct sljit_compiler* C, const Instr& ins,
 // jump that should leave the whole function (the yield bail; later, branches)
 // is appended to `ret_jumps` for the caller to bind to the function's return.
 bool emit_one_body(struct sljit_compiler* C, const Instr& ins,
-                   std::vector<struct sljit_jump*>& ret_jumps) {
+                   std::vector<struct sljit_jump*>& ret_jumps, const FnCtx* fn) {
     const uint32_t pc = ins.pc;
     const uint32_t next = pc + (ins.thumb ? 2u : 4u);
 
@@ -544,7 +568,7 @@ bool emit_one_body(struct sljit_compiler* C, const Instr& ins,
                    static_cast<sljit_sw>(instr_cycle_base(ins.op)));
 
     bool ok;
-    if (is_branch_op(ins.op))   ok = emit_branch_body(C, ins, ret_jumps);
+    if (is_branch_op(ins.op))   ok = emit_branch_body(C, ins, ret_jumps, fn);
     else if (is_dp_op(ins.op))  ok = emit_dp(C, ins);
     else if (is_mem_op(ins.op)) ok = emit_mem(C, ins);
     else if (is_mul_op(ins.op)) ok = emit_mul(C, ins);
@@ -629,7 +653,7 @@ SljitFn emit_instr_sljit(const Instr& ins) {
     if (!C) return SljitFn{};
     emit_enter_frame(C);
     std::vector<struct sljit_jump*> ret_jumps;
-    if (!emit_one_body(C, ins, ret_jumps)) { sljit_free_compiler(C); return SljitFn{}; }
+    if (!emit_one_body(C, ins, ret_jumps, nullptr)) { sljit_free_compiler(C); return SljitFn{}; }
     struct sljit_label* L_ret = sljit_emit_label(C);
     for (auto* j : ret_jumps) sljit_set_label(j, L_ret);
     return finish(C);
@@ -645,7 +669,46 @@ SljitFn emit_block_sljit(const Instr* ins, unsigned count) {
     emit_enter_frame(C);
     std::vector<struct sljit_jump*> ret_jumps;
     for (unsigned i = 0; i < count; ++i) {
-        if (!emit_one_body(C, ins[i], ret_jumps)) {
+        if (!emit_one_body(C, ins[i], ret_jumps, nullptr)) {
+            sljit_free_compiler(C);
+            return SljitFn{};
+        }
+    }
+    struct sljit_label* L_ret = sljit_emit_label(C);
+    for (auto* j : ret_jumps) sljit_set_label(j, L_ret);
+    return finish(C);
+}
+
+SljitFn emit_function_sljit(const Instr* prog, unsigned count) {
+    if (count == 0) return SljitFn{};
+    for (unsigned i = 0; i < count; ++i)
+        if (!sljit_supports(prog[i])) return SljitFn{};
+
+    const uint32_t lo = prog[0].pc;
+    const uint32_t hi = prog[count - 1].pc + (prog[count - 1].thumb ? 2u : 4u);
+
+    // Pass 1: mark the targets of backward intra-function B branches (loops).
+    std::unordered_map<uint32_t, struct sljit_label*> labels;
+    for (unsigned i = 0; i < count; ++i) {
+        const Instr& in = prog[i];
+        if (in.op == IrOp::B && in.branch_target >= lo && in.branch_target < hi &&
+            in.branch_target < in.pc) {
+            labels.emplace(in.branch_target, nullptr);
+        }
+    }
+
+    struct sljit_compiler* C = sljit_create_compiler(nullptr);
+    if (!C) return SljitFn{};
+    emit_enter_frame(C);
+    FnCtx fnctx{lo, hi, &labels};
+    std::vector<struct sljit_jump*> ret_jumps;
+
+    // Pass 2: emit. A label is placed at the start of each backward target's
+    // body (before its prologue), so a backward B re-runs the target faithfully.
+    for (unsigned i = 0; i < count; ++i) {
+        auto it = labels.find(prog[i].pc);
+        if (it != labels.end()) it->second = sljit_emit_label(C);
+        if (!emit_one_body(C, prog[i], ret_jumps, &fnctx)) {
             sljit_free_compiler(C);
             return SljitFn{};
         }

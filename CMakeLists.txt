@@ -540,6 +540,21 @@ target_link_libraries(sljit_block_tests PRIVATE
     gbarecomp_sljit_emit gbarecomp_armv4t)
 add_test(NAME sljit_block_tests COMMAND sljit_block_tests)
 
+# sljit_function_tests — whole-function producer (P5). JITs a decoded function
+# (emit_function_sljit) and diffs it vs a mini-dispatch interpreter that follows
+# branches, covering straight-line, a backward-branch LOOP, and memory. See
+# SLJIT.md §5.1.
+add_executable(sljit_function_tests
+    tests/sljit/function_test.cpp
+    tests/codegen/stubs.cpp
+)
+target_include_directories(sljit_function_tests PRIVATE
+    tests/codegen
+    src/armv4t)
+target_link_libraries(sljit_function_tests PRIVATE
+    gbarecomp_sljit_emit gbarecomp_armv4t)
+add_test(NAME sljit_function_tests COMMAND sljit_function_tests)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # selfheal_stage2_bios_identical — Stage-2 GFP1 byte-identity gate. Proves a
 # healed-to-native BIOS function (0xBA4 exclude fixture) executes instruction-
