@@ -576,6 +576,15 @@ target_link_libraries(sljit_function_tests PRIVATE
     gbarecomp_sljit_emit gbarecomp_armv4t)
 add_test(NAME sljit_function_tests COMMAND sljit_function_tests)
 
+# gate_tests — offline P6 differential-gate state machine (promote + pin). Drives
+# sljit_gate::on_dispatch against a real GbaBus/GbaPpu + the interpreter bridge
+# (links the full runtime stack), the deterministic CI counterpart to the in-vivo
+# MinishCap promotion witness.
+add_executable(gate_tests tests/sljit/gate_test.cpp)
+target_include_directories(gate_tests PRIVATE src/armv4t src/runtime src/gba)
+target_link_gbarecomp_runtime_stack(gate_tests)
+add_test(NAME gate_tests COMMAND gate_tests)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # selfheal_stage2_bios_identical — Stage-2 GFP1 byte-identity gate. Proves a
 # healed-to-native BIOS function (0xBA4 exclude fixture) executes instruction-
