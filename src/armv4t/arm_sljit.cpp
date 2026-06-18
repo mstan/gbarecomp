@@ -12,9 +12,12 @@
 //   P7:        + block transfer (LDM/STM), incl. the POP {.., pc} return idiom
 //              (exits the function like a branch; SP base C-returns, else
 //              dispatches). Declines s_bit / empty-list / rn==15.
+//   P7b:       + PC-relative LDR literal (LDR rd, [pc, #imm], rd!=15) — base
+//              baked as the pc-pipeline constant; no-writeback pre-indexed only.
 // Still DECLINED (precision over recall → caller runs gcc / interpreter):
 //   register-COUNT shifts, non-LSL reg offsets, LDRSH, long multiplies,
-//   PSR/SWI, R15 operands, LDM/STM s_bit + empty-list + PC base.
+//   PSR/SWI, R15 as a value operand / PC-write loads, LDM/STM s_bit +
+//   empty-list + PC base.
 //
 // Parity is by construction: value/carry/address/flag math mirrors
 // arm_codegen.cpp, and the per-instruction prologue/epilogue mirrors
@@ -214,7 +217,18 @@ bool emit_mem(struct sljit_compiler* C, const Instr& ins) {
     const IrOp op = ins.op;
     const auto& mem = ins.mem;
 
-    sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(mem.rn));
+    if (mem.rn == 15) {
+        // PC-relative literal load: the base is the pc-pipeline value, not the
+        // live R15 (which emit_one_body set to ins.pc). THUMB word-aligns it.
+        // Gated to the no-writeback pre-indexed form, so this base is never
+        // written back (it would be a PC write).
+        const uint32_t base = ins.thumb ? ((ins.pc + 4u) & ~3u) : (ins.pc + 8u);
+        sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM,
+                       static_cast<sljit_sw>(base));
+    } else {
+        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0,
+                       SLJIT_MEM1(SLJIT_S0), kRegOff(mem.rn));
+    }
     if (!mem.by_register) {
         sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R1, 0, SLJIT_IMM, mem.imm_offset);
     } else {

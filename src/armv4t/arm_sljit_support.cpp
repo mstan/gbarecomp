@@ -27,8 +27,19 @@ bool body_supported(const Instr& ins) {
         return true;
     }
     if (is_mem_op(ins.op)) {
-        if (ins.mem.rn == 15) return false;   // PC base → later
         if (ins.rd == 15) return false;       // PC dest/source → later
+        if (ins.mem.rn == 15) {
+            // PC-relative literal load (LDR rd, [pc, #imm]): supported as the
+            // pure pre-indexed, immediate-offset, no-writeback form only — the
+            // base is baked as the pc-pipeline constant in emit_mem and never
+            // updated, so no PC write occurs. A writeback / post-index / store
+            // / register-offset with a PC base would write or index off R15:
+            // unpredictable and not the literal-pool idiom → later.
+            if (!is_load(ins.op)) return false;
+            if (ins.mem.by_register) return false;
+            if (!ins.mem.pre_indexed || ins.mem.writeback) return false;
+            return true;
+        }
         if (ins.mem.by_register) {
             if (ins.mem.reg_offset.rm == 15) return false;
             if (ins.mem.reg_offset.type != ShiftType::LSL) return false;  // non-LSL → later

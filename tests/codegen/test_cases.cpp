@@ -37,6 +37,10 @@ const TestMemInit mem_word_at_1004_cafe[] = {
     {0x1004u, 0xCAFEF00Du},
 };
 
+const TestMemInit mem_word_at_010C[] = {
+    {0x010Cu, 0x12345678u},  // ARM LDR r0,[pc,#4] @ pc=0x100 → ea = pc+8+4 = 0x10C
+};
+
 const TestMemInit mem_word_at_1000_misaligned_pattern[] = {
     // a 32-bit word the LDR test will rotate
     {0x1000u, 0x11223344u},
@@ -872,6 +876,12 @@ const TestCase kTestCases[] = {
     { "thumb_cmp_imm", true, 0x100u, 0x00002805u,
       {5, 0, 0, 0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
       (1u<<5) | MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+
+    // ── ARM PC-rel LDR literal: LDR r0, [pc, #4]  (0xE59F0004) ─────
+    //   base = pc + 8 = 0x108, +4 → ea = 0x10C. Loads the seeded word.
+    { "arm_ldr_pc_rel", false, 0x100u, 0xE59F0004u,
+      {0, 0, 0, 0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, mem_word_at_010C, 1, false, 0, 0 },
 
     // ── THUMB fmt6 LDR PC-rel: LDR r0, [PC, #0]  (0x4800) ──────────
     //   PC at decode time = 0x100+4 = 0x104, aligned & ~3 = 0x104.
