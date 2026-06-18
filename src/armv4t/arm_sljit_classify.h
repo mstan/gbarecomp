@@ -29,8 +29,8 @@ inline bool is_dp_op(IrOp op) {
 inline bool is_mem_op(IrOp op) {
     switch (op) {
         case IrOp::LDR: case IrOp::STR: case IrOp::LDRB: case IrOp::STRB:
-        case IrOp::LDRH: case IrOp::STRH: case IrOp::LDRSB:
-            return true;  // LDRSH declined (misaligned-byte branch)
+        case IrOp::LDRH: case IrOp::STRH: case IrOp::LDRSB: case IrOp::LDRSH:
+            return true;
         default: return false;
     }
 }

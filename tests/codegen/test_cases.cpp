@@ -41,6 +41,10 @@ const TestMemInit mem_word_at_010C[] = {
     {0x010Cu, 0x12345678u},  // ARM LDR r0,[pc,#4] @ pc=0x100 → ea = pc+8+4 = 0x10C
 };
 
+const TestMemInit mem_hword_neg_at_3000[] = {
+    {0x3000u, 0x0000FF80u},  // aligned LDRSH reads 0xFF80 → sext16 = 0xFFFFFF80
+};
+
 const TestMemInit mem_word_at_1000_misaligned_pattern[] = {
     // a 32-bit word the LDR test will rotate
     {0x1000u, 0x11223344u},
@@ -784,6 +788,12 @@ const TestCase kTestCases[] = {
       // LDRSH r2, [r0, #1]: addr = 0x1001
       {0x1000u, 0, 0, 0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
       MODE_SYSTEM, mem_word_at_1000_misaligned_pattern, 1, false, 0, 0 },
+
+    // ── LDRSH on aligned address: sign-extended halfword ──────────
+    //   LDRSH r2, [r0]: addr = 0x3000 (even) → sext16(0xFF80) = 0xFFFFFF80
+    { "arm_ldrsh_aligned", false, 0x100u, 0xE1D020F0u,
+      {0x3000u, 0, 0, 0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, mem_hword_neg_at_3000, 1, false, 0, 0 },
 
     // ── LDR post-indexed: LDR r2, [r0], #4 ────────────────────────
     //   cond=AL, 010 P=0 U=1 B=0 W=0 L=1, Rn=0, Rd=2, imm12=4

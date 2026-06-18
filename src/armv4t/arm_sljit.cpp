@@ -14,10 +14,11 @@
 //              dispatches). Declines s_bit / empty-list / rn==15.
 //   P7b:       + PC-relative LDR literal (LDR rd, [pc, #imm], rd!=15) — base
 //              baked as the pc-pipeline constant; no-writeback pre-indexed only.
+//   P7c:       + LDRSH (runtime ea&1 branch: sext8 on the odd byte else sext16).
 // Still DECLINED (precision over recall → caller runs gcc / interpreter):
-//   register-COUNT shifts, non-LSL reg offsets, LDRSH, long multiplies,
-//   PSR/SWI, R15 as a value operand / PC-write loads, LDM/STM s_bit +
-//   empty-list + PC base.
+//   register-COUNT shifts, non-LSL reg offsets, long multiplies, PSR/SWI,
+//   R15 as a value operand / PC-write loads, LDM/STM s_bit + empty-list +
+//   PC base.
 //
 // Parity is by construction: value/carry/address/flag math mirrors
 // arm_codegen.cpp, and the per-instruction prologue/epilogue mirrors
@@ -284,6 +285,30 @@ bool emit_mem(struct sljit_compiler* C, const Instr& ins) {
                 sljit_emit_op2(C, SLJIT_SHL32, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 24);
                 sljit_emit_op2(C, SLJIT_ASHR32, SLJIT_S3, 0, SLJIT_R0, 0, SLJIT_IMM, 24);
                 break;
+            case IrOp::LDRSH: {
+                // ARMv4T: a misaligned (odd) LDRSH acts as LDRSB on the byte;
+                // an aligned one is a sign-extended halfword. Runtime branch on
+                // ea bit 0. Both paths leave the sign-extended value in S3.
+                sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+                struct sljit_jump* odd =
+                    sljit_emit_cmp(C, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+                // even: sext16(bus_read_u16(ea))  (ea is aligned here)
+                sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S1, 0);
+                sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1(32, 32),
+                                 SLJIT_IMM, addr_of((const void*)&bus_read_u16));
+                sljit_emit_op2(C, SLJIT_SHL32, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 16);
+                sljit_emit_op2(C, SLJIT_ASHR32, SLJIT_S3, 0, SLJIT_R0, 0, SLJIT_IMM, 16);
+                struct sljit_jump* done = sljit_emit_jump(C, SLJIT_JUMP);
+                // odd: sext8(bus_read_u8(ea))
+                sljit_set_label(odd, sljit_emit_label(C));
+                sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S1, 0);
+                sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1(32, 32),
+                                 SLJIT_IMM, addr_of((const void*)&bus_read_u8));
+                sljit_emit_op2(C, SLJIT_SHL32, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 24);
+                sljit_emit_op2(C, SLJIT_ASHR32, SLJIT_S3, 0, SLJIT_R0, 0, SLJIT_IMM, 24);
+                sljit_set_label(done, sljit_emit_label(C));
+                break;
+            }
             default: return false;
         }
         if ((mem.writeback || !mem.pre_indexed) && mem.rn != ins.rd)
