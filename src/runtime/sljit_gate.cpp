@@ -145,6 +145,9 @@ void validate(uint32_t pc, bool thumb, void (*fn)(void), GateState& st) {
             std::printf("sljit_gate: PROMOTE 0x%08X (%s) — %u consecutive clean "
                         "passes; runs native blind from here\n",
                         pc, thumb ? "thumb" : "arm", st.clean_passes);
+        } else {
+            std::printf("sljit_gate: clean 0x%08X (%s) — pass %u/%u\n",
+                        pc, thumb ? "thumb" : "arm", st.clean_passes, g_threshold);
         }
     } else {
         st.status = GateState::Status::Pinned;

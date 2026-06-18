@@ -91,6 +91,8 @@ public:
     bool on_bus_write(gba::BusWriteRegion region, uint32_t off, uint32_t addr,
                       uint8_t width, uint32_t old_value,
                       uint32_t new_value) override;
+    // A device (IO) read also counts as a device touch — see BusWriteObserver.
+    void on_bus_read(uint32_t addr) override;
 
     // Undo the recorded RAM writes — reverse order, writing each old value back
     // directly to the region arrays (NOT via bus.write*, which would re-journal).

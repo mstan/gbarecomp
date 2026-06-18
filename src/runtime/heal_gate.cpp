@@ -185,6 +185,16 @@ bool Journal::on_bus_write(gba::BusWriteRegion region, uint32_t off,
     return false;  // RAM writes always apply
 }
 
+void Journal::on_bus_read(uint32_t addr) {
+    // Reading a device register is a device touch: such registers advance with
+    // cycles, so a shadow-ticked shard re-run would read a different value → the
+    // function can't be cleanly shadow-validated (the gate pins it).
+    if (!io_touched_) {
+        io_touched_ = true;
+        io_first_addr_ = addr;
+    }
+}
+
 void Journal::rollback(gba::GbaBus& bus) const {
     // Reverse order so overlapping writes restore to the earliest old value.
     for (auto it = ram_writes_.rbegin(); it != ram_writes_.rend(); ++it) {

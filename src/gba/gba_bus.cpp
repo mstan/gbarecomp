@@ -137,6 +137,7 @@ uint8_t GbaBus::read8(uint32_t addr) {
                              : static_cast<uint8_t>(hw & 0xFFu);
         }
         case Region::Io:
+            if (write_observer_) write_observer_->on_bus_read(addr);
             return io_dispatch_.read8(static_cast<uint32_t>(off));
         case Region::Save:
             log_unmapped(addr, 0, false, 1);
@@ -179,6 +180,7 @@ uint16_t GbaBus::read16(uint32_t addr) {
             return static_cast<uint16_t>((off >> 1) & 0xFFFFu);
         }
         case Region::Io:
+            if (write_observer_) write_observer_->on_bus_read(addr);
             return io_dispatch_.read16(static_cast<uint32_t>(off));
         case Region::Save:
             log_unmapped(addr, 0, false, 2);
@@ -228,6 +230,7 @@ uint32_t GbaBus::read32(uint32_t addr) {
             return hw_lo | (hw_hi << 16);
         }
         case Region::Io:
+            if (write_observer_) write_observer_->on_bus_read(addr);
             return io_dispatch_.read32(static_cast<uint32_t>(off));
         case Region::Save:
             log_unmapped(addr, 0, false, 4);

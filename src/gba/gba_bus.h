@@ -45,6 +45,12 @@ struct BusWriteObserver {
     virtual bool on_bus_write(BusWriteRegion region, uint32_t off, uint32_t addr,
                               uint8_t width, uint32_t old_value,
                               uint32_t new_value) = 0;
+    // Notified on a READ from a device (IO) register. The gate uses this to pin
+    // functions that read IO: device registers (VCOUNT, timer counters, …)
+    // advance with cycles during the interpreter pass, so a shadow-ticked shard
+    // re-run would read different values — such functions can't be cleanly
+    // shadow-validated. Default no-op (only the gate cares).
+    virtual void on_bus_read(uint32_t /*addr*/) {}
 };
 
 class GbaBus : public MemoryBus {
