@@ -29,6 +29,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "arm_sljit_classify.h"  // shared op classifiers (sjc::)
 #include "runtime_arm.h"
 #include "sljitLir.h"
 
@@ -45,54 +46,9 @@ inline sljit_sw addr_of(const void* p) {
     return static_cast<sljit_sw>(reinterpret_cast<uintptr_t>(p));
 }
 
-bool is_dp_op(IrOp op) {
-    switch (op) {
-        case IrOp::AND: case IrOp::EOR: case IrOp::SUB: case IrOp::RSB:
-        case IrOp::ADD: case IrOp::ADC: case IrOp::SBC: case IrOp::RSC:
-        case IrOp::ORR: case IrOp::MOV: case IrOp::BIC:
-        case IrOp::MVN: case IrOp::TST: case IrOp::TEQ: case IrOp::CMP:
-        case IrOp::CMN:
-            return true;
-        default: return false;
-    }
-}
-bool is_mem_op(IrOp op) {
-    switch (op) {
-        case IrOp::LDR: case IrOp::STR: case IrOp::LDRB: case IrOp::STRB:
-        case IrOp::LDRH: case IrOp::STRH: case IrOp::LDRSB:
-            return true;  // LDRSH declined (misaligned-byte branch)
-        default: return false;
-    }
-}
-bool is_mul_op(IrOp op) { return op == IrOp::MUL || op == IrOp::MLA; }
-bool is_branch_op(IrOp op) {
-    return op == IrOp::B || op == IrOp::BX || op == IrOp::BL ||
-           op == IrOp::BL_prefix || op == IrOp::BL_suffix;
-}
-bool is_load(IrOp op) {
-    return op == IrOp::LDR || op == IrOp::LDRB || op == IrOp::LDRH ||
-           op == IrOp::LDRSB || op == IrOp::LDRSH;
-}
-unsigned access_width(IrOp op) {
-    switch (op) {
-        case IrOp::LDRB: case IrOp::STRB: case IrOp::LDRSB: return 1;
-        case IrOp::LDRH: case IrOp::STRH: case IrOp::LDRSH: return 2;
-        default: return 4;
-    }
-}
-bool is_test_op(IrOp op) {
-    return op == IrOp::TST || op == IrOp::TEQ ||
-           op == IrOp::CMP || op == IrOp::CMN;
-}
-bool is_logical_op(IrOp op) {
-    switch (op) {
-        case IrOp::AND: case IrOp::EOR: case IrOp::ORR: case IrOp::BIC:
-        case IrOp::MOV: case IrOp::MVN: case IrOp::TST: case IrOp::TEQ:
-            return true;
-        default: return false;
-    }
-}
-bool uses_rn(IrOp op) { return !(op == IrOp::MOV || op == IrOp::MVN); }
+// Op classifiers live in arm_sljit_classify.h (shared with arm_sljit_support.cpp);
+// pull them in unqualified.
+using namespace sjc;
 
 // cpsr_c() (bit 29 of cpsr) -> dst. Assumes S0 == &g_cpu.
 void emit_cpsr_c(struct sljit_compiler* C, sljit_s32 dst) {
@@ -589,37 +545,6 @@ bool emit_one_body(struct sljit_compiler* C, const Instr& ins,
     return true;
 }
 
-bool body_supported(const Instr& ins) {
-    if (is_dp_op(ins.op)) {
-        if (ins.op2.kind == Op2::Kind::Shifted) {
-            if (ins.op2.shifted.by_register) return false;
-            if (ins.op2.shifted.rm == 15) return false;
-        }
-        if (!is_test_op(ins.op) && ins.rd == 15) return false;
-        if (uses_rn(ins.op) && ins.rn == 15) return false;
-        return true;
-    }
-    if (is_mem_op(ins.op)) {
-        if (ins.mem.rn == 15) return false;
-        if (ins.rd == 15) return false;
-        if (ins.mem.by_register) {
-            if (ins.mem.reg_offset.rm == 15) return false;
-            if (ins.mem.reg_offset.type != ShiftType::LSL) return false;
-        }
-        return true;
-    }
-    if (is_mul_op(ins.op)) {
-        if (ins.rd == 15 || ins.rm == 15 || ins.rs == 15) return false;
-        if (ins.op == IrOp::MLA && ins.rn == 15) return false;
-        return true;
-    }
-    if (is_branch_op(ins.op)) {
-        if (ins.op == IrOp::BX && ins.rm == 15) return false;  // BX PC unpredictable
-        return true;
-    }
-    return false;
-}
-
 // Common function frame: enter, bake S0=&g_cpu. saveds=6 covers S0..S5 (S5 is
 // the cyc accumulator); scratches=4 covers R0..R3.
 void emit_enter_frame(struct sljit_compiler* C) {
@@ -641,11 +566,6 @@ SljitFn finish(struct sljit_compiler* C) {
 }
 
 }  // namespace
-
-bool sljit_supports(const Instr& ins) {
-    if (ins.is_undefined) return false;
-    return body_supported(ins);  // conditional execution is handled by emit_one_body
-}
 
 SljitFn emit_instr_sljit(const Instr& ins) {
     if (!sljit_supports(ins)) return SljitFn{};

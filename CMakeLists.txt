@@ -116,6 +116,9 @@ add_library(gbarecomp_armv4t STATIC
     src/armv4t/runtime_arm.cpp
     src/armv4t/symbol_lookup.cpp
     src/armv4t/interpreter.cpp
+    # sljit_supports() — pure classification, no runtime/sljit deps, so it lives
+    # in armv4t and is linkable into the recompiler tool (heal-coverage measure).
+    src/armv4t/arm_sljit_support.cpp
 )
 target_include_directories(gbarecomp_armv4t PUBLIC src/armv4t)
 set_property(TARGET gbarecomp_armv4t PROPERTY POSITION_INDEPENDENT_CODE ON)

@@ -47,6 +47,10 @@
 
 #include "config.h"
 #include "function_finder.h"
+#include "arm_sljit.h"     // armv4t::sljit_supports (heal-coverage measurement)
+#include "arm_decode.h"    // armv4t::ArmDecoder
+#include "thumb_decode.h"  // armv4t::ThumbDecoder
+#include "arm_ir.h"        // armv4t::Instr, ir_op_name
 #include "emit_function.h"
 #include "arm_codegen.h"
 #include "arm_decode.h"
@@ -701,6 +705,77 @@ int main(int argc, char** argv) {
     // (much slower) codegen pass — lets a measurement run read the
     // numbers without waiting for full generation.
     std::fflush(stdout);
+
+    // Optional: measure sljit heal-coverage over the discovered corpus, then
+    // exit (don't emit). GBARECOMP_SLJIT_COVERAGE=1. Reports how many functions
+    // emit_function_sljit would heal vs decline + the dominant declined ops +
+    // a few demo candidates (fully supported, with a load/store).
+    if (std::getenv("GBARECOMP_SLJIT_COVERAGE")) {
+        auto rd32 = [&](uint32_t a) -> uint32_t {
+            const uint32_t off = a - effective_rom_base;
+            if (a < effective_rom_base || off + 4u > rom.size()) return 0u;
+            const uint8_t* p = rom.data() + off;
+            return p[0] | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) |
+                   (uint32_t(p[3]) << 24);
+        };
+        auto rd16 = [&](uint32_t a) -> uint16_t {
+            const uint32_t off = a - effective_rom_base;
+            if (a < effective_rom_base || off + 2u > rom.size()) return 0u;
+            const uint8_t* p = rom.data() + off;
+            return static_cast<uint16_t>(p[0] | (uint16_t(p[1]) << 8));
+        };
+        std::size_t supported = 0, leaf_supported = 0;
+        std::unordered_map<std::string, int> decline;
+        std::vector<const Function*> demo;
+        for (const auto& f : funcs) {
+            const bool thumb = (f.mode == CpuMode::Thumb);
+            bool ok = (f.end_addr > f.addr);
+            bool has_call = false, has_mem = false;
+            std::string first_bad;
+            for (uint32_t a = f.addr; a < f.end_addr; a += thumb ? 2u : 4u) {
+                armv4t::Instr in = thumb ? armv4t::ThumbDecoder::decode(rd16(a), a)
+                                         : armv4t::ArmDecoder::decode(rd32(a), a);
+                if (in.op == armv4t::IrOp::BL || in.op == armv4t::IrOp::BL_suffix)
+                    has_call = true;
+                switch (in.op) {
+                    case armv4t::IrOp::LDR: case armv4t::IrOp::STR:
+                    case armv4t::IrOp::LDRB: case armv4t::IrOp::STRB:
+                    case armv4t::IrOp::LDRH: case armv4t::IrOp::STRH:
+                        has_mem = true; break;
+                    default: break;
+                }
+                if (ok && !armv4t::sljit_supports(in)) {
+                    ok = false;
+                    first_bad = armv4t::ir_op_name(in.op);
+                }
+            }
+            if (ok) {
+                ++supported;
+                if (!has_call) ++leaf_supported;
+                if (demo.size() < 12 && has_mem && !has_call) demo.push_back(&f);
+            } else if (!first_bad.empty()) {
+                decline[first_bad]++;
+            }
+        }
+        const std::size_t total = funcs.size();
+        std::printf("\n[sljit heal-coverage over %zu discovered functions]\n", total);
+        std::printf("  fully supported (would heal): %zu (%.1f%%)\n",
+                    supported, total ? 100.0 * double(supported) / double(total) : 0.0);
+        std::printf("  ... leaf (no BL call):        %zu\n", leaf_supported);
+        std::printf("  top first-unsupported-op classes:\n");
+        std::vector<std::pair<std::string, int>> v(decline.begin(), decline.end());
+        std::sort(v.begin(), v.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        for (std::size_t i = 0; i < v.size() && i < 12; ++i)
+            std::printf("    %-8s %d\n", v[i].first.c_str(), v[i].second);
+        std::printf("  demo candidates (fully supported, leaf, has load/store):\n");
+        for (const Function* f : demo)
+            std::printf("    0x%08X %-5s len=0x%X\n", f->addr,
+                        f->mode == CpuMode::Thumb ? "thumb" : "arm",
+                        f->end_addr - f->addr);
+        std::fflush(stdout);
+        return 0;
+    }
 
     // Make sure the output dir exists.
 #ifdef _WIN32
