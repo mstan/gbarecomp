@@ -50,6 +50,12 @@ extern "C" const unsigned kBiosDispatchTableLen;
 // link is a plain extern "C" symbol, mirroring runtime_dispatch_miss.
 extern "C" int overlay_try_dispatch(uint32_t pc, int thumb);
 
+// Demo/test hook: when it returns nonzero, runtime_dispatch SKIPS the static
+// dispatch tables for `pc`, forcing a miss so a supported function self-heals
+// via sljit on an otherwise fully-static build. Off by default (returns 0).
+// Real impl in overlay_loader.cpp; null stub in tests/codegen/stubs.cpp.
+extern "C" int overlay_should_force_miss(uint32_t pc, int thumb);
+
 // ── CPU state ──────────────────────────────────────────────────────
 
 extern "C" ArmCpuState g_cpu = {};
@@ -711,14 +717,19 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
     uint32_t pc = target_pc & ~1u;
     runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
 
-    void (*fn)(void) = nullptr;
     bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+    void (*fn)(void) = nullptr;
     if (pc < kBiosRegionEnd) {
         fn = lookup_in(kBiosDispatchTable, kBiosDispatchTableLen, pc, thumb);
     } else {
         fn = lookup_in(kDispatchTable, kDispatchTableLen, pc, thumb);
     }
-    if (fn) { fn(); return; }
+    // Force-heal demo (off by default): a chosen STATIC function entry (fn !=
+    // null) is skipped here so it misses + self-heals via sljit even on a fully-
+    // static build; overlay_try_dispatch below then serves the JIT'd version.
+    // Gating on fn != null means ONLY real function entries are eligible — a
+    // return address / mid-function dispatch target is never force-missed.
+    if (fn && !overlay_should_force_miss(pc, thumb ? 1 : 0)) { fn(); return; }
     // Stage-2 self-heal: third dispatch tier. After the static tables miss,
     // consult the runtime-healed native overlays before bridging. Defined in
     // src/runtime/overlay_loader.cpp (a null stub in tests/codegen/stubs.cpp,

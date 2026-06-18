@@ -30,4 +30,11 @@ bool overlay_sljit_produce(uint32_t pc, bool thumb,
                            void (**out_fn)(void), void** out_code,
                            uint32_t* out_end);
 
+// True iff the function rooted at (pc, thumb) is discoverable AND every
+// instruction in its extent is lowerable by the emitter (sljit_supports). Used
+// by the force-heal demo to pick supported functions without producing code.
+bool overlay_sljit_function_supported(uint32_t pc, bool thumb,
+                                      const uint8_t* bytes, std::size_t size,
+                                      uint32_t base);
+
 }  // namespace gbarecomp

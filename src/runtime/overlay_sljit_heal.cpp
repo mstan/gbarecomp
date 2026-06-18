@@ -6,7 +6,7 @@
 
 #include "arm_decode.h"       // armv4t::ArmDecoder
 #include "arm_ir.h"           // armv4t::Instr
-#include "arm_sljit.h"        // armv4t::emit_function_sljit
+#include "arm_sljit.h"        // armv4t::emit_function_sljit, sljit_supports
 #include "function_finder.h"  // gbarecomp::FunctionFinder
 #include "thumb_decode.h"     // armv4t::ThumbDecoder
 
@@ -29,14 +29,12 @@ uint16_t read_u16(const uint8_t* b, std::size_t size, uint32_t base, uint32_t a)
                                  (static_cast<uint16_t>(b[off + 1]) << 8));
 }
 
-}  // namespace
-
-bool overlay_sljit_produce(uint32_t pc, bool thumb,
-                           const uint8_t* bytes, std::size_t size, uint32_t base,
-                           void (**out_fn)(void), void** out_code,
-                           uint32_t* out_end) {
-    // Discover the function rooted at pc against the live code image (same call
-    // shape as emit_overlay_c; the callees self-heal independently on first hit).
+// Discover the function rooted at (pc, thumb) against the live code image and
+// decode its extent into `prog` (single mode across [addr, end_addr) — inter-
+// working exits via BX/dispatch). Returns false if undiscoverable / empty.
+bool decode_function(uint32_t pc, bool thumb, const uint8_t* bytes,
+                     std::size_t size, uint32_t base,
+                     std::vector<armv4t::Instr>& prog, uint32_t* out_end) {
     FunctionFinder ff(bytes, size, base);
     FunctionSeed seed;
     seed.addr = pc;
@@ -53,22 +51,28 @@ bool overlay_sljit_produce(uint32_t pc, bool thumb,
     }
     if (!target || target->end_addr <= target->addr) return false;
 
-    // Decode the function's extent in its (single) mode into the Instr stream
-    // the emitter consumes. Interworking exits the function via BX/dispatch, so
-    // the mode is fixed across [addr, end_addr).
-    std::vector<armv4t::Instr> prog;
     for (uint32_t a = target->addr; a < target->end_addr;) {
         if (thumb) {
-            prog.push_back(armv4t::ThumbDecoder::decode(
-                read_u16(bytes, size, base, a), a));
+            prog.push_back(armv4t::ThumbDecoder::decode(read_u16(bytes, size, base, a), a));
             a += 2u;
         } else {
-            prog.push_back(armv4t::ArmDecoder::decode(
-                read_u32(bytes, size, base, a), a));
+            prog.push_back(armv4t::ArmDecoder::decode(read_u32(bytes, size, base, a), a));
             a += 4u;
         }
     }
-    if (prog.empty()) return false;
+    *out_end = target->end_addr;
+    return !prog.empty();
+}
+
+}  // namespace
+
+bool overlay_sljit_produce(uint32_t pc, bool thumb,
+                           const uint8_t* bytes, std::size_t size, uint32_t base,
+                           void (**out_fn)(void), void** out_code,
+                           uint32_t* out_end) {
+    std::vector<armv4t::Instr> prog;
+    uint32_t end = 0;
+    if (!decode_function(pc, thumb, bytes, size, base, prog, &end)) return false;
 
     armv4t::SljitFn fn = armv4t::emit_function_sljit(
         prog.data(), static_cast<unsigned>(prog.size()));
@@ -76,7 +80,18 @@ bool overlay_sljit_produce(uint32_t pc, bool thumb,
 
     *out_fn = fn.fn;
     *out_code = fn.code;
-    *out_end = target->end_addr;
+    *out_end = end;
+    return true;
+}
+
+bool overlay_sljit_function_supported(uint32_t pc, bool thumb,
+                                      const uint8_t* bytes, std::size_t size,
+                                      uint32_t base) {
+    std::vector<armv4t::Instr> prog;
+    uint32_t end = 0;
+    if (!decode_function(pc, thumb, bytes, size, base, prog, &end)) return false;
+    for (const auto& in : prog)
+        if (!armv4t::sljit_supports(in)) return false;
     return true;
 }
 

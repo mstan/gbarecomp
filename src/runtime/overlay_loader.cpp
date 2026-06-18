@@ -72,6 +72,15 @@ uint64_t                                  s_native_calls_total = 0;
 bool                                      s_use_sljit = false;
 uint64_t                                  s_sljit_healed = 0;
 
+// Force-heal demo (GBARECOMP_SLJIT_FORCE_HEAL=N): force the first N supported,
+// dispatch-reached functions to MISS the static tables so they self-heal via
+// sljit even on a fully-static build (a witnessed heal without a regen). s_force_yes
+// = chosen (always force-missed thereafter → served by the JIT'd shard); s_force_no
+// = already rejected (unsupported / undiscoverable), cached so we don't re-decode.
+unsigned                                  s_force_heal_limit = 0;
+std::unordered_set<uint64_t>              s_force_yes;
+std::unordered_set<uint64_t>              s_force_no;
+
 // Cross-thread work/ready queues:
 std::mutex                  s_work_mtx;
 std::condition_variable     s_work_cv;
@@ -287,6 +296,11 @@ void overlay_loader_init(const std::string& cache_root,
     {
         const char* be = std::getenv("GBARECOMP_HEAL_BACKEND");
         s_use_sljit = (be != nullptr && std::strcmp(be, "sljit") == 0);
+        const char* fh = std::getenv("GBARECOMP_SLJIT_FORCE_HEAL");
+        s_force_heal_limit = fh ? static_cast<unsigned>(std::strtoul(fh, nullptr, 10)) : 0u;
+        if (s_force_heal_limit && s_use_sljit)
+            std::printf("self_heal: FORCE-HEAL demo armed for up to %u functions\n",
+                        s_force_heal_limit);
     }
 
     const int warm = warm_load_cache();
@@ -309,6 +323,26 @@ void overlay_loader_shutdown() {
     s_active = false;
 }
 
+// Produce + register an sljit shard for (pc, thumb) into g_healed (the caller
+// has already resolved region_bytes + dedup). Returns false if the emitter
+// declines. Internal-linkage so overlay_should_force_miss can call it too.
+static bool register_sljit_heal(uint32_t pc, bool thumb, const uint8_t* bytes,
+                                std::size_t size, uint32_t base, const char* tag) {
+    void (*fn)(void) = nullptr;
+    void* code = nullptr;
+    uint32_t end = 0;
+    if (!overlay_sljit_produce(pc, thumb, bytes, size, base, &fn, &code, &end))
+        return false;
+    HealedEntry h;
+    h.addr = pc; h.thumb = thumb; h.fn = fn; h.module = code;
+    h.end = end; h.sljit = true;
+    g_healed[heal_key(pc, thumb)] = h;
+    ++s_sljit_healed;
+    std::printf("self_heal: %s 0x%08X (%s) [0x%08X,0x%08X) — sljit native\n",
+                tag, pc, thumb ? "thumb" : "arm", pc, end);
+    return true;
+}
+
 void overlay_request_compile(uint32_t pc, bool thumb) {
     if (!s_active) return;
     pc &= ~1u;
@@ -329,19 +363,7 @@ void overlay_request_compile(uint32_t pc, bool thumb) {
     if (s_use_sljit) {
         // In-process JIT on the game thread: produce now, register now — the
         // next hit of this PC dispatches native. No worker, no DLL, no toolchain.
-        void (*fn)(void) = nullptr;
-        void* code = nullptr;
-        uint32_t end = 0;
-        if (overlay_sljit_produce(pc, thumb, bytes, size, base, &fn, &code, &end)) {
-            HealedEntry h;
-            h.addr = pc; h.thumb = thumb; h.fn = fn; h.module = code;
-            h.end = end; h.sljit = true;
-            g_healed[key] = h;
-            ++s_sljit_healed;
-            std::printf("self_heal: sljit-JIT'd 0x%08X (%s) [0x%08X,0x%08X) "
-                        "— native next hit\n",
-                        pc, thumb ? "thumb" : "arm", pc, end);
-        } else {
+        if (!register_sljit_heal(pc, thumb, bytes, size, base, "sljit-JIT'd")) {
             // Emitter declined (an op it can't lower yet, or undiscoverable):
             // stay on the honest interpreter bridge for this PC this session.
             s_failed.insert(key);
@@ -420,4 +442,39 @@ extern "C" int overlay_try_dispatch(uint32_t pc, int thumb) {
     ++gbarecomp::s_native_calls_total;
     it->second.fn();
     return 1;
+}
+
+// Force-heal demo hook (off unless GBARECOMP_SLJIT_FORCE_HEAL=N): when it returns
+// 1, runtime_dispatch skips the static tables for this PC. We pick the first N
+// distinct, supported, dispatch-reached functions; each then misses → bridges
+// once through the interpreter → heals via sljit → runs as the JIT'd shard on
+// every subsequent hit. Zero cost when the demo is off (one branch). Game-thread
+// only (same as runtime_dispatch), so the sets need no locking.
+extern "C" int overlay_should_force_miss(uint32_t pc, int thumb_i) {
+    if (!gbarecomp::s_active || gbarecomp::s_force_heal_limit == 0) return 0;
+    pc &= ~1u;
+    if (pc < 0x00004000u) return 0;  // never the BIOS (vectors/handlers are special)
+    const bool thumb = (thumb_i != 0);
+    const uint64_t key = gbarecomp::heal_key(pc, thumb);
+    if (gbarecomp::s_force_yes.count(key)) return 1;  // chosen → keep missing it
+    if (gbarecomp::s_force_no.count(key)) return 0;
+    if (gbarecomp::g_healed.count(key)) { gbarecomp::s_force_yes.insert(key); return 1; }
+    if (gbarecomp::s_force_yes.size() >= gbarecomp::s_force_heal_limit) return 0;
+
+    const uint8_t* bytes = nullptr;
+    std::size_t size = 0;
+    uint32_t base = 0;
+    if (!gbarecomp::region_bytes(pc, &bytes, &size, &base)) {
+        gbarecomp::s_force_no.insert(key);
+        return 0;
+    }
+    // Heal NOW and register the shard, so overlay_try_dispatch serves it on THIS
+    // hit — bypassing the interpreter bridge (whose stop-address contract does
+    // not fit a force-missed function and would otherwise run away).
+    if (gbarecomp::register_sljit_heal(pc, thumb, bytes, size, base, "FORCE-HEAL")) {
+        gbarecomp::s_force_yes.insert(key);
+        return 1;
+    }
+    gbarecomp::s_force_no.insert(key);
+    return 0;
 }
