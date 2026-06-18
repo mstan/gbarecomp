@@ -121,6 +121,33 @@ target_include_directories(gbarecomp_armv4t PUBLIC src/armv4t)
 set_property(TARGET gbarecomp_armv4t PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# sljit — Tier-2 in-process JIT backend (BSD-2-Clause; vendored in lib/sljit,
+# from psxrecomp/n64recomp). Single TU: sljitLir.c #includes the host-arch
+# backend it auto-detects (SLJIT_CONFIG_AUTO). The ARM Instr -> host emitter
+# (P3) and the runtime sljit producer (P5) link this. See lib/sljit/LICENSE.
+# Compiled with -w: it is vendored third-party C we do not own; its warnings
+# would otherwise drown the build (we keep -Wall/-Wextra on OUR code).
+# ─────────────────────────────────────────────────────────────────────────────
+add_library(sljit STATIC lib/sljit/sljit_src/sljitLir.c)
+target_include_directories(sljit PUBLIC lib/sljit/sljit_src)
+set_property(TARGET sljit PROPERTY POSITION_INDEPENDENT_CODE ON)
+if(NOT MSVC)
+    target_compile_options(sljit PRIVATE -w)
+endif()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sljit_emit — the ARM Instr -> host machine code emitter (Tier-2 JIT producer),
+# the sljit counterpart to ArmCodegen (IR -> C). Consumes the SAME armv4t::Instr
+# and bakes the runtime ABI addresses (g_cpu, arm_*, runtime_tick) as immediates.
+# Kept a SEPARATE target so gbarecomp_armv4t (the portable decoder/IR/codegen)
+# stays sljit-free. See src/armv4t/arm_sljit.h + SLJIT.md.
+# ─────────────────────────────────────────────────────────────────────────────
+add_library(gbarecomp_sljit_emit STATIC src/armv4t/arm_sljit.cpp)
+target_include_directories(gbarecomp_sljit_emit PUBLIC src/armv4t)
+target_link_libraries(gbarecomp_sljit_emit PUBLIC gbarecomp_armv4t sljit)
+set_property(TARGET gbarecomp_sljit_emit PROPERTY POSITION_INDEPENDENT_CODE ON)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # recompile_core — function discovery + per-function codegen, as a LIBRARY.
 # Extracted from tools/gba_recompile so the SAME emitter serves both the
 # offline corpus build (the tool) and the Stage-2 runtime self-healing
@@ -419,6 +446,13 @@ add_executable(ppu_smoke_tests tests/ppu_smoke/test_main.cpp)
 target_link_libraries(ppu_smoke_tests PRIVATE gbarecomp_gba)
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
 
+# sljit_smoke — P2 host-capability canary. JIT `f(a)=a+1234`, run it, check the
+# result. Proves the vendored JIT codegen + executable allocator work on this
+# host before the ARM emitter is built on top. See SLJIT.md P2.
+add_executable(sljit_smoke tests/sljit/smoke_test.c)
+target_link_libraries(sljit_smoke PRIVATE sljit)
+add_test(NAME sljit_smoke COMMAND sljit_smoke)
+
 # ─────────────────────────────────────────────────────────────────────
 # codegen_tests — L1 per-IrOp diff harness.
 #
@@ -474,6 +508,22 @@ target_include_directories(codegen_tests PRIVATE
     src/armv4t)
 target_link_libraries(codegen_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME codegen_tests COMMAND codegen_tests)
+
+# sljit_codegen_tests — L1 JIT-mode harness. Runs the SAME kTestCases corpus
+# through emit_instr_sljit and diffs each shard vs the interpreter (registers +
+# CPSR + memory + cycles). Reuses test_cases.cpp (corpus) + stubs.cpp (the
+# runtime-layer stubs the JIT'd code calls). See SLJIT.md §6.
+add_executable(sljit_codegen_tests
+    tests/codegen/sljit_test_main.cpp
+    tests/codegen/test_cases.cpp
+    tests/codegen/stubs.cpp
+)
+target_include_directories(sljit_codegen_tests PRIVATE
+    tests/codegen
+    src/armv4t)
+target_link_libraries(sljit_codegen_tests PRIVATE
+    gbarecomp_sljit_emit gbarecomp_armv4t)
+add_test(NAME sljit_codegen_tests COMMAND sljit_codegen_tests)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # selfheal_stage2_bios_identical — Stage-2 GFP1 byte-identity gate. Proves a
