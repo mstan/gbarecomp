@@ -64,9 +64,10 @@ bool is_mem_op(IrOp op) {
     }
 }
 bool is_mul_op(IrOp op) { return op == IrOp::MUL || op == IrOp::MLA; }
-// Terminating branches handled so far. BL/BL_prefix/BL_suffix (calls, which can
-// fall through) land next.
-bool is_branch_op(IrOp op) { return op == IrOp::B || op == IrOp::BX; }
+bool is_branch_op(IrOp op) {
+    return op == IrOp::B || op == IrOp::BX || op == IrOp::BL ||
+           op == IrOp::BL_prefix || op == IrOp::BL_suffix;
+}
 bool is_load(IrOp op) {
     return op == IrOp::LDR || op == IrOp::LDRB || op == IrOp::LDRH ||
            op == IrOp::LDRSB || op == IrOp::LDRSH;
@@ -276,8 +277,7 @@ bool emit_mem(struct sljit_compiler* C, const Instr& ins) {
     sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R2, 0, SLJIT_IMM, 0);
     sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS3(32, 32, 32, 32),
                      SLJIT_IMM, addr_of((const void*)&runtime_mem_cycles));
-    sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S5, 0, SLJIT_R0, 0, SLJIT_IMM,
-                   static_cast<sljit_sw>(instr_cycle_base(op)));
+    sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_R0, 0);  // += mem cycles
 
     if (is_load(op)) {
         switch (op) {
@@ -361,8 +361,7 @@ bool emit_mul(struct sljit_compiler* C, const Instr& ins) {
                    static_cast<sljit_sw>(extra));
     sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS3(32, 32, 32, 32),
                      SLJIT_IMM, addr_of((const void*)&runtime_mul_cycles));
-    sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S5, 0, SLJIT_R0, 0, SLJIT_IMM,
-                   static_cast<sljit_sw>(instr_cycle_base(ins.op)));
+    sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_R0, 0);  // += mul cycles
 
     sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(rm));
     sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(rs));
@@ -381,56 +380,119 @@ bool emit_mul(struct sljit_compiler* C, const Instr& ins) {
     return true;
 }
 
-// ── Terminating branches (B / BX). S0=&g_cpu; S1=target (BX). These set R15,
-// tick the branch cost directly (NOT via the S5 epilogue), dispatch, and append
-// an unconditional jump to ret_jumps so control leaves the function. Mirrors
-// emit_branch with an EMPTY names_by_key (the overlay model: every transfer
-// goes through runtime_dispatch). External targets only for now; intra-function
-// goto-to-label arrives with emit_function's two-pass. ──
+// ── Branches. S0=&g_cpu; S1=target (BX/BL_suffix); S5=exec cost (set by
+// emit_one_body). Mirrors emit_branch with an EMPTY names_by_key (the overlay
+// model: every transfer goes through runtime_dispatch). A taken transfer ticks
+// the cost and appends a jump to ret_jumps (→ function return). Calls (BL /
+// BL_suffix) may instead FALL THROUGH: after the callee C-returns to the
+// pushed return address, control resumes in this function — so they zero S5
+// (already ticked) and let the epilogue advance R15. External targets only for
+// now; intra-function goto-to-label arrives with emit_function's two-pass. ──
 bool emit_branch_body(struct sljit_compiler* C, const Instr& ins,
                       std::vector<struct sljit_jump*>& ret_jumps) {
-    const sljit_sw exec = static_cast<sljit_sw>(instr_cycle_base(ins.op));  // 3
-    if (ins.op == IrOp::B) {
-        sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, ins.branch_target);
-        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(15), SLJIT_R0, 0);
-        sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, exec);
+    auto tick_s5 = [&]() {
+        sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S5, 0);
         sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1V(32),
                          SLJIT_IMM, addr_of((const void*)&runtime_tick));
-        sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, ins.branch_target);
-        sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1V(32),
-                         SLJIT_IMM, addr_of((const void*)&runtime_dispatch));
-        ret_jumps.push_back(sljit_emit_jump(C, SLJIT_JUMP));
-        return true;
+    };
+    auto call1 = [&](const void* fn) {  // void fn(R0)
+        sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1V(32), SLJIT_IMM, addr_of(fn));
+    };
+
+    switch (ins.op) {
+        case IrOp::B:
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, ins.branch_target);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(15), SLJIT_R0, 0);
+            tick_s5();
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, ins.branch_target);
+            call1((const void*)&runtime_dispatch);
+            ret_jumps.push_back(sljit_emit_jump(C, SLJIT_JUMP));
+            return true;
+
+        case IrOp::BX: {
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(ins.rm));
+            sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, kM1);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(15), SLJIT_R0, 0);
+            tick_s5();
+            if (ins.rm == 14) {
+                // `bx lr`: set CPSR.T from target bit 0, then C-return if this
+                // matches the pending direct-call return.
+                sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), kCpsrOff);
+                sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM,
+                               static_cast<sljit_sw>(~(1u << 5)));
+                sljit_emit_op2(C, SLJIT_AND32, SLJIT_R1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+                sljit_emit_op2(C, SLJIT_SHL32, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_IMM, 5);
+                sljit_emit_op2(C, SLJIT_OR32, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R1, 0);
+                sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kCpsrOff, SLJIT_R0, 0);
+                sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(15));
+                sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1(32, 32),
+                                 SLJIT_IMM, addr_of((const void*)&runtime_call_should_return));
+                sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 0xFF);
+                ret_jumps.push_back(sljit_emit_cmp(C, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
+            }
+            sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S1, 0);
+            call1((const void*)&runtime_dispatch_with_exchange);
+            ret_jumps.push_back(sljit_emit_jump(C, SLJIT_JUMP));
+            return true;
+        }
+
+        case IrOp::BL_prefix:  // THUMB BL upper half: stash partial target in LR.
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, ins.branch_target);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(14), SLJIT_R0, 0);
+            return true;  // non-terminating → epilogue ticks S5 (=1), advances R15
+
+        case IrOp::BL: {
+            const uint32_t link = ins.pc + (ins.thumb ? 2u : 4u);
+            const uint32_t lr = ins.thumb ? (link | 1u) : link;
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, lr);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(14), SLJIT_R0, 0);
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, ins.branch_target);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(15), SLJIT_R0, 0);
+            if (ins.branch_target == link)
+                return true;  // bl-to-next (get-PC): LR set, fall through
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, link & ~1u);
+            call1((const void*)&runtime_call_push_return);
+            tick_s5();
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_S5, 0, SLJIT_IMM, 0);  // no double-tick
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, ins.branch_target);
+            call1((const void*)&runtime_dispatch);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(15));
+            struct sljit_jump* fall =
+                sljit_emit_cmp(C, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, link & ~1u);
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, link & ~1u);
+            call1((const void*)&runtime_call_cancel_return);
+            ret_jumps.push_back(sljit_emit_jump(C, SLJIT_JUMP));
+            sljit_set_label(fall, sljit_emit_label(C));
+            return true;
+        }
+
+        case IrOp::BL_suffix: {
+            // THUMB BL lower half: target = (LR + imm) & ~1; new LR = (pc+2)|1.
+            const uint32_t new_lr = (ins.pc + 2u) | 1u;
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(14));
+            sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, ins.swi_imm);
+            sljit_emit_op2(C, SLJIT_AND32, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, kM1);
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, new_lr);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(14), SLJIT_R0, 0);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(15), SLJIT_S1, 0);
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, new_lr & ~1u);
+            call1((const void*)&runtime_call_push_return);
+            tick_s5();
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_S5, 0, SLJIT_IMM, 0);
+            sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S1, 0);
+            call1((const void*)&runtime_dispatch);
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(15));
+            struct sljit_jump* fall =
+                sljit_emit_cmp(C, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, new_lr & ~1u);
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, new_lr & ~1u);
+            call1((const void*)&runtime_call_cancel_return);
+            ret_jumps.push_back(sljit_emit_jump(C, SLJIT_JUMP));
+            sljit_set_label(fall, sljit_emit_label(C));
+            return true;
+        }
+
+        default: return false;
     }
-    // BX: target = R[rm]; R15 = target & ~1; tick; (bx lr → maybe C-return);
-    // dispatch_with_exchange(target); return.
-    sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(ins.rm));
-    sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, kM1);
-    sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(15), SLJIT_R0, 0);
-    sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM, exec);
-    sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1V(32),
-                     SLJIT_IMM, addr_of((const void*)&runtime_tick));
-    if (ins.rm == 14) {
-        // `bx lr`: set CPSR.T from target bit 0 (so a C-return leaves T right),
-        // then C-return if this matches the pending direct-call return.
-        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), kCpsrOff);
-        sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM,
-                       static_cast<sljit_sw>(~(1u << 5)));
-        sljit_emit_op2(C, SLJIT_AND32, SLJIT_R1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-        sljit_emit_op2(C, SLJIT_SHL32, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_IMM, 5);
-        sljit_emit_op2(C, SLJIT_OR32, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R1, 0);
-        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kCpsrOff, SLJIT_R0, 0);
-        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(15));
-        sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1(32, 32),
-                         SLJIT_IMM, addr_of((const void*)&runtime_call_should_return));
-        sljit_emit_op2(C, SLJIT_AND32, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 0xFF);
-        ret_jumps.push_back(sljit_emit_cmp(C, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
-    }
-    sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S1, 0);
-    sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1V(32),
-                     SLJIT_IMM, addr_of((const void*)&runtime_dispatch_with_exchange));
-    ret_jumps.push_back(sljit_emit_jump(C, SLJIT_JUMP));
-    return true;
 }
 
 // ── The faithful per-instruction unit (mirrors arm_codegen::emit_instr). ──
@@ -473,6 +535,13 @@ bool emit_one_body(struct sljit_compiler* C, const Instr& ins,
                          SLJIT_IMM, addr_of((const void*)&arm_cond_passes));
         skip_body = sljit_emit_cmp(C, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
     }
+
+    // Exec cost (cond-pass path): instr_cycle_base + surcharges. The surcharge
+    // cases (register-count shifts, PC writes) are declined, so this is the
+    // base; mem/mul ADD their runtime component. The cond-fail path skips this
+    // and keeps the S5==1 fetch baseline.
+    sljit_emit_op1(C, SLJIT_MOV32, SLJIT_S5, 0, SLJIT_IMM,
+                   static_cast<sljit_sw>(instr_cycle_base(ins.op)));
 
     bool ok;
     if (is_branch_op(ins.op))   ok = emit_branch_body(C, ins, ret_jumps);
