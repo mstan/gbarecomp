@@ -966,6 +966,12 @@ extern "C" void runtime_msr_spsr(uint32_t value, uint32_t mask) {
 
 // ── Exception return ───────────────────────────────────────────────
 
+// IRQ nesting depth (defined below) and the depth at which the most recent
+// IRQ-mode exception return (iret) fired. runtime_irq() uses the latter to
+// know when its handler has fully unwound — see the re-dispatch loop there.
+extern "C" uint32_t g_irq_nest_depth;
+extern "C" uint32_t g_irq_iret_depth;
+
 extern "C" void runtime_exception_return(uint32_t new_pc) {
     uint32_t old_cpsr = g_cpu.cpsr;
     uint32_t old_mode = old_cpsr & 0x1Fu;
@@ -984,6 +990,13 @@ extern "C" void runtime_exception_return(uint32_t new_pc) {
     bank_in(new_bank, spsr);
 
     g_cpu.R[15] = new_pc;
+
+    // Returning FROM IRQ mode (0x12) is the iret that ends a hardware IRQ.
+    // Record the nesting depth so runtime_irq()'s drive-to-completion loop
+    // can tell when *its* IRQ (vs. a nested inner one) has returned. Set
+    // after the bank swap so g_irq_nest_depth still reflects the level being
+    // left (runtime_irq decrements only after its loop exits).
+    if (old_mode == 0x12u) g_irq_iret_depth = g_irq_nest_depth;
 }
 
 extern "C" void runtime_restore_cpsr_from_spsr(void) {
@@ -1077,6 +1090,10 @@ extern "C" unsigned long long g_runtime_irq_entries = 0;
 // mid-handler to allow nested IRQs.
 extern "C" uint32_t      g_irq_nest_depth = 0;
 extern "C" unsigned long long g_runtime_irq_max_depth = 0;
+// Depth at which the most recent IRQ-mode iret fired (set in
+// runtime_exception_return). runtime_irq() resets this to 0 on entry and
+// spins its drive-to-completion loop until it equals the IRQ's own depth.
+extern "C" uint32_t      g_irq_iret_depth = 0;
 
 extern "C" void runtime_irq(uint32_t return_address) {
     ++g_runtime_irq_entries;
@@ -1128,7 +1145,44 @@ extern "C" void runtime_irq(uint32_t return_address) {
     g_cpu.R[14]                 = return_address + 4u;
     g_cpu.R[15]                 = 0x00000018u;
 
+    // Drive the IRQ handler to completion.
+    //
+    // A single runtime_dispatch(0x18) finishes the handler ONLY if nothing
+    // inside it triggers a "return-to-top" unwind. A BIOS SWI executed inside
+    // the handler does exactly that: the SWI return path leaves R15 at the
+    // after-SWI PC and unwinds the host C stack via the per-call-site cancel
+    // cascade (runtime_call_cancel_return) — the SAME mechanism a SWI in the
+    // main thread uses to unwind back to step_frame's dispatch loop, which
+    // then re-dispatches R15. runtime_irq has no such loop, so the cascade
+    // would abandon the handler mid-flight: e.g. FireRed's VBlank handler
+    // (VBlankCB_Copyright -> LoadOam -> CpuSet/SWI) never reaches intr_main's
+    // post-handler `REG_IE = saved` restore, leaving VBlank masked in IE
+    // forever -> the game's VBlank busy-wait spins -> permanent freeze.
+    //
+    // Mirror the main loop here: keep re-dispatching R15 until THIS IRQ's
+    // handler has executed its iret (an IRQ-mode runtime_exception_return at
+    // our nesting depth). g_irq_nest_depth stays > 0 across the whole loop so
+    // runtime_should_yield() never unwinds us mid-handler. Nested IRQs are
+    // handled because the iret depth is matched to this frame's depth; the
+    // saved/restored g_irq_iret_depth keeps an enclosing IRQ's loop intact.
+    uint32_t my_depth      = g_irq_nest_depth;
+    uint32_t saved_iret    = g_irq_iret_depth;
+    g_irq_iret_depth       = 0u;  // sentinel: this IRQ has not iret'd yet
     runtime_dispatch(0x00000018u);
+    constexpr uint32_t kMaxIrqDispatches = 4'000'000u;
+    uint32_t irq_guard = 0u;
+    while (g_irq_iret_depth != my_depth) {
+        if (++irq_guard >= kMaxIrqDispatches) {
+            std::fprintf(stderr,
+                "runtime_irq: handler at depth %u did not iret after %u "
+                "dispatches (R15=0x%08X, cpsr=0x%08X) — abandoning\n",
+                my_depth, irq_guard, g_cpu.R[15], g_cpu.cpsr);
+            runtime_trace_dump_recent(160);
+            break;
+        }
+        runtime_dispatch(g_cpu.R[15]);
+    }
+    g_irq_iret_depth = saved_iret;  // restore an enclosing IRQ's expectation
     --g_irq_nest_depth;
 }
 
