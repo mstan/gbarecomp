@@ -1063,7 +1063,11 @@ extern "C" unsigned long long g_runtime_irq_entries = 0;
 // handler unwinds) and the high-water mark. Distinguishes the MC-HP-002 storm
 // shape: deep nesting (depth climbs → a long handler spanning the next IRQ
 // boundary) vs. flat re-fire (depth stays ~1 → an unacked source re-vectoring).
-static uint32_t          g_irq_nest_depth = 0;
+// Non-static so runtime_should_yield() (runtime_bus_bridge.cpp) can tell whether
+// an IRQ handler is currently on the host stack — the cpsr mode alone can't,
+// because GBA IRQ dispatchers (e.g. FireRed's intr_main) switch to System mode
+// mid-handler to allow nested IRQs.
+extern "C" uint32_t      g_irq_nest_depth = 0;
 extern "C" unsigned long long g_runtime_irq_max_depth = 0;
 
 extern "C" void runtime_irq(uint32_t return_address) {

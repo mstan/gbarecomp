@@ -43,6 +43,10 @@ extern "C" uint32_t g_runtime_break_pc = 0;
 // "recomp runs a frame ahead" when diffing memory at the same step index.
 extern "C" unsigned long long g_runtime_vblank_starts = 0;
 static unsigned long long g_runtime_yielded_vblank_start = 0;
+// Live IRQ-handler nesting depth (defined in armv4t/runtime_arm.cpp: ++ on IRQ
+// entry, -- after the handler unwinds). Used by the vblank-yield guard below to
+// avoid yielding while an IRQ handler is on the host stack.
+extern "C" uint32_t g_irq_nest_depth;
 
 // Cumulative guest-cycle clock (MC-HP-002 cycle-aligned divergence hunt).
 // Incremented by runtime_tick on EVERY tick — both the per-instruction exec
@@ -457,13 +461,19 @@ extern "C" bool runtime_should_yield(void) {
     // Some games, including Pokemon FireRed, busy-wait on a VBlank flag instead
     // of entering HALT. Yield once per VBlank-start in normal guest modes so the
     // host runner can present frames, poll input, and honor --frames even while
-    // the guest stays inside one long-running dispatch. Do not yield from IRQ/SVC
-    // handlers; runtime_tick must let those complete before control unwinds.
+    // the guest stays inside one long-running dispatch. Do NOT yield from inside
+    // an exception handler; runtime_irq runs the whole IRQ chain synchronously
+    // (runtime_dispatch(0x18) between ++/-- g_irq_nest_depth), so yielding there
+    // would unwind that nested dispatch and abandon the handler before it acks
+    // the interrupt — the FireRed VBlank freeze. The cpsr mode alone is NOT a
+    // sufficient guard: a GBA IRQ dispatcher (intr_main) switches IRQ→System mode
+    // mid-handler to allow nested IRQs, so it would pass a User/System-mode test
+    // while still inside the IRQ. Gate on the live IRQ nesting depth too.
     static const bool yield_on_vblank = [] {
         const char* e = std::getenv("GBARECOMP_YIELD_ON_VBLANK");
         return !(e && e[0] == '0' && e[1] == '\0');
     }();
-    if (yield_on_vblank &&
+    if (yield_on_vblank && g_irq_nest_depth == 0u &&
         g_runtime_vblank_starts != g_runtime_yielded_vblank_start) {
         const uint32_t mode = g_cpu.cpsr & 0x1Fu;
         if (mode == 0x10u || mode == 0x1Fu) {
