@@ -65,4 +65,11 @@ void free_sljit_fn(const SljitFn& f);
 // must exactly predict whether emit_instr_sljit returns non-null.
 bool sljit_supports(const Instr& ins);
 
+// The single source of truth behind sljit_supports(): returns nullptr if the
+// instruction is supported, else a short stable tag naming the exact decline
+// condition (e.g. "dp:reg-shift-count", "dp:S=1-pc-write", "mem:pc-base-store").
+// sljit_supports(ins) == (sljit_decline_reason(ins) == nullptr). Used by the
+// heal-coverage report to sub-classify declines by *why*, not just by op name.
+const char* sljit_decline_reason(const Instr& ins);
+
 }  // namespace armv4t

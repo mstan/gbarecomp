@@ -86,30 +86,35 @@ bool overlay_sljit_produce(uint32_t pc, bool thumb,
     *out_code = fn.code;
     *out_end = end;
     if (out_leaf) {
-        // Gate-eligible = SELF-CONTAINED: the function exits only via a return
-        // idiom, so the gate can shadow-validate it in isolation. Excluded:
-        //   - a call (BL/BLX, is_call),
+        // Gate-eligible = the function exits ONLY via a return idiom or a DIRECT
+        // call that comes back, so the gate's shadow re-run is guaranteed to
+        // C-return to the gate (never dispatching a target derived from
+        // possibly-incompletely-restored state, which can run away). Excluded:
         //   - a COMPUTED transfer that isn't a return (BX rN / mov pc,rN / ldr pc
-        //     / jump table — is_indirect && !is_return),
-        //   - a DIRECT branch whose target escapes [pc, end) (a switch case label
-        //     / tail branch — the shard dispatches out of its extent).
-        // Any of these makes the shadow run dispatch a target derived from
-        // possibly-incompletely-restored state, which can run away (the crash we
-        // hit before this guard). Plain returns (bx lr / pop {pc}, is_return) and
-        // intra-extent branches (loops, if/else) stay eligible.
-        bool leaf = true;
+        //     / jump table / indirect BLX — is_indirect && !is_return),
+        //   - a DIRECT tail branch whose target escapes [pc, end) (a switch case
+        //     label / tail call — dispatches out WITHOUT a return frame).
+        // A DIRECT call (BL/BLX-imm) IS allowed: it leaves the extent but pushes a
+        // return and comes back, so the shadow run still C-returns cleanly. Its
+        // only added hazard — the nested dispatch recursing on the host C stack —
+        // is handled by the gate's call-nesting DEPTH BOUND (sljit_gate.cpp), not
+        // here. Plain returns (bx lr / pop {pc}) and intra-extent branches (loops,
+        // if/else) stay eligible. (The flag is named `leaf` for ABI continuity but
+        // now means "gate-eligible: clean control flow, direct calls allowed".)
+        bool eligible = true;
         for (const auto& in : prog) {
-            if (in.is_call || (in.is_indirect && !in.is_return)) {
-                leaf = false;
+            if (in.is_indirect && !in.is_return) {
+                eligible = false;  // computed / indirect transfer → can run away
                 break;
             }
-            if (in.is_branch && !in.is_indirect && in.branch_target != 0 &&
+            if (in.is_branch && !in.is_call && !in.is_indirect &&
+                in.branch_target != 0 &&
                 (in.branch_target < pc || in.branch_target >= end)) {
-                leaf = false;  // branch escapes the shard's extent
+                eligible = false;  // direct TAIL branch escapes the extent
                 break;
             }
         }
-        *out_leaf = leaf;
+        *out_leaf = eligible;
     }
     return true;
 }

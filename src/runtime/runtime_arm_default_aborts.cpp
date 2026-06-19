@@ -311,6 +311,28 @@ void record_and_log_miss(std::uint32_t pc, bool thumb) {
                 ? "Re-run `gba_recompile --bios bios/gba_bios.bin "
                   "--config bios/gba_bios.toml` after merging the proposal."
                 : "Merge the proposal into game.toml and regenerate.");
+
+        const char* trace_on_miss = std::getenv("GBARECOMP_TRACE_ON_DISPATCH_MISS");
+        if (trace_on_miss && trace_on_miss[0] != '\0') {
+            bool dump = trace_on_miss[0] == '1' && trace_on_miss[1] == '\0';
+            if (!dump) {
+                const std::uint32_t wanted =
+                    static_cast<std::uint32_t>(std::strtoul(trace_on_miss, nullptr, 0));
+                dump = wanted == (pc & ~1u);
+            }
+            if (dump) {
+                std::uint32_t depth = 512u;
+                if (const char* depth_env = std::getenv("GBARECOMP_TRACE_DUMP_DEPTH")) {
+                    const std::uint32_t parsed =
+                        static_cast<std::uint32_t>(std::strtoul(depth_env, nullptr, 0));
+                    if (parsed != 0u) depth = parsed;
+                }
+                std::fprintf(stderr,
+                             "runtime_trace: dispatch-miss trace for pc=0x%08X\n",
+                             pc);
+                runtime_trace_dump_recent(depth);
+            }
+        }
     }
 }
 
@@ -336,6 +358,14 @@ void record_and_log_miss(std::uint32_t pc, bool thumb) {
 // Every interpreted instruction is fingerprinted into the SAME always-on ring
 // the generated prologue uses (runtime_insn_fp), so a bridged run diffs
 // bit-identically against a non-excluded build.
+// Max ARM call-nesting depth reached during the most recent bridge pass. The P6
+// sljit gate reads this after its interpreter pass: re-running a healed shard
+// recurses one host C-stack frame per nested dispatch, so a function whose call
+// nesting exceeds the safe stack headroom is pinned rather than re-run. Tracked
+// by the flat interp loop below (which itself costs O(1) host stack), so it is a
+// cheap pre-flight of how deep the shard re-run would recurse. Reset at entry.
+extern "C" uint32_t g_bridge_max_call_depth = 0;
+
 // runtime_bridge_interpret — the interpret-the-missed-subtree core, factored out
 // of runtime_dispatch_miss so the P6 sljit differential gate can reuse it as its
 // "interpreter pass": the kept, correct result a healed shard is validated
@@ -400,6 +430,14 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
     cpu.thumb    = entry_thumb;
 
     // ── (3) Interpret the subtree until control returns to stop_pc ──
+    // Call-nesting pre-flight (for the gate's depth bound): a stack of the
+    // return addresses of currently-open BL/BLX calls. Push when a call branches,
+    // pop when the PC lands back on an open return address. The high-water mark is
+    // a conservative estimate of how deep the shard re-run will recurse on the
+    // host C stack. Over-counting is safe (pins more); we only pop on an actual
+    // branch to avoid a spurious pop under-counting the depth.
+    std::vector<std::uint32_t> call_nest;
+    g_bridge_max_call_depth = 0;
     std::uint64_t iters = 0;
     std::uint64_t bridged_insns = 0;
     for (;;) {
@@ -408,6 +446,7 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
         // the generated per-instruction prologue would have set.
         gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
         const std::uint32_t pc = cpu.R[15];
+        const bool was_thumb = cpu.thumb;
         g_cpu.R[15] = pc;  // store_interp already set this; explicit for clarity
         bus->set_bios_access_enabled(pc < 0x00004000u);
         if (g_runtime_insn_trace) runtime_insn_fp();
@@ -463,6 +502,28 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
             gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
             runtime_tick(cyc);
             gbarecomp::load_arm_cpu_into_interp(g_cpu, cpu);
+        }
+
+        // Call-nesting pre-flight update (see the call_nest declaration above).
+        {
+            const std::uint32_t newpc  = cpu.R[15] & ~1u;
+            const std::uint32_t seqpc  = (pc + (was_thumb ? 2u : 4u)) & ~1u;
+            const bool branched = (newpc != seqpc);
+            // Pop returns: an actual branch landing on an open call's return addr.
+            if (branched)
+                while (!call_nest.empty() && newpc == (call_nest.back() & ~1u))
+                    call_nest.pop_back();
+            // Push calls: BL/BL_suffix(THUMB)/BLX that actually transferred.
+            const bool is_call = branched &&
+                (insn.op == armv4t::IrOp::BL ||
+                 insn.op == armv4t::IrOp::BL_suffix ||
+                 insn.op == armv4t::IrOp::BLX_reg);
+            if (is_call) {
+                call_nest.push_back(cpu.R[14]);  // the return address the call set
+                if (call_nest.size() > g_bridge_max_call_depth)
+                    g_bridge_max_call_depth =
+                        static_cast<std::uint32_t>(call_nest.size());
+            }
         }
 
         if ((cpu.R[15] & ~1u) == stop_pc) break;

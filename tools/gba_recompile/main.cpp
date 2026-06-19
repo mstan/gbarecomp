@@ -265,6 +265,133 @@ OutputNames names_for_mode(bool bios_mode) {
     };
 }
 
+// ── C++ identifier sanitization ──────────────────────────────────────
+//
+// Each guest function is emitted as `void <name>(void)`, and that same
+// <name> is referenced from the header decl, the dispatch table, and
+// inter-function call sites in the bodies. The name comes from the decomp
+// seed where known (readable codegen) — but a seed name is just a symbol-
+// table string and can be a C++ keyword, the std namespace ("std" is a real
+// libc routine in pokefirered at 0x081E8108), or a duplicate of another
+// local symbol. Any of those breaks the C++ compile. We KEEP the readable
+// name wherever it is already a unique, valid, non-reserved identifier and
+// only disambiguate the offenders by appending the (unique) guest address,
+// so the generated diff stays minimal and the debug symbol map still
+// matches the emitted code one-for-one.
+bool is_cxx_reserved_name(const std::string& s) {
+    static const std::unordered_set<std::string> kReserved = {
+        // C++ keywords and alternative tokens
+        "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand",
+        "bitor", "bool", "break", "case", "catch", "char", "char8_t",
+        "char16_t", "char32_t", "class", "compl", "concept", "const",
+        "consteval", "constexpr", "constinit", "const_cast", "continue",
+        "co_await", "co_return", "co_yield", "decltype", "default", "delete",
+        "do", "double", "dynamic_cast", "else", "enum", "explicit", "export",
+        "extern", "false", "float", "for", "friend", "goto", "if", "inline",
+        "int", "long", "mutable", "namespace", "new", "noexcept", "not",
+        "not_eq", "nullptr", "operator", "or", "or_eq", "private", "protected",
+        "public", "register", "reinterpret_cast", "requires", "return",
+        "short", "signed", "sizeof", "static", "static_assert", "static_cast",
+        "struct", "switch", "template", "this", "thread_local", "throw",
+        "true", "try", "typedef", "typeid", "typename", "union", "unsigned",
+        "using", "virtual", "void", "volatile", "wchar_t", "while", "xor",
+        "xor_eq",
+        // The standard namespace + macros the generated body pulls into scope.
+        "std", "NULL",
+    };
+    return kReserved.count(s) != 0;
+}
+
+bool is_valid_c_identifier(const std::string& s) {
+    if (s.empty()) return false;
+    auto is_ident_start = [](char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+    };
+    auto is_ident_cont = [&](char c) {
+        return is_ident_start(c) || (c >= '0' && c <= '9');
+    };
+    if (!is_ident_start(s[0])) return false;
+    for (char c : s) {
+        if (!is_ident_cont(c)) return false;
+    }
+    return true;
+}
+
+// Rewrite funcs[].name so every name is a valid, unique C++ identifier that
+// cannot collide with a host symbol. Deterministic: processes in vector
+// order, uses the guest address (unique per function) as the disambiguating
+// suffix. Mutates in place.
+//
+// Cart functions are emitted `extern "C"` into the SAME global symbol
+// namespace as the host program — libc, the GCC builtins, and the gbarecomp
+// runtime API. pokefirered's AGB libc contributes real symbols named
+// `memcpy`, `memset`, `_exit`, `strcpy`, `abort`, `fflush`, … and a guest
+// function emitted under one of those names would HIJACK the host's symbol
+// at link: every host `memcpy`/`memset` call — including the C-runtime
+// startup that runs *before* our constructors — would jump into guest code
+// operating on an uninitialised g_cpu, which is exactly the pre-main hang
+// FireRed showed. (Minish Cap never tripped this: its symbol set contains no
+// libc names.) A reserved `gf_` prefix the host never uses makes the
+// collision impossible by construction, and subsumes C++ keyword / `std`
+// namespace collisions for free. BIOS functions are NOT prefixed — they
+// dispatch through a separate table and their seed names (reset/swi/irq)
+// don't collide — but still get keyword/duplicate hardening.
+void sanitize_function_identifiers(std::vector<Function>& funcs,
+                                   bool prefix_guest) {
+    std::unordered_set<std::string> used;
+    used.reserve(funcs.size() * 2);
+    int renamed = 0;
+    for (auto& fn : funcs) {
+        std::string ident = fn.name;
+        // Coerce to syntactically valid identifier chars. Seed names are
+        // normally already valid; this is defensive against odd symbol-table
+        // strings.
+        if (!is_valid_c_identifier(ident)) {
+            std::string fixed;
+            fixed.reserve(ident.size() + 1);
+            for (char c : ident) {
+                bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                          (c >= '0' && c <= '9') || c == '_';
+                fixed.push_back(ok ? c : '_');
+            }
+            if (fixed.empty() ||
+                !((fixed[0] >= 'A' && fixed[0] <= 'Z') ||
+                  (fixed[0] >= 'a' && fixed[0] <= 'z') || fixed[0] == '_')) {
+                fixed.insert(fixed.begin(), '_');
+            }
+            ident = fixed;
+        }
+        if (prefix_guest) {
+            // Host-collision-proof by construction (also neutralises keywords
+            // and the std namespace).
+            ident = "gf_" + ident;
+        } else if (is_cxx_reserved_name(ident)) {
+            // BIOS path: keep the name but disambiguate a reserved word.
+            char suffix[16];
+            std::snprintf(suffix, sizeof(suffix), "_%08X", fn.addr);
+            ident += suffix;
+        }
+        // Guarantee uniqueness against any earlier function (duplicate local
+        // symbols, or a prefixed name that coincides with another) by
+        // appending the unique guest address.
+        if (used.count(ident)) {
+            char suffix[16];
+            std::snprintf(suffix, sizeof(suffix), "_%08X", fn.addr);
+            ident += suffix;
+            // Residual-collision guard (e.g. ARM + THUMB at one address).
+            while (used.count(ident)) ident += "_";
+        }
+        if (ident != fn.name) ++renamed;
+        used.insert(ident);
+        fn.name = std::move(ident);
+    }
+    if (renamed) {
+        std::printf("  sanitized %d function name(s) -> collision-proof C++ "
+                    "identifiers%s\n", renamed,
+                    prefix_guest ? " (gf_ prefix)" : " (reserved/duplicate)");
+    }
+}
+
 void write_header(const std::string& dir,
                    const std::vector<Function>& funcs,
                    const OutputNames& names) {
@@ -744,9 +871,13 @@ int main(int argc, char** argv) {
                         has_mem = true; break;
                     default: break;
                 }
-                if (ok && !armv4t::sljit_supports(in)) {
-                    ok = false;
-                    first_bad = armv4t::ir_op_name(in.op);
+                if (ok) {
+                    const char* why = armv4t::sljit_decline_reason(in);
+                    if (why) {
+                        ok = false;
+                        first_bad = std::string(armv4t::ir_op_name(in.op)) +
+                                    " [" + why + "]";
+                    }
                 }
             }
             if (ok) {
@@ -766,8 +897,8 @@ int main(int argc, char** argv) {
         std::vector<std::pair<std::string, int>> v(decline.begin(), decline.end());
         std::sort(v.begin(), v.end(),
                   [](const auto& a, const auto& b) { return a.second > b.second; });
-        for (std::size_t i = 0; i < v.size() && i < 12; ++i)
-            std::printf("    %-8s %d\n", v[i].first.c_str(), v[i].second);
+        for (std::size_t i = 0; i < v.size() && i < 20; ++i)
+            std::printf("    %-28s %d\n", v[i].first.c_str(), v[i].second);
         std::printf("  demo candidates (fully supported, leaf, has load/store):\n");
         for (const Function* f : demo)
             std::printf("    0x%08X %-5s len=0x%X\n", f->addr,
@@ -785,12 +916,20 @@ int main(int argc, char** argv) {
 #endif
     std::system(mkdir_cmd.c_str());
 
+    // Sanitize function names to valid, unique, non-reserved C++ identifiers
+    // before emission. Work on a copy so the finder's canonical vector (and
+    // anything that consults it by reference) is untouched. The SAME sanitized
+    // vector feeds every emitter, so the header decl, body def, dispatch table,
+    // inter-function calls, and debug symbol map all agree on each name.
+    std::vector<Function> emit_funcs = funcs;
+    sanitize_function_identifiers(emit_funcs, /*prefix_guest=*/!cli.bios_mode);
+
     OutputNames names = names_for_mode(cli.bios_mode);
-    if (cli.emit_symbol_map) write_symbol_map(cli.out_dir, funcs, cli.bios_mode);
-    write_header(cli.out_dir, funcs, names);
-    write_body(cli.out_dir, funcs, rom.data(), rom.size(), effective_rom_base,
+    if (cli.emit_symbol_map) write_symbol_map(cli.out_dir, emit_funcs, cli.bios_mode);
+    write_header(cli.out_dir, emit_funcs, names);
+    write_body(cli.out_dir, emit_funcs, rom.data(), rom.size(), effective_rom_base,
                names);
-    write_dispatch_table(cli.out_dir, funcs, names);
+    write_dispatch_table(cli.out_dir, emit_funcs, names);
     std::printf("==> wrote %s/{%s, %s, %s}\n",
                 cli.out_dir.c_str(),
                 names.header, names.body, names.dispatch);

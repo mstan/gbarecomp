@@ -17,10 +17,18 @@
 //   P7c:       + LDRSH (runtime ea&1 branch: sext8 on the odd byte else sext16).
 //   P7d:       + PC-write DP (rd==15, S=0): mov pc,lr return idiom (C-return) /
 //              computed jump (dispatch); exits the function like a branch.
+//   P7e:       + R15 as a value operand of DP (mov rd,pc; add rd,pc,#imm /ADR;
+//              add pc,pc,rN jump tables): the pc+8 (ARM) / pc+4 (THUMB, word-
+//              aligned for the rn+Imm ADR form) pipeline value is baked as the
+//              operand, mirroring Interpreter::read_reg.
+//   P7f:       + register-CONTROLLED shift DP (mov rd,rm,lsl rs; ...): the count
+//              comes from Rs[7:0] at runtime, so emit_dp dispatches to the
+//              arm_shift_<type> helpers (value + CPSR.C carry, +1I cycle).
+//              Declines R15 as the shifted value/count (PC+12) and reg-form RRX.
 // Still DECLINED (precision over recall → caller runs gcc / interpreter):
-//   register-COUNT shifts, non-LSL reg offsets, long multiplies, PSR/SWI,
-//   R15 as a value operand, S=1 PC-write (exception return), PC-write loads,
-//   LDM/STM s_bit + empty-list + PC base.
+//   non-LSL reg offsets, long multiplies, PSR/SWI, R15 as a register-shifted
+//   (PC+12) value/count, reg-form RRX, S=1 PC-write (exception return),
+//   PC-write loads, LDM/STM s_bit + empty-list + PC base.
 //
 // Parity is by construction: value/carry/address/flag math mirrors
 // arm_codegen.cpp, and the per-instruction prologue/epilogue mirrors
@@ -38,6 +46,7 @@
 #include <vector>
 
 #include "arm_sljit_classify.h"  // shared op classifiers (sjc::)
+#include "pipeline_semantics.h"  // arm_pc_value / thumb_pc_value (R15-as-operand)
 #include "runtime_arm.h"
 #include "sljitLir.h"
 
@@ -85,11 +94,49 @@ bool emit_dp(struct sljit_compiler* C, const Instr& ins,
             else sljit_emit_op1(C, SLJIT_MOV32, SLJIT_S4, 0, SLJIT_IMM,
                                 static_cast<sljit_sw>(ins.op2.imm_carry_out & 1u));
         }
+    } else if (ins.op2.shifted.by_register) {
+        // ── Register-controlled shift (count = Rs[7:0] at runtime) ──
+        // Reuse the validated arm_shift_<type> helpers — the same primitives the
+        // C codegen uses. Each returns the shifted value and, when set_carry,
+        // writes the shifter carry-out into CPSR.C exactly per do_shift's
+        // by-register branch (count==0 → C unchanged; count>=32 / ROR &31
+        // boundaries handled inside). rm==15 / Rs==15 / reg-form RRX are declined
+        // upstream, so this is always two plain GP regs and a value shift type.
+        const auto& sr = ins.op2.shifted;
+        const void* shift_fn =
+            (sr.type == ShiftType::LSL) ? (const void*)&arm_shift_lsl :
+            (sr.type == ShiftType::LSR) ? (const void*)&arm_shift_lsr :
+            (sr.type == ShiftType::ASR) ? (const void*)&arm_shift_asr :
+                                          (const void*)&arm_shift_ror;
+        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0,
+                       SLJIT_MEM1(SLJIT_S0), kRegOff(sr.rm));        // rm
+        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R1, 0,
+                       SLJIT_MEM1(SLJIT_S0), kRegOff(sr.imm_or_rs)); // Rs
+        sljit_emit_op2(C, SLJIT_AND32, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_IMM, 0xFF);
+        sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R2, 0, SLJIT_IMM, need_carry ? 1 : 0);
+        sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS3(32, 32, 32, 32),
+                         SLJIT_IMM, addr_of(shift_fn));
+        sljit_emit_op1(C, SLJIT_MOV, SLJIT_S3, 0, SLJIT_R0, 0);     // value → S3
+        // +1I shifter surcharge (register-specified shift). The carry-out, if
+        // any, is now in CPSR.C; the flag epilogue uses arm_set_nz to keep it.
+        sljit_emit_op2(C, SLJIT_ADD32, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_IMM, 1);
     } else {
         const auto& sr = ins.op2.shifted;
         const unsigned n = sr.imm_or_rs;
-        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0,
-                       SLJIT_MEM1(SLJIT_S0), kRegOff(sr.rm));
+        if (sr.rm == 15) {
+            // R15-as-shifted-operand: the live R15 holds ins.pc (set by
+            // emit_one_body), not the pipeline value. Bake pc+8 (ARM) /
+            // pc+4 (THUMB) — exactly Interpreter::read_reg for the shifted Rm.
+            // No word-align here (align is the rn+Imm ADR case only); the +12
+            // by-register form is declined upstream.
+            const uint32_t pcv =
+                ins.thumb ? thumb_pc_value(ins.pc) : arm_pc_value(ins.pc);
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_R0, 0, SLJIT_IMM,
+                           static_cast<sljit_sw>(pcv));
+        } else {
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_R0, 0,
+                           SLJIT_MEM1(SLJIT_S0), kRegOff(sr.rm));
+        }
         const bool rrx = (sr.type == ShiftType::RRX) ||
                          (sr.type == ShiftType::ROR && n == 0);
         if (rrx) {
@@ -144,8 +191,27 @@ bool emit_dp(struct sljit_compiler* C, const Instr& ins,
         }
     }
 
-    if (uses_rn(op))
-        sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), kRegOff(ins.rn));
+    if (uses_rn(op)) {
+        if (ins.rn == 15) {
+            // R15-as-Rn: bake the pipeline value (read_reg). For THUMB
+            // ADD Rd,PC,#imm (ADR) the interpreter word-aligns the PC value
+            // (interpreter.cpp); mirror that exactly — Imm op2 only, THUMB only.
+            uint32_t pcv =
+                ins.thumb ? thumb_pc_value(ins.pc) : arm_pc_value(ins.pc);
+            if (ins.thumb && ins.op2.kind == Op2::Kind::Imm) pcv &= ~3u;
+            // ARM register-controlled shift makes Rn=PC read as PC+12, not PC+8
+            // (the extra pipeline step; interpreter.cpp). Rm/Rs==15 in this form
+            // are declined upstream, so only Rn needs the adjust here.
+            if (!ins.thumb && ins.op2.kind == Op2::Kind::Shifted &&
+                ins.op2.shifted.by_register)
+                pcv += 4u;
+            sljit_emit_op1(C, SLJIT_MOV32, SLJIT_S2, 0, SLJIT_IMM,
+                           static_cast<sljit_sw>(pcv));
+        } else {
+            sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_S2, 0,
+                           SLJIT_MEM1(SLJIT_S0), kRegOff(ins.rn));
+        }
+    }
 
     switch (op) {
         case IrOp::AND: case IrOp::TST:
@@ -220,7 +286,17 @@ bool emit_dp(struct sljit_compiler* C, const Instr& ins,
         sljit_emit_op1(C, SLJIT_MOV_U32, SLJIT_MEM1(SLJIT_S0), kRegOff(ins.rd), SLJIT_S1, 0);
 
     if (ins.set_flags) {
-        if (logical) {
+        const bool byreg_shift = (ins.op2.kind == Op2::Kind::Shifted &&
+                                  ins.op2.shifted.by_register);
+        if (logical && byreg_shift) {
+            // arm_shift_<type>(.., set_carry=1) already wrote the shifter
+            // carry-out into CPSR.C (== do_shift's carry), so set only N/Z and
+            // preserve C. (Net result == arm_set_nzc_logic(result, shifter_carry),
+            // just via the helper's side effect rather than an inline carry reg.)
+            sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S1, 0);
+            sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS1V(32),
+                             SLJIT_IMM, addr_of((const void*)&arm_set_nz));
+        } else if (logical) {
             sljit_emit_op1(C, SLJIT_MOV, SLJIT_R0, 0, SLJIT_S1, 0);
             sljit_emit_op1(C, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S4, 0);
             sljit_emit_icall(C, SLJIT_CALL, SLJIT_ARGS2V(32, 32),

@@ -7,6 +7,7 @@
 
 #include "../armv4t/runtime_arm.h"
 #include "../armv4t/arm_ir.h"
+#include "../armv4t/symbol_lookup.h"
 #include "../gba/gba_bus.h"
 #include "../gba/gba_irq.h"
 #include "../gba/gba_m4a.h"
@@ -41,6 +42,7 @@ extern "C" uint32_t g_runtime_break_pc = 0;
 // frame of game-logic later than the oracles, manufacturing a spurious
 // "recomp runs a frame ahead" when diffing memory at the same step index.
 extern "C" unsigned long long g_runtime_vblank_starts = 0;
+static unsigned long long g_runtime_yielded_vblank_start = 0;
 
 // Cumulative guest-cycle clock (MC-HP-002 cycle-aligned divergence hunt).
 // Incremented by runtime_tick on EVERY tick — both the per-instruction exec
@@ -77,9 +79,66 @@ static std::thread       g_sampler;
 static std::atomic<bool> g_sampling{false};
 static std::unordered_map<uint32_t, uint64_t> g_pc_hist;  // sampler-thread only
 
+static void dump_sample_hist(const char* tag) {
+    std::vector<std::pair<uint32_t, uint64_t>> v(g_pc_hist.begin(),
+                                                 g_pc_hist.end());
+    std::sort(v.begin(), v.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    uint64_t total = 0;
+    for (const auto& p : v) total += p.second;
+    if (total == 0) return;
+
+    auto* ppu = g_active_ppu;
+    std::fprintf(stderr,
+                 "[sample] %s samples=%llu current_pc=0x%08X cpsr=0x%08X "
+                 "cycles=%llu",
+                 tag ? tag : "dump",
+                 static_cast<unsigned long long>(total),
+                 g_cpu.R[15],
+                 g_cpu.cpsr,
+                 static_cast<unsigned long long>(g_runtime_cycles));
+    if (ppu) {
+        std::fprintf(stderr, " ppu_frame=%llu vcount=%u",
+                     static_cast<unsigned long long>(ppu->frame_count()),
+                     static_cast<unsigned>(ppu->vcount()));
+    }
+    std::fprintf(stderr, "\n");
+
+    for (std::size_t i = 0; i < v.size() && i < 30; ++i) {
+        uint32_t off = 0;
+        const char* sym = gba_symbol_lookup(v[i].first, &off);
+        char symbuf[96];
+        symbuf[0] = '\0';
+        if (sym) {
+            std::snprintf(symbuf, sizeof(symbuf), " <%s+0x%X>", sym, off);
+        }
+        std::fprintf(stderr, "  0x%08X%s  %5.2f%%  (%llu)\n",
+                     v[i].first,
+                     symbuf,
+                     100.0 * static_cast<double>(v[i].second) /
+                         static_cast<double>(total),
+                     static_cast<unsigned long long>(v[i].second));
+    }
+    std::fflush(stderr);
+}
+
+static long long sampler_live_seconds() {
+    const char* e = std::getenv("GBARECOMP_SAMPLE_LIVE_SECONDS");
+    long long s = e ? std::atoll(e) : 0;
+    return s > 0 ? s : 0;
+}
+
 static void sampler_loop() {
+    const long long live_secs = sampler_live_seconds();
+    auto next_dump = std::chrono::steady_clock::now() +
+        std::chrono::seconds(live_secs > 0 ? live_secs : 86400);
     while (g_sampling.load(std::memory_order_relaxed)) {
         g_pc_hist[g_cpu.R[15]]++;  // racy read; approximate is fine
+        if (live_secs > 0 && std::chrono::steady_clock::now() >= next_dump) {
+            dump_sample_hist("live");
+            next_dump = std::chrono::steady_clock::now() +
+                std::chrono::seconds(live_secs);
+        }
         std::this_thread::sleep_for(std::chrono::microseconds(250));
     }
 }
@@ -91,20 +150,7 @@ static void start_sampler() {
     std::atexit([] {
         g_sampling.store(false);
         if (g_sampler.joinable()) g_sampler.join();
-        std::vector<std::pair<uint32_t, uint64_t>> v(g_pc_hist.begin(),
-                                                     g_pc_hist.end());
-        std::sort(v.begin(), v.end(),
-                  [](const auto& a, const auto& b) { return a.second > b.second; });
-        uint64_t total = 0;
-        for (const auto& p : v) total += p.second;
-        if (total == 0) return;
-        std::fprintf(stderr, "[sample] %llu samples; top guest PCs:\n",
-                     static_cast<unsigned long long>(total));
-        for (std::size_t i = 0; i < v.size() && i < 30; ++i) {
-            std::fprintf(stderr, "  0x%08X  %5.2f%%  (%llu)\n", v[i].first,
-                         100.0 * static_cast<double>(v[i].second) / total,
-                         static_cast<unsigned long long>(v[i].second));
-        }
+        dump_sample_hist("exit");
     });
 }
 
@@ -407,6 +453,24 @@ extern "C" bool runtime_should_yield(void) {
         bus->latch_bios_prefetch(g_cpu.R[15], (g_cpu.cpsr & CPSR_T_BIT) != 0);
 
     bool halted = bus && bus->io().halted();
+
+    // Some games, including Pokemon FireRed, busy-wait on a VBlank flag instead
+    // of entering HALT. Yield once per VBlank-start in normal guest modes so the
+    // host runner can present frames, poll input, and honor --frames even while
+    // the guest stays inside one long-running dispatch. Do not yield from IRQ/SVC
+    // handlers; runtime_tick must let those complete before control unwinds.
+    static const bool yield_on_vblank = [] {
+        const char* e = std::getenv("GBARECOMP_YIELD_ON_VBLANK");
+        return !(e && e[0] == '0' && e[1] == '\0');
+    }();
+    if (yield_on_vblank &&
+        g_runtime_vblank_starts != g_runtime_yielded_vblank_start) {
+        const uint32_t mode = g_cpu.cpsr & 0x1Fu;
+        if (mode == 0x10u || mode == 0x1Fu) {
+            g_runtime_yielded_vblank_start = g_runtime_vblank_starts;
+            return true;
+        }
+    }
 
     // ── Always-on hang watchdog ──────────────────────────────────────
     // A healthy GBA game HALTs (VBlankIntrWait) ~60x/sec; the MC-HP-002

@@ -468,8 +468,16 @@ extern "C" int overlay_try_dispatch(uint32_t pc, int thumb) {
 // once through the interpreter → heals via sljit → runs as the JIT'd shard on
 // every subsequent hit. Zero cost when the demo is off (one branch). Game-thread
 // only (same as runtime_dispatch), so the sets need no locking.
+extern "C" int sljit_gate_is_validating();  // src/runtime/sljit_gate.cpp
+
 extern "C" int overlay_should_force_miss(uint32_t pc, int thumb_i) {
     if (!gbarecomp::s_active || gbarecomp::s_force_heal_limit == 0) return 0;
+    // Never force-miss while the differential gate is re-running a shard: callees
+    // must serve their normal (static / already-healed) version there, matching
+    // what the gate's interpreter pass models. Force-missing a callee mid-
+    // validation heals it into a fresh sljit shard and perturbs the diff, which
+    // spuriously pins the parent (the SP/PC-wide divergences observed otherwise).
+    if (sljit_gate_is_validating()) return 0;
     pc &= ~1u;
     if (pc < 0x00004000u) return 0;  // never the BIOS (vectors/handlers are special)
     const bool thumb = (thumb_i != 0);

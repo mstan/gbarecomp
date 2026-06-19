@@ -11,6 +11,18 @@
 // top-level dispatch (no pending return frame), where the shard's return idiom
 // would dispatch out instead of C-returning.
 
+// windows.h FIRST, with a forced version bump: GetCurrentThreadStackLimits (the
+// gate's host stack-headroom probe) needs _WIN32_WINNT >= 0x0602, but a transitive
+// include below may otherwise lock it lower. LEAN_AND_MEAN + NOMINMAX keep the
+// global namespace clean for the rest of the runtime headers.
+#ifdef _WIN32
+#  undef _WIN32_WINNT
+#  define _WIN32_WINNT 0x0A00   // Windows 10
+#  define WIN32_LEAN_AND_MEAN
+#  define NOMINMAX
+#  include <windows.h>
+#endif
+
 #include "sljit_gate.h"
 
 #include <cstdint>
@@ -31,6 +43,11 @@
 // delta across the interpreter pass means an IRQ vectored mid-function; re-running
 // the heavy IRQ handler in the shard's full re-run is unsafe → pin.
 extern "C" unsigned long long g_runtime_irq_entries;
+
+// Max ARM call-nesting reached during the most recent bridge (interpreter) pass —
+// a conservative pre-flight of how deep the shard re-run will recurse on the host
+// C stack. Set by runtime_bridge_interpret; read by the gate's depth bound.
+extern "C" uint32_t g_bridge_max_call_depth;
 
 namespace gbarecomp::sljit_gate {
 
@@ -137,6 +154,37 @@ void report_divergence(const Blob& a, const Blob& b) {
 // IRQ handler returns well within this; overrunning means a wrong stop).
 constexpr uint64_t kGateInterpCap = 1'000'000u;
 
+// ── Host C-stack headroom → safe shard-revalidation depth ──
+// The shard re-run recurses one host frame per nested dispatch, so a non-leaf
+// whose call nesting exceeds the live headroom is pinned (NOT re-run). Pinning is
+// safe: the interpreter result is already the live state, and the function runs
+// blind via the gcc producer. Deriving the bound from ACTUAL headroom (not a
+// fixed depth) auto-accounts for how deep the game already is when the gate fires.
+size_t gate_stack_headroom() {
+#ifdef _WIN32
+    ULONG_PTR low = 0, high = 0;
+    GetCurrentThreadStackLimits(&low, &high);
+    volatile char probe;
+    const ULONG_PTR sp = reinterpret_cast<ULONG_PTR>(&probe);
+    return (sp > low) ? static_cast<size_t>(sp - low) : 0u;
+#else
+    return static_cast<size_t>(-1);  // unbounded elsewhere (project is Win32)
+#endif
+}
+
+uint32_t gate_allowed_depth() {
+    // kGatePerLevelBytes conservatively over-estimates the host stack one nested
+    // dispatch level costs (runtime_dispatch + the callee shard frame), absorbing
+    // the residual under-count from tail-call chains the interp pre-flight misses.
+    // kGateStackMargin reserves room for the snapshot blobs, the diff, and the OS.
+    constexpr size_t kGateStackMargin   = 512u * 1024u;
+    constexpr size_t kGatePerLevelBytes = 4096u;
+    const size_t hr = gate_stack_headroom();
+    if (hr <= kGateStackMargin) return 0u;
+    const size_t a = (hr - kGateStackMargin) / kGatePerLevelBytes;
+    return a > 0xFFFFu ? 0xFFFFu : static_cast<uint32_t>(a);
+}
+
 // One validation pass: interpret the function (kept, live result), then re-run
 // the shard from the identical pre-call machine and diff the complete result.
 // Returns Handled (the function executed, via interp) or — only when the interp
@@ -191,6 +239,23 @@ Decision validate(uint32_t pc, bool thumb, void (*fn)(void), GateState& st) {
         return Decision::Handled;
     }
 
+    // Depth bound: the shard re-run recurses one host C-stack frame per nested
+    // dispatch (see runtime_dispatch). The interp pass above measured the call
+    // nesting flatly; if it exceeds the live stack headroom, DON'T re-run the
+    // shard — pin. The live state already IS the interpreter result (correct), so
+    // the function simply runs blind via the gcc producer. This is what lets the
+    // gate accept non-leaves without overflowing the host stack on deep chains.
+    const uint32_t allowed = gate_allowed_depth();
+    if (g_bridge_max_call_depth > allowed) {
+        st.status = GateState::Status::Pinned;
+        std::printf("sljit_gate: PIN 0x%08X (%s) — call nesting %u exceeds the "
+                    "safe shard-revalidation depth %u; too deep to re-run, runs "
+                    "blind\n",
+                    pc, thumb ? "thumb" : "arm", g_bridge_max_call_depth, allowed);
+        g_gate_active = false;
+        return Decision::Handled;
+    }
+
     normalize();
     Blob s_interp;
     snapshot_machine(*bus, *ppu, s_interp);
@@ -236,15 +301,24 @@ bool enabled() {
     return g_enabled == 1;
 }
 
+// Exposed for the FORCE_HEAL demo hook: while the gate is validating, a callee
+// dispatched during the shard re-run should serve its NORMAL (static / already-
+// healed) version — exactly what the interpreter pass models — rather than be
+// force-missed into a fresh sljit shard, which would perturb the diff and spuriously
+// pin the parent. Game-thread only (same as the gate), so no synchronization.
+extern "C" int sljit_gate_is_validating() { return g_gate_active ? 1 : 0; }
+
 Decision on_dispatch(uint32_t pc, bool thumb, bool leaf, void (*shard_fn)(void)) {
     if (g_gate_active) return Decision::RunBlind;  // re-entrancy guard
 
-    // Gate only SELF-CONTAINED leaves (no calls / computed transfers / escaping
-    // branches — see overlay_sljit_produce). The complete-machine snapshot lets
-    // these validate even when they touch IO/devices (which the earlier shadow
-    // gate had to pin), but running an arbitrary NON-leaf function fully during
-    // validation — an IRQ handler, a deep call chain — re-does heavy side effects
-    // and can overflow the host stack. Non-leaf shards run blind (unchanged).
+    // Gate only GATE-ELIGIBLE functions: those whose control flow guarantees the
+    // shadow re-run C-returns cleanly to the gate — i.e. no computed/indirect
+    // transfer-that-isn't-a-return and no direct tail branch escaping the extent
+    // (see overlay_sljit_heal). Direct CALLS are now eligible (the `leaf` flag was
+    // relaxed to allow them); their only hazard, the shard re-run recursing on the
+    // host C stack, is handled by the call-nesting depth bound in validate(). An
+    // ineligible (computed-exit / tail-escaping) function runs blind — re-running
+    // it in isolation could dispatch a target from restored state and run away.
     if (!leaf) return Decision::RunBlind;
 
     // Top-level dispatch (no pending return frame): its return idiom isn't a

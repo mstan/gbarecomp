@@ -202,6 +202,117 @@ const TestCase kTestCases[] = {
         false, 0, 0,
     },
 
+    // ── R15 as a value operand of DP (P7e) ─────────────────────────
+    // pc+8 (ARM) is baked as the operand, matching Interpreter::read_reg.
+    // These are immediate-shift / immediate-op2 forms (the PC+12 by-register
+    // form above stays declined).
+
+    // MOV r0, pc → r0 = pc+8 = 0x108.
+    {
+        "arm_mov_r0_pc",
+        false, 0x100u,
+        0xE1A0000Fu,  // MOV r0, pc
+        {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM, nullptr, 0, false, 0, 0,
+    },
+    // MOV r0, pc, LSL #2 → (pc+8) << 2 = 0x420.
+    {
+        "arm_mov_r0_pc_lsl2",
+        false, 0x100u,
+        0xE1A0010Fu,  // MOV r0, pc, LSL #2
+        {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM, nullptr, 0, false, 0, 0,
+    },
+    // MVN r0, pc → ~(pc+8) = 0xFFFFFEF7.
+    {
+        "arm_mvn_r0_pc",
+        false, 0x100u,
+        0xE1E0000Fu,  // MVN r0, pc
+        {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM, nullptr, 0, false, 0, 0,
+    },
+    // ADD r0, pc, #4 → (pc+8) + 4 = 0x10C.
+    {
+        "arm_add_r0_pc_imm",
+        false, 0x100u,
+        0xE28F0004u,  // ADD r0, pc, #4
+        {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM, nullptr, 0, false, 0, 0,
+    },
+    // SUB r0, pc, #8 → (pc+8) - 8 = 0x100.
+    {
+        "arm_sub_r0_pc_imm",
+        false, 0x100u,
+        0xE24F0008u,  // SUB r0, pc, #8
+        {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM, nullptr, 0, false, 0, 0,
+    },
+    // ADD r0, pc, r1 (Rn=15, Rm=r1) with r1=0x10 → 0x108 + 0x10 = 0x118.
+    {
+        "arm_add_r0_pc_r1",
+        false, 0x100u,
+        0xE08F0001u,  // ADD r0, pc, r1
+        {0,0x10u,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM, nullptr, 0, false, 0, 0,
+    },
+    // ADD r0, r1, pc (Rn=r1, Rm=15) with r1=0x10 → 0x10 + 0x108 = 0x118.
+    {
+        "arm_add_r0_r1_pc",
+        false, 0x100u,
+        0xE081000Fu,  // ADD r0, r1, pc
+        {0,0x10u,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM, nullptr, 0, false, 0, 0,
+    },
+    // ORR r0, pc, #1 → (pc+8) | 1 = 0x109.
+    {
+        "arm_orr_r0_pc_imm",
+        false, 0x100u,
+        0xE38F0001u,  // ORR r0, pc, #1
+        {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM, nullptr, 0, false, 0, 0,
+    },
+    // CMP pc, #8 (test op, Rn=15) → flags from 0x108-8=0x100 (C=1), no write.
+    {
+        "arm_cmp_pc_imm",
+        false, 0x100u,
+        0xE35F0008u,  // CMP pc, #8
+        {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM, nullptr, 0, false, 0, 0,
+    },
+    // THUMB ADD r0, PC, #16 (ADR), pc word-aligned → (0x104)&~3 + 0x10 = 0x114.
+    {
+        "thumb_adr_r0_pc_aligned",
+        true, 0x100u,
+        0x0000A004u,  // ADD r0, pc, #16
+        {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        (1u<<5) | MODE_SYSTEM, nullptr, 0, false, 0, 0,
+    },
+    // THUMB ADD r0, PC, #16 (ADR), pc NOT word-aligned → exercises the &~3:
+    // (0x102+4)&~3 = 0x104, + 0x10 = 0x114 (not 0x116).
+    {
+        "thumb_adr_r0_pc_unaligned",
+        true, 0x102u,
+        0x0000A004u,  // ADD r0, pc, #16
+        {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x102u},
+        (1u<<5) | MODE_SYSTEM, nullptr, 0, false, 0, 0,
+    },
+    // ADD pc, pc, r0 (PC-dest jump-table form) with r0=0x20 → PC = 0x128.
+    {
+        "arm_add_pc_pc_r0",
+        false, 0x100u,
+        0xE08FF000u,  // ADD pc, pc, r0
+        {0x20u,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM, nullptr, 0, /*branches*/ true, 0, 0,
+    },
+    // ADD pc, pc, r0, LSL #2 (canonical jump table) with r0=4 → PC = 0x118.
+    {
+        "arm_add_pc_pc_r0_lsl2",
+        false, 0x100u,
+        0xE08FF100u,  // ADD pc, pc, r0, LSL #2
+        {0x4u,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+        MODE_SYSTEM, nullptr, 0, /*branches*/ true, 0, 0,
+    },
+
     {
         "arm_mov_lsl_reg_overflow",
         false, 0x100u,
@@ -222,6 +333,73 @@ const TestCase kTestCases[] = {
         nullptr, 0,
         false, 0, 0,
     },
+
+    // ── Register-CONTROLLED shift DP (P7f): count = Rs[7:0] at runtime ──
+    // (rm=r0, rd=r1, rs=r2 for the MOV forms). The carry-out across the
+    // count boundaries (0 / 1..31 / 32 / >32, and ROR &31) is the risk, so
+    // these pin every shift type with S=1; the emitter routes through the
+    // arm_shift_<type> helpers and the harness diffs CPSR against the interp.
+
+    // LSL count=1: C = bit31 (=1), result 0 → Z=1.
+    { "arm_movs_lsl_reg_c1", false, 0x100u, 0xE1B01210u,
+      {0x80000000u,0,1,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // LSR count=1: C = bit0.
+    { "arm_movs_lsr_reg_c1", false, 0x100u, 0xE1B01230u,
+      {0x00000003u,0,1,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // LSR count=32: result 0, C = bit31.
+    { "arm_movs_lsr_reg_32", false, 0x100u, 0xE1B01230u,
+      {0x80000000u,0,32,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // LSR count=40 (>32): result 0, C = 0.
+    { "arm_movs_lsr_reg_gt32", false, 0x100u, 0xE1B01230u,
+      {0xFFFFFFFFu,0,40,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // ASR count=1: arithmetic, C = bit0.
+    { "arm_movs_asr_reg_c1", false, 0x100u, 0xE1B01250u,
+      {0x80000001u,0,1,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // ASR count=33 (>=32): result = sign-extend, C = bit31.
+    { "arm_movs_asr_reg_ge32", false, 0x100u, 0xE1B01250u,
+      {0x80000000u,0,33,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // ASR count=0: no shift, C preserved (seed C=1).
+    { "arm_movs_asr_reg_c0", false, 0x100u, 0xE1B01250u,
+      {0x00000040u,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      (1u<<29) | MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // ROR count=4: C = bit31 of result.
+    { "arm_movs_ror_reg_c4", false, 0x100u, 0xE1B01270u,
+      {0x0000000Fu,0,4,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // ROR count=32 (multiple of 32): result = rm, C = bit31 of rm.
+    { "arm_movs_ror_reg_32", false, 0x100u, 0xE1B01270u,
+      {0x80000000u,0,32,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // ROR count=0: no shift, C preserved (seed C=1).
+    { "arm_movs_ror_reg_c0", false, 0x100u, 0xE1B01270u,
+      {0x00000001u,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      (1u<<29) | MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // S=0 value-only: MOV r1, r0, ASR r2 (count=2).
+    { "arm_mov_asr_reg_val", false, 0x100u, 0xE1A01250u,
+      {0x80000010u,0,2,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // S=0 value-only: MOV r1, r0, ROR r2 (count=8).
+    { "arm_mov_ror_reg_val", false, 0x100u, 0xE1A01270u,
+      {0x12345678u,0,8,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // Test op with register shift: CMP r0, r1, LSL r2 → 0x10-0x10=0 (Z=1,C=1).
+    { "arm_cmp_reg_shift", false, 0x100u, 0xE1500211u,
+      {0x10u,0x4u,2,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // Test op with register shift: TST r0, r1, LSL r2 (logical, shifter C).
+    { "arm_tst_reg_shift", false, 0x100u, 0xE1100211u,
+      {0xFFu,0x1u,4,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, false, 0, 0 },
+    // PC-dest with register shift: MOV pc, r0, LSL r2 → dispatch.
+    { "arm_mov_pc_reg_shift", false, 0x100u, 0xE1A0F210u,
+      {0x08001000u,0,2,0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x100u},
+      MODE_SYSTEM, nullptr, 0, /*branches*/ true, 0, 0 },
 
     // ── LDR with imm offset: LDR r2, [r0, #0] ───────────────────────
     {
