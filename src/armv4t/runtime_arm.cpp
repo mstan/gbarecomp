@@ -747,6 +747,14 @@ extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
     runtime_dispatch(target_pc);
 }
 
+extern "C" int runtime_has_static_entry(uint32_t pc, int thumb) {
+    uint32_t a = pc & ~1u;
+    void (*fn)(void) = (a < kBiosRegionEnd)
+        ? lookup_in(kBiosDispatchTable, kBiosDispatchTableLen, a, thumb != 0)
+        : lookup_in(kDispatchTable, kDispatchTableLen, a, thumb != 0);
+    return fn != nullptr ? 1 : 0;
+}
+
 extern "C" void runtime_call_push_return(uint32_t return_pc) {
     uint32_t pc = return_pc & ~1u;
     if (g_call_return_depth >= kCallReturnStackSize) {

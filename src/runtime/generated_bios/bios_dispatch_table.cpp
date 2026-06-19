@@ -189,7 +189,9 @@ extern "C" const DispatchEntry kBiosDispatchTable[] = {
     {0x00000BBCu, 0u, _00000BBC},
     {0x00000BC0u, 1u, _00000BC0},
     {0x00000BC4u, 0u, swi_branch_table_12},
+    {0x00000BD4u, 0u, bios_intrwait_resume_0BD4},
     {0x00000C04u, 0u, _00000C04},
+    {0x00000C0Cu, 0u, bios_resume_0C0C},
     {0x00000C14u, 0u, _00000C14},
     {0x00000C24u, 0u, _00000C24},
     {0x00000C2Cu, 0u, swi_branch_table_14},
@@ -750,4 +752,4 @@ extern "C" const DispatchEntry kBiosDispatchTable[] = {
     {0x00003734u, 0u, afunc_00003734},
     {0x00003F26u, 1u, tfunc_00003F26},
 };
-extern "C" const unsigned kBiosDispatchTableLen = 740;
+extern "C" const unsigned kBiosDispatchTableLen = 742;

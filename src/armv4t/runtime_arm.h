@@ -112,6 +112,12 @@ void runtime_dispatch(uint32_t target_pc);
 void runtime_dispatch_with_exchange(uint32_t target_pc);
 void runtime_dispatch_miss(uint32_t target_pc);
 
+// True iff a STATIC (recompiled) dispatch-table entry exists for this guest PC
+// + instruction-set state. The on-miss bridge uses it to detect re-entry into
+// statically recompiled code and hand control back (heal-to-static) when it has
+// no reliable stop address (a top-level / exception-return miss).
+int runtime_has_static_entry(uint32_t pc, int thumb);
+
 // The interpret-the-missed-subtree core of the on-miss bridge, factored so the
 // P6 sljit differential gate can reuse it as its "interpreter pass" (the kept
 // result a healed shard is validated against). Interprets from (entry_pc,

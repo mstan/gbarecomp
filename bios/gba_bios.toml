@@ -505,3 +505,19 @@ entries_mode = "auto"  # bit 0 of entry encodes mode
 name         = "bios_intro_command_table"
 note         = "BIOS intro command handlers; opcodes 0xB1..0xCE"
 
+# IntrWait/Halt resume points dispatched on exception (IRQ/SWI) return with an
+# empty C call-return stack — mid-function addresses the recompiler doesn't seed
+# as entries on its own. Seeding them makes IntrWait fully static instead of
+# interpreter-bridged. Source: FireRed dispatch-miss log 2026-06-19.
+[[extra_func]]
+addr = 0x00000BD4
+mode = "arm"
+name = "bios_intrwait_resume_0BD4"
+note = "IntrWait/Halt resume; mid-fn of swi_branch_table_12@0xBC4 (FireRed miss-log)"
+
+[[extra_func]]
+addr = 0x00000C0C
+mode = "arm"
+name = "bios_resume_0C0C"
+note = "exception-return resume; mid-fn of 0x00000C04 (FireRed miss-log)"
+

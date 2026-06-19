@@ -405,14 +405,20 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
     } else if (!top_level) {
         stop_pc = runtime_call_stack_data()[entry_depth - 1] & ~1u;
     } else {
-        // No pending direct-call return — a vector/top-level miss. This
-        // should not happen for a BL-reached function; fall back to LR and
-        // stay extra loud + capped.
+        // No pending direct-call return — a vector/top-level miss (e.g. an
+        // exception-return that dispatched a mid-function resume point, like
+        // the GBA BIOS IntrWait/Halt continuation at 0xBD4). There is no
+        // reliable return address: LR can equal entry_pc, a stop the routine
+        // never reaches, which would interpret the whole program and run away
+        // to a garbage PC. Use LR as a fallback stop, but the loop below ALSO
+        // heals-to-static: it hands control back the instant execution
+        // re-enters a statically-recompiled function. Stay loud + capped.
         stop_pc = g_cpu.R[14] & ~1u;
         std::fprintf(stderr,
                      "runtime_arm: SELF-HEAL bridge entered at top level "
-                     "(empty call-return stack) for pc=0x%08X; using LR=0x%08X "
-                     "as the stop address.\n", entry_pc, stop_pc);
+                     "(empty call-return stack) for pc=0x%08X; LR=0x%08X "
+                     "(fallback stop) — will heal to the next static entry.\n",
+                     entry_pc, stop_pc);
     }
     // Snapshot the entry stack so we can restore it exactly (minus the popped
     // frame) regardless of how IRQ/SWI excursions perturb it mid-bridge.
@@ -527,6 +533,19 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
         }
 
         if ((cpu.R[15] & ~1u) == stop_pc) break;
+
+        // Heal-to-static: for a top-level miss (no reliable return address),
+        // the moment the bridged subtree branches/returns back into a
+        // statically-recompiled function, stop interpreting and let the main
+        // dispatch loop resume native execution there. g_cpu.R[15] is already
+        // synced (store_interp_into_arm_cpu above), so returning hands the PC
+        // straight to runtime_dispatch. Without this, a degenerate stop_pc
+        // (LR == entry_pc) makes the bridge interpret the whole program and
+        // eventually run away to a garbage PC (FireRed BIOS IntrWait).
+        if (top_level && (cpu.R[15] & ~1u) != entry_pc &&
+            runtime_has_static_entry(cpu.R[15], cpu.thumb ? 1 : 0)) {
+            break;
+        }
 
         if (++iters > cap) {
             if (max_instrs != 0u) {
