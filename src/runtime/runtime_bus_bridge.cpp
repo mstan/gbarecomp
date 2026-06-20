@@ -42,6 +42,35 @@ extern "C" uint32_t g_runtime_break_pc = 0;
 // frame of game-logic later than the oracles, manufacturing a spurious
 // "recomp runs a frame ahead" when diffing memory at the same step index.
 extern "C" unsigned long long g_runtime_vblank_starts = 0;
+
+// ── Phase profiler (GBARECOMP_PHASE_PROF=1) ─────────────────────────────────
+// De-confounds the guest-PC sampler's biggest attribution trap: PPU pixel
+// composition runs per-visible-scanline inside tick_devices, which runs inside
+// runtime_tick — called from EVERY recompiled guest instruction, including the
+// WaitForVBlank busy-spin. A guest-PC profiler therefore charges composition to
+// whatever PC was live (usually the spin). Timing render_scanline directly
+// measures composition's true wall-time share. ~160 timed calls/frame, so the
+// steady_clock overhead is negligible; fully gated off (no clock reads) unless
+// the env var is set. Dumped to stderr at exit.
+extern "C" unsigned long long g_prof_scanline_ns = 0;
+extern "C" unsigned long long g_prof_scanline_count = 0;
+static const bool g_phase_prof = [] {
+    const char* e = std::getenv("GBARECOMP_PHASE_PROF");
+    bool on = (e != nullptr) && !(e[0] == '0' && e[1] == '\0');
+    if (on) {
+        std::atexit([] {
+            std::fprintf(stderr,
+                "[phase] render_scanline: %llu ns over %llu calls "
+                "(avg %.1f ns/call)\n",
+                g_prof_scanline_ns, g_prof_scanline_count,
+                g_prof_scanline_count
+                    ? static_cast<double>(g_prof_scanline_ns) /
+                          static_cast<double>(g_prof_scanline_count)
+                    : 0.0);
+        });
+    }
+    return on;
+}();
 static unsigned long long g_runtime_yielded_vblank_start = 0;
 // Live IRQ-handler nesting depth (defined in armv4t/runtime_arm.cpp: ++ on IRQ
 // entry, -- after the handler unwinds). Used by the vblank-yield guard below to
@@ -290,7 +319,20 @@ static void dump_hang_state(const char* reason) {
 
 }  // namespace gbarecomp
 
+// ── Stage 1: lazy device catch-up (MMIO access hooks) ───────────────────────
+// runtime_tick now accumulates guest cycles and only materializes device state
+// at the next scheduled-event horizon (see runtime_tick below). Any MMIO access
+// must therefore first catch the devices up to 'now' so the access observes
+// current state; a config-changing write additionally reschedules the horizon.
+// Defined after tick_devices. The IO region is 0x04000000-0x040003FF (page 4).
+extern "C" void runtime_mmio_catch_up(void);     // materialize lagged device state to now
+extern "C" void runtime_resync_horizon(void);    // recompute next-event budget after a write
+static inline bool is_io_addr(uint32_t addr) {
+    return (addr & 0xFF000000u) == 0x04000000u;
+}
+
 extern "C" uint32_t bus_read_u32(uint32_t addr) {
+    if (is_io_addr(addr)) runtime_mmio_catch_up();
     gbarecomp::sync_bios_access();
     uint32_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read32(addr)
@@ -300,6 +342,7 @@ extern "C" uint32_t bus_read_u32(uint32_t addr) {
 }
 
 extern "C" uint16_t bus_read_u16(uint32_t addr) {
+    if (is_io_addr(addr)) runtime_mmio_catch_up();
     gbarecomp::sync_bios_access();
     uint16_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read16(addr)
@@ -309,6 +352,7 @@ extern "C" uint16_t bus_read_u16(uint32_t addr) {
 }
 
 extern "C" uint8_t bus_read_u8(uint32_t addr) {
+    if (is_io_addr(addr)) runtime_mmio_catch_up();
     gbarecomp::sync_bios_access();
     uint8_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read8(addr)
@@ -318,15 +362,24 @@ extern "C" uint8_t bus_read_u8(uint32_t addr) {
 }
 
 extern "C" void bus_write_u32(uint32_t addr, uint32_t val) {
+    bool io = is_io_addr(addr);
+    if (io) runtime_mmio_catch_up();
     if (gbarecomp::g_active_bus) gbarecomp::g_active_bus->write32(addr, val);
+    if (io) runtime_resync_horizon();
 }
 
 extern "C" void bus_write_u16(uint32_t addr, uint16_t val) {
+    bool io = is_io_addr(addr);
+    if (io) runtime_mmio_catch_up();
     if (gbarecomp::g_active_bus) gbarecomp::g_active_bus->write16(addr, val);
+    if (io) runtime_resync_horizon();
 }
 
 extern "C" void bus_write_u8(uint32_t addr, uint8_t val) {
+    bool io = is_io_addr(addr);
+    if (io) runtime_mmio_catch_up();
     if (gbarecomp::g_active_bus) gbarecomp::g_active_bus->write8(addr, val);
+    if (io) runtime_resync_horizon();
 }
 
 extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
@@ -368,12 +421,20 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
         uint16_t ds = bus->io().dispstat();
         if (events.hblank_started &&
             ppu->vcount() < gba::GbaPpu::kLinesVisible) {
+            std::chrono::steady_clock::time_point _prof_t0;
+            if (g_phase_prof) _prof_t0 = std::chrono::steady_clock::now();
             ppu->render_scanline(ppu->vcount(),
                                  bus->io().read16(0x000),
                                  bus->io().raw(),
                                  bus->vram_ptr(),
                                  bus->oam_ptr(),
                                  bus->pal_ptr());
+            if (g_phase_prof) {
+                g_prof_scanline_ns += static_cast<unsigned long long>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - _prof_t0).count());
+                ++g_prof_scanline_count;
+            }
             // HBlank-timed DMA fires on each visible-line HBlank — AFTER the
             // line is rendered, so line N used the value the previous HBlank's
             // DMA loaded (matching the HBlank-IRQ ordering below and hardware:
@@ -401,6 +462,48 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
     }
 }
 
+// ── Stage 1: lazy device catch-up state ─────────────────────────────────────
+// g_pending_cycles: guest cycles advanced on the master clock but not yet
+// materialized into device state. g_event_budget: cycles remaining until the
+// next scheduled device event; when it reaches 0, runtime_tick materializes
+// (tick_devices) and reschedules. tick_devices chunks internally to exact
+// sub-event boundaries, so materializing a batched delta is bit-identical to
+// per-instruction ticking — at a fraction of the call overhead.
+static unsigned long long g_pending_cycles = 0;
+static long long          g_event_budget   = 0;
+
+static inline void recompute_event_budget(gba::GbaBus* bus, gba::GbaPpu* ppu) {
+    uint32_t h  = ppu->cycles_until_next_event();
+    uint32_t ut = bus->io().cycles_until_next_timer_event();
+    uint32_t us = bus->audio().cycles_until_next_sample();
+    if (ut < h) h = ut;
+    if (us < h) h = us;
+    if (h == 0u) h = 1u;
+    g_event_budget = static_cast<long long>(h);
+}
+
+// Materialize lagged device state up to 'now'. Called before any MMIO access so
+// the access observes current device state. Fires NO events: between flushes
+// g_pending_cycles < g_event_budget (we flush the instant the budget hits 0),
+// so the accumulated delta never reaches the next event boundary. The budget
+// already accounts for these cycles (runtime_tick debited it as they accrued),
+// so it is left unchanged here.
+extern "C" void runtime_mmio_catch_up(void) {
+    auto* bus = gbarecomp::g_active_bus;
+    auto* ppu = gbarecomp::g_active_ppu;
+    if (!bus || !ppu || g_pending_cycles == 0) return;
+    tick_devices(bus, ppu, static_cast<uint32_t>(g_pending_cycles));
+    g_pending_cycles = 0;
+}
+
+// Recompute the next-event horizon after a config-changing MMIO write (timer
+// reload/control, DISPSTAT, DMA registers, etc. move the next event).
+extern "C" void runtime_resync_horizon(void) {
+    auto* bus = gbarecomp::g_active_bus;
+    auto* ppu = gbarecomp::g_active_ppu;
+    if (bus && ppu) recompute_event_budget(bus, ppu);
+}
+
 extern "C" void runtime_tick(uint32_t cycles) {
     // P6 shadow-tick: a healed shard's validation re-run only accumulates its
     // cycle cost (for the cycle diff); the interpreter pass already pumped the
@@ -412,7 +515,17 @@ extern "C" void runtime_tick(uint32_t cycles) {
     if (!bus || !ppu || cycles == 0) return;
 
     g_runtime_cycles += cycles;
-    tick_devices(bus, ppu, cycles);
+    // Lazy device catch-up: advance the master clock every instruction (cheap),
+    // but materialize device state only when the next-event horizon is reached.
+    // (IRQ-eligibility is still checked every instruction below — that is cheap,
+    // and IF can only change at a flush, so checking between flushes is exact.)
+    g_pending_cycles += cycles;
+    g_event_budget   -= static_cast<long long>(cycles);
+    if (g_event_budget <= 0) {
+        tick_devices(bus, ppu, static_cast<uint32_t>(g_pending_cycles));
+        g_pending_cycles = 0;
+        recompute_event_budget(bus, ppu);
+    }
 
     if (bus->io().irq_pending() && (g_cpu.cpsr & CPSR_I_BIT) == 0) {
         g_runtime_irq_from_halt = bus->io().halted() ? 1u : 0u;
@@ -434,8 +547,16 @@ extern "C" void runtime_tick(uint32_t cycles) {
             // (the PPU/audio above are ticked regardless) but it broke cycle-
             // aligned diffing.
             bus->io().clear_halt();
+            // Materialize any cycles accumulated before the wake first (preserve
+            // device ordering), then the wake-latency window, then re-arm the
+            // horizon — all devices are now current as of this cycle.
+            if (g_pending_cycles) {
+                tick_devices(bus, ppu, static_cast<uint32_t>(g_pending_cycles));
+                g_pending_cycles = 0;
+            }
             g_runtime_cycles += gba::kIrqWakeDelayCycles;
             tick_devices(bus, ppu, gba::kIrqWakeDelayCycles);
+            recompute_event_budget(bus, ppu);
         }
         runtime_irq(g_cpu.R[15]);
     }
