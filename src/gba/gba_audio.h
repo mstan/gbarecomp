@@ -1,14 +1,16 @@
 // gba_audio.h — GBA sound channels + sample mixer.
 //
 // Implemented and mixed into the output: SOUND1 (square + sweep),
-// SOUND2 (square), and the DMA-driven Direct Sound A / B FIFOs (the
-// streamed-PCM path the MP2K/m4a music driver uses) — fed via
-// timer_overflow() + DMA refill, mixed in mix_one_sample(). The mixer
-// generates 16-bit signed samples; the rate follows SOUNDBIAS
-// resolution (32768 Hz default, 65536 Hz when the BIOS raises it).
+// SOUND2 (square), SOUND3 (wave RAM), SOUND4 (noise), and the
+// DMA-driven Direct Sound A / B FIFOs (the streamed-PCM path the
+// MP2K/m4a music driver uses) — fed via timer_overflow() + DMA refill,
+// mixed in mix_one_sample(). The mixer generates 16-bit signed samples;
+// the rate follows SOUNDBIAS resolution (32768 Hz default, 65536 Hz
+// when the BIOS raises it).
 //
-// NOT yet implemented: SOUND3 (wave RAM) and SOUND4 (noise) — they
-// accept IO writes but contribute no output. Audio correctness vs the
+// SOUND3/SOUND4 drive many sound EFFECTS (door open, bumps, menu blips,
+// percussion); they were previously decoded but silent, so those SFX
+// were missing. Now implemented per GBATEK. Audio correctness vs the
 // mGBA oracle is validated separately (differential audio sweeps).
 //
 // References:
@@ -171,6 +173,46 @@ private:
     };
     Sound2 ch2_{};
 
+    // ── Channel 3: wave RAM (4-bit PCM, 32/64 digits) ─────────────
+    struct Sound3 {
+        bool     active = false;
+        bool     dac_on = false;          // SOUND3CNT_L bit7 (0=stop, 1=play)
+        bool     two_banks = false;       // bit5 (0=32 digits, 1=64 digits)
+        uint8_t  bank = 0;                 // bit6 (bank selected for playback)
+        uint16_t length = 256;             // 0..256 (256-N); 256Hz clock
+        bool     length_enabled = false;   // SOUND3CNT_X bit14
+        uint8_t  volume_code = 0;          // bits13..14 (0=mute,1=100,2=50,3=25)
+        bool     force_volume = false;     // bit15 (force 75%)
+        uint16_t frequency = 0;            // 11-bit rate field
+        uint32_t wave_cycles = 0;          // per-digit cycle accumulator
+        uint8_t  wave_pos = 0;             // 0..63 current digit
+        uint32_t length_cycles = 0;
+    };
+    Sound3 ch3_{};
+    // Two 16-byte banks = 64 4-bit digits. CPU access at 0x090-0x09F maps to
+    // the bank NOT selected for playback (Bit 6), so a game can fill the next
+    // bank while the current plays (mGBA model).
+    uint8_t wave_ram_[32] = {};
+
+    // ── Channel 4: noise (LFSR) ───────────────────────────────────
+    struct Sound4 {
+        bool     active = false;
+        uint8_t  length = 64;              // 0..64 (64-N); 256Hz clock
+        bool     length_enabled = false;   // SOUND4CNT_H bit14
+        uint8_t  envelope_initial = 0;
+        bool     envelope_increase = false;
+        uint8_t  envelope_step  = 0;
+        uint8_t  volume = 0;
+        uint8_t  divisor_code = 0;         // SOUND4CNT_H bits0..2 (r)
+        bool     width_7bit = false;       // bit3 (0=15-bit, 1=7-bit LFSR)
+        uint8_t  shift = 0;                // bits4..7 (s)
+        uint16_t lfsr = 0x7FFF;            // 15-bit linear-feedback shift reg
+        uint32_t noise_cycles = 0;         // per-LFSR-step cycle accumulator
+        uint32_t envelope_cycles = 0;
+        uint32_t length_cycles   = 0;
+    };
+    Sound4 ch4_{};
+
     // ── Master state ──────────────────────────────────────────────
     bool    master_enable_ = false;  // SOUNDCNT_X bit 7
     uint8_t volume_l_ = 7;           // SOUNDCNT_L master volume left (0..7)
@@ -179,6 +221,10 @@ private:
     bool    ch1_right_enable_ = false;
     bool    ch2_left_enable_  = false;
     bool    ch2_right_enable_ = false;
+    bool    ch3_left_enable_  = false;
+    bool    ch3_right_enable_ = false;
+    bool    ch4_left_enable_  = false;
+    bool    ch4_right_enable_ = false;
     // SOUNDCNT_H (0x082..0x083) bits 0..1: DMG output ratio.
     //   0=25% 1=50% 2=100% 3=prohibited (treated as 0).
     uint8_t dmg_volume_ratio_ = 1;
@@ -234,6 +280,8 @@ private:
     void run_sample_event();
     void ch1_trigger();
     void ch2_trigger();
+    void ch3_trigger();
+    void ch4_trigger();
     // include_direct=false omits the Direct Sound FIFO contribution (PSG
     // only) — used when the MP2K shadow substitutes the direct-sound mix.
     int16_t mix_one_sample(uint32_t direct_slot, bool include_direct = true);

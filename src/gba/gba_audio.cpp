@@ -1,4 +1,5 @@
-// gba_audio.cpp — see gba_audio.h. Phase 2.7.C: minimal SOUND2 + mixer.
+// gba_audio.cpp — see gba_audio.h. SOUND1/2 (square), SOUND3 (wave RAM),
+// SOUND4 (noise), and Direct Sound A/B FIFOs, mixed in mix_one_sample().
 
 #include "gba_audio.h"
 
@@ -37,6 +38,12 @@ void GbaAudio::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     // are stable within a build and the snapshot version gates layout.
     w.bytes(&ch1_, sizeof(ch1_));
     w.bytes(&ch2_, sizeof(ch2_));
+    // NOTE: ch3_/ch4_/wave_ram_ are intentionally NOT serialized — adding them
+    // would change the blob layout and savestates are version-locked
+    // (snapshot.h kSnapshotVersion), invalidating every existing state file.
+    // Their state is transient (the MP2K driver re-triggers the PSG channels
+    // each frame and rewrites wave RAM per note), so a save/load boundary
+    // re-syncs them within ~1 frame. Revisit if/when kSnapshotVersion bumps.
     w.boolean(master_enable_);
     w.u8(volume_l_);
     w.u8(volume_r_);
@@ -71,6 +78,11 @@ void GbaAudio::serialize(gbarecomp::debug::SnapshotWriter& w) const {
 void GbaAudio::deserialize(gbarecomp::debug::SnapshotReader& r) {
     r.bytes(&ch1_, sizeof(ch1_));
     r.bytes(&ch2_, sizeof(ch2_));
+    // ch3_/ch4_/wave_ram_ not serialized — see serialize(). Reset them so a
+    // loaded state starts the new channels clean (they re-sync within ~1 frame).
+    ch3_ = Sound3{};
+    ch4_ = Sound4{};
+    std::fill(std::begin(wave_ram_), std::end(wave_ram_), uint8_t{0});
     master_enable_    = r.boolean();
     volume_l_         = r.u8();
     volume_r_         = r.u8();
@@ -105,6 +117,9 @@ void GbaAudio::deserialize(gbarecomp::debug::SnapshotReader& r) {
 void GbaAudio::reset() {
     ch1_ = Sound1{};
     ch2_ = Sound2{};
+    ch3_ = Sound3{};
+    ch4_ = Sound4{};
+    std::fill(std::begin(wave_ram_), std::end(wave_ram_), uint8_t{0});
     master_enable_ = false;
     volume_l_ = 7;
     volume_r_ = 7;
@@ -112,6 +127,10 @@ void GbaAudio::reset() {
     ch1_right_enable_ = false;
     ch2_left_enable_  = false;
     ch2_right_enable_ = false;
+    ch3_left_enable_  = false;
+    ch3_right_enable_ = false;
+    ch4_left_enable_  = false;
+    ch4_right_enable_ = false;
     dmg_volume_ratio_ = 1;
     fifo_reset(fifo_a_);
     fifo_reset(fifo_b_);
@@ -214,6 +233,75 @@ void GbaAudio::write_io8(uint32_t off, uint8_t v) {
             if (v & 0x80) ch2_trigger();
             break;
         }
+        // ── SOUND3 (wave RAM) ─────────────────────────────────────
+        // SOUND3CNT_L (0x070): dimension (bit5), bank (bit6), DAC on (bit7).
+        case 0x070: {
+            sample_until_current_time();
+            ch3_.two_banks = (v & 0x20) != 0;
+            ch3_.bank      = static_cast<uint8_t>((v >> 6) & 0x1);
+            ch3_.dac_on    = (v & 0x80) != 0;
+            if (!ch3_.dac_on) ch3_.active = false;
+            break;
+        }
+        // SOUND3CNT_H (0x072..0x073): length (0x072 bits0-7), volume code
+        // (0x073 bits5-6 = SOUND3CNT_H bits13-14), force-75% (0x073 bit7).
+        case 0x072: {
+            sample_until_current_time();
+            ch3_.length = static_cast<uint16_t>(256u - v);
+            break;
+        }
+        case 0x073: {
+            sample_until_current_time();
+            ch3_.volume_code  = static_cast<uint8_t>((v >> 5) & 0x3);
+            ch3_.force_volume = (v & 0x80) != 0;
+            break;
+        }
+        // SOUND3CNT_X (0x074..0x075): frequency + length-enable + trigger.
+        case 0x074: {
+            sample_until_current_time();
+            ch3_.frequency = static_cast<uint16_t>(
+                (ch3_.frequency & 0x0700) | v);
+            break;
+        }
+        case 0x075: {
+            sample_until_current_time();
+            ch3_.frequency = static_cast<uint16_t>(
+                (ch3_.frequency & 0x00FF) |
+                (static_cast<uint16_t>(v & 0x7) << 8));
+            ch3_.length_enabled = (v & 0x40) != 0;
+            if (v & 0x80) ch3_trigger();
+            break;
+        }
+        // ── SOUND4 (noise) ────────────────────────────────────────
+        // SOUND4CNT_L (0x078): length (bits0-5); 0x079: envelope (same
+        // layout as SOUND2CNT_L high byte at 0x069).
+        case 0x078: {
+            sample_until_current_time();
+            ch4_.length = static_cast<uint8_t>(64 - (v & 0x3F));
+            break;
+        }
+        case 0x079: {
+            sample_until_current_time();
+            ch4_.envelope_step     = static_cast<uint8_t>(v & 0x7);
+            ch4_.envelope_increase = (v & 0x08) != 0;
+            ch4_.envelope_initial  = static_cast<uint8_t>((v >> 4) & 0xF);
+            break;
+        }
+        // SOUND4CNT_H (0x07C): divisor (bits0-2), width (bit3), shift
+        // (bits4-7); 0x07D: length-enable (bit6) + trigger (bit7).
+        case 0x07C: {
+            sample_until_current_time();
+            ch4_.divisor_code = static_cast<uint8_t>(v & 0x7);
+            ch4_.width_7bit   = (v & 0x08) != 0;
+            ch4_.shift        = static_cast<uint8_t>((v >> 4) & 0xF);
+            break;
+        }
+        case 0x07D: {
+            sample_until_current_time();
+            ch4_.length_enabled = (v & 0x40) != 0;
+            if (v & 0x80) ch4_trigger();
+            break;
+        }
         // SOUNDCNT_L (0x080..0x081): master L/R volumes + channel routes
         case 0x080: {
             sample_until_current_time();
@@ -227,8 +315,12 @@ void GbaAudio::write_io8(uint32_t off, uint8_t v) {
             // bits 4..7 = left enables
             ch1_right_enable_ = (v & 0x01) != 0;
             ch2_right_enable_ = (v & 0x02) != 0;
+            ch3_right_enable_ = (v & 0x04) != 0;
+            ch4_right_enable_ = (v & 0x08) != 0;
             ch1_left_enable_  = (v & 0x10) != 0;
             ch2_left_enable_  = (v & 0x20) != 0;
+            ch3_left_enable_  = (v & 0x40) != 0;
+            ch4_left_enable_  = (v & 0x80) != 0;
             break;
         }
         // SOUNDCNT_H (0x082..0x083): DMG channel volume ratio +
@@ -273,10 +365,21 @@ void GbaAudio::write_io8(uint32_t off, uint8_t v) {
                 // Disabling kills all channel state per hardware.
                 ch1_.active = false;
                 ch2_.active = false;
+                ch3_.active = false;
+                ch4_.active = false;
             }
             break;
         }
         default:
+            // Wave RAM (0x090..0x09F): the CPU window maps to the bank NOT
+            // selected for playback (SOUND3CNT_L bit6), so a game can fill the
+            // next bank while the current one plays (mGBA model). wave_ram_ is
+            // 32 bytes = two 16-byte banks (bank0 = bytes 0-15, bank1 = 16-31).
+            if (off >= 0x090 && off <= 0x09F) {
+                sample_until_current_time();
+                uint32_t bank_base = (ch3_.bank ^ 1u) ? 16u : 0u;
+                wave_ram_[bank_base + (off - 0x090u)] = v;
+            }
             break;
     }
 }
@@ -325,6 +428,31 @@ void GbaAudio::ch2_trigger() {
     // still considered "started" by the channel but emits silence.
     if (ch2_.envelope_initial == 0 && !ch2_.envelope_increase) {
         ch2_.active = false;
+    }
+}
+
+void GbaAudio::ch3_trigger() {
+    // SOUND3CNT_X bit15. With the DAC off (bit7 of SOUND3CNT_L) the channel
+    // produces no output regardless of the trigger.
+    if (!ch3_.dac_on) { ch3_.active = false; return; }
+    ch3_.active = true;
+    if (ch3_.length == 0) ch3_.length = 256;
+    ch3_.wave_pos    = 0;   // restart at the first digit of the selected bank
+    ch3_.wave_cycles = 0;
+    ch3_.length_cycles = 0;
+}
+
+void GbaAudio::ch4_trigger() {
+    ch4_.active = true;
+    if (ch4_.length == 0) ch4_.length = 64;
+    ch4_.volume          = ch4_.envelope_initial;
+    ch4_.lfsr            = 0x7FFF;   // all-ones reload per hardware
+    ch4_.noise_cycles    = 0;
+    ch4_.envelope_cycles = 0;
+    ch4_.length_cycles   = 0;
+    // DAC-disabled trigger (init vol 0, decreasing envelope) → silent.
+    if (ch4_.envelope_initial == 0 && !ch4_.envelope_increase) {
+        ch4_.active = false;
     }
 }
 
@@ -581,11 +709,108 @@ int16_t GbaAudio::mix_one_sample(uint32_t direct_slot, bool include_direct) {
         }
     }
 
+    // ── Channel 3 (wave RAM, 4-bit PCM) ──────────────────────────
+    int32_t ch3_sample = 0;
+    if (ch3_.active && ch3_.dac_on) {
+        // One 4-bit digit advances every (2048-freq)*8 cycles (32 digits per
+        // waveform; half ch1/ch2's per-phase period since the wave has 4× the
+        // steps). Per GBATEK § "GBA Sound Channel 3".
+        uint32_t digit_period = (2048u - ch3_.frequency) * 8u;
+        if (digit_period == 0) digit_period = 8u;
+        uint32_t digits = ch3_.two_banks ? 64u : 32u;
+        ch3_.wave_cycles += cycles_per_sample_;
+        while (ch3_.wave_cycles >= digit_period) {
+            ch3_.wave_cycles -= digit_period;
+            ch3_.wave_pos = static_cast<uint8_t>((ch3_.wave_pos + 1u) % digits);
+        }
+        if (ch3_.length_enabled) {
+            ++ch3_.length_cycles;
+            if (ch3_.length_cycles >= (sample_rate() / 256u)) {
+                ch3_.length_cycles = 0;
+                if (ch3_.length > 0) {
+                    --ch3_.length;
+                    if (ch3_.length == 0) ch3_.active = false;
+                }
+            }
+        }
+        if (ch3_.active) {
+            uint32_t abs_digit =
+                (static_cast<uint32_t>(ch3_.bank) * 32u + ch3_.wave_pos) & 63u;
+            uint8_t byte = wave_ram_[abs_digit >> 1];
+            uint8_t digit = (abs_digit & 1u) ? (byte & 0x0Fu)
+                                             : static_cast<uint8_t>(byte >> 4);
+            // Volume: force-75% overrides the 2-bit code
+            // (0=mute,1=100%,2=50%,3=25%).
+            int32_t num, den;
+            if (ch3_.force_volume) { num = 3; den = 4; }
+            else switch (ch3_.volume_code) {
+                case 0:  num = 0; den = 1; break;
+                case 1:  num = 1; den = 1; break;
+                case 2:  num = 1; den = 2; break;
+                default: num = 1; den = 4; break;
+            }
+            // 4-bit unsigned digit → signed swing ±15 (matching ch1/ch2 max),
+            // scaled by the volume fraction.
+            ch3_sample = ((2 * static_cast<int32_t>(digit) - 15) * num) / den;
+        }
+    }
+
+    // ── Channel 4 (noise, LFSR) ──────────────────────────────────
+    int32_t ch4_sample = 0;
+    if (ch4_.active) {
+        // LFSR steps at 524288 / r / 2^(s+1) Hz: GB divisor table {8,16,…,112}
+        // (r=0 → 8) shifted left by s, ×4 for the GBA's 4× system clock.
+        static constexpr uint32_t kNoiseDiv[8] =
+            {8u, 16u, 32u, 48u, 64u, 80u, 96u, 112u};
+        uint32_t step_period =
+            (kNoiseDiv[ch4_.divisor_code] << ch4_.shift) * 4u;
+        if (step_period == 0) step_period = 4u;
+        ch4_.noise_cycles += cycles_per_sample_;
+        while (ch4_.noise_cycles >= step_period) {
+            ch4_.noise_cycles -= step_period;
+            uint32_t fb = (ch4_.lfsr ^ (ch4_.lfsr >> 1)) & 1u;
+            ch4_.lfsr = static_cast<uint16_t>((ch4_.lfsr >> 1) | (fb << 14));
+            if (ch4_.width_7bit) {
+                ch4_.lfsr = static_cast<uint16_t>(
+                    (ch4_.lfsr & ~(1u << 6)) | (fb << 6));
+            }
+        }
+        if (ch4_.envelope_step != 0) {
+            ++ch4_.envelope_cycles;
+            uint32_t env_period = ch4_.envelope_step * (sample_rate() / 64u);
+            if (ch4_.envelope_cycles >= env_period) {
+                ch4_.envelope_cycles = 0;
+                if (ch4_.envelope_increase) {
+                    if (ch4_.volume < 15) ++ch4_.volume;
+                } else {
+                    if (ch4_.volume > 0) --ch4_.volume;
+                }
+            }
+        }
+        if (ch4_.length_enabled) {
+            ++ch4_.length_cycles;
+            if (ch4_.length_cycles >= (sample_rate() / 256u)) {
+                ch4_.length_cycles = 0;
+                if (ch4_.length > 0) {
+                    --ch4_.length;
+                    if (ch4_.length == 0) ch4_.active = false;
+                }
+            }
+        }
+        if (ch4_.active) {
+            // Output is high when LFSR bit 0 is 0.
+            int32_t high = ((ch4_.lfsr & 1u) == 0) ? 1 : -1;
+            ch4_sample = high * static_cast<int32_t>(ch4_.volume);
+        }
+    }
+
     // Apply routing — channel must be enabled on at least one side
     // to be audible in our mono mix.
     int32_t mix = 0;
     if (ch1_left_enable_ || ch1_right_enable_) mix += ch1_sample;
     if (ch2_left_enable_ || ch2_right_enable_) mix += ch2_sample;
+    if (ch3_left_enable_ || ch3_right_enable_) mix += ch3_sample;
+    if (ch4_left_enable_ || ch4_right_enable_) mix += ch4_sample;
 
     // DMG volume ratio (SOUNDCNT_H bits 0..1): 0=25% 1=50% 2=100%.
     // We bake this into the output scale.
