@@ -53,6 +53,13 @@ namespace {
 struct MissRec {
     bool          thumb = false;
     std::uint64_t count = 0;
+    // The top-level/empty-stack "fallback bridge" stderr line is emitted ONCE
+    // per PC (like the dispatch-miss line); per-occurrence counts live in the
+    // exit report. A hot interior-resume bridge (e.g. the WaitForVBlank poll
+    // yielding at an interior PC every frame) would otherwise flood stderr —
+    // and console I/O is slow enough to dominate windowed wall-time. (recomp-
+    // template PRINCIPLES: structured debug surface, never printf spam.)
+    bool          toplevel_logged = false;
 };
 
 std::map<std::uint32_t, MissRec> g_misses;        // keyed by PC & ~1
@@ -414,11 +421,18 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
         // heals-to-static: it hands control back the instant execution
         // re-enters a statically-recompiled function. Stay loud + capped.
         stop_pc = g_cpu.R[14] & ~1u;
-        std::fprintf(stderr,
-                     "runtime_arm: SELF-HEAL bridge entered at top level "
-                     "(empty call-return stack) for pc=0x%08X; LR=0x%08X "
-                     "(fallback stop) — will heal to the next static entry.\n",
-                     entry_pc, stop_pc);
+        // Loud ONCE per PC, then silent (counts surfaced in the exit miss
+        // report) — see MissRec::toplevel_logged. Mirrors record_and_log_miss.
+        MissRec& mr = g_misses[entry_pc & ~1u];
+        if (!mr.toplevel_logged) {
+            mr.toplevel_logged = true;
+            std::fprintf(stderr,
+                         "runtime_arm: SELF-HEAL bridge entered at top level "
+                         "(empty call-return stack) for pc=0x%08X; LR=0x%08X "
+                         "(fallback stop) — will heal to the next static entry. "
+                         "[logged once/PC; see exit miss-report for counts]\n",
+                         entry_pc, stop_pc);
+        }
     }
     // Snapshot the entry stack so we can restore it exactly (minus the popped
     // frame) regardless of how IRQ/SWI excursions perturb it mid-bridge.

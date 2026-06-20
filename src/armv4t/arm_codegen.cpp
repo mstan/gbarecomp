@@ -354,6 +354,19 @@ std::string emit_direct_branch(uint32_t target, uint32_t branch_pc,
           << fmt_hex32(branch_pc) << ", " << fmt_hex32(target)
           << ", 0u, 0u);\n";
         s << indent << "runtime_tick(" << cyc << ");\n";
+        // Stage 2 idle-loop elision: this backward branch closes a
+        // statically-eligible quiescent loop (see CodegenCtx::
+        // idle_backedge_pcs). Probe the runtime AFTER charging the
+        // branch cycles and just before resuming the header: if the
+        // loop is dynamically proven idle, the runtime fast-forwards
+        // the master clock by whole loop periods to one period before
+        // the next scheduled event (bit-identical — see
+        // runtime_idle_backedge), leaving us positioned at the header.
+        if (ctx.idle_backedge_pcs &&
+            ctx.idle_backedge_pcs->count(branch_pc) != 0) {
+            s << indent << "runtime_idle_backedge(" << fmt_hex32(target)
+              << ");\n";
+        }
         s << indent << "goto " << label_for_addr(target) << ";\n";
         return s.str();
     }

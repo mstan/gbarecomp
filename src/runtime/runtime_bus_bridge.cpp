@@ -86,6 +86,18 @@ extern "C" uint32_t g_irq_nest_depth;
 // so the recomp and the bios_smoke interp oracle align by identical cycles.
 extern "C" unsigned long long g_runtime_cycles = 0;
 
+// ── Stage 2 idle-loop elision: disturbance epoch + skip counters ─────────────
+// Bumped whenever something happens that could change a watched poll value or
+// the timing rules: a guest memory write, an MMIO read (disqualifies MMIO
+// polling), or a device-event materialization (tick_devices). The per-site
+// prover (runtime_idle_backedge) requires it unchanged across the two proof
+// iterations. See runtime_arm.h.
+extern "C" unsigned long long g_idle_disturb_epoch = 0;
+// Diagnostics for the exit banner: cycles/iterations the prover fast-forwarded.
+static unsigned long long g_idle_skipped_cycles = 0;
+static unsigned long long g_idle_skipped_iters  = 0;
+static unsigned long long g_idle_confirmed_sites = 0;
+
 // P6 sljit differential gate — shadow-tick mode. While g_runtime_shadow_tick is
 // set (only during a healed shard's throwaway VALIDATION re-run), runtime_tick
 // accumulates the shard's cycle cost into g_runtime_shadow_cycles and does
@@ -331,8 +343,33 @@ static inline bool is_io_addr(uint32_t addr) {
     return (addr & 0xFF000000u) == 0x04000000u;
 }
 
+// Stage 2: is a load from `addr` safe to treat as side-effect-free and stable
+// inside an idle-candidate loop? Only writable RAM whose every mutation bumps
+// g_idle_disturb_epoch (EWRAM/IWRAM) and immutable memory (ROM, BIOS) qualify.
+// Everything else — MMIO (read side effects / FIFOs), the cartridge GPIO window
+// (RTC etc. clock state out on read), save/flash (0x0E/0x0F, command state
+// machine), palette/VRAM/OAM, open-bus/unmapped — is rejected: a load from such
+// a region bumps the disturbance epoch so the loop can never reach a confirmed
+// fixed point and is never elided. (ChatGPT-validated "probe memory-class
+// check" — registers + epoch are sufficient ONLY with this guard. The bless of
+// the omitted explicit load trace is conditional on it.)
+static inline bool is_idle_safe_read(uint32_t addr) {
+    const uint32_t region = addr >> 24;
+    if (region == 0x02u || region == 0x03u) return true;   // EWRAM / IWRAM
+    if (addr < 0x00004000u) return true;                   // BIOS (immutable)
+    if (region >= 0x08u && region <= 0x0Du) {              // ROM (immutable) …
+        const uint32_t off = addr & 0x01FFFFFFu;
+        // … except the GPIO window 0x080000C4-0x080000C8 (RTC/sensor reads have
+        // side effects). A small guard band covers wide accesses straddling it.
+        if (off >= 0x000000C0u && off < 0x000000CCu) return false;
+        return true;
+    }
+    return false;  // MMIO, palette, VRAM, OAM, save/flash, open-bus, unmapped
+}
+
 extern "C" uint32_t bus_read_u32(uint32_t addr) {
     if (is_io_addr(addr)) runtime_mmio_catch_up();
+    if (!is_idle_safe_read(addr)) ++g_idle_disturb_epoch;
     gbarecomp::sync_bios_access();
     uint32_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read32(addr)
@@ -343,6 +380,7 @@ extern "C" uint32_t bus_read_u32(uint32_t addr) {
 
 extern "C" uint16_t bus_read_u16(uint32_t addr) {
     if (is_io_addr(addr)) runtime_mmio_catch_up();
+    if (!is_idle_safe_read(addr)) ++g_idle_disturb_epoch;
     gbarecomp::sync_bios_access();
     uint16_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read16(addr)
@@ -353,6 +391,7 @@ extern "C" uint16_t bus_read_u16(uint32_t addr) {
 
 extern "C" uint8_t bus_read_u8(uint32_t addr) {
     if (is_io_addr(addr)) runtime_mmio_catch_up();
+    if (!is_idle_safe_read(addr)) ++g_idle_disturb_epoch;
     gbarecomp::sync_bios_access();
     uint8_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read8(addr)
@@ -365,6 +404,7 @@ extern "C" void bus_write_u32(uint32_t addr, uint32_t val) {
     bool io = is_io_addr(addr);
     if (io) runtime_mmio_catch_up();
     if (gbarecomp::g_active_bus) gbarecomp::g_active_bus->write32(addr, val);
+    ++g_idle_disturb_epoch;   // any guest write may change a watched poll value
     if (io) runtime_resync_horizon();
 }
 
@@ -372,6 +412,7 @@ extern "C" void bus_write_u16(uint32_t addr, uint16_t val) {
     bool io = is_io_addr(addr);
     if (io) runtime_mmio_catch_up();
     if (gbarecomp::g_active_bus) gbarecomp::g_active_bus->write16(addr, val);
+    ++g_idle_disturb_epoch;
     if (io) runtime_resync_horizon();
 }
 
@@ -379,6 +420,7 @@ extern "C" void bus_write_u8(uint32_t addr, uint8_t val) {
     bool io = is_io_addr(addr);
     if (io) runtime_mmio_catch_up();
     if (gbarecomp::g_active_bus) gbarecomp::g_active_bus->write8(addr, val);
+    ++g_idle_disturb_epoch;
     if (io) runtime_resync_horizon();
 }
 
@@ -401,6 +443,10 @@ extern "C" uint32_t runtime_mul_cycles(uint32_t rs_value,
 // IRQ. Shared by runtime_tick's normal path and the wake-from-HALT latency
 // pump, so the delay window ticks devices identically without re-vectoring.
 static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
+    // Stage 2: materializing device state can raise IF, advance the PPU phase,
+    // run timed DMA into watched RAM, etc. Any of these can change a polled
+    // value or the timing rules, so it disturbs an in-flight idle proof.
+    ++g_idle_disturb_epoch;
     uint32_t remaining = cycles;
     while (remaining != 0) {
         uint32_t chunk = remaining;
@@ -560,6 +606,106 @@ extern "C" void runtime_tick(uint32_t cycles) {
         }
         runtime_irq(g_cpu.R[15]);
     }
+}
+
+// ── Stage 2: idle-loop elision prover ───────────────────────────────────────
+// Per back-edge of a statically-eligible quiescent loop (codegen emits the
+// call), prove the loop idle via a rolling fixed point and fast-forward the
+// Stage-1 master clock to one period before the next scheduled event. See
+// runtime_arm.h for the full contract and the cycle-accuracy argument.
+namespace {
+struct IdleSite {
+    uint32_t regs[15];                 // R0-R14 at the previous back-edge
+    uint32_t cpsr;                     // full CPSR at the previous back-edge
+    unsigned long long last_cycles;    // g_runtime_cycles at previous back-edge
+    unsigned long long last_epoch;     // g_idle_disturb_epoch at previous edge
+    unsigned long long period;         // measured per-iteration cycle cost
+    int  matches;                      // period-stable confirmations (>=1 → skip)
+    bool have_period;
+    bool valid;
+};
+static std::unordered_map<uint32_t, IdleSite> g_idle_sites;
+static const bool g_idle_elision_on = [] {
+    const char* e = std::getenv("GBARECOMP_IDLE_ELISION");
+    bool on = !(e && e[0] == '0' && e[1] == '\0');   // default ON
+    if (on) {
+        std::atexit([] {
+            if (g_idle_skipped_cycles == 0) return;
+            std::fprintf(stderr,
+                "[idle] elided %llu loop iterations (%llu cycles) over %llu "
+                "skip ops across %zu site(s)\n",
+                g_idle_skipped_iters, g_idle_skipped_cycles,
+                g_idle_confirmed_sites, g_idle_sites.size());
+        });
+    }
+    return on;
+}();
+}  // namespace
+
+extern "C" void runtime_idle_backedge(uint32_t header_pc) {
+    if (!g_idle_elision_on) return;
+    if (g_runtime_shadow_tick) return;  // never alter time during a shadow re-run
+
+    const unsigned long long now   = g_runtime_cycles;
+    const unsigned long long epoch = g_idle_disturb_epoch;
+
+    IdleSite& s = g_idle_sites[header_pc];
+
+    bool regs_match = s.valid && s.cpsr == g_cpu.cpsr;
+    if (regs_match) {
+        for (int i = 0; i < 15; ++i) {
+            if (s.regs[i] != g_cpu.R[i]) { regs_match = false; break; }
+        }
+    }
+    const bool undisturbed = s.valid && (epoch == s.last_epoch);
+    const unsigned long long delta = s.valid ? (now - s.last_cycles) : 0ull;
+
+    // Rolling fixed point: the prior iteration left identical {R0-R14, CPSR},
+    // nothing disturbed the watched state, and the period is stable. The loaded
+    // poll value flows into a register, so an unchanged register set proves the
+    // load returned the same value — no explicit load trace needed given the
+    // static no-store / no-MMIO filter and the disturbance epoch.
+    bool confirmed = false;
+    if (regs_match && undisturbed && delta != 0ull) {
+        if (s.have_period && delta == s.period) {
+            if (++s.matches >= 1) confirmed = true;
+        } else {
+            s.period = delta;
+            s.have_period = true;
+            s.matches = 0;
+        }
+    } else {
+        s.have_period = false;
+        s.matches = 0;
+    }
+
+    if (confirmed && s.period != 0ull &&
+        g_event_budget > static_cast<long long>(s.period)) {
+        // next_event - now == g_event_budget (Stage-1 horizon). Skip whole
+        // periods that all end strictly before it: periods = (budget-1)/period
+        // guarantees now+skipped < next_event, so NO event fires in the hook.
+        const unsigned long long budget =
+            static_cast<unsigned long long>(g_event_budget);
+        const unsigned long long periods = (budget - 1ull) / s.period;
+        if (periods != 0ull) {
+            const unsigned long long skipped = periods * s.period;
+            g_runtime_cycles += skipped;   // master clock
+            g_pending_cycles += skipped;   // materialized lazily at the horizon
+            g_event_budget   -= static_cast<long long>(skipped);
+            g_idle_skipped_cycles += skipped;
+            g_idle_skipped_iters  += periods;
+            ++g_idle_confirmed_sites;
+        }
+    }
+
+    // Snapshot for the next iteration. Registers are unchanged by a skip;
+    // last_cycles takes the post-skip clock so the next delta measures one real
+    // period.
+    for (int i = 0; i < 15; ++i) s.regs[i] = g_cpu.R[i];
+    s.cpsr = g_cpu.cpsr;
+    s.last_cycles = g_runtime_cycles;
+    s.last_epoch  = g_idle_disturb_epoch;
+    s.valid = true;
 }
 
 extern "C" bool runtime_should_yield(void) {

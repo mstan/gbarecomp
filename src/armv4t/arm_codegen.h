@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "arm_ir.h"
@@ -52,6 +53,17 @@ struct CodegenCtx {
     uint32_t current_function_end_addr = 0xFFFFFFFFu;
     bool current_function_thumb = false;
     bool force_bx_c_return = false;
+
+    // Stage 2 idle-loop elision. Set of back-edge branch PCs whose
+    // in-function backward branch closes a statically-eligible
+    // quiescent loop (no stores / calls / SWI / mode-change / PC-write
+    // in the body — only DP/MOV, loads, MUL, MRS, and this single
+    // conditional back-edge). For those branches emit_direct_branch
+    // emits a runtime_idle_backedge() probe before the `goto` so the
+    // runtime can dynamically prove the loop idle and fast-forward the
+    // scheduler to the next event boundary. nullptr → no elision.
+    // Populated per-function by emit_function.cpp's pre-scan.
+    const std::unordered_set<uint32_t>* idle_backedge_pcs = nullptr;
 };
 
 class ArmCodegen {

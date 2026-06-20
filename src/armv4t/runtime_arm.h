@@ -203,6 +203,29 @@ uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
                                    uint32_t max_entries);
 void runtime_tick(uint32_t cycles);
 bool runtime_should_yield(void);
+
+// ── Stage 2 idle-loop elision ──────────────────────────────────────
+// Emitted by codegen at the back-edge of a statically-eligible quiescent
+// loop (CodegenCtx::idle_backedge_pcs), called once per completed iteration
+// with the loop-header PC as the site identity. The runtime keeps a per-site
+// rolling fixed-point proof: when two consecutive iterations leave {R0-R14,
+// full CPSR} identical, span the same cycle period, and no disturbance
+// (memory write, MMIO read, IRQ, or serviced device event) occurred between
+// them, the loop is provably idle until an external agent changes its watched
+// state. It then fast-forwards the Stage-1 master clock by whole loop periods
+// to one period before the next scheduled event (g_event_budget horizon) —
+// servicing NO event inside the hook — and returns with the CPU positioned at
+// the loop header, so the final event-crossing iterations run normally and the
+// IRQ is delivered at the exact baseline cycle. Bit-identical by construction.
+void runtime_idle_backedge(uint32_t header_pc);
+
+// Monotonic "something that could change a watched poll value or the timing
+// rules happened" counter. Bumped on every guest memory write, every MMIO
+// read (so MMIO-polling loops never qualify), every IRQ entry, and every
+// device event materialization. The idle prover requires it to be unchanged
+// across the two proof iterations. (Correctness-first: false invalidations
+// only cost a re-prove; a missed bump would be unsound.)
+extern unsigned long long g_idle_disturb_epoch;
 // Cumulative guest-cycle clock. Incremented by runtime_tick on EVERY tick
 // (per-instruction exec ticks AND halt-pump chunks), so it is the authoritative
 // total-cycle count — unlike runtime.cpp's `cycles_elapsed`, which only tallied
