@@ -22,8 +22,9 @@ from __future__ import annotations
 import argparse, json, os, pathlib, socket, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PROJ = ROOT.parent / "MinishCapRecomp"
-RECOMP_EXE = PROJ / "build" / "MinishCapRecomp.exe"
+import recomp_paths as _rp
+PROJ = _rp.game_dir(ROOT)
+RECOMP_EXE = _rp.recomp_exe(ROOT)
 DEF_STATE = PROJ / "roms" / "minishcap_usa.state3"
 OUT = ROOT / "oracle" / "trace_out"
 

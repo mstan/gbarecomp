@@ -30,8 +30,9 @@ from __future__ import annotations
 import argparse, json, os, pathlib, socket, struct, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent          # gbarecomp/
-PROJ = ROOT.parent / "MinishCapRecomp"
-RECOMP_EXE = PROJ / "build" / "MinishCapRecomp.exe"
+import recomp_paths as _rp
+PROJ = _rp.game_dir(ROOT)
+RECOMP_EXE = _rp.recomp_exe(ROOT)
 INTERP_EXE = ROOT / "build" / "bios_smoke.exe"
 BIOS = ROOT / "bios" / "gba_bios.bin"
 ROM = PROJ / "roms" / "minishcap_usa.gba"

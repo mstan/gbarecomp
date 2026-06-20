@@ -12,8 +12,9 @@ import argparse, json, pathlib, socket, subprocess, sys, time
 from collections import Counter
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PROJ = ROOT.parent / "MinishCapRecomp"
-RECOMP_EXE = PROJ / "build" / "MinishCapRecomp.exe"
+import recomp_paths as _rp
+PROJ = _rp.game_dir(ROOT)
+RECOMP_EXE = _rp.recomp_exe(ROOT)
 DEF_STATE = PROJ / "roms" / "minishcap_usa.state3"
 
 KEYMASK = {"up": 0x3FF & ~0x40, "down": 0x3FF & ~0x80,

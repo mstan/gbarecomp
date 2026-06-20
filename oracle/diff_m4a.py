@@ -32,8 +32,9 @@ import time
 from typing import Optional
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent          # gbarecomp/
-PROJ = ROOT.parent / "MinishCapRecomp"
-NATIVE_EXE = PROJ / "build" / "MinishCapRecomp.exe"
+import recomp_paths as _rp
+PROJ = _rp.game_dir(ROOT)
+NATIVE_EXE = _rp.recomp_exe(ROOT)
 ORACLE     = ROOT / "build" / "oracle" / "gbarecomp_oracle.exe"
 BIOS_PATH  = ROOT / "bios" / "gba_bios.bin"
 ROM_PATH   = PROJ / "roms" / "minishcap_usa.gba"

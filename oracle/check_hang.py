@@ -17,8 +17,9 @@ from __future__ import annotations
 import argparse, json, os, pathlib, socket, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-PROJ = ROOT.parent / "MinishCapRecomp"
-RECOMP_EXE = PROJ / "build" / "MinishCapRecomp.exe"
+import recomp_paths as _rp
+PROJ = _rp.game_dir(ROOT)
+RECOMP_EXE = _rp.recomp_exe(ROOT)
 
 START_KEYINPUT = 0x3F7   # active-low, START pressed
 NONE_KEYINPUT = 0x3FF
@@ -70,12 +71,12 @@ def main():
         if not args.no_spawn:
             if not RECOMP_EXE.exists():
                 print(f"missing {RECOMP_EXE}", file=sys.stderr); return 1
-            # insn-trace OFF for speed (this is a liveness check, not a diff).
-            env = dict(os.environ); env.pop("GBARECOMP_INSN_TRACE", None)
+            # Inherit the caller's env so GBARECOMP_HANG_WATCHDOG /
+            # GBARECOMP_INSN_TRACE reach the child; let stderr through so the
+            # watchdog / abort dumps are visible (stdout stays quiet).
             proc = subprocess.Popen([str(RECOMP_EXE), "--tcp", "19842"],
-                                    cwd=str(PROJ), env=env,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
+                                    cwd=str(PROJ), env=dict(os.environ),
+                                    stdout=subprocess.DEVNULL)
         rec = JsonClient("127.0.0.1", 19842)
         print("==> recomp connected (fresh boot); driving intro to "
               f"f{args.until}", flush=True)
@@ -91,6 +92,14 @@ def main():
                       f"{args.timeout}s — recomp is spinning in one dispatch. "
                       f"MC-HP-002 NOT resolved. ***", flush=True)
                 return 2
+            except (RuntimeError, ConnectionError, OSError) as ex:
+                # Child closed the socket mid-step — almost always the hang
+                # watchdog firing (it _Exit()s after dumping). Its stderr dump
+                # (guest PC + fp ring tail) is printed above.
+                print(f"\n*** child exited mid-step at loop-frame {f} ({ex}) — "
+                      f"hang watchdog fired; see its stderr dump above. ***",
+                      flush=True)
+                return 3
             if f % 250 == 0:
                 try:
                     info = rec.call(timeout=5.0, cmd="frame")
