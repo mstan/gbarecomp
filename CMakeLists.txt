@@ -283,8 +283,11 @@ add_library(gbarecomp_debug STATIC
     src/debug/tcp_debug_server.cpp
     src/debug/trace_ring.cpp
     src/debug/snapshot.cpp
+    src/debug/ws_provenance.cpp
 )
 target_include_directories(gbarecomp_debug PUBLIC src/debug)
+# ws_provenance.cpp consults the active bus via runtime_bus_bridge.h.
+target_include_directories(gbarecomp_debug PRIVATE src/runtime)
 target_link_libraries(gbarecomp_debug PUBLIC gbarecomp_gba)
 set_property(TARGET gbarecomp_debug PROPERTY POSITION_INDEPENDENT_CODE ON)
 if(WIN32 OR MSYS)

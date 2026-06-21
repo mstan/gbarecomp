@@ -289,6 +289,11 @@ extern "C" uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
 
 extern "C" unsigned g_runtime_insn_trace = 0;
 
+// General function-entry hook (see runtime_arm.h). nullptr = disabled; a host
+// debug probe assigns its own handler. Called from the generated function
+// prologue with the guest entry PC while R0..R3 still hold the AAPCS args.
+extern "C" void (*g_runtime_fn_entry_hook)(uint32_t) = nullptr;
+
 namespace {
 // ~8M instructions of history (~60+ PPU-frames). The recomp runs several frames
 // ahead of the interp oracle in cumulative cycle (boot step_frame overshoot), so

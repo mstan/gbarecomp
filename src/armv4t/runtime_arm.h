@@ -186,6 +186,19 @@ uint32_t runtime_fp_save_file(const char* path);
 // execution history leading into a freeze is on disk with no live interaction
 // (n==0 → whole ring). Requires GBARECOMP_INSN_TRACE armed. Returns records.
 uint32_t runtime_fp_save_tail_csv(const char* path, uint32_t n);
+
+// ── Function-entry hook (general debug observability) ──────────────────
+// When g_runtime_fn_entry_hook != nullptr the generated function prologue
+// calls it with the guest entry PC, BEFORE the first instruction of that
+// function runs. At that instant g_cpu.R[0..3] hold the AAPCS arguments and
+// g_cpu.R[14] the return address, so a host probe can read a recompiled
+// function's arguments and guest memory at call time. This is the general
+// substrate for host-side observation of ANY recompiled guest function across
+// ANY game (e.g. the widescreen tilemap-provenance probe reads DrawMetatileAt's
+// world-coord args). nullptr (the default) costs one not-taken branch per
+// function entry and is byte-identical to the un-hooked guest state.
+extern void (*g_runtime_fn_entry_hook)(uint32_t entry_pc);
+
 // Dedicated always-on IRQ-vector log (MC-HP-002): one entry per IRQ vectoring,
 // dumped as CSV. Armed by env GBARECOMP_IRQ_LOG. g_runtime_irq_from_halt is set
 // by runtime_tick's wake-from-HALT path so each log entry records whether the

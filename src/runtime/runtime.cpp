@@ -35,6 +35,7 @@
 #include "sha1.h"
 #include "snapshot.h"
 #include "tcp_debug_server.h"
+#include "ws_provenance.h"
 
 #include <algorithm>
 #include <atomic>
@@ -970,6 +971,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // BIOS snapshot is the immutable code image for BIOS-region heals.
     gbarecomp::overlay_loader_init("recomp_cache", rom_sha1, &bios);
 
+    // Widescreen Step B tilemap-provenance probe (debug-only; no-op unless
+    // GBARECOMP_WS_PROBE_DRAWMETATILE is set). Installs the function-entry hook
+    // so the owner ring tracks DrawMetatileAt continuously from boot.
+    ws_provenance_init_from_env();
+
     // ── Recompiler exec gate ──────────────────────────────────────
     //
     // The runtime is recompiler-driven (PRINCIPLES.md "Interpreter
@@ -1610,6 +1616,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 count_nonzero(bus.pal_ptr(), 1024),
                 count_nonzero(bus.vram_ptr(), 96 * 1024),
                 count_nonzero(bus.oam_ptr(), 1024));
+
+    // Widescreen provenance dump (debug-only): query the always-on owner ring
+    // for the final guest state. GBARECOMP_WS_PROBE_DUMP=<path>.
+    if (ws_provenance_armed()) {
+        if (const char* wsp = std::getenv("GBARECOMP_WS_PROBE_DUMP")) {
+            if (wsp[0]) ws_provenance_dump(wsp, args.widescreen);
+        }
+    }
 
     gbarecomp::overlay_loader_shutdown();  // join worker + drain before banner
     emit_exit_diagnostics();

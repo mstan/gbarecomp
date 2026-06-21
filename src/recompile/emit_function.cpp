@@ -284,6 +284,14 @@ std::string emit_function_body_str(
     ctx.idle_backedge_pcs = &idle_backedge_pcs;
 
     uint32_t pc = fn.addr;
+    // General function-entry hook (debug observability; see runtime_arm.h).
+    // Fires before the first instruction while R0..R3 still hold the AAPCS
+    // arguments. nullptr (default) = one not-taken branch, guest-state
+    // byte-identical. Keyed by the function entry PC so a host probe can
+    // dispatch per-function (e.g. widescreen tilemap provenance).
+    appendf(out,
+        "    if (g_runtime_fn_entry_hook) g_runtime_fn_entry_hook(0x%08Xu);\n",
+        fn.addr);
     while (pc < fn.end_addr) {
         std::size_t off = 0;
         if (!source_offset_for(pc, step, &off)) break;
