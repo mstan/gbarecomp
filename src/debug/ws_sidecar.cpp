@@ -41,6 +41,12 @@ uint32_t g_gmain = 0;                      // IWRAM addr of gMain (callback2 @ +
 uint32_t g_cb2_overworld = 0;             // guest PC of CB2_Overworld (thumb, no |1)
 bool     g_active_mode = false;           // GBARECOMP_WS_SC_ACTIVE: per-frame fill
 bool     g_in_active_fill = false;        // re-entrancy guard for synthetic draws
+bool     g_log_dm = false;                // GBARECOMP_WS_SC_LOGDM: calibration log
+uint32_t g_curcoords = 0;                 // gObjectEvents[0].currentCoords (x@+0,y@+2)
+int      g_center_x = 14;                  // coarse origin: w0 = currentCoords*2 - center
+int      g_center_y = 9;                   //   (resolves the 256px wrap window)
+int      g_center_x_c2 = 12;               // fine origin: w0 = (scroll>>3 & 31) + C2,
+int      g_center_y_c2 = 14;               //   tracks the live BG scroll like central
 unsigned long long g_draws = 0;
 unsigned long long g_syncs = 0;
 unsigned long long g_cache_fills = 0;
@@ -63,6 +69,13 @@ bool g_anchor_valid = false;
 int  g_anchor_col = 0, g_anchor_row = 0;   // ring slot (col,row) of the anchor
 int  g_anchor_wx = 0, g_anchor_wy = 0;     // exact world tile at that ring slot
 const uint8_t* g_io_raw = nullptr;         // live IO shadow (for live BG scroll)
+
+// Camera world origin (world tile at screen tile 0,0) derived from GUEST state
+// (gObjectEvents[0].currentCoords) — savestate/boot-safe, unlike the host owner
+// ring. Published once per frame by active_fill; the provider combines it with
+// the LIVE BG scroll for sub-tile tracking. This is the Option-A origin source.
+bool g_cam_valid = false;
+int  g_cam_w0x = 0, g_cam_w0y = 0;
 
 uint32_t parse_hex_env(const char* name) {
     const char* v = std::getenv(name);
@@ -171,6 +184,21 @@ bool world_origin(gba::GbaBus* bus, int bg, int* w0x, int* w0y, Scroll* s,
     return true;
 }
 
+// Option-A origin: world tile at screen (0,0) from GUEST camera state. The field
+// view centers the player's currentCoords (metatile units, incl. MAP_OFFSET) at
+// a fixed screen tile, so world tile at screen origin = currentCoords*2 - center.
+// currentCoords jumps to the TARGET tile mid-step, so this is a COARSE (metatile)
+// origin; the provider adds the live BG-scroll fd8() term for per-pixel tracking.
+// Correct from any entry point (boot OR savestate) — no host owner ring needed.
+bool camera_origin(gba::GbaBus* bus, int* w0x, int* w0y) {
+    if (!g_curcoords) return false;
+    const int ccx = static_cast<int16_t>(rd16(bus, g_curcoords));
+    const int ccy = static_cast<int16_t>(rd16(bus, g_curcoords + 2u));
+    *w0x = ccx * 2 - g_center_x;
+    *w0y = ccy * 2 - g_center_y;
+    return true;
+}
+
 }  // namespace
 
 // Function-entry hook: maintain the per-tile owner ring from DrawMetatileAt.
@@ -181,6 +209,12 @@ extern "C" void ws_sidecar_fn_entry_hook(uint32_t pc) {
     const uint32_t off = g_cpu.R[1] & kRingMask;     // ring tile offset (TL)
     const int mwx = static_cast<int>(g_cpu.R[2]);    // world METATILE x
     const int mwy = static_cast<int>(g_cpu.R[3]);    // world METATILE y
+    if (g_log_dm) {  // calibration: ground-truth ring-slot <-> world-tile pairs
+        std::fprintf(stderr, "[ws-dm] off=%u col=%u row=%u mtx=%d mty=%d "
+            "wtileTL=(%d,%d)\n", off, off & 31u, (off >> 5) & 31u, mwx, mwy,
+            2 * mwx, 2 * mwy);
+        std::fflush(stderr);
+    }
     // The 2x2 tile block at off,+1,+0x20,+0x21 maps to world tiles
     // (2mwx,2mwy)=TL, (2mwx+1,2mwy)=TR, (2mwx,2mwy+1)=BL, (2mwx+1,2mwy+1)=BR.
     struct { uint32_t d; int dx; int dy; } e[4] = {
@@ -207,6 +241,13 @@ void ws_sidecar_init_from_env() {
     g_cb2_overworld = parse_hex_env("GBARECOMP_WS_SC_CB2_OVERWORLD") & ~1u;
     if (const char* a = std::getenv("GBARECOMP_WS_SC_ACTIVE"))
         g_active_mode = (a[0] && a[0] != '0');
+    if (const char* a = std::getenv("GBARECOMP_WS_SC_LOGDM"))
+        g_log_dm = (a[0] && a[0] != '0');
+    g_curcoords = parse_hex_env("GBARECOMP_WS_SC_CURCOORDS");  // Option-A origin src
+    if (uint32_t cx = parse_hex_env("GBARECOMP_WS_SC_CENTERX")) g_center_x = (int)cx;
+    if (uint32_t cy = parse_hex_env("GBARECOMP_WS_SC_CENTERY")) g_center_y = (int)cy;
+    if (uint32_t cx = parse_hex_env("GBARECOMP_WS_SC_C2X")) g_center_x_c2 = (int)cx;
+    if (uint32_t cy = parse_hex_env("GBARECOMP_WS_SC_C2Y")) g_center_y_c2 = (int)cy;
     if (!g_dm_pc || !g_tilemap_ptrs) {
         std::fprintf(stderr, "[ws-sidecar] NOT armed: need "
             "GBARECOMP_WS_SC_DRAWMETATILE and _TILEMAP_PTRS\n");
@@ -301,18 +342,16 @@ void ws_sidecar_active_fill() {
     // Policy: only extend the world in the overworld; elsewhere letterbox.
     if (!is_overworld(bus)) { gba::g_ws_pillarbox = 1; return; }
     gba::g_ws_pillarbox = 0;
-    int w0x, w0y, ac, ar, awx, awy; Scroll s;
-    if (!world_origin(bus, 1, &w0x, &w0y, &s, &ac, &ar, &awx, &awy)) {
-        g_anchor_valid = false; return;
-    }
+    int w0x, w0y;
+    // Option A: world origin from GUEST camera state (savestate/boot-safe).
+    if (!camera_origin(bus, &w0x, &w0y)) { g_cam_valid = false; return; }
     const uint32_t map_layout = rd32(bus, g_mapheader);  // gMapHeader.mapLayout
-    if (!map_layout) { g_anchor_valid = false; return; }
-    // Publish the scroll-independent anchor for the provider. The provider reads
-    // the LIVE scroll itself, so margins track the camera with no frame lag; the
-    // anchor only pins which 32-tile world window the camera is in.
-    g_anchor_col = ac; g_anchor_row = ar; g_anchor_wx = awx; g_anchor_wy = awy;
+    if (!map_layout) { g_cam_valid = false; return; }
+    // Publish the coarse camera origin for the provider; the provider adds the
+    // LIVE BG-scroll fd8() term for per-pixel/sub-tile tracking against central.
+    g_cam_w0x = w0x; g_cam_w0y = w0y;
     g_io_raw = bus->io().raw();
-    g_anchor_valid = true;
+    g_cam_valid = true;
 
     // World-metatile region: MARGINS ONLY (the central 15 metatile columns come
     // from the guest's own VRAM tilemap; the PPU reads those directly). Filling
@@ -387,49 +426,29 @@ unsigned long long g_prov_calls = 0, g_prov_hits = 0;
 bool ws_sidecar_tilemap_entry(int bg, int hw_x, int screen_y,
                               uint16_t* out_entry) {
     ++g_prov_calls;
-    // g_anchor_valid is no longer required: the world origin is resolved from the
-    // LIVE owner ring below (cached anchor is only a cold-start fallback). g_io_raw
-    // gates the very first frame before active_fill publishes the IO shadow ptr.
-    if (!g_enabled || bg < 1 || bg > 3 || !out_entry || !g_io_raw)
+    if (!g_enabled || bg < 1 || bg > 3 || !out_entry || !g_io_raw || !g_cam_valid)
         return false;
-    // Hot path (per margin pixel). Read the LIVE BG scroll from the same IO
-    // shadow the central path reads (gba_ppu render_regular_bg, scroll_off =
-    // 0x10 + bg*4), so the margins resolve to exactly the world tiles the
-    // central BG is showing this scanline — zero frame lag. The cached anchor
-    // (scroll-independent ring-slot -> world-tile) only fixes which 32-tile
-    // window the camera is in; the live scroll does the rest.
+    // Hot path (per margin pixel). World origin = FINE position from the LIVE BG
+    // scroll (base_col + C2, which tracks the central path exactly, since central
+    // also renders from the live scroll) + the COARSE camera origin from guest
+    // state (g_cam_*) used only to resolve the 256px (32-tile) wrap window. This
+    // is savestate/boot-safe (no host owner ring) and has no mid-step desync:
+    // base_col carries the per-tile motion, g_cam_* the absolute window.
     const uint8_t* io = g_io_raw;
     const uint32_t so = 0x10u + static_cast<uint32_t>(bg) * 4u;
     const int hofs = static_cast<int>(io[so]     | (io[so + 1] << 8));
     const int vofs = static_cast<int>(io[so + 2] | (io[so + 3] << 8));
-    auto sd = [](int d) { return ((d + 16) & 31) - 16; };  // signed ring delta
     const int base_col = static_cast<int>((static_cast<uint32_t>(hofs) >> 3) & 31u);
     const int base_row = static_cast<int>((static_cast<uint32_t>(vofs) >> 3) & 31u);
-    // Resolve the on-screen world origin (world tile at screen tile col/row 0)
-    // from the LIVE owner ring — NOT a frame-boundary-cached anchor. g_owner is
-    // updated by the guest's own DrawMetatileAt during its VBlank handler, which
-    // runs BEFORE this frame's visible scanlines, so it already reflects this
-    // frame's camera. Sampling mid-screen (a slot the guest is guaranteed to have
-    // drawn) is O(1) and means the margins track the camera with the SAME timing
-    // as the central BG (which reads the same live scroll + live VRAM ring). A
-    // frame-boundary cached anchor trailed by one camera update — the lag bug.
-    constexpr int kRefDC = 15, kRefDR = 10;  // mid-screen tile offset (240/2,160/2)
-    const int rc = (base_col + kRefDC) & (kRing - 1);
-    const int rr = (base_row + kRefDR) & (kRing - 1);
-    const TileXY& ref = g_owner[rr * kRing + rc];
-    int w0x, w0y;
-    if (ref.valid) {
-        // ref is the world tile at screen tile (kRefDC,kRefDR); step back to col0.
-        w0x = ref.wx - kRefDC;
-        w0y = ref.wy - kRefDR;
-    } else if (g_anchor_valid) {
-        // Cold start (e.g. savestate, ring not yet seeded): fall back to the
-        // per-frame published anchor until the guest redraws the field.
-        w0x = g_anchor_wx + sd(base_col - g_anchor_col);
-        w0y = g_anchor_wy + sd(base_row - g_anchor_row);
-    } else {
-        return false;
-    }
+    // Snap base+C2 (mod 32) to the window nearest the coarse camera origin.
+    auto snap = [](int fine, int coarse) {
+        int w = fine;
+        while (w - coarse >  16) w -= 32;
+        while (coarse - w >  16) w += 32;
+        return w;
+    };
+    const int w0x = snap(base_col + g_center_x_c2, g_cam_w0x);
+    const int w0y = snap(base_row + g_center_y_c2, g_cam_w0y);
     const int wtx = w0x + fd8(hofs + hw_x) - fd8(hofs);
     const int wty = w0y + fd8(vofs + screen_y) - fd8(vofs);
     const int cidx = (wty & (kCacheH - 1)) * kCacheW + (wtx & (kCacheW - 1));

@@ -32,13 +32,24 @@
 > (`src/debug/ws_sidecar.cpp`). These are improvements but do not fix the
 > fundamental owner-ring unreliability.
 >
-> **The real fix (next time):** derive the camera world origin from **guest state
-> directly** — `gTotalCameraPixelOffsetX/Y` (0x0300506C/68), `gFieldCamera`
-> (0x03005050), `sFieldCameraOffset` (0x03000E90), and/or the player/object-event
-> map coords — so the origin is correct from ANY entry point (fresh boot OR
-> savestate) and independent of the host owner-ring shadow. This single change
-> should resolve both the walking-stale bug (issue #1) and the savestate
-> cold-start bug (issue #3). Until then the feature stays force-disabled.
+> **Guest-camera origin (Option A) — IMPLEMENTED 2026-06-21, IMPROVED but not
+> perfect; feature stays force-disabled.** The margin world origin is now derived
+> from guest state instead of the host owner ring (`camera_origin()` in
+> `src/debug/ws_sidecar.cpp`): fine position from the LIVE BG scroll
+> (`(scroll>>3)&31 + C2`, C2=12x/14y — empirically invariant, so it tracks the
+> central path), wrap-window resolved by `gObjectEvents[0].currentCoords*2 -
+> (14,9)` (`+0x10`, valid from boot AND savestate). Calibrated against the guest's
+> own `DrawMetatileAt` ring-slot↔world-tile pairs (logged via
+> `GBARECOMP_WS_SC_LOGDM`). Env: `GBARECOMP_WS_SC_CURCOORDS=0x02036E48`
+> (`_CENTERX/_CENTERY` and `_C2X/_C2Y` override the constants).
+> Result: OFF byte-identical; overworld margins render the true extended world and
+> track far better than the owner-ring approach, fixing the savestate cold-start
+> (no movement needed to seed). **Residual:** some stale/misaligned margin tiles
+> still appear during motion (user-observed "less bad but not gone"). Suspects for
+> next time: per-scanline scroll vs the once-per-frame coarse window, the cache
+> fill region vs the live origin under fast motion, and map-connection borders
+> (neighbor tileset not loaded). The feature remains force-disabled (WIP) pending
+> that cleanup.
 
 Opt-in 16:9 widescreen for Pokémon FRLG overworld. **OFF = byte-identical /
 system-faithful** (the gate); **ON = the guest renders a true 64-tile-wide field
