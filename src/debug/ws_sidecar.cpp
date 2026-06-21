@@ -35,6 +35,8 @@ bool     g_enabled = false;
 uint32_t g_dm_pc = 0;                      // DrawMetatileAt guest PC
 uint32_t g_tilemap_ptrs = 0;              // IWRAM addr of gBGTilemapBuffers1
 uint32_t g_mapheader = 0;                 // EWRAM addr of gMapHeader (.mapLayout @+0)
+uint32_t g_gmain = 0;                      // IWRAM addr of gMain (callback2 @ +4)
+uint32_t g_cb2_overworld = 0;             // guest PC of CB2_Overworld (thumb, no |1)
 bool     g_active_mode = false;           // GBARECOMP_WS_SC_ACTIVE: per-frame fill
 bool     g_in_active_fill = false;        // re-entrancy guard for synthetic draws
 unsigned long long g_draws = 0;
@@ -77,6 +79,18 @@ void wr32_iwram(gba::GbaBus* bus, uint32_t addr, uint32_t v) {
     p[2] = (v >> 16) & 0xFF; p[3] = (v >> 24) & 0xFF;
 }
 
+// VRAM byte save/restore for the transient scratch the synthetic draws write,
+// so the guest's VRAM is left byte-identical (count_nonzero would otherwise
+// count the scratch, and the guest could read the region).
+void vram_save(gba::GbaBus* bus, uint32_t addr, uint8_t* buf, uint32_t n) {
+    if (addr < 0x06000000u || addr - 0x06000000u + n > 0x18000u) return;
+    std::memcpy(buf, bus->vram_ptr() + (addr - 0x06000000u), n);
+}
+void vram_restore(gba::GbaBus* bus, uint32_t addr, const uint8_t* buf, uint32_t n) {
+    if (addr < 0x06000000u || addr - 0x06000000u + n > 0x18000u) return;
+    std::memcpy(bus->vram_ptr() + (addr - 0x06000000u), buf, n);
+}
+
 // floor(v / 8) for signed v (margins make HOFS+x go negative).
 inline int fd8(int v) { return (v >= 0) ? (v >> 3) : -(((-v) + 7) >> 3); }
 
@@ -90,16 +104,37 @@ Scroll bg_scroll(gba::GbaBus* bus, int bg) {
     return { r16(0x10u + bg * 4u), r16(0x12u + bg * 4u) };
 }
 
-// World tile at screen (0,0) for BG `bg` from the live central ring owner.
-// Returns false if the central slot isn't owned yet.
+// World tile at screen (0,0) for BG `bg`. The ring slot for screen (0,0) is
+// (base_row, base_col); ideally that slot is owned. If not (e.g. a savestate
+// left the owner ring partial and the central slot hasn't been redrawn yet),
+// extrapolate from the NEAREST owned slot using the ring's contiguous-window
+// structure: the slots hold 32 consecutive world tiles, so the world tile at a
+// slot differs from a neighbor by the signed ring delta. Returns false only if
+// the entire owner ring is empty.
 bool world_origin(gba::GbaBus* bus, int bg, int* w0x, int* w0y, Scroll* s) {
     *s = bg_scroll(bus, bg);
-    const uint32_t cslot = ((static_cast<uint32_t>(s->vofs) >> 3) & 31u) * 32u +
-                           ((static_cast<uint32_t>(s->hofs) >> 3) & 31u);
-    const TileXY& o = g_owner[cslot];
-    if (!o.valid) return false;
-    *w0x = o.wx;
-    *w0y = o.wy;
+    const int base_col = static_cast<int>((static_cast<uint32_t>(s->hofs) >> 3) & 31u);
+    const int base_row = static_cast<int>((static_cast<uint32_t>(s->vofs) >> 3) & 31u);
+    auto sd = [](int d) { return ((d + 16) & 31) - 16; };  // signed ring delta
+    int best = 0x7fffffff, bx = 0, by = 0; bool found = false;
+    for (int r = 0; r < kRing; ++r) {
+        for (int c = 0; c < kRing; ++c) {
+            const TileXY& o = g_owner[r * kRing + c];
+            if (!o.valid) continue;
+            const int dc = sd(base_col - c), dr = sd(base_row - r);
+            const int dist = (dc < 0 ? -dc : dc) + (dr < 0 ? -dr : dr);
+            if (dist < best) {
+                best = dist;
+                bx = o.wx + dc;  // world tile at base_col
+                by = o.wy + dr;  // world tile at base_row
+                found = true;
+                if (dist == 0) { *w0x = bx; *w0y = by; return true; }
+            }
+        }
+    }
+    if (!found) return false;
+    *w0x = bx;
+    *w0y = by;
     return true;
 }
 
@@ -135,6 +170,8 @@ void ws_sidecar_init_from_env() {
     g_dm_pc = parse_hex_env("GBARECOMP_WS_SC_DRAWMETATILE") & ~1u;
     g_tilemap_ptrs = parse_hex_env("GBARECOMP_WS_SC_TILEMAP_PTRS");
     g_mapheader = parse_hex_env("GBARECOMP_WS_SC_MAPHEADER");  // for active fill
+    g_gmain = parse_hex_env("GBARECOMP_WS_SC_GMAIN");          // overworld policy
+    g_cb2_overworld = parse_hex_env("GBARECOMP_WS_SC_CB2_OVERWORLD") & ~1u;
     if (const char* a = std::getenv("GBARECOMP_WS_SC_ACTIVE"))
         g_active_mode = (a[0] && a[0] != '0');
     if (!g_dm_pc || !g_tilemap_ptrs) {
@@ -212,10 +249,24 @@ bool draw_one_metatile(gba::GbaBus* bus, uint32_t map_layout, int mx, int my,
 }
 }  // namespace
 
+namespace {
+// Overworld discriminator: gMain.callback2 == CB2_Overworld (and field-return
+// variants the caller may OR into the env). If unconfigured, assume overworld
+// (no pillarbox) so the probe still works without policy addrs.
+bool is_overworld(gba::GbaBus* bus) {
+    if (!g_gmain || !g_cb2_overworld) return true;
+    const uint32_t cb2 = rd32(bus, g_gmain + 4u) & ~1u;
+    return cb2 == g_cb2_overworld;
+}
+}  // namespace
+
 void ws_sidecar_active_fill() {
     if (!g_enabled || !g_mapheader) return;
     gba::GbaBus* bus = active_bus();
     if (!bus) return;
+    // Policy: only extend the world in the overworld; elsewhere letterbox.
+    if (!is_overworld(bus)) { gba::g_ws_pillarbox = 1; return; }
+    gba::g_ws_pillarbox = 0;
     int w0x, w0y; Scroll s;
     if (!world_origin(bus, 1, &w0x, &w0y, &s)) return;  // need an anchor
     const uint32_t map_layout = rd32(bus, g_mapheader);  // gMapHeader.mapLayout
@@ -241,6 +292,13 @@ void ws_sidecar_active_fill() {
     const unsigned saved_shadow = g_runtime_shadow_tick;
     const unsigned long long saved_shadow_cyc = g_runtime_shadow_cycles;
     g_runtime_shadow_tick = 1u;
+    // Preserve the VRAM scratch the synthetic draws overwrite (so VRAM stays
+    // byte-identical to a non-sidecar run). Each draw touches offsets 0,1,0x20,
+    // 0x21; 0x80 bytes/region covers it with margin.
+    constexpr uint32_t kScratchSave = 0x80u;
+    uint8_t scratch_bak[3][kScratchSave];
+    for (int k = 0; k < 3; ++k)
+        vram_save(bus, kScratch[k], scratch_bak[k], kScratchSave);
 
     g_in_active_fill = true;
     for (int my = my_lo; my <= my_hi; ++my) {
@@ -266,13 +324,17 @@ void ws_sidecar_active_fill() {
     // Restore everything so the guest is bit-for-bit unaffected.
     g_runtime_shadow_tick = saved_shadow;
     g_runtime_shadow_cycles = saved_shadow_cyc;
-    for (int k = 0; k < 3; ++k)
+    for (int k = 0; k < 3; ++k) {
         wr32_iwram(bus, g_tilemap_ptrs + static_cast<uint32_t>(k) * 4u, saved_ptr[k]);
+        vram_restore(bus, kScratch[k], scratch_bak[k], kScratchSave);
+    }
     g_cpu = saved;
 }
 
+unsigned long long g_prov_calls = 0, g_prov_hits = 0;
 bool ws_sidecar_tilemap_entry(int bg, int hw_x, int screen_y,
                               uint16_t* out_entry) {
+    ++g_prov_calls;
     if (!g_enabled || bg < 1 || bg > 3 || !out_entry) return false;
     gba::GbaBus* bus = active_bus();
     if (!bus) return false;
@@ -283,6 +345,7 @@ bool ws_sidecar_tilemap_entry(int bg, int hw_x, int screen_y,
     const int cidx = (wty & (kCacheH - 1)) * kCacheW + (wtx & (kCacheW - 1));
     if (!g_cache_valid[cidx]) return false;
     *out_entry = g_cache[bg - 1][cidx];
+    ++g_prov_hits;
     return true;
 }
 
@@ -310,6 +373,8 @@ bool ws_sidecar_dump(const char* path, int extra_cols_per_side) {
     std::fprintf(f, "draws=%llu syncs=%llu active_calls=%llu cache_filled=%d/%d "
                  "extra_px=%d\n", g_draws, g_syncs, g_active_calls, cached,
                  kCacheW * kCacheH, extra_cols_per_side);
+    std::fprintf(f, "provider_calls=%llu provider_hits=%llu pillarbox=%d\n",
+                 g_prov_calls, g_prov_hits, gba::g_ws_pillarbox);
 
     // VRAM screenblock audit for Strategy-A widening (64-wide field BG needs an
     // extra 2KB screenblock per BG + the char base must not collide).

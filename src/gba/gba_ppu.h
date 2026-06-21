@@ -175,5 +175,6 @@ private:
 // runtime-side sidecar; nullptr = vanilla wide behavior.
 extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
                                         uint16_t* out_entry);
+extern "C" int g_ws_pillarbox;  // Step C policy: black margins on non-field screens
 
 }  // namespace gba

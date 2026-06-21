@@ -20,6 +20,12 @@ namespace gba {
 extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
                                         uint16_t* out_entry) = nullptr;
 
+// Widescreen pillarbox (Step C policy): when nonzero, the wide path renders the
+// margin columns (outside the central 240) as solid black instead of extended
+// world — used for non-overworld screens (menus, battles, transitions) so they
+// are letterboxed rather than garbled. Set per-frame by the runtime policy.
+extern "C" int g_ws_pillarbox = 0;
+
 GbaPpu::GbaPpu()  = default;
 GbaPpu::~GbaPpu() = default;
 
@@ -867,8 +873,15 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
         uint32_t height_px = height_tiles * 8u;
         uint32_t block_cols = width_tiles / 32u;
         for (uint32_t x = 0; x < out_w; ++x) {
-            if (!layer_enabled(x, layer)) continue;
             int hx = static_cast<int>(x) - static_cast<int>(ox);
+            const bool margin = (hx < 0 || hx >= 240);
+            // The guest window (WIN0/1) is authored for the 240px view, so a
+            // margin falls to WINOUT and would be culled. When the sidecar can
+            // supply the extended world for this margin, bypass the window cull
+            // so it renders; central columns (and vanilla-wide margins without a
+            // sidecar) keep the faithful window behavior.
+            const bool sidecar_margin = margin && g_ws_tilemap_provider != nullptr;
+            if (!sidecar_margin && !layer_enabled(x, layer)) continue;
             uint32_t tex_x = static_cast<uint32_t>(hx + static_cast<int>(hofs)) &
                              (width_px - 1u);
             uint32_t tex_y = (y + vofs) & (height_px - 1u);
@@ -1107,6 +1120,12 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
     if (bldy > 16u) bldy = 16u;
     for (uint32_t x = 0; x < out_w; ++x) {
         uint8_t* dst = row + x * 3;
+        // Pillarbox policy: black out the margin columns on non-overworld
+        // screens so menus/battles are letterboxed, not garbled.
+        if (g_ws_pillarbox && (x < ox || x >= ox + 240u)) {
+            dst[0] = dst[1] = dst[2] = 0;
+            continue;
+        }
         if (effect == 1 && (bldalpha & 0x1Fu) != 0 &&
             top[x].target1 && second[x].valid && second[x].target2 &&
             !(top[x].layer == 4 && second[x].layer == 4)) {

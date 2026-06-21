@@ -1538,9 +1538,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 sc_last_frame = scf;
                 // Active mode: render the extended world (incl. never-seen
                 // margins) via the guest's own draw — cycle/IRQ-transparent.
-                // Otherwise just capture the live ring (eviction).
-                if (ws_sidecar_active_mode()) ws_sidecar_active_fill();
-                else ws_sidecar_sync_frame();
+                // Only when widescreen is actually on (no point, and avoids any
+                // synthetic-draw side effects, when off). Otherwise capture the
+                // live ring (eviction).
+                if (ws_sidecar_active_mode() && args.widescreen > 0)
+                    ws_sidecar_active_fill();
+                else if (!ws_sidecar_active_mode())
+                    ws_sidecar_sync_frame();
             }
         }
         if (args.window) {
@@ -1600,10 +1604,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         // margins) via the guest's own draw, then force a FRESH render so the
         // wide path reads the filled cache instead of the run-time latched FB.
         bool fresh = false;
-        if (ws_sidecar_enabled()) {
-            if (const char* a = std::getenv("GBARECOMP_WS_SC_ACTIVE")) {
-                if (a[0] && a[0] != '0') { ws_sidecar_active_fill(); fresh = true; }
-            }
+        if (ws_sidecar_enabled() && args.widescreen > 0 &&
+            ws_sidecar_active_mode()) {
+            ws_sidecar_active_fill();
+            fresh = true;
         }
         if (ppu.has_latched_framebuffer() && !fresh) {
             std::memcpy(fb.data(), ppu.latched_framebuffer(), fb.size());
