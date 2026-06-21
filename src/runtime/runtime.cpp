@@ -36,6 +36,7 @@
 #include "snapshot.h"
 #include "tcp_debug_server.h"
 #include "ws_provenance.h"
+#include "ws_sidecar.h"
 
 #include <algorithm>
 #include <atomic>
@@ -975,6 +976,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // GBARECOMP_WS_PROBE_DRAWMETATILE is set). Installs the function-entry hook
     // so the owner ring tracks DrawMetatileAt continuously from boot.
     ws_provenance_init_from_env();
+    ws_sidecar_init_from_env();   // widescreen Step C margin-injection sidecar
 
     // ── Recompiler exec gate ──────────────────────────────────────
     //
@@ -1506,6 +1508,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         return static_cast<uint16_t>(0x03FFu & ~btn);  // KEYINPUT active-low
     };
     uint64_t demo_last_frame = ~uint64_t{0};
+    uint64_t sc_last_frame = ~uint64_t{0};  // widescreen sidecar per-frame sync
 
     // Headless --frames is a count of frames to run from where we start, not
     // an absolute PPU frame index — so a --load-state run executes args.frames
@@ -1524,6 +1527,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 demo_last_frame = fc;
                 bus.io().set_keyinput(demo_walk ? walk_keyinput_for_frame(fc)
                                                 : demo_keyinput_for_frame(fc));
+            }
+        }
+        // Widescreen sidecar: capture the live tilemap ring once per guest
+        // frame (no-op unless armed) so resident tiles are cached before the
+        // camera evicts them — the always-on substrate for margin injection.
+        if (ws_sidecar_enabled()) {
+            const uint64_t scf = ppu.frame_count();
+            if (scf != sc_last_frame) {
+                sc_last_frame = scf;
+                ws_sidecar_sync_frame();
             }
         }
         if (args.window) {
@@ -1622,6 +1635,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     if (ws_provenance_armed()) {
         if (const char* wsp = std::getenv("GBARECOMP_WS_PROBE_DUMP")) {
             if (wsp[0]) ws_provenance_dump(wsp, args.widescreen);
+        }
+    }
+    if (ws_sidecar_enabled()) {
+        if (const char* scp = std::getenv("GBARECOMP_WS_SC_DUMP")) {
+            if (scp[0]) ws_sidecar_dump(scp, args.widescreen);
         }
     }
 

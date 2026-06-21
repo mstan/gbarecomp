@@ -284,6 +284,7 @@ add_library(gbarecomp_debug STATIC
     src/debug/trace_ring.cpp
     src/debug/snapshot.cpp
     src/debug/ws_provenance.cpp
+    src/debug/ws_sidecar.cpp
 )
 target_include_directories(gbarecomp_debug PUBLIC src/debug)
 # ws_provenance.cpp consults the active bus via runtime_bus_bridge.h.
