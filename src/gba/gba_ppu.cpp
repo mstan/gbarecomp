@@ -519,7 +519,7 @@ void render_scanline_internal(uint8_t* rgb,
             uint8_t rgbv[3];
             to_rgb888(load_u16_le(&pal[pal_idx * 2]), rgbv);
             submit(x, rgbv,
-                   static_cast<int>(bg_priority * 128u + 128u + layer),
+                   static_cast<int>(bg_priority * 256u + 128u + layer),
                    static_cast<uint8_t>(layer),
                    blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
                    (second_targets & (1u << layer)) != 0);
@@ -573,7 +573,7 @@ void render_scanline_internal(uint8_t* rgb,
             uint8_t rgbv[3];
             to_rgb888(load_u16_le(&pal[pal_idx * 2]), rgbv);
             submit(x, rgbv,
-                   static_cast<int>(bg_priority * 128 + 128 + layer),
+                   static_cast<int>(bg_priority * 256 + 128 + layer),
                    static_cast<uint8_t>(layer),
                    blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
                    (second_targets & (1u << layer)) != 0);
@@ -623,7 +623,15 @@ void render_scanline_internal(uint8_t* rgb,
             int tiles_w = sw / 8;
             int tiles_h = sh / 8;
             int priority = static_cast<int>((attr2 >> 10) & 0x3u);
-            int key = priority * 128 + idx;
+            // Composite key (lower = front). Per-priority stride 256 with OBJ in
+            // [p*256, p*256+127] (tie-break by OAM idx) and BG in [p*256+128,
+            // p*256+131] (tie-break by layer) yields the exact GBA order
+            // OBJ0<BG0<OBJ1<BG1<OBJ2<BG2<OBJ3<BG3: an OBJ is in front of a same-
+            // priority BG, but a BG of priority p sits in front of any OBJ of
+            // priority p+1 (this is what lets the player walk BEHIND roof/tree
+            // tops). The stride MUST exceed 128 so OBJ idx (0..127) can't bleed
+            // into the next priority's BG band.
+            int key = priority * 256 + idx;
             bool obj_target2 = (second_targets & (1u << 4)) != 0;
             auto emit_obj = [&](int tex_x, int tex_y, int screen_x) {
                 if (screen_x < 0 || screen_x >= static_cast<int>(kScreenWidth)) return;
@@ -933,7 +941,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             uint8_t rgbv[3];
             to_rgb888(load_u16_le(&pal[pal_idx * 2]), rgbv);
             submit(x, rgbv,
-                   static_cast<int>(bg_priority * 128u + 128u + layer),
+                   static_cast<int>(bg_priority * 256u + 128u + layer),
                    static_cast<uint8_t>(layer),
                    blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
                    (second_targets & (1u << layer)) != 0);
@@ -982,7 +990,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             uint8_t rgbv[3];
             to_rgb888(load_u16_le(&pal[pal_idx * 2]), rgbv);
             submit(x, rgbv,
-                   static_cast<int>(bg_priority * 128 + 128 + layer),
+                   static_cast<int>(bg_priority * 256 + 128 + layer),
                    static_cast<uint8_t>(layer),
                    blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
                    (second_targets & (1u << layer)) != 0);
@@ -1033,7 +1041,15 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             int tiles_w = sw / 8;
             int tiles_h = sh / 8;
             int priority = static_cast<int>((attr2 >> 10) & 0x3u);
-            int key = priority * 128 + idx;
+            // Composite key (lower = front). Per-priority stride 256 with OBJ in
+            // [p*256, p*256+127] (tie-break by OAM idx) and BG in [p*256+128,
+            // p*256+131] (tie-break by layer) yields the exact GBA order
+            // OBJ0<BG0<OBJ1<BG1<OBJ2<BG2<OBJ3<BG3: an OBJ is in front of a same-
+            // priority BG, but a BG of priority p sits in front of any OBJ of
+            // priority p+1 (this is what lets the player walk BEHIND roof/tree
+            // tops). The stride MUST exceed 128 so OBJ idx (0..127) can't bleed
+            // into the next priority's BG band.
+            int key = priority * 256 + idx;
             bool obj_target2 = (second_targets & (1u << 4)) != 0;
             auto emit_obj = [&](int tex_x, int tex_y, int screen_x) {
                 if (screen_x < 0 || screen_x >= static_cast<int>(out_w)) return;
