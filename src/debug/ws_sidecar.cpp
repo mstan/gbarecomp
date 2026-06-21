@@ -47,13 +47,22 @@ unsigned long long g_cache_fills = 0;
 unsigned long long g_active_calls = 0;
 unsigned long long g_active_fail = 0;
 
-// Per-frame cached render origin. active_fill computes the (expensive, owner-ring
-// scanning) world origin ONCE per frame and stores it here; the PPU provider —
-// called per margin pixel (tens of thousands/frame) — reads these directly with
-// no scan. Using the SAME origin active_fill filled with also guarantees the
-// provider's cache lookups hit what was just written.
-bool g_o_valid = false;
-int  g_o_w0x = 0, g_o_w0y = 0, g_o_hofs = 0, g_o_vofs = 0;
+// Per-frame cached render ANCHOR — a scroll-INDEPENDENT mapping from one owned
+// ring slot to its exact world tile. active_fill computes it ONCE per frame
+// (owner-ring scan) and publishes it here; the PPU provider — called per margin
+// pixel (tens of thousands/frame) — combines it with the LIVE BG scroll (read
+// from the same IO shadow the central path reads) to derive the world tile with
+// NO per-pixel scan and NO frame lag.
+//
+// Why scroll-independent: ring slot c always holds a world tile w with
+// (w & 31) == c, so the anchor only needs to fix WHICH 32-tile window the camera
+// is in (good to ±128px). The live scroll then resolves the exact on-screen
+// world origin every frame, so margins track the camera 1:1 with the central BG
+// (which reads the same live scroll) instead of trailing by a frame.
+bool g_anchor_valid = false;
+int  g_anchor_col = 0, g_anchor_row = 0;   // ring slot (col,row) of the anchor
+int  g_anchor_wx = 0, g_anchor_wy = 0;     // exact world tile at that ring slot
+const uint8_t* g_io_raw = nullptr;         // live IO shadow (for live BG scroll)
 
 uint32_t parse_hex_env(const char* name) {
     const char* v = std::getenv(name);
@@ -121,12 +130,24 @@ Scroll bg_scroll(gba::GbaBus* bus, int bg) {
 // structure: the slots hold 32 consecutive world tiles, so the world tile at a
 // slot differs from a neighbor by the signed ring delta. Returns false only if
 // the entire owner ring is empty.
-bool world_origin(gba::GbaBus* bus, int bg, int* w0x, int* w0y, Scroll* s) {
+// `anc_*` (optional) receive the chosen owned ring slot and its world tile — the
+// scroll-independent anchor the provider needs (so it can re-derive w0x/w0y from
+// the LIVE scroll rather than the scroll captured here).
+bool world_origin(gba::GbaBus* bus, int bg, int* w0x, int* w0y, Scroll* s,
+                  int* anc_c = nullptr, int* anc_r = nullptr,
+                  int* anc_wx = nullptr, int* anc_wy = nullptr) {
     *s = bg_scroll(bus, bg);
     const int base_col = static_cast<int>((static_cast<uint32_t>(s->hofs) >> 3) & 31u);
     const int base_row = static_cast<int>((static_cast<uint32_t>(s->vofs) >> 3) & 31u);
     auto sd = [](int d) { return ((d + 16) & 31) - 16; };  // signed ring delta
     int best = 0x7fffffff, bx = 0, by = 0; bool found = false;
+    int bc = 0, br = 0, bwx = 0, bwy = 0;  // anchor slot of the best match
+    auto publish_anchor = [&]() {
+        if (anc_c)  *anc_c  = bc;
+        if (anc_r)  *anc_r  = br;
+        if (anc_wx) *anc_wx = bwx;
+        if (anc_wy) *anc_wy = bwy;
+    };
     for (int r = 0; r < kRing; ++r) {
         for (int c = 0; c < kRing; ++c) {
             const TileXY& o = g_owner[r * kRing + c];
@@ -137,14 +158,16 @@ bool world_origin(gba::GbaBus* bus, int bg, int* w0x, int* w0y, Scroll* s) {
                 best = dist;
                 bx = o.wx + dc;  // world tile at base_col
                 by = o.wy + dr;  // world tile at base_row
+                bc = c; br = r; bwx = o.wx; bwy = o.wy;
                 found = true;
-                if (dist == 0) { *w0x = bx; *w0y = by; return true; }
+                if (dist == 0) { *w0x = bx; *w0y = by; publish_anchor(); return true; }
             }
         }
     }
     if (!found) return false;
     *w0x = bx;
     *w0y = by;
+    publish_anchor();
     return true;
 }
 
@@ -278,13 +301,18 @@ void ws_sidecar_active_fill() {
     // Policy: only extend the world in the overworld; elsewhere letterbox.
     if (!is_overworld(bus)) { gba::g_ws_pillarbox = 1; return; }
     gba::g_ws_pillarbox = 0;
-    int w0x, w0y; Scroll s;
-    if (!world_origin(bus, 1, &w0x, &w0y, &s)) { g_o_valid = false; return; }
+    int w0x, w0y, ac, ar, awx, awy; Scroll s;
+    if (!world_origin(bus, 1, &w0x, &w0y, &s, &ac, &ar, &awx, &awy)) {
+        g_anchor_valid = false; return;
+    }
     const uint32_t map_layout = rd32(bus, g_mapheader);  // gMapHeader.mapLayout
-    if (!map_layout) { g_o_valid = false; return; }
-    // Publish this frame's origin for the provider (no per-pixel rescan).
-    g_o_w0x = w0x; g_o_w0y = w0y; g_o_hofs = s.hofs; g_o_vofs = s.vofs;
-    g_o_valid = true;
+    if (!map_layout) { g_anchor_valid = false; return; }
+    // Publish the scroll-independent anchor for the provider. The provider reads
+    // the LIVE scroll itself, so margins track the camera with no frame lag; the
+    // anchor only pins which 32-tile world window the camera is in.
+    g_anchor_col = ac; g_anchor_row = ar; g_anchor_wx = awx; g_anchor_wy = awy;
+    g_io_raw = bus->io().raw();
+    g_anchor_valid = true;
 
     // World-metatile region: MARGINS ONLY (the central 15 metatile columns come
     // from the guest's own VRAM tilemap; the PPU reads those directly). Filling
@@ -359,11 +387,51 @@ unsigned long long g_prov_calls = 0, g_prov_hits = 0;
 bool ws_sidecar_tilemap_entry(int bg, int hw_x, int screen_y,
                               uint16_t* out_entry) {
     ++g_prov_calls;
-    // Hot path (per margin pixel): use the per-frame cached origin — NO owner-ring
-    // scan, no bus read. g_o_* is published once per frame by active_fill.
-    if (!g_enabled || bg < 1 || bg > 3 || !out_entry || !g_o_valid) return false;
-    const int wtx = g_o_w0x + fd8(g_o_hofs + hw_x) - fd8(g_o_hofs);
-    const int wty = g_o_w0y + fd8(g_o_vofs + screen_y) - fd8(g_o_vofs);
+    // g_anchor_valid is no longer required: the world origin is resolved from the
+    // LIVE owner ring below (cached anchor is only a cold-start fallback). g_io_raw
+    // gates the very first frame before active_fill publishes the IO shadow ptr.
+    if (!g_enabled || bg < 1 || bg > 3 || !out_entry || !g_io_raw)
+        return false;
+    // Hot path (per margin pixel). Read the LIVE BG scroll from the same IO
+    // shadow the central path reads (gba_ppu render_regular_bg, scroll_off =
+    // 0x10 + bg*4), so the margins resolve to exactly the world tiles the
+    // central BG is showing this scanline — zero frame lag. The cached anchor
+    // (scroll-independent ring-slot -> world-tile) only fixes which 32-tile
+    // window the camera is in; the live scroll does the rest.
+    const uint8_t* io = g_io_raw;
+    const uint32_t so = 0x10u + static_cast<uint32_t>(bg) * 4u;
+    const int hofs = static_cast<int>(io[so]     | (io[so + 1] << 8));
+    const int vofs = static_cast<int>(io[so + 2] | (io[so + 3] << 8));
+    auto sd = [](int d) { return ((d + 16) & 31) - 16; };  // signed ring delta
+    const int base_col = static_cast<int>((static_cast<uint32_t>(hofs) >> 3) & 31u);
+    const int base_row = static_cast<int>((static_cast<uint32_t>(vofs) >> 3) & 31u);
+    // Resolve the on-screen world origin (world tile at screen tile col/row 0)
+    // from the LIVE owner ring — NOT a frame-boundary-cached anchor. g_owner is
+    // updated by the guest's own DrawMetatileAt during its VBlank handler, which
+    // runs BEFORE this frame's visible scanlines, so it already reflects this
+    // frame's camera. Sampling mid-screen (a slot the guest is guaranteed to have
+    // drawn) is O(1) and means the margins track the camera with the SAME timing
+    // as the central BG (which reads the same live scroll + live VRAM ring). A
+    // frame-boundary cached anchor trailed by one camera update — the lag bug.
+    constexpr int kRefDC = 15, kRefDR = 10;  // mid-screen tile offset (240/2,160/2)
+    const int rc = (base_col + kRefDC) & (kRing - 1);
+    const int rr = (base_row + kRefDR) & (kRing - 1);
+    const TileXY& ref = g_owner[rr * kRing + rc];
+    int w0x, w0y;
+    if (ref.valid) {
+        // ref is the world tile at screen tile (kRefDC,kRefDR); step back to col0.
+        w0x = ref.wx - kRefDC;
+        w0y = ref.wy - kRefDR;
+    } else if (g_anchor_valid) {
+        // Cold start (e.g. savestate, ring not yet seeded): fall back to the
+        // per-frame published anchor until the guest redraws the field.
+        w0x = g_anchor_wx + sd(base_col - g_anchor_col);
+        w0y = g_anchor_wy + sd(base_row - g_anchor_row);
+    } else {
+        return false;
+    }
+    const int wtx = w0x + fd8(hofs + hw_x) - fd8(hofs);
+    const int wty = w0y + fd8(vofs + screen_y) - fd8(vofs);
     const int cidx = (wty & (kCacheH - 1)) * kCacheW + (wtx & (kCacheW - 1));
     if (!g_cache_valid[cidx]) return false;
     // Only render if the slot actually owns THIS world tile (guards against a
@@ -429,8 +497,30 @@ bool ws_sidecar_dump(const char* path, int extra_cols_per_side) {
     }
     const int extra_tiles = (extra_cols_per_side + 7) / 8;
     const int row_y = 80;  // mid-screen scanline
-    std::fprintf(f, "BG1 hofs=%d vofs=%d  world_origin=(%d,%d)\n",
+    std::fprintf(f, "BG1 hofs=%d vofs=%d  world_origin(scan)=(%d,%d)\n",
                  s.hofs, s.vofs, w0x, w0y);
+    // DIAGNOSTIC: owner-ring ownership + the provider's live center-sample origin
+    // vs the scan origin. A partial ring (e.g. savestate cold-start) shows up as
+    // low owned_slots and/or center_owned=NO (forcing the anchor fallback).
+    {
+        int owned = 0;
+        for (int i = 0; i < kRing * kRing; ++i) owned += g_owner[i].valid;
+        const int base_col = (static_cast<uint32_t>(s.hofs) >> 3) & 31u;
+        const int base_row = (static_cast<uint32_t>(s.vofs) >> 3) & 31u;
+        const int rc = (base_col + 15) & (kRing - 1);
+        const int rr = (base_row + 10) & (kRing - 1);
+        const TileXY& ref = g_owner[rr * kRing + rc];
+        std::fprintf(f, "owner_slots=%d/%d  center_slot(rc=%d,rr=%d) owned=%s "
+                     "ref_world=(%d,%d)\n", owned, kRing * kRing, rc, rr,
+                     ref.valid ? "YES" : "NO", ref.wx, ref.wy);
+        if (ref.valid)
+            std::fprintf(f, "world_origin(center-sample)=(%d,%d)%s\n",
+                         ref.wx - 15, ref.wy - 10,
+                         (ref.wx - 15 == w0x && ref.wy - 10 == w0y)
+                             ? "  == scan" : "  != scan (ORIGIN MISMATCH)");
+        else
+            std::fprintf(f, "world_origin(center-sample)=FALLBACK-TO-ANCHOR\n");
+    }
     std::fprintf(f, "# expanded-span resolution at screen_y=%d "
         "(o = output tile col; central 0..29, margins outside)\n", row_y);
     std::fprintf(f, "# o  world_tile(x,y)  cached  entry\n");

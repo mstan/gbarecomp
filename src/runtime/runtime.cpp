@@ -877,6 +877,18 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     bus.set_bios(&bios);
     bus.request_audio_shadow(args.audio_shadow);  // [audio].shadow default; env can override
 
+    // WIP KILL-SWITCH — widescreen is force-disabled everywhere.
+    // The view-area expansion + Step C margin sidecar are work-in-progress: the
+    // off-screen margins render visibly wrong (stale/misaligned tiles) while the
+    // camera scrolls, because the host-side owner-ring world origin is unreliable
+    // (a savestate / partially-seeded ring yields inconsistent ring-slot->world
+    // mappings; see docs/WIDESCREEN_STEPC_PLAN.md "Status: WIP / disabled").
+    // The code is intentionally RETAINED, not removed, for future work. To
+    // re-enable for development, set GBARECOMP_WS_WIP=1.
+    const char* ws_wip_env = std::getenv("GBARECOMP_WS_WIP");
+    const bool ws_wip_enabled =
+        ws_wip_env && ws_wip_env[0] && ws_wip_env[0] != '0';
+
     // View-area expansion (opt-in enhancement). GBARECOMP_WIDESCREEN overrides
     // the --widescreen / [video].widescreen value at launch (matches the
     // screen/shadow override convention). N = extra columns per side; 0 = the
@@ -886,6 +898,15 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (const char* e = std::getenv("GBARECOMP_WIDESCREEN")) {
             int n = 0;
             if (parse_int(e, &n) && n >= 0) ws = n;
+        }
+        if (ws != 0 && !ws_wip_enabled) {
+            if (!args.quiet)
+                std::fprintf(stderr,
+                    "[gbarecomp:runtime] widescreen is WIP and force-disabled; "
+                    "rendering the faithful 240x160 view. Set GBARECOMP_WS_WIP=1 "
+                    "to enable it for development (see "
+                    "docs/WIDESCREEN_STEPC_PLAN.md)\n");
+            ws = 0;
         }
         ppu.set_view_margins(static_cast<uint32_t>(ws),
                              static_cast<uint32_t>(ws), 0, 0);
@@ -976,7 +997,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // GBARECOMP_WS_PROBE_DRAWMETATILE is set). Installs the function-entry hook
     // so the owner ring tracks DrawMetatileAt continuously from boot.
     ws_provenance_init_from_env();
-    ws_sidecar_init_from_env();   // widescreen Step C margin-injection sidecar
+    // Step C margin sidecar — gated by the WIP kill-switch (force-disabled unless
+    // GBARECOMP_WS_WIP=1) so the shipped build never arms the broken margin path.
+    if (ws_wip_enabled) ws_sidecar_init_from_env();
 
     // ── Recompiler exec gate ──────────────────────────────────────
     //

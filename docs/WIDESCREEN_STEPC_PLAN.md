@@ -1,5 +1,45 @@
 # Widescreen Step C — Strategy A (widen the guest field BG ring 32→64)
 
+> ## Status: WIP — FORCE-DISABLED (2026-06-21)
+>
+> The widescreen view expansion and the Step C margin sidecar are **disabled in
+> every build**. The runner force-clamps `--widescreen`/`[video].widescreen` to 0
+> and does not arm the sidecar unless `GBARECOMP_WS_WIP=1` is set (development
+> escape hatch). The faithful 240×160 view is always rendered; OFF remains
+> byte-identical (unchanged).
+>
+> **Why disabled:** the off-screen margins render visibly wrong (stale /
+> misaligned tiles) while the camera scrolls. Root cause established this session:
+> the host-side owner ring (`g_owner` in `src/debug/ws_sidecar.cpp`) is **not a
+> reliable source of the camera world origin**. The guest tilemap ring is
+> *camera-scrolled* (a ring slot's world tile depends on the camera position when
+> that slot was last drawn), NOT `world mod 32`. So:
+> - From a savestate (`--load-state`), `g_owner` starts **empty** (it is host-side
+>   state, not restored by the savestate). Walking only redraws leading-edge
+>   strips, leaving `g_owner` a scattered mix of slots drawn at *different* camera
+>   positions → inconsistent ring-slot→world mappings → wrong origin → stale
+>   margins. Confirmed via the dump diagnostic: `owner_slots≈576/1024`, and the
+>   live center-sample origin disagreed with the scan origin by exactly the ring
+>   size (Y: 32 vs 64).
+> - Even on a fresh boot (where `DrawWholeMapView` seeds all 1024 slots), the
+>   margins were still reported wrong while walking, so the seeding path is not
+>   the only gap.
+>
+> **What was changed this session (retained, still in tree):** the PPU margin
+> provider was reworked to read **live BG scroll** (matching the central path,
+> removing the one-frame scroll lag) and to resolve the world origin from the
+> **live owner ring** mid-screen sample instead of a frame-boundary-cached anchor
+> (`src/debug/ws_sidecar.cpp`). These are improvements but do not fix the
+> fundamental owner-ring unreliability.
+>
+> **The real fix (next time):** derive the camera world origin from **guest state
+> directly** — `gTotalCameraPixelOffsetX/Y` (0x0300506C/68), `gFieldCamera`
+> (0x03005050), `sFieldCameraOffset` (0x03000E90), and/or the player/object-event
+> map coords — so the origin is correct from ANY entry point (fresh boot OR
+> savestate) and independent of the host owner-ring shadow. This single change
+> should resolve both the walking-stale bug (issue #1) and the savestate
+> cold-start bug (issue #3). Until then the feature stays force-disabled.
+
 Opt-in 16:9 widescreen for Pokémon FRLG overworld. **OFF = byte-identical /
 system-faithful** (the gate); **ON = the guest renders a true 64-tile-wide field
 BG**, so margins show the real world (incl. never-before-seen tiles), with no
