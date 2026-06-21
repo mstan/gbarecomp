@@ -46,6 +46,12 @@ bool ws_sidecar_enabled();
 // guest frame (VBlank) so resident tiles are captured before eviction.
 void ws_sidecar_sync_frame();
 
+// Actively populate the extended cache (incl. never-seen margins) by invoking
+// the guest's own DrawMetatileAt over the expanded world region into VRAM
+// scratch. Requires GBARECOMP_WS_SC_MAPHEADER. Saves/restores guest state so it
+// is transparent to the guest. This is the Strategy-A content generator.
+void ws_sidecar_active_fill();
+
 // Resolve the cached tilemap entry for field BG `bg` (1..3) at hardware column
 // `hw_x` (may be <0 or >=240) and screen row `screen_y`. Returns true and fills
 // *out_entry (raw BG text-tilemap u16) when a cached world tile is available.

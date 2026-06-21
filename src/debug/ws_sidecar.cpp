@@ -33,9 +33,13 @@ uint8_t  g_cache_valid[kCacheW * kCacheH];
 bool     g_enabled = false;
 uint32_t g_dm_pc = 0;                      // DrawMetatileAt guest PC
 uint32_t g_tilemap_ptrs = 0;              // IWRAM addr of gBGTilemapBuffers1
+uint32_t g_mapheader = 0;                 // EWRAM addr of gMapHeader (.mapLayout @+0)
+bool     g_in_active_fill = false;        // re-entrancy guard for synthetic draws
 unsigned long long g_draws = 0;
 unsigned long long g_syncs = 0;
 unsigned long long g_cache_fills = 0;
+unsigned long long g_active_calls = 0;
+unsigned long long g_active_fail = 0;
 
 uint32_t parse_hex_env(const char* name) {
     const char* v = std::getenv(name);
@@ -61,6 +65,14 @@ uint16_t rd16(gba::GbaBus* bus, uint32_t addr) {
 uint32_t rd32(gba::GbaBus* bus, uint32_t addr) {
     return static_cast<uint32_t>(rd16(bus, addr)) |
            (static_cast<uint32_t>(rd16(bus, addr + 2u)) << 16);
+}
+
+// Side-effect-free IWRAM u32 write (for transient gBGTilemapBuffers redirect).
+void wr32_iwram(gba::GbaBus* bus, uint32_t addr, uint32_t v) {
+    if (addr < 0x03000000u || addr + 3u >= 0x03008000u) return;
+    uint8_t* p = bus->iwram_ptr() + (addr - 0x03000000u);
+    p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF;
+    p[2] = (v >> 16) & 0xFF; p[3] = (v >> 24) & 0xFF;
 }
 
 // floor(v / 8) for signed v (margins make HOFS+x go negative).
@@ -95,6 +107,7 @@ bool world_origin(gba::GbaBus* bus, int bg, int* w0x, int* w0y, Scroll* s) {
 // Hot path — single compare for non-target PCs.
 extern "C" void ws_sidecar_fn_entry_hook(uint32_t pc) {
     if (pc != g_dm_pc) return;
+    if (g_in_active_fill) return;  // skip our own synthetic margin draws
     const uint32_t off = g_cpu.R[1] & kRingMask;     // ring tile offset (TL)
     const int mwx = static_cast<int>(g_cpu.R[2]);    // world METATILE x
     const int mwy = static_cast<int>(g_cpu.R[3]);    // world METATILE y
@@ -116,6 +129,7 @@ void ws_sidecar_init_from_env() {
     if (parse_hex_env("GBARECOMP_WS_SIDECAR") == 0) return;
     g_dm_pc = parse_hex_env("GBARECOMP_WS_SC_DRAWMETATILE") & ~1u;
     g_tilemap_ptrs = parse_hex_env("GBARECOMP_WS_SC_TILEMAP_PTRS");
+    g_mapheader = parse_hex_env("GBARECOMP_WS_SC_MAPHEADER");  // for active fill
     if (!g_dm_pc || !g_tilemap_ptrs) {
         std::fprintf(stderr, "[ws-sidecar] NOT armed: need "
             "GBARECOMP_WS_SC_DRAWMETATILE and _TILEMAP_PTRS\n");
@@ -158,6 +172,87 @@ void ws_sidecar_sync_frame() {
     ++g_syncs;
 }
 
+// Render one world metatile via the guest's OWN DrawMetatileAt into free VRAM
+// scratch, returning its 4 tile entries per BG. Uses the runtime's call-return
+// contract exactly as a guest BL would (runtime_call_push_return + dispatch).
+// The guest's gBGTilemapBuffers ptrs are transiently redirected to VRAM scratch
+// so the live 32-ring is untouched. Reads the extended virtual map, so it works
+// for NEVER-SEEN metatiles. Caller must have saved g_cpu + the 3 buffer ptrs.
+namespace {
+constexpr uint32_t kScratch[3] = {0x0600C000u, 0x0600C800u, 0x0600D000u};
+const uint32_t kRetSentinel = 0xF0000001u;  // thumb-flagged fake return PC
+
+bool draw_one_metatile(gba::GbaBus* bus, uint32_t map_layout, int mx, int my,
+                       uint16_t tiles[3][4]) {
+    // Args: R0=mapLayout, R1=offset(0 -> scratch base), R2=x, R3=y.
+    g_cpu.R[0] = map_layout;
+    g_cpu.R[1] = 0u;
+    g_cpu.R[2] = static_cast<uint32_t>(mx);
+    g_cpu.R[3] = static_cast<uint32_t>(my);
+    g_cpu.R[14] = kRetSentinel;          // LR -> our sentinel
+    g_cpu.cpsr |= CPSR_T_BIT;            // DrawMetatileAt is THUMB
+    runtime_call_push_return(kRetSentinel);
+    runtime_dispatch(g_dm_pc | 1u);
+    runtime_call_cancel_return(kRetSentinel);  // no-op if already consumed
+    // The 2x2 metatile occupies scratch offsets 0,1,0x20,0x21.
+    static const uint32_t blk[4] = {0u, 1u, 0x20u, 0x21u};
+    for (int k = 0; k < 3; ++k)
+        for (int t = 0; t < 4; ++t)
+            tiles[k][t] = rd16(bus, kScratch[k] + blk[t] * 2u);
+    return true;
+}
+}  // namespace
+
+void ws_sidecar_active_fill() {
+    if (!g_enabled || !g_mapheader) return;
+    gba::GbaBus* bus = active_bus();
+    if (!bus) return;
+    int w0x, w0y; Scroll s;
+    if (!world_origin(bus, 1, &w0x, &w0y, &s)) return;  // need an anchor
+    const uint32_t map_layout = rd32(bus, g_mapheader);  // gMapHeader.mapLayout
+    if (!map_layout) return;
+
+    // World-metatile region covering the central view (15 mt) + margins.
+    const int mtx0 = w0x >> 1, mty0 = w0y >> 1;
+    const int margin_mt = 4;  // > ceil(24px/16) per side; generous
+    const int mx_lo = mtx0 - margin_mt, mx_hi = mtx0 + 15 + margin_mt;
+    const int my_lo = mty0 - 1,         my_hi = mty0 + 11;
+
+    // Save state we transiently clobber.
+    ArmCpuState saved = g_cpu;
+    uint32_t saved_ptr[3];
+    for (int k = 0; k < 3; ++k)
+        saved_ptr[k] = rd32(bus, g_tilemap_ptrs + static_cast<uint32_t>(k) * 4u);
+    for (int k = 0; k < 3; ++k)
+        wr32_iwram(bus, g_tilemap_ptrs + static_cast<uint32_t>(k) * 4u, kScratch[k]);
+
+    g_in_active_fill = true;
+    for (int my = my_lo; my <= my_hi; ++my) {
+        for (int mx = mx_lo; mx <= mx_hi; ++mx) {
+            uint16_t tiles[3][4];
+            draw_one_metatile(bus, map_layout, mx, my, tiles);
+            ++g_active_calls;
+            // Store the 2x2 block at world tiles (2mx,2my)..(2mx+1,2my+1).
+            const int wtl[4][2] = {{2*mx, 2*my}, {2*mx+1, 2*my},
+                                   {2*mx, 2*my+1}, {2*mx+1, 2*my+1}};
+            for (int t = 0; t < 4; ++t) {
+                const int cx = wtl[t][0] & (kCacheW - 1);
+                const int cy = wtl[t][1] & (kCacheH - 1);
+                const int cidx = cy * kCacheW + cx;
+                for (int k = 0; k < 3; ++k) g_cache[k][cidx] = tiles[k][t];
+                if (!g_cache_valid[cidx]) ++g_cache_fills;
+                g_cache_valid[cidx] = 1u;
+            }
+        }
+    }
+    g_in_active_fill = false;
+
+    // Restore everything so the guest is bit-for-bit unaffected.
+    for (int k = 0; k < 3; ++k)
+        wr32_iwram(bus, g_tilemap_ptrs + static_cast<uint32_t>(k) * 4u, saved_ptr[k]);
+    g_cpu = saved;
+}
+
 bool ws_sidecar_tilemap_entry(int bg, int hw_x, int screen_y,
                               uint16_t* out_entry) {
     if (!g_enabled || bg < 1 || bg > 3 || !out_entry) return false;
@@ -175,6 +270,11 @@ bool ws_sidecar_tilemap_entry(int bg, int hw_x, int screen_y,
 
 bool ws_sidecar_dump(const char* path, int extra_cols_per_side) {
     if (!g_enabled || !path || !path[0]) return false;
+    // Active-fill mode: render the expanded region via the guest's own draw
+    // right before reporting, so the verify reflects true (incl. never-seen)
+    // margins rather than only eviction-captured tiles.
+    if (const char* a = std::getenv("GBARECOMP_WS_SC_ACTIVE"))
+        if (a[0] && a[0] != '0') ws_sidecar_active_fill();
     gba::GbaBus* bus = active_bus();
     if (!bus) return false;
     std::FILE* f = std::fopen(path, "w");
@@ -183,8 +283,9 @@ bool ws_sidecar_dump(const char* path, int extra_cols_per_side) {
     int cached = 0;
     for (int i = 0; i < kCacheW * kCacheH; ++i) cached += g_cache_valid[i];
     std::fprintf(f, "# widescreen sidecar verify report\n");
-    std::fprintf(f, "draws=%llu syncs=%llu cache_filled=%d/%d extra_px=%d\n",
-                 g_draws, g_syncs, cached, kCacheW * kCacheH, extra_cols_per_side);
+    std::fprintf(f, "draws=%llu syncs=%llu active_calls=%llu cache_filled=%d/%d "
+                 "extra_px=%d\n", g_draws, g_syncs, g_active_calls, cached,
+                 kCacheW * kCacheH, extra_cols_per_side);
 
     // VRAM screenblock audit for Strategy-A widening (64-wide field BG needs an
     // extra 2KB screenblock per BG + the char base must not collide).
