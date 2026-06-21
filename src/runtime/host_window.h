@@ -29,17 +29,19 @@ public:
     static bool is_available();
 
     // Open a window. `scale` is the integer scale factor applied to
-    // the 240x160 logical surface. Returns false on failure (also
-    // when is_available() is false).
+    // the logical surface, whose size is `base_w` x `base_h` (240x160 for the
+    // faithful view, wider when view-area expansion is active). Returns false on
+    // failure (also when is_available() is false).
     // `screen` is the per-game color model from [video].screen in game.toml
     // (raw|unlit|frontlit|backlit|classic), or nullptr for none. The
     // GBARECOMP_SCREEN env var, when set, overrides it.
-    bool open(int scale = 3, const char* title = "gbarecomp",
-              const char* screen = nullptr);
+    bool open(int scale = 3, int base_w = 240, int base_h = 160,
+              const char* title = "gbarecomp", const char* screen = nullptr);
     void close();
     bool is_open() const { return open_; }
 
-    // Upload a 240x160 RGB888 frame and present.
+    // Upload one base_w x base_h RGB888 frame (the dimensions passed to open())
+    // and present.
     void present(const uint8_t* rgb888);
 
     // Push `count` int16_t mono samples (32.768 kHz) into the audio

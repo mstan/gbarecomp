@@ -92,6 +92,42 @@ public:
     static constexpr std::size_t kFramebufferBytes =
         kScreenWidth * kScreenHeight * 3;
 
+    // ── View-area expansion (opt-in enhancement; default OFF = faithful) ──
+    // Generic "render extra margin columns/rows" runner capability. With every
+    // margin 0 the PPU runs the LITERAL vanilla path (render_scanline_internal),
+    // so OFF-mode is byte-identical to the faithful build BY CONSTRUCTION — not
+    // by algebraic equivalence (per the widescreen design review). Horizontal
+    // widening reuses each scanline's latched register state; VERTICAL widening
+    // would have to invent state for nonexistent scanlines (no VCOUNT / HBlank
+    // DMA / affine-ref / WIN_V), so kMaxExtraY is compile-capped at 0 for now —
+    // the API still accepts top/bottom (clamped to 0) so callers stay generic.
+    // These margins are present-time host state and are NEVER serialized into
+    // the snapshot (the save format is unchanged).
+    static constexpr uint32_t kMaxExtraX = 64;   // ~2.3:1 max; 16:9 needs ~24/side
+    static constexpr uint32_t kMaxExtraY = 0;    // vertical deferred; bump when invented-scanline path lands
+    static constexpr uint32_t kMaxRenderWidth  = kScreenWidth  + 2u * kMaxExtraX;  // 368
+    static constexpr uint32_t kMaxRenderHeight = kScreenHeight + 2u * kMaxExtraY;  // 160
+    static constexpr std::size_t kMaxFramebufferBytes =
+        static_cast<std::size_t>(kMaxRenderWidth) * kMaxRenderHeight * 3;
+
+    // Set the per-side view margins (clamped to the compile-time max per axis).
+    // Call once at runtime init from the runner's --widescreen wiring.
+    void set_view_margins(uint32_t left, uint32_t right,
+                          uint32_t top, uint32_t bottom);
+    uint32_t view_extra_left()   const { return extra_left_; }
+    uint32_t view_extra_right()  const { return extra_right_; }
+    uint32_t view_extra_top()    const { return extra_top_; }
+    uint32_t view_extra_bottom() const { return extra_bottom_; }
+    bool     view_expanded()     const {
+        return (extra_left_ | extra_right_ | extra_top_ | extra_bottom_) != 0;
+    }
+    // Active output dimensions = vanilla + active margins (== 240/160 when OFF).
+    uint32_t render_width()  const { return kScreenWidth  + extra_left_ + extra_right_; }
+    uint32_t render_height() const { return kScreenHeight + extra_top_ + extra_bottom_; }
+    std::size_t render_bytes() const {
+        return static_cast<std::size_t>(render_width()) * render_height() * 3;
+    }
+
     void render(uint8_t* rgb,
                 uint16_t dispcnt,
                 const uint8_t* io,    // 1 KB IO page for BGxCNT, BGxX/Y/PA/PB/PC/PD
@@ -123,8 +159,16 @@ private:
     uint32_t cycle_in_dot_    = 0;   // 0..3
     uint16_t vcount_          = 0;
     uint64_t frame_count_     = 0;
-    std::array<uint8_t, kFramebufferBytes> latched_fb_{};
+    // Oversized to the compile-time max so the widened frame fits without
+    // reallocation; only the first render_bytes() are used (vanilla = 115200).
+    std::array<uint8_t, kMaxFramebufferBytes> latched_fb_{};
     bool has_latched_fb_ = false;
+
+    // View-area margins (present-time host state; NOT serialized — see above).
+    uint32_t extra_left_   = 0;
+    uint32_t extra_right_  = 0;
+    uint32_t extra_top_    = 0;
+    uint32_t extra_bottom_ = 0;
 };
 
 }  // namespace gba

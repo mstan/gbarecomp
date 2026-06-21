@@ -648,7 +648,7 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         if (ctx.ppu->has_latched_framebuffer()) {
             rgb = ctx.ppu->latched_framebuffer();
         } else {
-            live.assign(gba::GbaPpu::kFramebufferBytes, 0);
+            live.assign(ctx.ppu->render_bytes(), 0);
             ctx.ppu->render(live.data(),
                             ctx.bus->io().read16(0x000),
                             ctx.bus->io().raw(),
@@ -657,8 +657,11 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
                             ctx.bus->pal_ptr());
             rgb = live.data();
         }
-        out = "{\"ok\":true,\"w\":240,\"h\":160,\"data\":";
-        json_emit_hex(out, rgb, gba::GbaPpu::kFramebufferBytes);
+        // Dimensions track the active view (240x160 faithful, wider when
+        // view-area expansion is on) so oracle tooling sees the real frame.
+        out = "{\"ok\":true,\"w\":" + std::to_string(ctx.ppu->render_width()) +
+              ",\"h\":" + std::to_string(ctx.ppu->render_height()) + ",\"data\":";
+        json_emit_hex(out, rgb, ctx.ppu->render_bytes());
         out += "}";
         return;
     }

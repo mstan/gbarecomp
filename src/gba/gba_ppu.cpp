@@ -21,7 +21,11 @@ void GbaPpu::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     w.u16(vcount_);
     w.u64(frame_count_);
     w.boolean(has_latched_fb_);
-    w.bytes(latched_fb_.data(), latched_fb_.size());
+    // Serialize ONLY the vanilla 240x160 region so the snapshot layout is
+    // unchanged when view-area expansion is compiled in (kSnapshotVersion is
+    // version-locked; the oversized tail is never saved). The latch is a
+    // present-time artifact re-rendered next frame, so this is lossless.
+    w.bytes(latched_fb_.data(), kFramebufferBytes);
 }
 
 void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
@@ -31,7 +35,7 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
     vcount_          = r.u16();
     frame_count_     = r.u64();
     has_latched_fb_  = r.boolean();
-    r.bytes(latched_fb_.data(), latched_fb_.size());
+    r.bytes(latched_fb_.data(), kFramebufferBytes);
 }
 
 void GbaPpu::reset() {
@@ -42,6 +46,17 @@ void GbaPpu::reset() {
     frame_count_ = 0;
     has_latched_fb_ = false;
     std::memset(latched_fb_.data(), 0xFF, latched_fb_.size());
+}
+
+void GbaPpu::set_view_margins(uint32_t left, uint32_t right,
+                              uint32_t top, uint32_t bottom) {
+    // Clamp each side to its compile-time max. kMaxExtraY is 0 for now, so
+    // top/bottom are forced to 0 (vertical expansion deferred) — the params
+    // stay in the API so callers remain generic.
+    extra_left_   = left   > kMaxExtraX ? kMaxExtraX : left;
+    extra_right_  = right  > kMaxExtraX ? kMaxExtraX : right;
+    extra_top_    = top    > kMaxExtraY ? kMaxExtraY : top;
+    extra_bottom_ = bottom > kMaxExtraY ? kMaxExtraY : bottom;
 }
 
 GbaPpu::TickEvents GbaPpu::tick(uint32_t cycles, uint16_t vcount_compare) {
@@ -709,6 +724,384 @@ void render_scanline_internal(uint8_t* rgb,
     return;
 }
 
+// ── Wide (view-expanded) scanline compositor ────────────────────────────────
+// Renders output scanline `y` into an `out_w`-pixel row, where output column x
+// maps to hardware column hx = x - ox (ox = left margin). This path is ONLY
+// entered when view-area expansion is active; the faithful build always takes
+// render_scanline_internal above, so OFF-mode stays byte-identical by construc-
+// tion. For central hx in [0,240) the per-pixel logic is the same as vanilla;
+// margin columns extend the BG scroll / affine extrapolation / OBJ sampling into
+// the surrounding map. WIN0/WIN1 register tests are NOT widened — a margin hx
+// falls outside [X1,X2) so it naturally resolves to WINOUT (the conservative
+// policy for columns the game never authored). OAM X keeps its 9-bit signed
+// decode and is tested against the expanded viewport, so wrapped-negative sprites
+// (left) and x>=240 sprites (right) both appear in the margins. Vertical is not
+// expanded here (extra_top/bottom are forced 0), so `y` is the hardware scanline.
+void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
+                          const uint8_t* io, const uint8_t* vram,
+                          const uint8_t* oam, const uint8_t* pal,
+                          uint32_t out_w, uint32_t ox) {
+    constexpr uint32_t kVanW = GbaPpu::kScreenWidth;   // 240
+    constexpr uint32_t kVanH = GbaPpu::kScreenHeight;  // 160
+    if (y >= kVanH) return;
+
+    uint8_t* row = rgb + y * out_w * 3;
+    if (dispcnt & 0x0080u) { std::memset(row, 0xFF, out_w * 3); return; }
+
+    struct PixelCandidate {
+        uint8_t rgb[3] = {0, 0, 0};
+        int key = 0x7FFFFFFF;
+        uint8_t layer = 5;
+        bool target1 = false;
+        bool target2 = false;
+        bool valid = false;
+    };
+
+    const bool win0_en   = (dispcnt & 0x2000u) != 0;
+    const bool win1_en   = (dispcnt & 0x4000u) != 0;
+    const bool objwin_en = (dispcnt & 0x8000u) != 0;
+    const bool any_window = win0_en || win1_en || objwin_en;
+    uint16_t winin  = static_cast<uint16_t>(io[0x48] | (io[0x49] << 8));
+    uint16_t winout = static_cast<uint16_t>(io[0x4A] | (io[0x4B] << 8));
+    auto win_v_row = [&](uint32_t vreg) -> bool {
+        uint32_t v  = static_cast<uint32_t>(io[vreg] | (io[vreg + 1] << 8));
+        uint32_t y1 = (v >> 8) & 0xFFu, y2 = v & 0xFFu;
+        if (y2 > kVanH || y1 > y2) y2 = kVanH;
+        return y >= y1 && y < y2;
+    };
+    auto win_h_in = [&](uint32_t hreg, int hx) -> bool {
+        uint32_t h  = static_cast<uint32_t>(io[hreg] | (io[hreg + 1] << 8));
+        int x1 = static_cast<int>((h >> 8) & 0xFFu), x2 = static_cast<int>(h & 0xFFu);
+        if (x2 > static_cast<int>(kVanW) || x1 > x2) x2 = static_cast<int>(kVanW);
+        return hx >= x1 && hx < x2;
+    };
+    const bool win0_row = win0_en && win_v_row(0x44);
+    const bool win1_row = win1_en && win_v_row(0x46);
+    // OBJ-window stencil is built in vanilla 240-space; margin columns (hx
+    // outside [0,240)) get no OBJ-window (WINOUT), consistent with WIN0/1.
+    bool obj_window_storage[GbaPpu::kScreenWidth] = {};
+    bool* obj_window_mask = nullptr;
+    if (objwin_en) {
+        mark_obj_window_scanline(obj_window_storage, y, dispcnt, vram, oam,
+                                 kVanW, kVanH);
+        obj_window_mask = obj_window_storage;
+    }
+    auto window_control = [&](uint32_t x) -> uint16_t {
+        if (!any_window) return 0x3Fu;
+        int hx = static_cast<int>(x) - static_cast<int>(ox);
+        if (win0_row && win_h_in(0x40, hx)) return winin & 0x3Fu;
+        if (win1_row && win_h_in(0x42, hx)) return (winin >> 8) & 0x3Fu;
+        if (obj_window_mask && hx >= 0 && hx < static_cast<int>(kVanW) &&
+            obj_window_mask[hx])
+            return static_cast<uint16_t>((winout >> 8) & 0x3Fu);
+        return static_cast<uint16_t>(winout & 0x3Fu);
+    };
+    auto layer_enabled = [&](uint32_t x, uint32_t layer_bit) -> bool {
+        return (window_control(x) & (1u << layer_bit)) != 0;
+    };
+    auto blend_enabled = [&](uint32_t x) -> bool {
+        return (window_control(x) & (1u << 5)) != 0;
+    };
+
+    uint16_t bldcnt = static_cast<uint16_t>(io[0x50] | (io[0x51] << 8));
+    uint16_t bldalpha = static_cast<uint16_t>(io[0x52] | (io[0x53] << 8));
+    uint32_t first_targets = bldcnt & 0x3Fu;
+    uint32_t second_targets = (bldcnt >> 8) & 0x3Fu;
+    uint32_t effect = (bldcnt >> 6) & 0x3u;
+
+    PixelCandidate top[GbaPpu::kMaxRenderWidth];
+    PixelCandidate second[GbaPpu::kMaxRenderWidth];
+    uint8_t backdrop_rgb[3];
+    to_rgb888(load_u16_le(&pal[0]), backdrop_rgb);
+    for (uint32_t x = 0; x < out_w; ++x) {
+        top[x].rgb[0] = backdrop_rgb[0];
+        top[x].rgb[1] = backdrop_rgb[1];
+        top[x].rgb[2] = backdrop_rgb[2];
+        top[x].key = 0x70000000;
+        top[x].layer = 5;
+        top[x].target1 = blend_enabled(x) && ((first_targets & (1u << 5)) != 0);
+        top[x].target2 = (second_targets & (1u << 5)) != 0;
+        top[x].valid = true;
+    }
+    auto submit = [&](uint32_t x, const uint8_t* rgbv, int key, uint8_t layer,
+                      bool target1, bool target2) {
+        PixelCandidate cand;
+        cand.rgb[0] = rgbv[0];
+        cand.rgb[1] = rgbv[1];
+        cand.rgb[2] = rgbv[2];
+        cand.key = key;
+        cand.layer = layer;
+        cand.target1 = target1;
+        cand.target2 = target2;
+        cand.valid = true;
+        if (key < top[x].key) { second[x] = top[x]; top[x] = cand; }
+        else if (key < second[x].key) { second[x] = cand; }
+    };
+
+    uint32_t bg_mode = dispcnt & 0x07u;
+    auto render_regular_bg = [&](uint32_t layer, uint32_t cnt_off,
+                                 uint32_t scroll_off) {
+        if ((dispcnt & (0x0100u << layer)) == 0) return;
+        uint16_t bgcnt = static_cast<uint16_t>(io[cnt_off] | (io[cnt_off + 1] << 8));
+        uint32_t char_base = ((bgcnt >> 2) & 0x3u) * 0x4000u;
+        uint32_t screen_base = ((bgcnt >> 8) & 0x1Fu) * 0x800u;
+        bool color256 = (bgcnt & 0x0080u) != 0;
+        uint32_t size_code = (bgcnt >> 14) & 0x3u;
+        uint32_t bg_priority = bgcnt & 0x3u;
+        uint32_t hofs = static_cast<uint16_t>(
+            io[scroll_off] | (io[scroll_off + 1] << 8)) & 0x01FFu;
+        uint32_t vofs = static_cast<uint16_t>(
+            io[scroll_off + 2] | (io[scroll_off + 3] << 8)) & 0x01FFu;
+        uint32_t width_tiles = (size_code & 1u) ? 64u : 32u;
+        uint32_t height_tiles = (size_code & 2u) ? 64u : 32u;
+        uint32_t width_px = width_tiles * 8u;
+        uint32_t height_px = height_tiles * 8u;
+        uint32_t block_cols = width_tiles / 32u;
+        for (uint32_t x = 0; x < out_w; ++x) {
+            if (!layer_enabled(x, layer)) continue;
+            int hx = static_cast<int>(x) - static_cast<int>(ox);
+            uint32_t tex_x = static_cast<uint32_t>(hx + static_cast<int>(hofs)) &
+                             (width_px - 1u);
+            uint32_t tex_y = (y + vofs) & (height_px - 1u);
+            uint32_t tile_x = tex_x >> 3;
+            uint32_t tile_y = tex_y >> 3;
+            uint32_t block = (tile_x >> 5) + (tile_y >> 5) * block_cols;
+            uint32_t map_off = screen_base + block * 0x800u +
+                ((tile_y & 31u) * 32u + (tile_x & 31u)) * 2u;
+            if (map_off + 1 >= 96u * 1024u) continue;
+            uint16_t entry = load_u16_le(&vram[map_off]);
+            uint32_t tile_num = entry & 0x03FFu;
+            bool hflip = (entry & 0x0400u) != 0;
+            bool vflip = (entry & 0x0800u) != 0;
+            uint32_t palette_bank = (entry >> 12) & 0x0Fu;
+            uint32_t px = tex_x & 7u;
+            uint32_t py = tex_y & 7u;
+            if (hflip) px = 7u - px;
+            if (vflip) py = 7u - py;
+            uint8_t pal_idx = 0;
+            if (color256) {
+                uint32_t tile_addr = char_base + tile_num * 64u + py * 8u + px;
+                if (tile_addr >= 96u * 1024u) continue;
+                pal_idx = vram[tile_addr];
+            } else {
+                uint32_t tile_addr = char_base + tile_num * 32u + py * 4u + (px >> 1);
+                if (tile_addr >= 96u * 1024u) continue;
+                uint8_t packed = vram[tile_addr];
+                pal_idx = (px & 1u) ? (packed >> 4) : (packed & 0x0Fu);
+                pal_idx = static_cast<uint8_t>(
+                    pal_idx | static_cast<uint8_t>(palette_bank << 4));
+            }
+            if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
+            uint8_t rgbv[3];
+            to_rgb888(load_u16_le(&pal[pal_idx * 2]), rgbv);
+            submit(x, rgbv,
+                   static_cast<int>(bg_priority * 128u + 128u + layer),
+                   static_cast<uint8_t>(layer),
+                   blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
+                   (second_targets & (1u << layer)) != 0);
+        }
+    };
+    auto render_affine_bg = [&](uint32_t layer, uint32_t cnt_off,
+                                uint32_t param_off) {
+        if ((dispcnt & (0x0100u << layer)) == 0) return;
+        uint16_t bgcnt = static_cast<uint16_t>(io[cnt_off] | (io[cnt_off + 1] << 8));
+        uint32_t char_base   = ((bgcnt >> 2) & 0x3u) * 0x4000u;
+        uint32_t screen_base = ((bgcnt >> 8) & 0x1Fu) * 0x800u;
+        bool wrap            = (bgcnt & 0x2000u) != 0;
+        uint32_t size_code   = (bgcnt >> 14) & 0x3u;
+        int bg_pixels = 128 << size_code;
+        int bg_tiles  = bg_pixels / 8;
+        int bg_priority = static_cast<int>(bgcnt & 0x3u);
+        int32_t pa = read_s16(io, param_off + 0x00);
+        int32_t pb = read_s16(io, param_off + 0x02);
+        int32_t pc = read_s16(io, param_off + 0x04);
+        int32_t pd = read_s16(io, param_off + 0x06);
+        int32_t refx = read_s28_ref(io, param_off + 0x08);
+        int32_t refy = read_s28_ref(io, param_off + 0x0C);
+        // Extrapolate from the scanline reference using the signed logical x:
+        // output column 0 is hardware x = -ox, so pre-advance by (-ox)*PA/PC.
+        int32_t xt = refx + static_cast<int32_t>(y) * pb +
+                     static_cast<int32_t>(-static_cast<int>(ox)) * pa;
+        int32_t yt = refy + static_cast<int32_t>(y) * pd +
+                     static_cast<int32_t>(-static_cast<int>(ox)) * pc;
+        for (uint32_t x = 0; x < out_w; ++x) {
+            int32_t tex_x = xt >> 8;
+            int32_t tex_y = yt >> 8;
+            xt += pa;
+            yt += pc;
+            if (!layer_enabled(x, layer)) continue;
+            if (wrap) { tex_x &= (bg_pixels - 1); tex_y &= (bg_pixels - 1); }
+            else if (tex_x < 0 || tex_x >= bg_pixels ||
+                     tex_y < 0 || tex_y >= bg_pixels) continue;
+            uint32_t map_off = screen_base + (tex_y >> 3) * bg_tiles + (tex_x >> 3);
+            if (map_off >= 96u * 1024u) continue;
+            uint8_t tile_index = vram[map_off];
+            uint32_t tile_addr = char_base + tile_index * 64u +
+                                 (tex_y & 7) * 8 + (tex_x & 7);
+            if (tile_addr >= 96u * 1024u) continue;
+            uint8_t pal_idx = vram[tile_addr];
+            if (pal_idx == 0) continue;
+            uint8_t rgbv[3];
+            to_rgb888(load_u16_le(&pal[pal_idx * 2]), rgbv);
+            submit(x, rgbv,
+                   static_cast<int>(bg_priority * 128 + 128 + layer),
+                   static_cast<uint8_t>(layer),
+                   blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
+                   (second_targets & (1u << layer)) != 0);
+        }
+    };
+    if (bg_mode == 0) {
+        render_regular_bg(3, 0x0E, 0x1C);
+        render_regular_bg(2, 0x0C, 0x18);
+        render_regular_bg(1, 0x0A, 0x14);
+        render_regular_bg(0, 0x08, 0x10);
+    } else if (bg_mode == 1) {
+        render_affine_bg(2, 0x0C, 0x20);
+        render_regular_bg(1, 0x0A, 0x14);
+        render_regular_bg(0, 0x08, 0x10);
+    } else if (bg_mode == 2) {
+        render_affine_bg(3, 0x0E, 0x30);
+        render_affine_bg(2, 0x0C, 0x20);
+    }
+
+    if (dispcnt & 0x1000u) {
+        uint32_t obj_tile_base = (bg_mode >= 3) ? 0x14000u : 0x10000u;
+        bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
+        const uint8_t* obj_pal = pal + 0x200;
+        for (int idx = 127; idx >= 0; --idx) {
+            const uint8_t* entry = oam + idx * 8;
+            uint16_t attr0 = load_u16_le(&entry[0]);
+            uint16_t attr1 = load_u16_le(&entry[2]);
+            uint16_t attr2 = load_u16_le(&entry[4]);
+            bool rot_scale = (attr0 & 0x0100u) != 0;
+            bool disable_or_double = (attr0 & 0x0200u) != 0;
+            if (!rot_scale && disable_or_double) continue;
+            uint32_t obj_mode = (attr0 >> 10) & 0x3u;
+            if (obj_mode == 2 || obj_mode == 3) continue;
+            uint32_t shape = (attr0 >> 14) & 0x3u;
+            if (shape >= 3) continue;
+            uint32_t size  = (attr1 >> 14) & 0x3u;
+            int sw = kSpriteWH[shape][size][0];
+            int sh = kSpriteWH[shape][size][1];
+            int sy = static_cast<int>(attr0 & 0xFFu);
+            // OAM X: keep the 9-bit signed decode (do NOT clamp); the sprite is
+            // then tested against the expanded viewport below.
+            int sx = static_cast<int>(attr1 & 0x1FFu);
+            if (sy >= 160) sy -= 256;
+            if (sx & 0x100) sx -= 0x200;
+            bool color256 = (attr0 & 0x2000u) != 0;
+            uint32_t tile_num = attr2 & 0x3FFu;
+            uint32_t palette_bank = (attr2 >> 12) & 0xFu;
+            int tiles_w = sw / 8;
+            int tiles_h = sh / 8;
+            int priority = static_cast<int>((attr2 >> 10) & 0x3u);
+            int key = priority * 128 + idx;
+            bool obj_target2 = (second_targets & (1u << 4)) != 0;
+            auto emit_obj = [&](int tex_x, int tex_y, int screen_x) {
+                if (screen_x < 0 || screen_x >= static_cast<int>(out_w)) return;
+                if (!layer_enabled(static_cast<uint32_t>(screen_x), 4)) return;
+                int tile_x_in_sprite = tex_x >> 3;
+                int tile_y_in_sprite = tex_y >> 3;
+                int px_in_tile = tex_x & 7;
+                int py_in_tile = tex_y & 7;
+                uint32_t this_tile;
+                if (obj_1d_mapping) {
+                    this_tile = tile_num + (tile_y_in_sprite * tiles_w + tile_x_in_sprite) *
+                                            (color256 ? 2u : 1u);
+                } else {
+                    this_tile = tile_num + (tile_y_in_sprite * 32u) +
+                                tile_x_in_sprite * (color256 ? 2u : 1u);
+                }
+                uint32_t tile_off = obj_tile_base + this_tile * 32u;
+                uint8_t pal_index;
+                if (color256) {
+                    uint32_t off = tile_off + py_in_tile * 8 + px_in_tile;
+                    if (off + 1 > 96u * 1024u) return;
+                    pal_index = vram[off];
+                    if (pal_index == 0) return;
+                } else {
+                    uint32_t off = tile_off + py_in_tile * 4 + (px_in_tile / 2);
+                    if (off + 1 > 96u * 1024u) return;
+                    uint8_t b = vram[off];
+                    pal_index = (px_in_tile & 1) ? (b >> 4) : (b & 0x0F);
+                    if (pal_index == 0) return;
+                    pal_index = static_cast<uint8_t>(pal_index | (palette_bank << 4));
+                }
+                uint8_t rgbv[3];
+                to_rgb888(load_u16_le(&obj_pal[pal_index * 2]), rgbv);
+                uint32_t ux = static_cast<uint32_t>(screen_x);
+                bool t1 = blend_enabled(ux) && obj_mode == 1;
+                submit(ux, rgbv, key, 4, t1, obj_target2);
+            };
+            if (rot_scale) {
+                int bw = disable_or_double ? sw * 2 : sw;
+                int bh = disable_or_double ? sh * 2 : sh;
+                int j = static_cast<int>(y) - sy;
+                if (j < 0 || j >= bh) continue;
+                int affine_group = (attr1 >> 9) & 0x1Fu;
+                const uint8_t* ag = oam + affine_group * 0x20u;
+                int32_t pa = read_s16(ag, 0x06);
+                int32_t pb = read_s16(ag, 0x0E);
+                int32_t pc = read_s16(ag, 0x16);
+                int32_t pd = read_s16(ag, 0x1E);
+                int half_bw = bw >> 1;
+                int half_bh = bh >> 1;
+                int half_sw = sw >> 1;
+                int half_sh = sh >> 1;
+                int dy = j - half_bh;
+                for (int i = 0; i < bw; ++i) {
+                    int dx = i - half_bw;
+                    int tex_x = ((pa * dx + pb * dy) >> 8) + half_sw;
+                    int tex_y = ((pc * dx + pd * dy) >> 8) + half_sh;
+                    if (tex_x < 0 || tex_x >= sw) continue;
+                    if (tex_y < 0 || tex_y >= sh) continue;
+                    emit_obj(tex_x, tex_y, sx + i + static_cast<int>(ox));
+                }
+                continue;
+            }
+            int line = static_cast<int>(y) - sy;
+            if (line < 0 || line >= sh) continue;
+            bool hflip = (attr1 & 0x1000u) != 0;
+            bool vflip = (attr1 & 0x2000u) != 0;
+            int ty = line >> 3;
+            int py = line & 7;
+            int src_ty = vflip ? (tiles_h - 1 - ty) : ty;
+            int src_py = vflip ? (7 - py) : py;
+            for (int tx = 0; tx < tiles_w; ++tx) {
+                int src_tx = hflip ? (tiles_w - 1 - tx) : tx;
+                for (int px = 0; px < 8; ++px) {
+                    int src_px = hflip ? (7 - px) : px;
+                    emit_obj(src_tx * 8 + src_px, src_ty * 8 + src_py,
+                             sx + tx * 8 + px + static_cast<int>(ox));
+                }
+            }
+        }
+    }
+
+    uint32_t bldy = static_cast<uint32_t>(io[0x54] | (io[0x55] << 8)) & 0x1Fu;
+    if (bldy > 16u) bldy = 16u;
+    for (uint32_t x = 0; x < out_w; ++x) {
+        uint8_t* dst = row + x * 3;
+        if (effect == 1 && (bldalpha & 0x1Fu) != 0 &&
+            top[x].target1 && second[x].valid && second[x].target2 &&
+            !(top[x].layer == 4 && second[x].layer == 4)) {
+            blend_alpha_rgb888(top[x].rgb, second[x].rgb,
+                               bldalpha & 0x1Fu, (bldalpha >> 8) & 0x1Fu, dst);
+        } else if ((effect == 2u || effect == 3u) && bldy != 0u && top[x].target1) {
+            for (int c = 0; c < 3; ++c) {
+                int v = top[x].rgb[c];
+                if (effect == 2u) v += ((255 - v) * static_cast<int>(bldy)) / 16;
+                else              v -= (v * static_cast<int>(bldy)) / 16;
+                dst[c] = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+            }
+        } else {
+            dst[0] = top[x].rgb[0];
+            dst[1] = top[x].rgb[1];
+            dst[2] = top[x].rgb[2];
+        }
+    }
+}
+
 }  // namespace
 
 void GbaPpu::render(uint8_t* rgb,
@@ -717,9 +1110,17 @@ void GbaPpu::render(uint8_t* rgb,
                     const uint8_t* vram,
                     const uint8_t* oam,
                     const uint8_t* pal) const {
+    if (!view_expanded()) {
+        // Faithful path — literally unchanged from before view expansion existed.
+        for (uint32_t y = 0; y < kScreenHeight; ++y) {
+            render_scanline_internal(rgb, y, dispcnt, io, vram, oam, pal,
+                                     kScreenWidth, kScreenHeight);
+        }
+        return;
+    }
+    const uint32_t ow = render_width();
     for (uint32_t y = 0; y < kScreenHeight; ++y) {
-        render_scanline_internal(rgb, y, dispcnt, io, vram, oam, pal,
-                                 kScreenWidth, kScreenHeight);
+        render_scanline_wide(rgb, y, dispcnt, io, vram, oam, pal, ow, extra_left_);
     }
 }
 
@@ -981,8 +1382,13 @@ void GbaPpu::render_scanline(uint32_t y,
                              const uint8_t* vram,
                              const uint8_t* oam,
                              const uint8_t* pal) {
-    render_scanline_internal(latched_fb_.data(), y, dispcnt, io, vram, oam, pal,
-                             kScreenWidth, kScreenHeight);
+    if (!view_expanded()) {
+        render_scanline_internal(latched_fb_.data(), y, dispcnt, io, vram, oam,
+                                 pal, kScreenWidth, kScreenHeight);
+        return;
+    }
+    render_scanline_wide(latched_fb_.data(), y, dispcnt, io, vram, oam, pal,
+                         render_width(), extra_left_);
 }
 
 void GbaPpu::latch_framebuffer(uint16_t dispcnt,

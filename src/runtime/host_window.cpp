@@ -26,7 +26,9 @@ struct Backend {
     // GBARECOMP_SCREEN; default Raw = exact passthrough (no copy, no
     // grading), so default behavior is byte-identical to upstream.
     std::unique_ptr<runtime::ColorLut> color_lut;
-    std::vector<uint8_t> graded_fb;  // scratch RGB888 (240*160*3)
+    std::vector<uint8_t> graded_fb;  // scratch RGB888 (base_w*base_h*3)
+    int base_w = 240;   // logical surface width  (240 faithful, wider if expanded)
+    int base_h = 160;   // logical surface height (160; vertical expansion deferred)
 };
 
 // Resolve the screen model: the per-game [video].screen from game.toml
@@ -81,9 +83,12 @@ HostWindow::~HostWindow() {
 
 bool HostWindow::is_available() { return true; }
 
-bool HostWindow::open(int scale, const char* title, const char* screen) {
+bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
+                      const char* screen) {
     if (open_) return true;
     if (scale < 1) scale = 1;
+    if (base_w < 1) base_w = 240;
+    if (base_h < 1) base_h = 160;
 
     if (SDL_WasInit(SDL_INIT_VIDEO) == 0) {
         if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
@@ -101,8 +106,10 @@ bool HostWindow::open(int scale, const char* title, const char* screen) {
     }
 
     auto* b = new Backend{};
-    const int win_w = 240 * scale;
-    const int win_h = 160 * scale;
+    b->base_w = base_w;
+    b->base_h = base_h;
+    const int win_w = base_w * scale;
+    const int win_h = base_h * scale;
     b->window = SDL_CreateWindow(title ? title : "gbarecomp",
                                  SDL_WINDOWPOS_CENTERED,
                                  SDL_WINDOWPOS_CENTERED,
@@ -131,12 +138,12 @@ bool HostWindow::open(int scale, const char* title, const char* screen) {
         delete b;
         return false;
     }
-    SDL_RenderSetLogicalSize(b->renderer, 240, 160);
+    SDL_RenderSetLogicalSize(b->renderer, base_w, base_h);
 
     b->texture = SDL_CreateTexture(b->renderer,
                                    SDL_PIXELFORMAT_RGB24,
                                    SDL_TEXTUREACCESS_STREAMING,
-                                   240, 160);
+                                   base_w, base_h);
     if (!b->texture) {
         std::fprintf(stderr, "host_window: SDL_CreateTexture failed: %s\n",
                      SDL_GetError());
@@ -170,7 +177,7 @@ bool HostWindow::open(int scale, const char* title, const char* screen) {
 
     b->color_lut = std::make_unique<runtime::ColorLut>(resolve_color_settings(screen));
     if (!b->color_lut->is_passthrough())
-        b->graded_fb.resize(240 * 160 * 3);
+        b->graded_fb.resize(static_cast<std::size_t>(base_w) * base_h * 3);
 
     impl_ = b;
     open_ = true;
@@ -210,11 +217,11 @@ void HostWindow::present(const uint8_t* rgb888) {
     // Present-time color grading (opt-in). Raw is passthrough: the raw
     // PPU frame is uploaded untouched, so verify/frame-hash are unaffected.
     if (b->color_lut && !b->color_lut->is_passthrough() &&
-        b->graded_fb.size() == 240u * 160u * 3u) {
-        b->color_lut->map_rgb888(rgb888, b->graded_fb.data(), 240, 160);
+        b->graded_fb.size() == static_cast<std::size_t>(b->base_w) * b->base_h * 3u) {
+        b->color_lut->map_rgb888(rgb888, b->graded_fb.data(), b->base_w, b->base_h);
         rgb888 = b->graded_fb.data();
     }
-    SDL_UpdateTexture(b->texture, nullptr, rgb888, 240 * 3);
+    SDL_UpdateTexture(b->texture, nullptr, rgb888, b->base_w * 3);
     SDL_RenderClear(b->renderer);
     SDL_RenderCopy(b->renderer, b->texture, nullptr, nullptr);
     SDL_RenderPresent(b->renderer);

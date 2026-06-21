@@ -112,6 +112,12 @@ struct Args {
     // [audio] shadow = true|false — arm the MP2K verified-enhancement shadow
     // mixer (default off). GBARECOMP_AUDIO_SHADOW overrides at launch.
     bool audio_shadow = false;
+    // --widescreen <N> / [video].widescreen: opt-in view-area expansion. N =
+    // extra columns rendered per side (left & right); 0 = OFF = byte-identical
+    // to the faithful 240x160 build. Vertical expansion is deferred, so only
+    // the horizontal margin is exposed. Clamped to GbaPpu::kMaxExtraX. The
+    // GBARECOMP_WIDESCREEN env var overrides at launch.
+    int widescreen = 0;
 };
 
 std::string trim(std::string_view in) {
@@ -453,6 +459,9 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
             args->save_size = static_cast<std::size_t>(n);
         } else if (section == "video" && key == "screen") {
             args->screen = val;
+        } else if (section == "video" && key == "widescreen") {
+            int n = 0;
+            if (parse_int(val.c_str(), &n) && n >= 0) args->widescreen = n;
         } else if (section == "audio" && key == "shadow") {
             args->audio_shadow = (val == "true" || val == "1");
         }
@@ -471,6 +480,7 @@ void find_config_arg(int argc, char** argv, Args* args) {
              s == "--rom-sha1" || s == "--steps" || s == "--frames" ||
              s == "--scale" || s == "--tcp" || s == "--dump-bmp" ||
              s == "--dump-png" || s == "--load-state" ||
+             s == "--widescreen" ||
              s == "--save" || s == "--save-path") &&
             i + 1 < argc) {
             ++i;
@@ -618,6 +628,15 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             args->load_state = v;
             continue;
         }
+        if (s == "--widescreen") {
+            const char* v = need_value("--widescreen");
+            if (!v) return false;
+            if (!parse_int(v, &args->widescreen) || args->widescreen < 0) {
+                if (err) *err = "invalid --widescreen value (expected >= 0)";
+                return false;
+            }
+            continue;
+        }
         if (s == "--save" || s == "--save-path") {
             const char* v = need_value(s.c_str());
             if (!v) return false;
@@ -687,6 +706,13 @@ std::size_t count_nonzero(const uint8_t* p, std::size_t n) {
 }
 
 }  // namespace
+
+// Opt-in view-area expansion master switch + parameter (the runner owns
+// enhancement policy). The future per-game widescreen injector externs these
+// from generated cart code to gate its map/camera widening on g_ws_active and
+// scale by g_ws_extra. 0/0 = faithful 240x160; set once from --widescreen.
+extern "C" unsigned g_ws_active = 0;
+extern "C" unsigned g_ws_extra  = 0;
 
 int run_game(int argc, char** argv, const RunOptions& opts) {
     Args args;
@@ -848,6 +874,29 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gba::GbaPpu ppu;
     bus.set_bios(&bios);
     bus.request_audio_shadow(args.audio_shadow);  // [audio].shadow default; env can override
+
+    // View-area expansion (opt-in enhancement). GBARECOMP_WIDESCREEN overrides
+    // the --widescreen / [video].widescreen value at launch (matches the
+    // screen/shadow override convention). N = extra columns per side; 0 = the
+    // faithful 240x160 view (byte-identical). The PPU clamps to kMaxExtraX.
+    {
+        int ws = args.widescreen;
+        if (const char* e = std::getenv("GBARECOMP_WIDESCREEN")) {
+            int n = 0;
+            if (parse_int(e, &n) && n >= 0) ws = n;
+        }
+        ppu.set_view_margins(static_cast<uint32_t>(ws),
+                             static_cast<uint32_t>(ws), 0, 0);
+        g_ws_extra  = static_cast<unsigned>(ppu.view_extra_left());
+        g_ws_active = ppu.view_expanded() ? 1u : 0u;
+        if (ppu.view_expanded() && !args.quiet) {
+            std::fprintf(stderr,
+                "[gbarecomp:runtime] view-area expansion ON: +%u px/side "
+                "(render %ux%u); set --widescreen 0 for the faithful view\n",
+                static_cast<unsigned>(ppu.view_extra_left()),
+                ppu.render_width(), ppu.render_height());
+        }
+    }
     bus.set_rom(rom.data(), rom.size());
     if (header.save_type == gba::SaveType::EEPROM) {
         std::size_t eeprom_bytes = args.save_size ? args.save_size : (8 * 1024);
@@ -1312,13 +1361,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             runtime_shutdown();
             return 1;
         }
-        if (!win.open(args.scale, GBARECOMP_WINDOW_TITLE,
+        if (!win.open(args.scale, ppu.render_width(), ppu.render_height(),
+                      GBARECOMP_WINDOW_TITLE,
                       args.screen.empty() ? nullptr : args.screen.c_str())) {
             gbarecomp::overlay_loader_shutdown();
             runtime_shutdown();
             return 1;
         }
-        live_fb.assign(gba::GbaPpu::kFramebufferBytes, 0);
+        live_fb.assign(ppu.render_bytes(), 0);
         pacer.emplace();  // paces to the GBA's 59.7275 Hz
     }
 
@@ -1480,7 +1530,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             if (frame != last_presented_frame) {
                 if (ppu.has_latched_framebuffer()) {
                     std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
-                                gba::GbaPpu::kFramebufferBytes);
+                                ppu.render_bytes());
                 } else {
                     ppu.render(live_fb.data(), bus.io().read16(0x000),
                                bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
@@ -1522,7 +1572,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     bool save_ok = flush_save();
 
     if (!args.dump_bmp.empty() || !args.dump_png.empty()) {
-        std::vector<uint8_t> fb(gba::GbaPpu::kFramebufferBytes, 0);
+        std::vector<uint8_t> fb(ppu.render_bytes(), 0);
         if (ppu.has_latched_framebuffer()) {
             std::memcpy(fb.data(), ppu.latched_framebuffer(), fb.size());
         } else {
@@ -1530,15 +1580,15 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                        bus.vram_ptr(), bus.oam_ptr(), bus.pal_ptr());
         }
         if (!args.dump_bmp.empty() &&
-            !write_bmp(args.dump_bmp, fb.data(), gba::GbaPpu::kScreenWidth,
-                       gba::GbaPpu::kScreenHeight)) {
+            !write_bmp(args.dump_bmp, fb.data(), ppu.render_width(),
+                       ppu.render_height())) {
             std::fprintf(stderr,
                          "[gbarecomp:runtime] failed to write %s\n",
                          args.dump_bmp.c_str());
         }
         if (!args.dump_png.empty() &&
-            !write_png(args.dump_png, fb.data(), gba::GbaPpu::kScreenWidth,
-                       gba::GbaPpu::kScreenHeight)) {
+            !write_png(args.dump_png, fb.data(), ppu.render_width(),
+                       ppu.render_height())) {
             std::fprintf(stderr,
                          "[gbarecomp:runtime] failed to write %s\n",
                          args.dump_png.c_str());
