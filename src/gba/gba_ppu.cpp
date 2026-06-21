@@ -720,7 +720,13 @@ void render_scanline_internal(uint8_t* rgb,
     if (bldy > 16u) bldy = 16u;
     for (uint32_t x = 0; x < kScreenWidth; ++x) {
         uint8_t* dst = row + x * 3;
-        if (effect == 1 && (bldalpha & 0x1Fu) != 0 &&
+        // Alpha blend top (1st target) with the layer below (2nd target). Per
+        // GBATEK this occurs when effect==1 OR top is a semi-transparent OBJ
+        // (mode 1 forces alpha regardless of BLDCNT). NOT gated on EVA!=0:
+        // EVA=0/EVB=16 is a valid blend (1st target fully fades into the 2nd) —
+        // the Oak-intro character fade endpoint that previously snapped back to
+        // opaque, leaving body/feet (BG2 + semi-transparent OBJ) out of sync.
+        if ((effect == 1 || top[x].layer == 4) &&
             top[x].target1 && second[x].valid && second[x].target2 &&
             !(top[x].layer == 4 && second[x].layer == 4)) {
             blend_alpha_rgb888(top[x].rgb, second[x].rgb,
@@ -1142,7 +1148,13 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             dst[0] = dst[1] = dst[2] = 0;
             continue;
         }
-        if (effect == 1 && (bldalpha & 0x1Fu) != 0 &&
+        // Alpha blend top (1st target) with the layer below (2nd target). Per
+        // GBATEK this occurs when effect==1 OR top is a semi-transparent OBJ
+        // (mode 1 forces alpha regardless of BLDCNT). NOT gated on EVA!=0:
+        // EVA=0/EVB=16 is a valid blend (1st target fully fades into the 2nd) —
+        // the Oak-intro character fade endpoint that previously snapped back to
+        // opaque, leaving body/feet (BG2 + semi-transparent OBJ) out of sync.
+        if ((effect == 1 || top[x].layer == 4) &&
             top[x].target1 && second[x].valid && second[x].target2 &&
             !(top[x].layer == 4 && second[x].layer == 4)) {
             blend_alpha_rgb888(top[x].rgb, second[x].rgb,
