@@ -30,6 +30,8 @@ struct TileXY { int16_t wx; int16_t wy; uint8_t valid; };
 TileXY   g_owner[kRing * kRing];          // ring slot -> exact world tile
 uint16_t g_cache[3][kCacheW * kCacheH];   // per field BG (1..3) tilemap entry
 uint8_t  g_cache_valid[kCacheW * kCacheH];
+int32_t  g_cache_world[kCacheW * kCacheH];  // packed world tile owning each slot
+                                            // ((wy<<16)|(wx&0xFFFF)); -1 = none
 
 bool     g_enabled = false;
 uint32_t g_dm_pc = 0;                      // DrawMetatileAt guest PC
@@ -44,6 +46,14 @@ unsigned long long g_syncs = 0;
 unsigned long long g_cache_fills = 0;
 unsigned long long g_active_calls = 0;
 unsigned long long g_active_fail = 0;
+
+// Per-frame cached render origin. active_fill computes the (expensive, owner-ring
+// scanning) world origin ONCE per frame and stores it here; the PPU provider —
+// called per margin pixel (tens of thousands/frame) — reads these directly with
+// no scan. Using the SAME origin active_fill filled with also guarantees the
+// provider's cache lookups hit what was just written.
+bool g_o_valid = false;
+int  g_o_w0x = 0, g_o_w0y = 0, g_o_hofs = 0, g_o_vofs = 0;
 
 uint32_t parse_hex_env(const char* name) {
     const char* v = std::getenv(name);
@@ -182,6 +192,7 @@ void ws_sidecar_init_from_env() {
     std::memset(g_owner, 0, sizeof(g_owner));
     std::memset(g_cache, 0, sizeof(g_cache));
     std::memset(g_cache_valid, 0, sizeof(g_cache_valid));
+    std::memset(g_cache_world, 0xFF, sizeof(g_cache_world));  // -1 sentinel
     if (g_runtime_fn_entry_hook && g_runtime_fn_entry_hook !=
             &ws_sidecar_fn_entry_hook) {
         std::fprintf(stderr, "[ws-sidecar] WARNING: fn-entry hook already "
@@ -268,13 +279,18 @@ void ws_sidecar_active_fill() {
     if (!is_overworld(bus)) { gba::g_ws_pillarbox = 1; return; }
     gba::g_ws_pillarbox = 0;
     int w0x, w0y; Scroll s;
-    if (!world_origin(bus, 1, &w0x, &w0y, &s)) return;  // need an anchor
+    if (!world_origin(bus, 1, &w0x, &w0y, &s)) { g_o_valid = false; return; }
     const uint32_t map_layout = rd32(bus, g_mapheader);  // gMapHeader.mapLayout
-    if (!map_layout) return;
+    if (!map_layout) { g_o_valid = false; return; }
+    // Publish this frame's origin for the provider (no per-pixel rescan).
+    g_o_w0x = w0x; g_o_w0y = w0y; g_o_hofs = s.hofs; g_o_vofs = s.vofs;
+    g_o_valid = true;
 
-    // World-metatile region covering the central view (15 mt) + margins.
+    // World-metatile region: MARGINS ONLY (the central 15 metatile columns come
+    // from the guest's own VRAM tilemap; the PPU reads those directly). Filling
+    // only the ~4 metatile columns each side cuts the synthetic-draw count ~3x.
     const int mtx0 = w0x >> 1, mty0 = w0y >> 1;
-    const int margin_mt = 4;  // > ceil(24px/16) per side; generous
+    const int margin_mt = 4;  // > ceil(24px/16) per side; +1 lookahead
     const int mx_lo = mtx0 - margin_mt, mx_hi = mtx0 + 15 + margin_mt;
     const int my_lo = mty0 - 1,         my_hi = mty0 + 11;
 
@@ -303,12 +319,19 @@ void ws_sidecar_active_fill() {
     g_in_active_fill = true;
     for (int my = my_lo; my <= my_hi; ++my) {
         for (int mx = mx_lo; mx <= mx_hi; ++mx) {
+            if (mx >= mtx0 && mx < mtx0 + 15) continue;  // skip central (in VRAM)
+            // Skip if this metatile's cache slot already holds THIS world tile
+            // (static/slow camera → near-zero redraws). Keyed on the TL tile.
+            const int wtl[4][2] = {{2*mx, 2*my}, {2*mx+1, 2*my},
+                                   {2*mx, 2*my+1}, {2*mx+1, 2*my+1}};
+            const int tl_idx = (wtl[0][1] & (kCacheH - 1)) * kCacheW +
+                               (wtl[0][0] & (kCacheW - 1));
+            const int32_t tl_key = (wtl[0][1] << 16) | (wtl[0][0] & 0xFFFF);
+            if (g_cache_valid[tl_idx] && g_cache_world[tl_idx] == tl_key) continue;
             uint16_t tiles[3][4];
             draw_one_metatile(bus, map_layout, mx, my, tiles);
             ++g_active_calls;
             // Store the 2x2 block at world tiles (2mx,2my)..(2mx+1,2my+1).
-            const int wtl[4][2] = {{2*mx, 2*my}, {2*mx+1, 2*my},
-                                   {2*mx, 2*my+1}, {2*mx+1, 2*my+1}};
             for (int t = 0; t < 4; ++t) {
                 const int cx = wtl[t][0] & (kCacheW - 1);
                 const int cy = wtl[t][1] & (kCacheH - 1);
@@ -316,6 +339,7 @@ void ws_sidecar_active_fill() {
                 for (int k = 0; k < 3; ++k) g_cache[k][cidx] = tiles[k][t];
                 if (!g_cache_valid[cidx]) ++g_cache_fills;
                 g_cache_valid[cidx] = 1u;
+                g_cache_world[cidx] = (wtl[t][1] << 16) | (wtl[t][0] & 0xFFFF);
             }
         }
     }
@@ -335,15 +359,16 @@ unsigned long long g_prov_calls = 0, g_prov_hits = 0;
 bool ws_sidecar_tilemap_entry(int bg, int hw_x, int screen_y,
                               uint16_t* out_entry) {
     ++g_prov_calls;
-    if (!g_enabled || bg < 1 || bg > 3 || !out_entry) return false;
-    gba::GbaBus* bus = active_bus();
-    if (!bus) return false;
-    int w0x, w0y; Scroll s;
-    if (!world_origin(bus, bg, &w0x, &w0y, &s)) return false;
-    const int wtx = w0x + fd8(s.hofs + hw_x) - fd8(s.hofs);
-    const int wty = w0y + fd8(s.vofs + screen_y) - fd8(s.vofs);
+    // Hot path (per margin pixel): use the per-frame cached origin — NO owner-ring
+    // scan, no bus read. g_o_* is published once per frame by active_fill.
+    if (!g_enabled || bg < 1 || bg > 3 || !out_entry || !g_o_valid) return false;
+    const int wtx = g_o_w0x + fd8(g_o_hofs + hw_x) - fd8(g_o_hofs);
+    const int wty = g_o_w0y + fd8(g_o_vofs + screen_y) - fd8(g_o_vofs);
     const int cidx = (wty & (kCacheH - 1)) * kCacheW + (wtx & (kCacheW - 1));
     if (!g_cache_valid[cidx]) return false;
+    // Only render if the slot actually owns THIS world tile (guards against a
+    // stale entry from a wrapped/scrolled-out tile not yet redrawn).
+    if (g_cache_world[cidx] != ((wty << 16) | (wtx & 0xFFFF))) return false;
     *out_entry = g_cache[bg - 1][cidx];
     ++g_prov_hits;
     return true;
