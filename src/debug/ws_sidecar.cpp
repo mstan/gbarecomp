@@ -186,6 +186,26 @@ bool ws_sidecar_dump(const char* path, int extra_cols_per_side) {
     std::fprintf(f, "draws=%llu syncs=%llu cache_filled=%d/%d extra_px=%d\n",
                  g_draws, g_syncs, cached, kCacheW * kCacheH, extra_cols_per_side);
 
+    // VRAM screenblock audit for Strategy-A widening (64-wide field BG needs an
+    // extra 2KB screenblock per BG + the char base must not collide).
+    {
+        const uint8_t* io = bus->io().raw();
+        auto r16 = [&](uint32_t o){ return static_cast<int>(io[o]|(io[o+1]<<8)); };
+        const int dispcnt = r16(0x00);
+        std::fprintf(f, "DISPCNT=0x%04X mode=%d\n", dispcnt, dispcnt & 7);
+        static const char* szname[4] = {"256x256","512x256","256x512","512x512"};
+        for (int b = 0; b < 4; ++b) {
+            const int cnt = r16(0x08 + b * 2);
+            const int charBase = (cnt >> 2) & 3;     // x16KB
+            const int scrBase = (cnt >> 8) & 31;     // x2KB
+            const int size = (cnt >> 14) & 3;
+            std::fprintf(f, "BG%dCNT=0x%04X prio=%d charBase=%d(0x%05X) "
+                "scrBase=%d(0x%05X) size=%d(%s)\n", b, cnt, cnt & 3,
+                charBase, charBase * 0x4000, scrBase, scrBase * 0x800,
+                size, szname[size]);
+        }
+    }
+
     int w0x, w0y; Scroll s;
     if (!world_origin(bus, 1, &w0x, &w0y, &s)) {
         std::fprintf(f, "central slot not owned yet (no field draw seen)\n");
