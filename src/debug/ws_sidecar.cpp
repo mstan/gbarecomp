@@ -10,6 +10,7 @@
 #include "runtime_bus_bridge.h"     // gbarecomp::active_bus()
 #include "gba_bus.h"                // GbaBus raw region pointers, io()
 #include "gba_io.h"                 // GbaIo::raw()
+#include "gba_ppu.h"                // gba::g_ws_tilemap_provider
 
 namespace gbarecomp {
 
@@ -124,6 +125,9 @@ extern "C" void ws_sidecar_fn_entry_hook(uint32_t pc) {
     ++g_draws;
 }
 
+extern "C" int ws_sidecar_provider_adapter(int bg, int hw_x, int screen_y,
+                                           uint16_t* out_entry);  // fwd
+
 void ws_sidecar_init_from_env() {
     if (g_enabled) return;
     if (parse_hex_env("GBARECOMP_WS_SIDECAR") == 0) return;
@@ -144,6 +148,7 @@ void ws_sidecar_init_from_env() {
             "installed by another probe; sidecar overriding\n");
     }
     g_runtime_fn_entry_hook = &ws_sidecar_fn_entry_hook;
+    gba::g_ws_tilemap_provider = &ws_sidecar_provider_adapter;  // PPU margin source
     g_enabled = true;
     std::fprintf(stderr, "[ws-sidecar] armed: DrawMetatileAt=0x%08X "
         "tilemap_ptrs=0x%08X cache=%dx%d\n", g_dm_pc, g_tilemap_ptrs,
@@ -266,6 +271,12 @@ bool ws_sidecar_tilemap_entry(int bg, int hw_x, int screen_y,
     if (!g_cache_valid[cidx]) return false;
     *out_entry = g_cache[bg - 1][cidx];
     return true;
+}
+
+// Adapter matching the PPU's provider pointer signature (int return).
+extern "C" int ws_sidecar_provider_adapter(int bg, int hw_x, int screen_y,
+                                           uint16_t* out_entry) {
+    return ws_sidecar_tilemap_entry(bg, hw_x, screen_y, out_entry) ? 1 : 0;
 }
 
 bool ws_sidecar_dump(const char* path, int extra_cols_per_side) {

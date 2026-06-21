@@ -11,6 +11,15 @@
 
 namespace gba {
 
+// Widescreen margin tilemap provider (Step C). When set (by the runtime-side
+// sidecar) and the wide path samples a margin column (hardware x outside
+// 0..239), the BG text-tilemap entry is sourced from this hook (the true
+// extended world) instead of the wrapped 256px ring. Returns nonzero + fills
+// *out_entry when data is available. nullptr (default) = vanilla wide behavior.
+// Layering-clean: the PPU only calls a nullable pointer; the sidecar owns it.
+extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
+                                        uint16_t* out_entry) = nullptr;
+
 GbaPpu::GbaPpu()  = default;
 GbaPpu::~GbaPpu() = default;
 
@@ -870,6 +879,22 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                 ((tile_y & 31u) * 32u + (tile_x & 31u)) * 2u;
             if (map_off + 1 >= 96u * 1024u) continue;
             uint16_t entry = load_u16_le(&vram[map_off]);
+            // Widescreen margin (hardware column outside 0..239): the 256px ring
+            // entry here is the wrapped/aliased seam. If the sidecar can supply
+            // the true off-screen world tile, use it; if it's armed but has no
+            // data, leave the pixel transparent (no seam) rather than draw the
+            // wrap. With no sidecar, keep vanilla wide behavior.
+            if (hx < 0 || hx >= 240) {
+                if (g_ws_tilemap_provider) {
+                    uint16_t ext;
+                    if (g_ws_tilemap_provider(static_cast<int>(layer), hx,
+                                              static_cast<int>(y), &ext)) {
+                        entry = ext;
+                    } else {
+                        continue;
+                    }
+                }
+            }
             uint32_t tile_num = entry & 0x03FFu;
             bool hflip = (entry & 0x0400u) != 0;
             bool vflip = (entry & 0x0800u) != 0;

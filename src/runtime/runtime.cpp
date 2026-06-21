@@ -1592,7 +1592,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     if (!args.dump_bmp.empty() || !args.dump_png.empty()) {
         std::vector<uint8_t> fb(ppu.render_bytes(), 0);
-        if (ppu.has_latched_framebuffer()) {
+        // Widescreen sidecar: populate the extended tilemap (incl. never-seen
+        // margins) via the guest's own draw, then force a FRESH render so the
+        // wide path reads the filled cache instead of the run-time latched FB.
+        bool fresh = false;
+        if (ws_sidecar_enabled()) {
+            if (const char* a = std::getenv("GBARECOMP_WS_SC_ACTIVE")) {
+                if (a[0] && a[0] != '0') { ws_sidecar_active_fill(); fresh = true; }
+            }
+        }
+        if (ppu.has_latched_framebuffer() && !fresh) {
             std::memcpy(fb.data(), ppu.latched_framebuffer(), fb.size());
         } else {
             ppu.render(fb.data(), bus.io().read16(0x000), bus.io().raw(),

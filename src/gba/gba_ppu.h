@@ -171,4 +171,9 @@ private:
     uint32_t extra_bottom_ = 0;
 };
 
+// Widescreen margin tilemap provider (Step C; see gba_ppu.cpp). Set by the
+// runtime-side sidecar; nullptr = vanilla wide behavior.
+extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
+                                        uint16_t* out_entry);
+
 }  // namespace gba
