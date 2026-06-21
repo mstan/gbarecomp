@@ -41,6 +41,9 @@ namespace gbarecomp {
 // Arm from env (idempotent). Installs the function-entry hook if enabled.
 void ws_sidecar_init_from_env();
 bool ws_sidecar_enabled();
+// True when GBARECOMP_WS_SC_ACTIVE is set: the runtime should call
+// ws_sidecar_active_fill() once per frame for live (real-time) margins.
+bool ws_sidecar_active_mode();
 
 // Sync the extended cache from the guest's live tilemap buffers. Call once per
 // guest frame (VBlank) so resident tiles are captured before eviction.

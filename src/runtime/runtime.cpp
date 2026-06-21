@@ -1536,7 +1536,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             const uint64_t scf = ppu.frame_count();
             if (scf != sc_last_frame) {
                 sc_last_frame = scf;
-                ws_sidecar_sync_frame();
+                // Active mode: render the extended world (incl. never-seen
+                // margins) via the guest's own draw — cycle/IRQ-transparent.
+                // Otherwise just capture the live ring (eviction).
+                if (ws_sidecar_active_mode()) ws_sidecar_active_fill();
+                else ws_sidecar_sync_frame();
             }
         }
         if (args.window) {

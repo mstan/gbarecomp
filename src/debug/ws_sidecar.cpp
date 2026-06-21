@@ -35,6 +35,7 @@ bool     g_enabled = false;
 uint32_t g_dm_pc = 0;                      // DrawMetatileAt guest PC
 uint32_t g_tilemap_ptrs = 0;              // IWRAM addr of gBGTilemapBuffers1
 uint32_t g_mapheader = 0;                 // EWRAM addr of gMapHeader (.mapLayout @+0)
+bool     g_active_mode = false;           // GBARECOMP_WS_SC_ACTIVE: per-frame fill
 bool     g_in_active_fill = false;        // re-entrancy guard for synthetic draws
 unsigned long long g_draws = 0;
 unsigned long long g_syncs = 0;
@@ -134,6 +135,8 @@ void ws_sidecar_init_from_env() {
     g_dm_pc = parse_hex_env("GBARECOMP_WS_SC_DRAWMETATILE") & ~1u;
     g_tilemap_ptrs = parse_hex_env("GBARECOMP_WS_SC_TILEMAP_PTRS");
     g_mapheader = parse_hex_env("GBARECOMP_WS_SC_MAPHEADER");  // for active fill
+    if (const char* a = std::getenv("GBARECOMP_WS_SC_ACTIVE"))
+        g_active_mode = (a[0] && a[0] != '0');
     if (!g_dm_pc || !g_tilemap_ptrs) {
         std::fprintf(stderr, "[ws-sidecar] NOT armed: need "
             "GBARECOMP_WS_SC_DRAWMETATILE and _TILEMAP_PTRS\n");
@@ -156,6 +159,7 @@ void ws_sidecar_init_from_env() {
 }
 
 bool ws_sidecar_enabled() { return g_enabled; }
+bool ws_sidecar_active_mode() { return g_active_mode; }
 
 void ws_sidecar_sync_frame() {
     if (!g_enabled) return;
@@ -230,6 +234,13 @@ void ws_sidecar_active_fill() {
         saved_ptr[k] = rd32(bus, g_tilemap_ptrs + static_cast<uint32_t>(k) * 4u);
     for (int k = 0; k < 3; ++k)
         wr32_iwram(bus, g_tilemap_ptrs + static_cast<uint32_t>(k) * 4u, kScratch[k]);
+    // Make the synthetic guest draws side-effect free: shadow-tick mode turns
+    // runtime_tick into a pure cycle counter (no device advance, no IRQ
+    // delivery, no g_runtime_cycles change) — so the real run is unperturbed and
+    // this is safe to call every frame during live play.
+    const unsigned saved_shadow = g_runtime_shadow_tick;
+    const unsigned long long saved_shadow_cyc = g_runtime_shadow_cycles;
+    g_runtime_shadow_tick = 1u;
 
     g_in_active_fill = true;
     for (int my = my_lo; my <= my_hi; ++my) {
@@ -253,6 +264,8 @@ void ws_sidecar_active_fill() {
     g_in_active_fill = false;
 
     // Restore everything so the guest is bit-for-bit unaffected.
+    g_runtime_shadow_tick = saved_shadow;
+    g_runtime_shadow_cycles = saved_shadow_cyc;
     for (int k = 0; k < 3; ++k)
         wr32_iwram(bus, g_tilemap_ptrs + static_cast<uint32_t>(k) * 4u, saved_ptr[k]);
     g_cpu = saved;
