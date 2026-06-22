@@ -74,6 +74,15 @@ uint64_t                                  s_native_calls_total = 0;
 bool                                      s_use_sljit = false;
 uint64_t                                  s_sljit_healed = 0;
 
+// sljit cross-session persistence: a manifest of healed (pc,thumb) keyed by ROM
+// sha1 (cache_dir/sljit_shards.txt). On a warm start each entry is re-JIT'd so the
+// path is native from launch — "interpreted once ever, then native forever". The
+// re-JIT is deterministic from the immutable ROM bytes; the P6 gate re-validates
+// lazily on first dispatch, exactly like a cold heal. Defined after
+// register_sljit_heal (forward-declared here for warm_load / overlay_request).
+std::string                  s_sljit_manifest;
+std::unordered_set<uint64_t> s_persisted;   // keys already written to the manifest
+
 // Force-heal demo (GBARECOMP_SLJIT_FORCE_HEAL=N): force the first N supported,
 // dispatch-reached functions to MISS the static tables so they self-heal via
 // sljit even on a fully-static build (a witnessed heal without a regen). s_force_yes
@@ -259,15 +268,28 @@ int warm_load_cache() {
 
 }  // namespace
 
+// sljit persistence helpers (defined after register_sljit_heal, used by
+// overlay_loader_init + overlay_request_compile above it).
+static void persist_sljit_shard(uint32_t pc, bool thumb);
+static int  warm_load_sljit_manifest();
+
 void overlay_loader_init(const std::string& cache_root,
                          const std::string& image_sha1,
                          const gba::GbaBios* bios) {
-    if (!env_truthy("GBARECOMP_SELFHEAL_RECOMPILE")) {
+    // Self-improving native healing is ON by default (toolchain-less sljit
+    // backend) so released games heal interpreter misses to native AND persist
+    // them across launches — interpreted once ever per path, native thereafter.
+    // Opt out for pure-interpreter runs (oracle diff / cycle-accurate trace) with
+    // GBARECOMP_SELFHEAL_RECOMPILE=0.
+    const char* sh_env = std::getenv("GBARECOMP_SELFHEAL_RECOMPILE");
+    const bool sh_off = sh_env && (std::strcmp(sh_env, "0") == 0 ||
+                                   std::strcmp(sh_env, "false") == 0 ||
+                                   std::strcmp(sh_env, "off") == 0);
+    if (sh_off) {
         s_active = false;
         std::printf("self_heal_recompile=DISABLED "
-                    "(set GBARECOMP_SELFHEAL_RECOMPILE=1 to heal misses to "
-                    "native; this session is a pure Stage-1 interpreter "
-                    "bridge)\n");
+                    "(GBARECOMP_SELFHEAL_RECOMPILE=0 — pure Stage-1 interpreter "
+                    "bridge this session)\n");
         return;
     }
 
@@ -279,6 +301,8 @@ void overlay_loader_init(const std::string& cache_root,
     s_cache_dir = (fs::path(root) / image_sha1).string();
     std::error_code ec;
     fs::create_directories(s_cache_dir, ec);
+    s_sljit_manifest = (fs::path(s_cache_dir) / "sljit_shards.txt").string();
+    s_persisted.clear();
 
     // Snapshot the 16 KB BIOS as the immutable code image for BIOS heals.
     s_bios_bytes.clear();
@@ -293,11 +317,13 @@ void overlay_loader_init(const std::string& cache_root,
     s_active = true;
     s_ever_active = true;  // sticky: survives shutdown for the exit report
 
-    // Production backend: sljit (in-process, toolchain-less) when requested,
-    // else the gcc DLL path (default). gcc stays byte-identical.
+    // Production backend: sljit (in-process, toolchain-less) is the DEFAULT —
+    // no compiler needed on the player's machine, and shards persist via the
+    // re-JIT manifest. Opt into the gcc DLL backend with GBARECOMP_HEAL_BACKEND=gcc
+    // (needs a toolchain; produces persisted DLLs instead).
     {
         const char* be = std::getenv("GBARECOMP_HEAL_BACKEND");
-        s_use_sljit = (be != nullptr && std::strcmp(be, "sljit") == 0);
+        s_use_sljit = !(be != nullptr && std::strcmp(be, "gcc") == 0);
         const char* fh = std::getenv("GBARECOMP_SLJIT_FORCE_HEAL");
         s_force_heal_limit = fh ? static_cast<unsigned>(std::strtoul(fh, nullptr, 10)) : 0u;
         if (s_force_heal_limit && s_use_sljit)
@@ -305,7 +331,10 @@ void overlay_loader_init(const std::string& cache_root,
                         s_force_heal_limit);
     }
 
-    const int warm = warm_load_cache();
+    int warm = warm_load_cache();
+    // sljit shards persist as a re-JIT manifest (no DLLs); re-JIT them now so a
+    // previously-played game is native from launch.
+    if (s_use_sljit) warm += warm_load_sljit_manifest();
     s_stop.store(false);
     s_worker = std::thread(worker_main);
 
@@ -346,6 +375,49 @@ static bool register_sljit_heal(uint32_t pc, bool thumb, const uint8_t* bytes,
     return true;
 }
 
+// Append a successfully-healed sljit shard to the persistent manifest (once per
+// PC). Plain text "PPPPPPPP m\n" so it's diff-friendly + trivially re-read.
+static void persist_sljit_shard(uint32_t pc, bool thumb) {
+    if (s_sljit_manifest.empty()) return;
+    const uint64_t key = heal_key(pc, thumb);
+    if (!s_persisted.insert(key).second) return;  // already on disk
+    std::FILE* f = std::fopen(s_sljit_manifest.c_str(), "a");
+    if (!f) return;
+    std::fprintf(f, "%08X %c\n", pc, thumb ? 't' : 'a');
+    std::fclose(f);
+}
+
+// Warm start: re-JIT every shard recorded in the manifest so previously-healed
+// paths run native from the first launch onward (no interpreter bridge). Skips
+// entries already healed this session; declines/region-misses are dropped
+// silently (they'll re-heal on demand). Returns the count made native.
+static int warm_load_sljit_manifest() {
+    if (s_sljit_manifest.empty()) return 0;
+    std::FILE* f = std::fopen(s_sljit_manifest.c_str(), "r");
+    if (!f) return 0;
+    int loaded = 0;
+    char line[64];
+    while (std::fgets(line, sizeof(line), f)) {
+        unsigned pcv = 0;
+        char mode = 0;
+        if (std::sscanf(line, "%x %c", &pcv, &mode) != 2) continue;
+        if (mode != 'a' && mode != 't') continue;
+        const uint32_t pc = pcv & ~1u;
+        const bool thumb = (mode == 't');
+        const uint64_t key = heal_key(pc, thumb);
+        s_persisted.insert(key);  // it's already on disk; don't re-append
+        if (g_healed.count(key)) continue;
+        const uint8_t* bytes = nullptr;
+        std::size_t size = 0;
+        uint32_t base = 0;
+        if (!region_bytes(pc, &bytes, &size, &base)) continue;
+        if (register_sljit_heal(pc, thumb, bytes, size, base, "warm-sljit"))
+            ++loaded;
+    }
+    std::fclose(f);
+    return loaded;
+}
+
 void overlay_request_compile(uint32_t pc, bool thumb) {
     if (!s_active) return;
     pc &= ~1u;
@@ -366,7 +438,11 @@ void overlay_request_compile(uint32_t pc, bool thumb) {
     if (s_use_sljit) {
         // In-process JIT on the game thread: produce now, register now — the
         // next hit of this PC dispatches native. No worker, no DLL, no toolchain.
-        if (!register_sljit_heal(pc, thumb, bytes, size, base, "sljit-JIT'd")) {
+        if (register_sljit_heal(pc, thumb, bytes, size, base, "sljit-JIT'd")) {
+            // Record it so the NEXT launch re-JITs it up front (native from the
+            // start) — the game stays improved across sessions.
+            persist_sljit_shard(pc, thumb);
+        } else {
             // Emitter declined (an op it can't lower yet, or undiscoverable):
             // stay on the honest interpreter bridge for this PC this session.
             s_failed.insert(key);
