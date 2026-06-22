@@ -75,6 +75,11 @@ FunctionFinder::FunctionFinder(const uint8_t* rom_bytes,
     : rom_(rom_bytes), rom_size_(rom_size), rom_base_(rom_base) {}
 
 void FunctionFinder::add_seed(const FunctionSeed& seed) {
+    if (seed.alias_candidate) {
+        uint64_t key = (static_cast<uint64_t>(seed.addr) << 1) |
+                       (seed.mode == CpuMode::Thumb ? 1u : 0u);
+        alias_candidate_keys_.insert(key);
+    }
     seeds_.push_back(seed);
 }
 
@@ -1759,13 +1764,26 @@ void FunctionFinder::run(std::size_t max_functions) {
                   if (a.addr != b.addr) return a.addr < b.addr;
                   return a.mode < b.mode;
               });
+
+    auto is_alias_candidate = [&](const Function& f) -> bool {
+        if (alias_candidate_keys_.empty()) return false;
+        uint64_t k = (static_cast<uint64_t>(f.addr) << 1) |
+                     (f.mode == CpuMode::Thumb ? 1u : 0u);
+        return alias_candidate_keys_.count(k) != 0;
+    };
+
     // Set end_addr to the next same-mode function start when adjacent
     // (approximate boundary). ARM and THUMB entries occupy the same byte
     // address space but do not share instruction boundaries; a false-start
     // THUMB entry in the middle of ARM code must not truncate the ARM body.
+    // Explicit interior/resume seeds (alias candidates) are NOT boundaries —
+    // skipping them keeps the host's body intact so the candidate can be
+    // rolled into it as a mid-function label rather than splitting the host.
     for (std::size_t i = 0; i < functions_.size(); ++i) {
+        if (is_alias_candidate(functions_[i])) continue;  // extent unused
         for (std::size_t j = i + 1; j < functions_.size(); ++j) {
             if (functions_[j].mode != functions_[i].mode) continue;
+            if (is_alias_candidate(functions_[j])) continue;  // not a boundary
             if (functions_[j].addr > functions_[i].addr) {
                 functions_[i].end_addr = std::min(
                     functions_[i].end_addr,
@@ -1773,6 +1791,57 @@ void FunctionFinder::run(std::size_t max_functions) {
             }
             break;
         }
+    }
+
+    // ── Mid-function aliasing (ported from psxrecomp) ───────────────────────
+    // Roll each explicit interior/resume seed into the REAL host whose clamped
+    // body contains it (host.addr < cand.addr < host.end_addr, same mode).
+    // A WaitForVBlank-style busy-wait that an IRQ returns into mid-loop is the
+    // motivating case: rooting the resume PC as its own function would split
+    // the tight loop into dispatch-chained 1-instruction functions (binary
+    // search per iteration → throughput regression, see psxrecomp). Instead
+    // the host stays one whole function (native goto back-edges intact) and the
+    // resume PC becomes an interior label reached via the host's resume
+    // prologue. Host extents are the just-computed CLAMPED end_addr (accurate
+    // next-real-function boundary), so the resume PC is guaranteed to lie in
+    // the host's emitted body — its label exists. A candidate with no
+    // containing host (a gap / genuine standalone) is left as its own function.
+    if (!alias_candidate_keys_.empty()) {
+        std::size_t aliases = 0;
+        for (std::size_t i = 0; i < functions_.size(); ++i) {
+            Function& c = functions_[i];
+            if (!is_alias_candidate(c)) continue;
+            std::size_t best = SIZE_MAX;
+            for (std::size_t j = 0; j < functions_.size(); ++j) {
+                if (j == i) continue;
+                const Function& h = functions_[j];
+                if (is_alias_candidate(h) || h.mode != c.mode) continue;
+                if (h.addr < c.addr && c.addr < h.end_addr) {
+                    if (best == SIZE_MAX ||
+                        h.addr > functions_[best].addr) {
+                        best = j;
+                    }
+                }
+            }
+            if (best != SIZE_MAX) {
+                functions_[best].alias_entries.push_back(c.addr);
+                c.is_alias = true;
+                ++aliases;
+            }
+        }
+        std::size_t hosts = 0;
+        for (Function& f : functions_) {
+            if (!f.alias_entries.empty()) {
+                std::sort(f.alias_entries.begin(), f.alias_entries.end());
+                ++hosts;
+            }
+        }
+        stats_.alias_entries_total = aliases;
+        stats_.alias_hosts_total = hosts;
+        functions_.erase(
+            std::remove_if(functions_.begin(), functions_.end(),
+                           [](const Function& f) { return f.is_alias; }),
+            functions_.end());
     }
 
     // Stats

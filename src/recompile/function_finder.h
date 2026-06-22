@@ -47,6 +47,13 @@ struct FunctionSeed {
     // data_range the function is silently DROPPED (the literal wasn't
     // really code). Propagates to every descendant reached from it.
     bool speculative = false;
+    // Explicit interior/resume seed (config `[[extra_func]] resume = true`).
+    // If this address turns out to fall inside another function's body it is
+    // rolled up into that host as a mid-function alias entry rather than
+    // emitted as a standalone function. Gating aliasing to flagged seeds
+    // avoids mis-aliasing the thousands of real functions whose entries
+    // happen to fall within another function's over-extending linear walk.
+    bool alias_candidate = false;
 };
 
 // Output: one entry per discovered function.
@@ -73,6 +80,17 @@ struct Function {
     // True if at least one indirect control transfer (BX reg,
     // LDR PC, ldm with PC, etc.) was decoded in this function.
     bool has_indirect_transfer = false;
+    // Mid-function alias entries (ported from psxrecomp): guest PCs that
+    // fall strictly INSIDE this function's natural body and are reached as
+    // alternate ("resume") entries — e.g. an IRQ/SWI return landing mid
+    // busy-wait loop. They are NOT separate functions (that would split the
+    // body and turn the loop's native gotos into per-iteration dispatch);
+    // instead each is a labelled re-entry point and the body emits a resume
+    // prologue that goto's the right label. Sorted ascending, deduped.
+    std::vector<uint32_t> alias_entries;
+    // Set during alias consolidation to mark this entry for removal from the
+    // function list (it was rolled into its host's alias_entries).
+    bool is_alias = false;
 };
 
 // A jump table the finder recognized automatically (no [[jump_table]]
@@ -113,6 +131,10 @@ struct FinderStats {
     // that looks like a code pointer seeds a new function entry.
     std::size_t literal_pool_words_seen = 0;  // PC-rel literals examined
     std::size_t literal_pool_seeds_kept = 0;  // passed the code filter
+    // Mid-function aliasing: entries rolled into a host as resume points
+    // (not emitted as standalone functions).
+    std::size_t alias_entries_total = 0;
+    std::size_t alias_hosts_total = 0;
 };
 
 // A byte range the finder must not decode as code. See
@@ -203,6 +225,9 @@ private:
     std::vector<FunctionSeed> seeds_;
     std::vector<Function>     functions_;
     std::unordered_map<uint64_t, std::size_t> visited_;  // key=(addr<<1)|mode
+    // Keys (addr<<1|mode) of explicit interior/resume seeds — candidates for
+    // mid-function alias roll-up. See FunctionSeed::alias_candidate.
+    std::unordered_set<uint64_t> alias_candidate_keys_;
     std::vector<AutoJumpTable> auto_jump_tables_;
     // Every jump-table base ever handed to the emitter, so the same table
     // reached by multiple seed walks is accounted once (the dispatch

@@ -52,6 +52,11 @@ struct ConfigExtraFunc {
     CpuMode     mode = CpuMode::Arm;
     std::string name;       // optional; finder generates one if empty
     std::string note;       // documentation only
+    // resume = true marks an explicit interior/resume seed: if addr falls
+    // inside another function it is rolled up as a mid-function alias entry
+    // (alternate dispatch target) instead of fragmenting the host. Used for
+    // IRQ/SWI-return resume PCs (e.g. a WaitForVBlank busy-spin interior).
+    bool        resume = false;
 };
 
 struct ConfigDataRange {

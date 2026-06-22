@@ -199,6 +199,17 @@ uint32_t runtime_fp_save_tail_csv(const char* path, uint32_t n);
 // function entry and is byte-identical to the un-hooked guest state.
 extern void (*g_runtime_fn_entry_hook)(uint32_t entry_pc);
 
+// ── Mid-function alias resume PC ───────────────────────────────────────
+// Set by a thin per-alias dispatch wrapper (generated) to the alternate
+// entry PC immediately before it tail-calls the host function; the host's
+// resume prologue reads it, clears it, and computed-goto's to the interior
+// label for that PC. 0 (the default) = normal entry: the host falls through
+// the prologue and starts at its first instruction. This is how an IRQ/SWI
+// return into the middle of an already-recompiled function (e.g. a
+// WaitForVBlank busy-spin) re-enters the WHOLE native function at the right
+// point instead of fragmenting it into dispatch-chained pieces.
+extern uint32_t g_runtime_resume_pc;
+
 // Dedicated always-on IRQ-vector log (MC-HP-002): one entry per IRQ vectoring,
 // dumped as CSV. Armed by env GBARECOMP_IRQ_LOG. g_runtime_irq_from_halt is set
 // by runtime_tick's wake-from-HALT path so each log entry records whether the

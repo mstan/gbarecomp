@@ -392,6 +392,15 @@ void sanitize_function_identifiers(std::vector<Function>& funcs,
     }
 }
 
+// Stable C identifier for a host's per-alias dispatch wrapper. Derived from
+// the (already collision-proofed) host name + the alias PC, so it inherits the
+// host's gf_ prefix / sanitization and is unique across the corpus.
+std::string alias_wrapper_name(const Function& fn, uint32_t alias_addr) {
+    char suffix[24];
+    std::snprintf(suffix, sizeof(suffix), "__alias_%08X", alias_addr);
+    return fn.name + suffix;
+}
+
 void write_header(const std::string& dir,
                    const std::vector<Function>& funcs,
                    const OutputNames& names) {
@@ -414,6 +423,11 @@ void write_header(const std::string& dir,
         std::fprintf(f, "void %s(void);  /* 0x%08X %s */\n",
                      fn.name.c_str(), fn.addr,
                      fn.mode == CpuMode::Thumb ? "thumb" : "arm");
+        for (uint32_t a : fn.alias_entries) {
+            std::string wn = alias_wrapper_name(fn, a);
+            std::fprintf(f, "void %s(void);  /* alias 0x%08X */\n",
+                         wn.c_str(), a);
+        }
     }
     std::fprintf(f, "}  /* extern \"C\" */\n");
     std::fclose(f);
@@ -436,16 +450,27 @@ void write_dispatch_table(const std::string& dir,
         "struct DispatchEntry { uint32_t addr; uint8_t thumb; void (*fn)(void); };\n"
         "extern \"C\" const DispatchEntry %s[] = {\n",
         names.header, names.table_symbol);
+    // funcs is sorted by addr; each host's alias entries are interior to it
+    // (host.addr < alias < next_host.addr), so emitting [host, its sorted
+    // aliases] per host keeps the whole table sorted for the binary search.
+    std::size_t total = 0;
     for (const auto& fn : funcs) {
         std::fprintf(f, "    {0x%08Xu, %uu, %s},\n",
                      fn.addr,
                      fn.mode == CpuMode::Thumb ? 1u : 0u,
                      fn.name.c_str());
+        ++total;
+        for (uint32_t a : fn.alias_entries) {
+            std::string wn = alias_wrapper_name(fn, a);
+            std::fprintf(f, "    {0x%08Xu, %uu, %s},\n",
+                         a, fn.mode == CpuMode::Thumb ? 1u : 0u, wn.c_str());
+            ++total;
+        }
     }
     std::fprintf(f,
         "};\n"
         "extern \"C\" const unsigned %s = %zu;\n",
-        names.table_len_symbol, funcs.size());
+        names.table_len_symbol, total);
     std::fclose(f);
 }
 
@@ -554,6 +579,17 @@ void write_body(const std::string& dir,
             fn.name.c_str());
         emit_function_body(f, fn, rom, rom_size, rom_base, name_by_key);
         std::fprintf(f, "}\n\n");
+        // Thin per-alias dispatch wrappers: set the resume PC and tail-call
+        // the host. Each is a separate dispatch-table entry so an interior
+        // (IRQ/SWI-return) PC re-enters the WHOLE host function at the right
+        // label instead of fragmenting it. (Mid-function aliasing.)
+        for (uint32_t a : fn.alias_entries) {
+            std::string wn = alias_wrapper_name(fn, a);
+            std::fprintf(f,
+                "/* alias 0x%08X -> %s */\n"
+                "void %s(void) { g_runtime_resume_pc = 0x%08Xu; %s(); }\n\n",
+                a, fn.name.c_str(), wn.c_str(), a, fn.name.c_str());
+        }
     }
     std::fclose(f);
 }
@@ -698,7 +734,9 @@ int main(int argc, char** argv) {
             }
         }
         for (const auto& ef : cfg.extra_funcs) {
-            finder.add_seed(FunctionSeed{ef.addr, ef.mode, ef.name});
+            FunctionSeed seed{ef.addr, ef.mode, ef.name};
+            seed.alias_candidate = ef.resume;  // interior/resume seed -> alias
+            finder.add_seed(seed);
         }
     }
 
@@ -849,6 +887,9 @@ int main(int argc, char** argv) {
                     cfg.data_ranges.size() + cfg.jump_tables.size());
         std::printf("  code_copies:           %zu\n",
                     cfg.code_copies.size());
+        std::printf("  midfn_aliases:         %zu entries -> %zu hosts "
+                    "(rolled-up interior resume points)\n",
+                    stats.alias_entries_total, stats.alias_hosts_total);
         std::printf("  excluded:              %zu\n",
                     stats.excluded_count);
         std::printf("  TOTAL emitted:         %zu\n",

@@ -284,6 +284,33 @@ std::string emit_function_body_str(
     ctx.idle_backedge_pcs = &idle_backedge_pcs;
 
     uint32_t pc = fn.addr;
+
+    // Mid-function alias entries (resume points rolled into this host). When
+    // non-empty this function gets (1) a resume prologue that computed-goto's
+    // to the interior label for an alternate entry PC, and (2) per-instruction
+    // brace-scoping so the forward goto is legal C++ (each instruction's
+    // function-scope temporaries become block-scope, so the jump crosses no
+    // in-scope initialization). Functions WITHOUT alias entries are emitted
+    // byte-identically to before (no braces, no prologue).
+    const bool has_aliases = !fn.alias_entries.empty();
+    std::unordered_set<uint32_t> alias_set(fn.alias_entries.begin(),
+                                           fn.alias_entries.end());
+    if (has_aliases) {
+        // Resume routing FIRST so an alternate entry skips the entry hook
+        // (it is not a fresh call). g_runtime_resume_pc is set by the thin
+        // per-alias dispatch wrapper (see main.cpp) and consumed here.
+        appendf(out, "    if (g_runtime_resume_pc) {\n");
+        appendf(out,
+            "        uint32_t _resume = g_runtime_resume_pc;"
+            " g_runtime_resume_pc = 0u;\n");
+        appendf(out, "        switch (_resume) {\n");
+        for (uint32_t a : fn.alias_entries) {
+            appendf(out, "        case 0x%08Xu: goto L_%08X;\n", a, a);
+        }
+        appendf(out, "        default: break;\n");
+        appendf(out, "        }\n    }\n");
+    }
+
     // General function-entry hook (debug observability; see runtime_arm.h).
     // Fires before the first instruction while R0..R3 still hold the AAPCS
     // arguments. nullptr (default) = one not-taken branch, guest-state
@@ -308,7 +335,7 @@ std::string emit_function_body_str(
             ins = armv4t::ArmDecoder::decode(w, pc);
         }
 
-        if (backward_targets.count(pc) != 0) {
+        if (backward_targets.count(pc) != 0 || alias_set.count(pc) != 0) {
             appendf(out, "L_%08X:\n", pc);
         }
 
@@ -318,7 +345,15 @@ std::string emit_function_body_str(
         bool ni = false;
         ctx.force_bx_c_return = bx_c_return_pcs.count(pc) != 0;
         std::string emitted = armv4t::ArmCodegen::emit_instr(ins, ctx, &ni);
-        out += emitted;
+        if (has_aliases) {
+            // Block-scope each instruction so the resume prologue's forward
+            // goto crosses no in-scope local initialization (goto-legal C++).
+            out += "    {\n";
+            out += emitted;
+            out += "    }\n";
+        } else {
+            out += emitted;
+        }
         // emit_instr already handles all return-shaped flows
         // (branches set PC + dispatch + return; SWI sets PC +
         // returns; LDM with PC in list returns; LDR PC dispatches).

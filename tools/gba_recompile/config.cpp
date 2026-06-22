@@ -135,6 +135,7 @@ bool parse_extra_funcs(const toml::array& arr,
         }
         e.name = get_string_field(*t, "name", false, ok, err);
         e.note = get_string_field(*t, "note", false, ok, err);
+        e.resume = (*t)["resume"].value_or(false);
         out.push_back(std::move(e));
     }
     return true;
