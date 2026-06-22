@@ -75,6 +75,15 @@ uint32_t g_trace_seq = 0;
 constexpr uint32_t kCallReturnStackSize = 1024u;
 uint32_t g_call_return_stack[kCallReturnStackSize] = {};
 uint32_t g_call_return_depth = 0;
+// Barrier into the GLOBAL guest call-return stack. An IRQ is dispatched on top
+// of whatever mainline (or enclosing-IRQ) call frames are live, but the handler's
+// guest returns/cancels must NOT match or pop those interrupted frames — doing so
+// makes a handler return-cancel unwind into the mainline, skipping the rest of
+// the handler (e.g. LeafGreen's VBlankIntr tail `gMain.intrCheck |= VBLANK` is
+// never reached, so WaitForVBlank spins forever). runtime_irq() raises this floor
+// to the live depth for the duration of the handler; should_return/cancel_return
+// never look below it. Saved/restored across nested IRQs by runtime_irq().
+uint32_t g_call_return_floor = 0;
 
 const char* trace_kind_name(uint32_t kind) {
     switch (kind) {
@@ -776,7 +785,9 @@ extern "C" void runtime_call_push_return(uint32_t return_pc) {
 
 extern "C" int runtime_call_should_return(uint32_t target_pc) {
     uint32_t pc = target_pc & ~1u;
-    for (uint32_t i = g_call_return_depth; i != 0; --i) {
+    // Scan only down to the active IRQ floor — never match an interrupted
+    // mainline / enclosing-IRQ return frame.
+    for (uint32_t i = g_call_return_depth; i != g_call_return_floor; --i) {
         uint32_t slot = i - 1u;
         if (g_call_return_stack[slot] == pc) {
             runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc,
@@ -795,7 +806,8 @@ extern "C" int runtime_call_should_return(uint32_t target_pc) {
 
 extern "C" void runtime_call_cancel_return(uint32_t return_pc) {
     uint32_t pc = return_pc & ~1u;
-    if (g_call_return_depth != 0 &&
+    // Never pop below the active IRQ floor (an interrupted mainline frame).
+    if (g_call_return_depth > g_call_return_floor &&
         g_call_return_stack[g_call_return_depth - 1u] == pc) {
         runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_call_return_depth,
                             4u);
@@ -1173,6 +1185,11 @@ extern "C" void runtime_irq(uint32_t return_address) {
     uint32_t my_depth      = g_irq_nest_depth;
     uint32_t saved_iret    = g_irq_iret_depth;
     g_irq_iret_depth       = 0u;  // sentinel: this IRQ has not iret'd yet
+    // Raise the call-return floor so the handler's guest returns/cancels can
+    // unwind back to here but never match/pop the interrupted mainline (or an
+    // enclosing IRQ's) frames — see g_call_return_floor. Restored below.
+    uint32_t saved_floor   = g_call_return_floor;
+    g_call_return_floor    = g_call_return_depth;
     runtime_dispatch(0x00000018u);
     constexpr uint32_t kMaxIrqDispatches = 4'000'000u;
     uint32_t irq_guard = 0u;
@@ -1188,6 +1205,7 @@ extern "C" void runtime_irq(uint32_t return_address) {
         runtime_dispatch(g_cpu.R[15]);
     }
     g_irq_iret_depth = saved_iret;  // restore an enclosing IRQ's expectation
+    g_call_return_floor = saved_floor;
     --g_irq_nest_depth;
 }
 

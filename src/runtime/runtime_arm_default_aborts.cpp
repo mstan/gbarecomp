@@ -373,6 +373,17 @@ void record_and_log_miss(std::uint32_t pc, bool thumb) {
 // cheap pre-flight of how deep the shard re-run would recurse. Reset at entry.
 extern "C" uint32_t g_bridge_max_call_depth = 0;
 
+// Set by runtime_irq() in runtime_arm.cpp (>0 while an IRQ handler is on the host
+// stack). When an in-handler SWI unwinds and runtime_irq() re-dispatches a mid-
+// handler PC that MISSES, the bridge must DRIVE the handler forward (heal back to
+// native at the first static entry so the recompiled intr_main can iret) rather
+// than stopping at the LR fallback / call-stack-top — otherwise the handler's
+// tail (e.g. LeafGreen VBlankIntr's gMain.intrCheck |= VBLANK) is skipped and the
+// game's VBlank wait spins forever. Pairs with the call-return floor in
+// runtime_irq() (g_call_return_floor): the floor keeps the cancel cascade from
+// corrupting mainline frames; this keeps the self-heal bridge from bailing early.
+extern "C" uint32_t g_irq_nest_depth;
+
 // runtime_bridge_interpret — the interpret-the-missed-subtree core, factored out
 // of runtime_dispatch_miss so the P6 sljit differential gate can reuse it as its
 // "interpreter pass": the kept, correct result a healed shard is validated
@@ -434,6 +445,14 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
                          entry_pc, stop_pc);
         }
     }
+    // IRQ-continuation mode: bridging a dispatch miss while an IRQ handler is in
+    // progress (runtime_irq() re-dispatched a mid-handler PC after an in-handler
+    // SWI unwound). The normal stop contract (LR fallback / call-stack-top) is
+    // invalid here — drive forward and heal to native at the first static entry
+    // so the recompiled intr_main reaches its iret. (forced_stop_pc != 0 is the
+    // sljit gate's bounded pass — never an IRQ continuation.)
+    const bool irq_cont = (g_irq_nest_depth != 0u) && (forced_stop_pc == 0u);
+
     // Snapshot the entry stack so we can restore it exactly (minus the popped
     // frame) regardless of how IRQ/SWI excursions perturb it mid-bridge.
     std::vector<std::uint32_t> entry_stack;
@@ -546,7 +565,7 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
             }
         }
 
-        if ((cpu.R[15] & ~1u) == stop_pc) break;
+        if (!irq_cont && (cpu.R[15] & ~1u) == stop_pc) break;
 
         // Heal-to-static: for a top-level miss (no reliable return address),
         // the moment the bridged subtree branches/returns back into a
@@ -556,7 +575,12 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
         // straight to runtime_dispatch. Without this, a degenerate stop_pc
         // (LR == entry_pc) makes the bridge interpret the whole program and
         // eventually run away to a garbage PC (FireRed BIOS IntrWait).
-        if (top_level && (cpu.R[15] & ~1u) != entry_pc &&
+        // Heal to static for an IRQ continuation too (regardless of top_level):
+        // the moment execution re-enters a recompiled function, hand it back to
+        // native so the recompiled intr_main can run its iret (which sets
+        // g_irq_iret_depth via runtime_exception_return) and terminate
+        // runtime_irq()'s drive loop.
+        if ((irq_cont || top_level) && (cpu.R[15] & ~1u) != entry_pc &&
             runtime_has_static_entry(cpu.R[15], cpu.thumb ? 1 : 0)) {
             break;
         }
@@ -589,7 +613,10 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
     // ── (4) Write back + pop the returned frame ────────────────────
     gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);  // g_cpu.R[15] == stop_pc
     bus->set_bios_access_enabled(g_cpu.R[15] < 0x00004000u);
-    if (!top_level) {
+    // An IRQ continuation that healed to static is not a subroutine return —
+    // runtime_irq()'s loop re-dispatches the static entry natively — so do not
+    // pop a call-return frame here.
+    if (!top_level && !irq_cont) {
         // Restore the entry stack minus exactly the one frame the missed
         // subroutine's return idiom (`bx lr` / `pop {pc}`) would have popped
         // via runtime_call_should_return.
