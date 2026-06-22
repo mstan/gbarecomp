@@ -735,15 +735,50 @@ int main(int argc, char** argv) {
     }
     finder.run(cli.max_functions);
 
-    // Data-range collisions are a hard error per docs/TOML_SCHEMA.md.
-    // Report every collision before exiting so the operator can
-    // resolve them in one pass.
+    // Control-flow into a data_range. Two very different cases:
+    //
+    //  * AUTHORITATIVE range (readelf [[data_range]] or a manual
+    //    [[jump_table]] hint): the operator asserted these bytes are data,
+    //    so flow into them is a genuine contradiction — HARD ERROR, and the
+    //    human must resolve it (shrink the range / exclude the caller).
+    //
+    //  * AUTO jump_table (the finder's own speculative abs32-table guess):
+    //    real code can never branch *into* a true code-pointer table, so a
+    //    collision here is proof the guess mis-modeled some packed/offset
+    //    THUMB switch (e.g. LeafGreen rev1 @ 0x0801A8E8 — 48 case handlers
+    //    that each branch to a shared address inside the table bytes, which
+    //    readelf confirms ARE data). The data_range itself is correct; only
+    //    the decoded branches are artifacts. Downgrade to a WARNING: keep
+    //    the bytes as data and let the residual indirect branches resolve
+    //    through the runtime's honest self-heal path. Never a build failure.
     const auto& cols = finder.collisions();
-    if (!cols.empty()) {
+    std::size_t fatal = 0, auto_jt = 0;
+    for (const auto& c : cols) {
+        if (c.range_note == "auto jump_table") ++auto_jt; else ++fatal;
+    }
+    if (auto_jt > 0) {
         std::fprintf(stderr,
-            "ERROR: %zu control-flow entries into [[data_range]]\n",
-            cols.size());
+            "WARNING: %zu control-flow entries into an auto-detected "
+            "jump_table (mis-modeled switch; bytes kept as data, residual "
+            "branches self-heal at runtime). Sample:\n", auto_jt);
+        std::size_t shown = 0;
         for (const auto& c : cols) {
+            if (c.range_note != "auto jump_table") continue;
+            if (shown++ >= 3) break;
+            std::fprintf(stderr,
+                "  [0x%08X,0x%08X) auto jump_table <- 0x%08X via %s",
+                c.range_start, c.range_end, c.flow_target_addr,
+                c.flow_origin_kind.c_str());
+            if (c.flow_origin_addr != 0)
+                std::fprintf(stderr, " in fn 0x%08X", c.flow_origin_addr);
+            std::fprintf(stderr, "\n");
+        }
+    }
+    if (fatal > 0) {
+        std::fprintf(stderr,
+            "ERROR: %zu control-flow entries into [[data_range]]\n", fatal);
+        for (const auto& c : cols) {
+            if (c.range_note == "auto jump_table") continue;
             std::fprintf(stderr,
                 "  data_range [0x%08X, 0x%08X)%s%s\n"
                 "    entered at 0x%08X via %s",
