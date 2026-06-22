@@ -43,6 +43,7 @@
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -62,6 +63,11 @@
 // ctx.irq_entries (the run-loop local never increments — IRQs are taken in
 // runtime_tick, not here). See MC-HP-002 IRQ-delivery comparison.
 extern "C" unsigned long long g_runtime_irq_entries;
+
+// Present-in-place hook setter (defined in runtime_bus_bridge.cpp). Registering
+// a hook makes the per-VBlank frame-present yield present + resume in place
+// instead of unwinding the guest stack — see the windowed runner below.
+void runtime_set_frame_present_hook(std::function<bool()>);
 
 #ifndef GBARECOMP_DEFAULT_GAME_CONFIG
 #define GBARECOMP_DEFAULT_GAME_CONFIG "game.toml"
@@ -960,16 +966,64 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                             bus.save().eeprom_size());
             }
         }
+    } else if (header.save_type == gba::SaveType::Flash1M ||
+               header.save_type == gba::SaveType::Flash512) {
+        // FLASH (every pret Gen3 game). Without this, IdentifyFlash fails,
+        // gFlashMemoryPresent stays FALSE and AgbMain's
+        // `SetMainCallback2(NULL)` gate blanks the screen — the game never
+        // boots past the copyright screen.
+        std::size_t flash_bytes =
+            (header.save_type == gba::SaveType::Flash1M) ? 0x20000u : 0x10000u;
+        if (args.save_size) flash_bytes = args.save_size;
+        bus.save().configure_flash(flash_bytes);
+
+        if (args.save_path.empty()) {
+            std::filesystem::path save_path(args.rom);
+            save_path.replace_extension(".sav");
+            args.save_path = save_path.string();
+        }
+
+        std::error_code ec;
+        if (!args.save_path.empty() &&
+            std::filesystem::exists(args.save_path, ec)) {
+            std::vector<uint8_t> save_bytes;
+            if (!read_file(args.save_path, &save_bytes, &err)) {
+                std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
+                return 1;
+            }
+            if (save_bytes.size() > bus.save().flash_size()) {
+                std::fprintf(stderr,
+                             "[gbarecomp:runtime] save file too large: %s "
+                             "(%zu bytes, flash is %zu bytes)\n",
+                             args.save_path.c_str(), save_bytes.size(),
+                             bus.save().flash_size());
+                return 1;
+            }
+            if (!bus.save().load_flash_bytes(save_bytes.data(),
+                                             save_bytes.size())) {
+                std::fprintf(stderr,
+                             "[gbarecomp:runtime] failed to load flash save "
+                             "%s\n", args.save_path.c_str());
+                return 1;
+            }
+            if (!args.quiet) {
+                std::printf("save_loaded path=\"%s\" size=%zu/%zu\n",
+                            args.save_path.c_str(), save_bytes.size(),
+                            bus.save().flash_size());
+            }
+        }
     }
     bus.io().set_ppu(&ppu);
     bus.io().set_bus(&bus);
 
     auto flush_save = [&]() -> bool {
-        if (!bus.save().eeprom_enabled() || args.save_path.empty() ||
-            !bus.save().dirty()) {
+        const bool has_save =
+            bus.save().eeprom_enabled() || bus.save().flash_enabled();
+        if (!has_save || args.save_path.empty() || !bus.save().dirty()) {
             return true;
         }
-        std::vector<uint8_t> save_bytes = bus.save().eeprom_bytes();
+        std::vector<uint8_t> save_bytes = bus.save().flash_enabled()
+            ? bus.save().flash_bytes() : bus.save().eeprom_bytes();
         if (!write_file(args.save_path, save_bytes, &err)) {
             std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
             return false;
@@ -987,6 +1041,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     runtime_init(&bus);
     reset_recomp_cpu();
     self_heal_reset();  // fresh coverage tally for this machine bring-up
+    // Stamp the persisted miss/coverage logs with the game's identity so they
+    // are never ambiguous about their source (and so per-game default
+    // filenames don't clobber each other).
+    gbarecomp::self_heal_set_program_identity(
+        header.game_title.c_str(), header.game_code.c_str(), rom_sha1.c_str());
     // Stage-2 self-heal: wire the on-the-fly recompiler (gated behind
     // GBARECOMP_SELFHEAL_RECOMPILE; no-op + a clear banner when off). The cache
     // is keyed by the cart SHA-1 so a different ROM gets a fresh DLL set; the
@@ -1048,15 +1107,28 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // ring records from machine reset (no arm-then-run gap), so this is a
     // pure query of recorded history — two builds run identically diff
     // bit-for-bit on these files. (Arm with GBARECOMP_INSN_TRACE=1.)
+    // Per-game default filenames (overridable by env) so concurrent / serial
+    // runs of different games don't clobber each other's miss logs — the cause
+    // of "which game is this frag from?" ambiguity. Tag = sanitized 4-char game
+    // code (e.g. BPEE), falling back to "unknown".
+    auto game_tag = [&]() {
+        std::string t;
+        for (char c : header.game_code)
+            if (std::isalnum(static_cast<unsigned char>(c))) t += c;
+        return t.empty() ? std::string("unknown") : t;
+    };
     auto emit_exit_diagnostics = [&]() {
+        const std::string tag = game_tag();
+        const std::string default_frag = "recomp_master_misses_" + tag + ".toml.frag";
+        const std::string default_cov  = "recomp_coverage_" + tag + ".json";
         const char* frag = std::getenv("GBARECOMP_MISS_FRAG");
         gbarecomp::self_heal_write_report(
-            frag ? frag : "recomp_master_misses.toml.frag");
+            frag ? frag : default_frag.c_str());
         // Machine-readable coverage summary for the build loop / CI (written
         // every exit, FULLY_STATIC included). Override path with env.
         const char* cov = std::getenv("GBARECOMP_COVERAGE_JSON");
         gbarecomp::self_heal_write_coverage_json(
-            cov ? cov : "recomp_coverage.json");
+            cov ? cov : default_cov.c_str());
         if (const char* fp = std::getenv("GBARECOMP_FP_SAVE")) {
             uint32_t n = runtime_fp_save_file(fp);
             std::printf("fp_ring_saved path=\"%s\" records=%u\n", fp, n);
@@ -1455,6 +1527,50 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     };
 
+    // Present-in-place (structural fix for frame-boundary resume dispatch-misses).
+    // When windowed, register a hook so the per-VBlank frame-present yield presents
+    // the frame from INSIDE runtime_should_yield and resumes the guest in place —
+    // the guest never unwinds to the runner, so its interrupted interior PC is
+    // never re-dispatched (which previously self-healed through the interpreter
+    // every frame). Returns true to request quit. Headless/TCP leave the hook
+    // unset and keep the original unwind-and-redispatch path.
+    // Present-in-place is the default for windowed play (validated on busy-spin
+    // games AND HALT-based Minish Cap). Escape hatch: GBARECOMP_PRESENT_IN_PLACE=0.
+    // Stepped aside while the WIP widescreen sidecar is armed, since that path
+    // relies on the per-frame runner loop (which present-in-place bypasses).
+    const char* pip_env = std::getenv("GBARECOMP_PRESENT_IN_PLACE");
+    const bool present_in_place =
+        (pip_env ? pip_env[0] != '0' : true) && !ws_sidecar_enabled();
+    if (args.window && present_in_place) {
+        std::fprintf(stderr, "[gbarecomp:runtime] present-in-place ON "
+                     "(frame-boundary resume misses eliminated structurally; "
+                     "GBARECOMP_PRESENT_IN_PLACE=0 to disable)\n");
+        runtime_set_frame_present_hook([&]() -> bool {
+            uint64_t frame = ppu.frame_count();
+            if (frame != last_presented_frame) {
+                if (ppu.has_latched_framebuffer()) {
+                    std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
+                                ppu.render_bytes());
+                } else {
+                    ppu.render(live_fb.data(), bus.io().read16(0x000),
+                               bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
+                               bus.pal_ptr());
+                }
+                win.present(live_fb.data());
+                int16_t audio_buf[2048];
+                std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
+                if (n > 0) win.push_audio_samples(audio_buf, n);
+                pump_host_input();
+                last_presented_frame = frame;
+                ++frames_presented;
+                if (args.frames >= 0 && frames_presented >= args.frames)
+                    host_quit = true;
+                if (pacer) pacer->wait_for_next_frame();
+            }
+            return host_quit;
+        });
+    }
+
     const bool open_ended = (args.window || args.frames >= 0);
     const int step_budget = open_ended
         ? (args.steps > 16 ? args.steps : std::numeric_limits<int>::max() / 2)
@@ -1617,6 +1733,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             break;
         }
     }
+    // Drop the present-in-place hook before the captured runner locals (win,
+    // pacer, live_fb, …) go out of scope at function return.
+    runtime_set_frame_present_hook(nullptr);
     if (args.window) win.close();
 
     bool save_ok = flush_save();

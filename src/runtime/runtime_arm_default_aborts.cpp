@@ -65,6 +65,13 @@ struct MissRec {
 std::map<std::uint32_t, MissRec> g_misses;        // keyed by PC & ~1
 std::uint64_t                    g_interp_insns = 0;
 
+// Program identity, set once at startup, stamped into the persisted miss/
+// coverage logs so they are never ambiguous about which game produced them
+// (and so per-game default filenames don't clobber each other).
+std::string g_prog_title;
+std::string g_prog_code;
+std::string g_prog_sha1;
+
 // Hard backstop so a runaway bridge (e.g. an interpreted infinite loop
 // that never reaches the stop address) fails loudly instead of hanging
 // forever. Far above any real BIOS/cart subroutine length.
@@ -77,6 +84,13 @@ namespace gbarecomp {
 void self_heal_reset() {
     g_misses.clear();
     g_interp_insns = 0;
+}
+
+void self_heal_set_program_identity(const char* title, const char* code,
+                                    const char* sha1) {
+    g_prog_title = title ? title : "";
+    g_prog_code  = code ? code : "";
+    g_prog_sha1  = sha1 ? sha1 : "";
 }
 
 bool self_heal_any_misses() { return !g_misses.empty(); }
@@ -177,7 +191,12 @@ void self_heal_write_report(const char* frag_path) {
         "#       switch's case targets. Sizing the table covers the whole\n"
         "#       switch in ONE entry; prefer it over the per-case [[extra_func]].\n"
         "# BIOS PCs (< 0x4000) belong in bios/gba_bios.toml; cart PCs in the\n"
-        "# game's game.toml.\n\n");
+        "# game's game.toml.\n");
+    std::fprintf(f,
+        "#\n# game:  %s\n# code:  %s\n# sha1:  %s\n\n",
+        g_prog_title.empty() ? "(unknown)" : g_prog_title.c_str(),
+        g_prog_code.empty()  ? "(unknown)" : g_prog_code.c_str(),
+        g_prog_sha1.empty()  ? "(unknown)" : g_prog_sha1.c_str());
     for (const auto& c : clusters) {
         if (c.jump_table_candidate) {
             std::fprintf(f,
@@ -234,12 +253,14 @@ std::string self_heal_misses_json() {
     const bool fully_static = g_misses.empty() && healed == 0;
 
     std::string out;
-    char buf[384];
+    char buf[640];
     std::snprintf(buf, sizeof(buf),
-        "{\"ok\":true,\"coverage\":\"%s\",\"enabled\":%s,"
+        "{\"ok\":true,\"program\":\"%s\",\"code\":\"%s\",\"sha1\":\"%s\","
+        "\"coverage\":\"%s\",\"enabled\":%s,"
         "\"distinct_misses\":%zu,\"interpreted_insns\":%llu,"
         "\"healed_native\":%llu,\"native_calls\":%llu,\"inflight\":%llu,"
         "\"failed\":%llu,\"jump_table_candidate_regions\":%zu,\"misses\":[",
+        g_prog_title.c_str(), g_prog_code.c_str(), g_prog_sha1.c_str(),
         fully_static ? "FULLY_STATIC" : "NOT_STATIC",
         gbarecomp::overlay_was_enabled() ? "true" : "false",
         g_misses.size(),

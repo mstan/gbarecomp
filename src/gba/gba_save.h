@@ -39,6 +39,25 @@ public:
     bool dirty() const { return dirty_; }
     void clear_dirty() { dirty_ = false; }
 
+    // Cartridge FLASH controller (Macronix MX29L010 1 Mbit / 128 KB, the
+    // chip every pret Gen3 game uses; also models 512 Kbit / 64 KB). The
+    // chip is command-driven through writes to the save region (0x0E...):
+    // an unlock sequence (0xAA @ 0x5555, 0x55 @ 0x2AAA) precedes each
+    // command (0x90 enter-ID, 0xA0 program-byte, 0x80.. erase, 0xB0
+    // bank-select, 0xF0 reset). 1 Mbit parts page two 64 KB banks through
+    // the 64 KB window. See agb_flash.c in the pret decomp + GBATEK
+    // § "GBA Backup Flash ROM".
+    //   bytes: total chip size (0x20000 for 1 Mbit, 0x10000 for 512 Kbit).
+    void configure_flash(std::size_t bytes);
+    bool flash_enabled() const { return flash_enabled_; }
+    std::size_t flash_size() const { return flash_size_; }
+    // off = address within the save region (addr - 0x0E000000); masked to
+    // the 64 KB window internally and combined with the selected bank.
+    uint8_t flash_read(uint32_t off);
+    void    flash_write(uint32_t off, uint8_t value);
+    bool load_flash_bytes(const uint8_t* data, std::size_t bytes);
+    std::vector<uint8_t> flash_bytes() const;
+
     // Save-state serialization (chip config + EEPROM bytes + in-flight
     // serial command/read state). See debug/snapshot.h.
     void serialize(gbarecomp::debug::SnapshotWriter& w) const;
@@ -62,6 +81,26 @@ private:
     uint32_t command_address() const;
     void finish_eeprom_read();
     void finish_eeprom_write();
+
+    // ---- FLASH controller state ----
+    // Command-sequence FSM. Each command is preceded by the two-cycle
+    // unlock (0xAA @ 0x5555, 0x55 @ 0x2AAA); erase needs a second unlock.
+    enum class FlashState : uint8_t {
+        Idle, Unlock1, Unlock2,
+        EraseUnlock0, EraseUnlock1, EraseUnlock2,
+        Program, Bank,
+    };
+    static constexpr uint32_t kFlashBankBytes = 0x10000;  // 64 KB window
+
+    bool flash_enabled_ = false;
+    std::size_t flash_size_ = 0;       // total chip bytes (0x20000 / 0x10000)
+    uint32_t flash_banks_ = 1;         // 2 for 1 Mbit, 1 for 512 Kbit
+    uint8_t flash_maker_ = 0xC2;       // Macronix
+    uint8_t flash_device_ = 0x09;      // MX29L010 (1 Mbit)
+    FlashState flash_state_ = FlashState::Idle;
+    bool flash_id_mode_ = false;
+    uint8_t flash_bank_ = 0;
+    std::vector<uint8_t> flash_data_;
 };
 
 }  // namespace gba

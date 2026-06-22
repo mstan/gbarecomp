@@ -71,3 +71,8 @@ rom.cfg
 
 # Scratch dump dir for oracle probes (fingerprint-ring .bin dumps, etc.).
 oracle/trace_out/
+
+# Self-heal coverage/miss artifacts written on every run (now per-game-tagged).
+recomp_coverage*.json
+recomp_master_misses*.toml.frag
+hang_trace.csv

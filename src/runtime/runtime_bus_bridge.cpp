@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -708,6 +709,24 @@ extern "C" void runtime_idle_backedge(uint32_t header_pc) {
     s.valid = true;
 }
 
+// Frame-present hook (present-in-place). When set, the per-VBlank frame-present
+// yield does NOT unwind the guest stack: it calls this hook (which presents the
+// frame, polls input, paces) and resumes the guest in place — so R15 is never
+// re-dispatched from an arbitrary interior PC, eliminating the whole class of
+// frame-boundary resume dispatch-misses. The hook returns true to request quit
+// (then the yield DOES unwind, so the runner can exit). Set by the windowed
+// runner only; unset for headless/TCP, which keep the unwind-and-redispatch path.
+std::function<bool()> g_frame_present_hook;
+// Sticky quit: once the present hook requests exit, EVERY subsequent yield must
+// unwind (return true) so the guest's whole host call stack pops back to the
+// runner — one return only frees one frame. Cleared when a hook is (re)set.
+bool g_frame_present_quit = false;
+
+void runtime_set_frame_present_hook(std::function<bool()> h) {
+    g_frame_present_hook = std::move(h);
+    g_frame_present_quit = false;
+}
+
 extern "C" bool runtime_should_yield(void) {
     auto* bus = gbarecomp::g_active_bus;
 
@@ -722,6 +741,9 @@ extern "C" bool runtime_should_yield(void) {
     // BIOS. See gba_bus.cpp prefetch_word / the open-bus read paths.
     if (bus && g_cpu.R[15] < 0x00004000u)
         bus->latch_bios_prefetch(g_cpu.R[15], (g_cpu.cpsr & CPSR_T_BIT) != 0);
+
+    // Present-in-place quit: fully unwind the guest to the runner once requested.
+    if (g_frame_present_quit) return true;
 
     bool halted = bus && bus->io().halted();
 
@@ -745,6 +767,16 @@ extern "C" bool runtime_should_yield(void) {
         const uint32_t mode = g_cpu.cpsr & 0x1Fu;
         if (mode == 0x10u || mode == 0x1Fu) {
             g_runtime_yielded_vblank_start = g_runtime_vblank_starts;
+            // Present-in-place when a hook is registered (windowed runner): the
+            // frame is presented from here and the guest resumes WITHOUT
+            // unwinding — no interior-PC re-dispatch, so no frame-boundary
+            // dispatch-miss. Only unwind (return true) when the hook asks to
+            // quit. With no hook (headless/TCP), keep the original unwind path.
+            if (g_frame_present_hook) {
+                bool quit = g_frame_present_hook();
+                if (quit) g_frame_present_quit = true;  // sticky: full unwind
+                return quit;
+            }
             return true;
         }
     }

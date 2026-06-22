@@ -140,6 +140,8 @@ uint8_t GbaBus::read8(uint32_t addr) {
             if (write_observer_) write_observer_->on_bus_read(addr);
             return io_dispatch_.read8(static_cast<uint32_t>(off));
         case Region::Save:
+            if (save_.flash_enabled())
+                return save_.flash_read(static_cast<uint32_t>(off));
             log_unmapped(addr, 0, false, 1);
             return 0;
         case Region::OpenBus:
@@ -183,6 +185,10 @@ uint16_t GbaBus::read16(uint32_t addr) {
             if (write_observer_) write_observer_->on_bus_read(addr);
             return io_dispatch_.read16(static_cast<uint32_t>(off));
         case Region::Save:
+            if (save_.flash_enabled()) {
+                uint8_t b = save_.flash_read(static_cast<uint32_t>(off));
+                return static_cast<uint16_t>(b | (b << 8));  // 8-bit bus mirror
+            }
             log_unmapped(addr, 0, false, 2);
             return 0;
         case Region::OpenBus:
@@ -233,6 +239,10 @@ uint32_t GbaBus::read32(uint32_t addr) {
             if (write_observer_) write_observer_->on_bus_read(addr);
             return io_dispatch_.read32(static_cast<uint32_t>(off));
         case Region::Save:
+            if (save_.flash_enabled()) {
+                uint8_t b = save_.flash_read(static_cast<uint32_t>(off));
+                return static_cast<uint32_t>(b) * 0x01010101u;  // 8-bit bus mirror
+            }
             log_unmapped(addr, 0, false, 4);
             return 0;
         case Region::OpenBus:
@@ -307,6 +317,12 @@ void GbaBus::write8(uint32_t addr, uint8_t v) {
             io_dispatch_.write8(static_cast<uint32_t>(off), v);
             return;
         case Region::Save:
+            if (save_.flash_enabled()) {
+                save_.flash_write(static_cast<uint32_t>(off), v);
+                return;
+            }
+            log_unmapped(addr, v, true, 1);
+            return;
         case Region::OpenBus:
         case Region::Unknown:
             log_unmapped(addr, v, true, 1);
@@ -342,6 +358,13 @@ void GbaBus::write16(uint32_t addr, uint16_t v) {
             io_dispatch_.write16(static_cast<uint32_t>(off), v);
             return;
         case Region::Save:
+            if (save_.flash_enabled()) {
+                save_.flash_write(static_cast<uint32_t>(off),
+                                  static_cast<uint8_t>(v & 0xFF));
+                return;
+            }
+            log_unmapped(addr, v, true, 2);
+            return;
         case Region::OpenBus:
         case Region::Unknown:
             log_unmapped(addr, v, true, 2);
@@ -377,6 +400,13 @@ void GbaBus::write32(uint32_t addr, uint32_t v) {
             io_dispatch_.write32(static_cast<uint32_t>(off), v);
             return;
         case Region::Save:
+            if (save_.flash_enabled()) {
+                save_.flash_write(static_cast<uint32_t>(off),
+                                  static_cast<uint8_t>(v & 0xFF));
+                return;
+            }
+            log_unmapped(addr, v, true, 4);
+            return;
         case Region::OpenBus:
         case Region::Unknown:
             log_unmapped(addr, v, true, 4);

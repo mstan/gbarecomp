@@ -43,6 +43,12 @@ std::uint64_t self_heal_interpreted_insns();
 // (see self_heal_cluster_misses). NEVER merges into game.toml.
 void self_heal_write_report(const char* frag_path);
 
+// Set the running program's identity (title, 4-char game code, ROM SHA-1).
+// Stamped into the frag header and the coverage JSON so the persisted logs
+// are unambiguous about which game produced them. Call once at startup.
+void self_heal_set_program_identity(const char* title, const char* code,
+                                    const char* sha1);
+
 // ── Jump-table-aware proposal clustering ───────────────────────────
 // One bridged miss, for the proposal/coverage report.
 struct SelfHealMiss {
