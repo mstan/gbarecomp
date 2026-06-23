@@ -208,6 +208,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         cfg.source_rate = 65536.0;                 // engine's standardized GBA mixer rate
         cfg.host_rate   = static_cast<double>(got.freq);
         cfg.target_ms   = 60.0;                     // steady cushion (matches NES)
+        cfg.preroll_ms  = 250.0;                    // boot pre-roll: hide the cold-start
+                                                    // recomp warm-up hitch (drains to target)
         if (rab_init(&b->bridge, &cfg) == 0) b->bridge_ready = true;
         SDL_PauseAudioDevice(b->audio_dev, 0);      // start the callback
     }
@@ -220,6 +222,11 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     open_ = true;
     return true;
 }
+
+// Game-thread codegen time (overlay_loader.cpp) — forward-declared to avoid a
+// heavy include. ~0 during async play; >0 means the game thread is compiling.
+// (We are already inside namespace gbarecomp, so declare it unqualified.)
+uint64_t overlay_game_thread_compile_ns();
 
 void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
     if (!open_ || !impl_ || !samples || count == 0) return;
@@ -245,12 +252,24 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
         if ((s_pushes % 120ULL) == 0ULL) {
             rab_stats st; rab_get_stats(&b->bridge, &st);
             double secs = static_cast<double>(s_samples) / 65536.0;
+            double stretch_ms = st.stretch_frames * 1000.0
+                              / static_cast<double>(b->bridge.cfg.host_rate);
+            // Game-thread codegen time: cumulative + this-window delta. The delta
+            // is the smoking gun — async play holds it at 0; sync play grows it.
+            static unsigned long long s_prev_cc_ns = 0;
+            unsigned long long cc_ns = overlay_game_thread_compile_ns();
+            double gt_ms      = cc_ns / 1e6;
+            double gt_dms     = (cc_ns - s_prev_cc_ns) / 1e6;
+            s_prev_cc_ns = cc_ns;
             std::fprintf(stderr,
-                "[gba-audio-probe] pushes=%llu audio=%.1fs bridge_underrun=%llu(%.2f/s) overflow_drops=%llu fill_ms=%.1f corr=%+.3f%%\n",
+                "[gba-audio-probe] pushes=%llu audio=%.1fs bridge_underrun=%llu(%.2f/s) "
+                "stretch=%.0fms(ev=%llu) overflow_drops=%llu fill_ms=%.1f corr=%+.3f%% "
+                "gt_compile=%.1fms(+%.1fms)\n",
                 s_pushes, secs, (unsigned long long)st.underrun_events,
                 secs > 0 ? st.underrun_events / secs : 0.0,
+                stretch_ms, (unsigned long long)st.stretch_events,
                 (unsigned long long)st.overflow_drops, rab_fill_ms(&b->bridge),
-                st.last_correction * 100.0);
+                st.last_correction * 100.0, gt_ms, gt_dms);
             std::fflush(stderr);
         }
     }
