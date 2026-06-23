@@ -14,6 +14,20 @@ recompile *The Legend of Zelda: The Minish Cap*.
 
 ---
 
+## Game targets
+
+Each target is its own repo that consumes this core. The three
+Pokémon repos cover **five games** between them:
+
+| Repo | Games |
+|------|-------|
+| [FireRedLeafGreenRecomp](https://github.com/mstan/FireRedLeafGreenRecomp) | Pokémon FireRed, Pokémon LeafGreen |
+| [RubySapphireRecomp](https://github.com/mstan/RubySapphireRecomp) | Pokémon Ruby, Pokémon Sapphire |
+| [EmeraldRecomp](https://github.com/mstan/EmeraldRecomp) | Pokémon Emerald |
+| [MinishCapRecomp](https://github.com/mstan/MinishCapRecomp) | The Legend of Zelda: The Minish Cap |
+
+---
+
 ## What this repo contains
 
 | Folder        | Purpose                                                                 |
