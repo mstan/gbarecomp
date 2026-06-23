@@ -3,6 +3,7 @@
 #include "overlay_loader.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -52,6 +53,8 @@ struct ReadyEntry {
     uint64_t key = 0;
     bool     ok = false;
     OverlayCompiled c;
+    bool     sljit = false;   // produced by the in-process JIT (vs a gcc DLL)
+    bool     leaf  = false;   // sljit only: gate-eligible control flow
 };
 
 // ── State ──────────────────────────────────────────────────────────
@@ -72,6 +75,10 @@ uint64_t                                  s_native_calls_total = 0;
 // overlay_request_compile. Resolved once at init from GBARECOMP_HEAL_BACKEND
 // (=sljit), so the gcc DLL path stays the default + byte-identical.
 bool                                      s_use_sljit = false;
+// GBARECOMP_HEAL_SYNC=1: debug-only escape that compiles the sljit shard
+// SYNCHRONOUSLY on the game thread (the historical behaviour). Off by default;
+// the production rule is "the game thread never compiles." Kept for A/B only.
+bool                                      s_heal_sync = false;
 uint64_t                                  s_sljit_healed = 0;
 
 // sljit cross-session persistence: a manifest of healed (pc,thumb) keyed by ROM
@@ -102,6 +109,17 @@ std::atomic<bool>           s_stop{false};
 std::mutex                  s_ready_mtx;
 std::deque<ReadyEntry>      s_ready;
 std::atomic<int>            s_ready_pending{0};
+
+// Serializes sljit code generation. sljit's executable-memory allocator is not
+// guaranteed re-entrant across threads in every build config, and a debug
+// force-heal/sync path can call the emitter on the game thread concurrently
+// with the worker; one lock around every overlay_sljit_produce makes codegen
+// thread-safe regardless of the sljit build flags.
+std::mutex                  s_sljit_codegen_mtx;
+
+// Wall-time the GAME THREAD spends in codegen (sync/force/warm register_sljit_heal).
+// Async play keeps this flat (only the worker compiles). Nanoseconds, monotonic.
+std::atomic<uint64_t>       s_gt_compile_ns{0};
 
 // ── Region resolution: the immutable code image a PC lives in ──────
 bool region_bytes(uint32_t pc, const uint8_t** bytes, std::size_t* size,
@@ -194,19 +212,46 @@ void worker_main() {
 
         ReadyEntry r;
         r.key = heal_key(w.pc, w.thumb);
-        std::string err;
-        r.ok = overlay_compile_one(w, s_cache_dir, &g_callbacks,
-                                   /*compile_if_missing=*/true, &r.c, &err);
-        if (r.ok) {
-            std::fprintf(stderr,
-                "self_heal: HEALED 0x%08X (%s) -> native (crc=%08X, "
-                "[0x%08X,0x%08X)); the interpreter bridge stops for this PC.\n",
-                w.pc, w.thumb ? "thumb" : "arm", r.c.crc, w.pc, r.c.end);
+        if (s_use_sljit) {
+            // In-process JIT, now OFF the game thread. Pure codegen from the
+            // immutable region bytes (decode + emit); the result is installed
+            // into g_healed by the game thread in overlay_drain_ready.
+            void (*fn)(void) = nullptr; void* code = nullptr;
+            uint32_t end = 0; bool leaf = false;
+            {
+                std::lock_guard<std::mutex> cg(s_sljit_codegen_mtx);
+                r.ok = overlay_sljit_produce(w.pc, w.thumb, w.bytes, w.size,
+                                             w.base, &fn, &code, &end, &leaf);
+            }
+            if (r.ok) {
+                r.sljit = true; r.leaf = leaf;
+                r.c.pc = w.pc; r.c.thumb = w.thumb;
+                r.c.fn = fn; r.c.module = code; r.c.end = end; r.c.crc = 0;
+                std::fprintf(stderr,
+                    "self_heal: HEALED 0x%08X (%s) -> sljit native [0x%08X,0x%08X) "
+                    "(async, worker thread); interpreter bridge stops for this PC.\n",
+                    w.pc, w.thumb ? "thumb" : "arm", w.pc, end);
+            } else {
+                std::fprintf(stderr,
+                    "self_heal: sljit DECLINED 0x%08X (%s) — interp bridge "
+                    "(emitter gap; precision over recall).\n",
+                    w.pc, w.thumb ? "thumb" : "arm");
+            }
         } else {
-            std::fprintf(stderr,
-                "self_heal: compile FAILED for 0x%08X (%s): %s — staying on the "
-                "interpreter bridge this session.\n",
-                w.pc, w.thumb ? "thumb" : "arm", err.c_str());
+            std::string err;
+            r.ok = overlay_compile_one(w, s_cache_dir, &g_callbacks,
+                                       /*compile_if_missing=*/true, &r.c, &err);
+            if (r.ok) {
+                std::fprintf(stderr,
+                    "self_heal: HEALED 0x%08X (%s) -> native (crc=%08X, "
+                    "[0x%08X,0x%08X)); the interpreter bridge stops for this PC.\n",
+                    w.pc, w.thumb ? "thumb" : "arm", r.c.crc, w.pc, r.c.end);
+            } else {
+                std::fprintf(stderr,
+                    "self_heal: compile FAILED for 0x%08X (%s): %s — staying on the "
+                    "interpreter bridge this session.\n",
+                    w.pc, w.thumb ? "thumb" : "arm", err.c_str());
+            }
         }
 
         {
@@ -324,6 +369,11 @@ void overlay_loader_init(const std::string& cache_root,
     {
         const char* be = std::getenv("GBARECOMP_HEAL_BACKEND");
         s_use_sljit = !(be != nullptr && std::strcmp(be, "gcc") == 0);
+        const char* hs = std::getenv("GBARECOMP_HEAL_SYNC");
+        s_heal_sync = (hs != nullptr && hs[0] && hs[0] != '0');
+        if (s_heal_sync)
+            std::printf("self_heal: WARNING GBARECOMP_HEAL_SYNC=1 — synchronous "
+                        "game-thread sljit heal (debug A/B; reintroduces stalls)\n");
         const char* fh = std::getenv("GBARECOMP_SLJIT_FORCE_HEAL");
         s_force_heal_limit = fh ? static_cast<unsigned>(std::strtoul(fh, nullptr, 10)) : 0u;
         if (s_force_heal_limit && s_use_sljit)
@@ -363,8 +413,19 @@ static bool register_sljit_heal(uint32_t pc, bool thumb, const uint8_t* bytes,
     void* code = nullptr;
     uint32_t end = 0;
     bool leaf = false;
-    if (!overlay_sljit_produce(pc, thumb, bytes, size, base, &fn, &code, &end, &leaf))
-        return false;
+    {
+        // Serialize against the worker thread's codegen (allocator safety).
+        std::lock_guard<std::mutex> cg(s_sljit_codegen_mtx);
+        // This runs on the GAME THREAD (sync/force/warm); time it so the
+        // regression is directly observable (see overlay_game_thread_compile_ns).
+        const auto t0 = std::chrono::steady_clock::now();
+        bool ok = overlay_sljit_produce(pc, thumb, bytes, size, base, &fn, &code, &end, &leaf);
+        const auto dt = std::chrono::steady_clock::now() - t0;
+        s_gt_compile_ns.fetch_add(
+            (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(dt).count(),
+            std::memory_order_relaxed);
+        if (!ok) return false;
+    }
     HealedEntry h;
     h.addr = pc; h.thumb = thumb; h.fn = fn; h.module = code;
     h.end = end; h.sljit = true; h.leaf = leaf;
@@ -435,25 +496,24 @@ void overlay_request_compile(uint32_t pc, bool thumb) {
         return;
     }
 
-    if (s_use_sljit) {
-        // In-process JIT on the game thread: produce now, register now — the
-        // next hit of this PC dispatches native. No worker, no DLL, no toolchain.
-        if (register_sljit_heal(pc, thumb, bytes, size, base, "sljit-JIT'd")) {
-            // Record it so the NEXT launch re-JITs it up front (native from the
-            // start) — the game stays improved across sessions.
+    // Debug-only escape (GBARECOMP_HEAL_SYNC=1): the historical SYNCHRONOUS
+    // in-process sljit heal, on the game thread. Kept only for A/B measurement —
+    // it reintroduces the audio stall this change exists to remove.
+    if (s_use_sljit && s_heal_sync) {
+        if (register_sljit_heal(pc, thumb, bytes, size, base, "sljit-JIT'd(sync)"))
             persist_sljit_shard(pc, thumb);
-        } else {
-            // Emitter declined (an op it can't lower yet, or undiscoverable):
-            // stay on the honest interpreter bridge for this PC this session.
+        else {
             s_failed.insert(key);
-            std::printf("self_heal: sljit DECLINED 0x%08X (%s) — interp bridge "
-                        "(emitter gap; precision over recall)\n",
+            std::printf("self_heal: sljit DECLINED 0x%08X (%s) — interp bridge\n",
                         pc, thumb ? "thumb" : "arm");
         }
         return;
     }
 
-    // gcc path: hand the region to the worker thread for an async compile.
+    // Production rule: the game thread NEVER compiles. Both backends (sljit
+    // in-process JIT and gcc DLL) hand the region to the worker thread; the game
+    // thread keeps interpreting this PC until the shard is installed at a frame
+    // boundary (overlay_drain_ready). First hit enqueues — it does not compile.
     OverlayWorkItem w;
     w.pc = pc; w.thumb = thumb;
     w.bytes = bytes; w.size = size; w.base = base;
@@ -476,10 +536,21 @@ void overlay_drain_ready() {
     for (const ReadyEntry& r : local) {
         s_inflight.erase(r.key);
         if (r.ok) {
+            // Game-thread install: publish the worker-produced code into the
+            // dispatch map. This validates + installs only — it never compiles.
             HealedEntry h;
             h.addr = r.c.pc; h.thumb = r.c.thumb; h.fn = r.c.fn;
             h.module = r.c.module; h.crc = r.c.crc; h.end = r.c.end;
+            if (r.sljit) {
+                h.sljit = true; h.leaf = r.leaf;
+                ++s_sljit_healed;
+            }
             g_healed[r.key] = h;
+            if (r.sljit) {
+                // Persist so the NEXT launch re-JITs it up front (native from the
+                // start) — "interpreted once ever, then native forever."
+                persist_sljit_shard(r.c.pc, r.c.thumb);
+            }
         } else {
             s_failed.insert(r.key);
         }
@@ -491,6 +562,10 @@ bool overlay_query(uint32_t pc, bool thumb, uint64_t* native_calls) {
     if (it == g_healed.end()) return false;
     if (native_calls) *native_calls = it->second.native_calls;
     return true;
+}
+
+uint64_t overlay_game_thread_compile_ns() {
+    return s_gt_compile_ns.load(std::memory_order_relaxed);
 }
 
 void overlay_counters(uint64_t* healed_native, uint64_t* native_calls_total,

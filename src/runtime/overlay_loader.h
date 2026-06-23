@@ -70,6 +70,13 @@ void overlay_drain_ready();
 // reports how many times the native function has been dispatched.
 bool overlay_query(uint32_t pc, bool thumb, uint64_t* native_calls);
 
+// Total wall-time the GAME THREAD has spent generating shards (the synchronous
+// register_sljit_heal path: warm-load at init, debug force-heal, or the
+// GBARECOMP_HEAL_SYNC escape). The production async path keeps this flat during
+// gameplay — only the worker thread compiles — so any growth while the game is
+// running is the audio-stall regression by definition. Nanoseconds, monotonic.
+uint64_t overlay_game_thread_compile_ns();
+
 // Aggregate counters for the coverage banner + the live `misses` TCP command.
 // Any out-param may be null.
 void overlay_counters(uint64_t* healed_native, uint64_t* native_calls_total,
