@@ -13,6 +13,13 @@
 
 #include <SDL.h>
 
+// Shared ecosystem clock-domain bridge (callback-driven DRC). Replaces the
+// SDL_QueueAudio push path, which silence-filled on queue underrun (~3.4/s
+// measured on Minish Cap) and hard-flushed on overflow — the same output-side
+// crackle fixed on NES. IMPL is defined in exactly this one translation unit.
+#define RECOMP_AUDIO_DRC_IMPL
+#include "recomp_audio_drc.h"
+
 namespace gbarecomp {
 
 namespace {
@@ -22,6 +29,10 @@ struct Backend {
     SDL_Renderer* renderer = nullptr;
     SDL_Texture*  texture  = nullptr;
     SDL_AudioDeviceID audio_dev = 0;
+    // Callback-driven clock-domain bridge (replaces SDL queue push).
+    rab_bridge    bridge{};
+    bool          bridge_ready = false;
+    SDL_mutex*    audio_mtx = nullptr;
     // Present-time screen-color simulation. Built once from
     // GBARECOMP_SCREEN; default Raw = exact passthrough (no copy, no
     // grading), so default behavior is byte-identical to upstream.
@@ -70,6 +81,21 @@ int scancode_to_gba_bit(SDL_Scancode sc) {
         case SDL_SCANCODE_S:      return 8;
         case SDL_SCANCODE_A:      return 9;
         default:                  return -1;
+    }
+}
+
+// SDL audio pull callback: render exactly `len` bytes of device-rate mono S16
+// from the bridge ring. The bridge emits faded silence (not raw zeros) before
+// prime / on underrun, so a momentarily-starved producer no longer clicks.
+void gba_audio_callback(void* userdata, Uint8* stream, int len) {
+    auto* b = static_cast<Backend*>(userdata);
+    int frames = len / static_cast<int>(sizeof(int16_t)); // mono
+    if (b && b->bridge_ready) {
+        SDL_LockMutex(b->audio_mtx);
+        rab_pull(&b->bridge, reinterpret_cast<int16_t*>(stream), frames);
+        SDL_UnlockMutex(b->audio_mtx);
+    } else {
+        SDL_memset(stream, 0, len);
     }
 }
 
@@ -166,13 +192,24 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     want.freq     = 65536;
     want.format   = AUDIO_S16SYS;
     want.channels = 1;
-    want.samples  = 1024;  // ~15 ms buffer at 65 kHz
-    want.callback = nullptr;  // queue mode
+    want.samples  = 1024;  // ~15 ms callback quantum at 65 kHz
+    want.callback = gba_audio_callback;  // pull mode (bridge-fed)
+    want.userdata = b;
     SDL_AudioSpec got{};
+    // Allow the device to pick its native rate; the bridge resamples the GBA
+    // mixer rate (65536) to whatever the device opened at.
     b->audio_dev = SDL_OpenAudioDevice(nullptr, /*iscapture=*/0,
-                                       &want, &got, /*allowed_changes=*/0);
+                                       &want, &got, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
     if (b->audio_dev != 0) {
-        SDL_PauseAudioDevice(b->audio_dev, 0);  // start playback
+        b->audio_mtx = SDL_CreateMutex();
+        rab_config cfg;
+        rab_config_defaults(&cfg);
+        cfg.channels    = 1;
+        cfg.source_rate = 65536.0;                 // engine's standardized GBA mixer rate
+        cfg.host_rate   = static_cast<double>(got.freq);
+        cfg.target_ms   = 60.0;                     // steady cushion (matches NES)
+        if (rab_init(&b->bridge, &cfg) == 0) b->bridge_ready = true;
+        SDL_PauseAudioDevice(b->audio_dev, 0);      // start the callback
     }
 
     b->color_lut = std::make_unique<runtime::ColorLut>(resolve_color_settings(screen));
@@ -187,22 +224,44 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
 void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
     if (!open_ || !impl_ || !samples || count == 0) return;
     auto* b = static_cast<Backend*>(impl_);
-    if (b->audio_dev == 0) return;
-    // Don't let the queue grow unbounded — past ~250 ms of latency
-    // the host falls behind the GBA's perceived audio.
-    constexpr Uint32 kMaxQueuedBytes = 65536 * 2 / 4;  // ~250 ms at 65 kHz
-    if (SDL_GetQueuedAudioSize(b->audio_dev) > kMaxQueuedBytes) {
-        SDL_ClearQueuedAudio(b->audio_dev);
+    if (b->audio_dev == 0 || !b->bridge_ready) return;
+
+    // Producer: append mono frames into the bridge ring. The SDL callback
+    // (gba_audio_callback) drains it at the device rate with band-limited
+    // resampling + a P-only fill servo — no queue underrun, no hard flush.
+    SDL_LockMutex(b->audio_mtx);
+    rab_push(&b->bridge, samples, static_cast<int>(count)); // mono: count == frames
+    SDL_UnlockMutex(b->audio_mtx);
+
+    // ── NES-mode crackle probe (measure step) ──────────────────────────
+    // GBARECOMP_AUDIO_PROBE=1 reports the BRIDGE's underrun/overflow counters
+    // (the post-fix equivalent of SDL queue underruns) so a before/after is
+    // directly comparable. Expect ~0 underruns once primed.
+    static int s_probe = -1;
+    if (s_probe < 0) { const char* e = std::getenv("GBARECOMP_AUDIO_PROBE"); s_probe = (e && *e && *e != '0') ? 1 : 0; }
+    if (s_probe) {
+        static unsigned long long s_pushes = 0, s_samples = 0;
+        s_pushes++; s_samples += count;
+        if ((s_pushes % 120ULL) == 0ULL) {
+            rab_stats st; rab_get_stats(&b->bridge, &st);
+            double secs = static_cast<double>(s_samples) / 65536.0;
+            std::fprintf(stderr,
+                "[gba-audio-probe] pushes=%llu audio=%.1fs bridge_underrun=%llu(%.2f/s) overflow_drops=%llu fill_ms=%.1f corr=%+.3f%%\n",
+                s_pushes, secs, (unsigned long long)st.underrun_events,
+                secs > 0 ? st.underrun_events / secs : 0.0,
+                (unsigned long long)st.overflow_drops, rab_fill_ms(&b->bridge),
+                st.last_correction * 100.0);
+            std::fflush(stderr);
+        }
     }
-    SDL_QueueAudio(b->audio_dev,
-                   samples,
-                   static_cast<Uint32>(count * sizeof(int16_t)));
 }
 
 void HostWindow::close() {
     if (!impl_) { open_ = false; return; }
     auto* b = static_cast<Backend*>(impl_);
-    if (b->audio_dev) SDL_CloseAudioDevice(b->audio_dev);
+    if (b->audio_dev) SDL_CloseAudioDevice(b->audio_dev);  // stops the callback first
+    if (b->bridge_ready) rab_free(&b->bridge);
+    if (b->audio_mtx) SDL_DestroyMutex(b->audio_mtx);
     if (b->texture)   SDL_DestroyTexture(b->texture);
     if (b->renderer)  SDL_DestroyRenderer(b->renderer);
     if (b->window)    SDL_DestroyWindow(b->window);
