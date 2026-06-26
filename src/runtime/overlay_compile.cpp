@@ -31,6 +31,17 @@ namespace gbarecomp {
 
 namespace {
 
+// Directory of the running executable, for locating release-bundled assets (the
+// overlay_toolchain/ the packager stages next to the exe). "" if unresolved.
+std::string exe_dir() {
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, sizeof(buf));
+    if (n > 0 && n < sizeof(buf)) return fs::path(buf).parent_path().string();
+#endif
+    return "";
+}
+
 // The C++ compiler used to build overlay DLLs. The dev machine has msys2
 // mingw64 g++ on PATH at run time (the runtime exits 127 without it anyway);
 // GBARECOMP_HEAL_CXX overrides for non-default installs.
@@ -49,17 +60,31 @@ std::string tcc_path() {
     if (const char* e = std::getenv("GBARECOMP_HEAL_TCC")) {
         if (e[0]) return e;
     }
-#ifdef _WIN32
-    char buf[MAX_PATH];
-    DWORD n = GetModuleFileNameA(nullptr, buf, sizeof(buf));
-    if (n > 0 && n < sizeof(buf)) {
-        fs::path cand =
-            fs::path(buf).parent_path() / "overlay_toolchain" / "tcc" / "tcc.exe";
+    const std::string ed = exe_dir();
+    if (!ed.empty()) {
+        fs::path cand = fs::path(ed) / "overlay_toolchain" / "tcc" / "tcc.exe";
         std::error_code ec;
         if (fs::exists(cand, ec)) return cand.string();
     }
-#endif
     return "tcc";
+}
+
+// Include flags for compiling an overlay's emitted C. On a dev box the baked
+// GBARECOMP_SRC_DIR points at the engine source (shim headers in src/runtime +
+// src/armv4t). On a SHIPPED, source-less box those don't exist, so fall back to
+// the headers the release packager flattened into <exe>/overlay_toolchain/
+// include (beside the bundled tcc). Used by BOTH gcc and tcc, so the gcc shipped
+// path is fixed too. Returns a leading-space-prefixed flag string.
+std::string overlay_include_flags() {
+    const std::string src = GBARECOMP_SRC_DIR;
+    std::error_code ec;
+    if (fs::exists(fs::path(src) / "src" / "runtime" / "overlay_runtime_arm.h", ec))
+        return " -I\"" + src + "/src/runtime\" -I\"" + src + "/src/armv4t\"";
+    const std::string ed = exe_dir();
+    if (!ed.empty())
+        return " -I\"" +
+               (fs::path(ed) / "overlay_toolchain" / "include").generic_string() + "\"";
+    return " -I\"" + src + "/src/runtime\" -I\"" + src + "/src/armv4t\"";  // last resort
 }
 
 #ifdef _WIN32
@@ -228,7 +253,7 @@ bool overlay_compile_one(const OverlayWorkItem& w,
             std::fclose(f);
         }
 
-        const std::string src = GBARECOMP_SRC_DIR;
+        const std::string inc = overlay_include_flags();
         std::string cmd;
         if (backend == HealBackend::Tcc) {
             // tcc: a self-contained C compiler (own linker + headers), so it
@@ -238,17 +263,13 @@ bool overlay_compile_one(const OverlayWorkItem& w,
             // / func_<pc> symbols the loader resolves. No -O (tcc has no real
             // optimizer) and no -x c++ (it is a C compiler).
             cmd =
-                "\"" + tcc_path() + "\" -shared"
-                " -I\"" + src + "/src/runtime\""
-                " -I\"" + src + "/src/armv4t\""
+                "\"" + tcc_path() + "\" -shared" + inc +
                 " -o \"" + dlltmp.generic_string() + "\""
                 " \"" + cpath.generic_string() + "\"";
         } else {
             cmd =
                 "\"" + gxx_path() + "\""
-                " -O2 -std=gnu++17 -fno-exceptions -fno-rtti -shared"
-                " -I\"" + src + "/src/runtime\""
-                " -I\"" + src + "/src/armv4t\""
+                " -O2 -std=gnu++17 -fno-exceptions -fno-rtti -shared" + inc +
                 " -o \"" + dlltmp.generic_string() + "\""
                 // -x c++: under gcc the emitted body compiles as C++ to match
                 // the static corpus's C++ semantics exactly. Explicit so it

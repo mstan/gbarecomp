@@ -17,10 +17,13 @@
 #   .\tools\fetch_tcc.ps1 [-Toolchain <dir>] [-CacheDir <dir>]
 
 param(
-    # Where to stage the tcc/ tree (the runtime looks for <here>/tcc/tcc.exe).
-    [string]$Toolchain = (Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..")) "overlay_toolchain"),
+    # Where to stage the toolchain tree (the runtime looks for <here>/tcc/tcc.exe
+    # and <here>/include/*.h).
+    [string]$Toolchain  = (Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..")) "overlay_toolchain"),
+    # The gbarecomp engine checkout whose shim headers get staged.
+    [string]$EngineRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     # Download cache so repeat packaging never re-downloads.
-    [string]$CacheDir  = (Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..")) "tools/_toolchain_cache")
+    [string]$CacheDir   = (Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..")) "tools/_toolchain_cache")
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,3 +53,20 @@ Copy-Item -Recurse -Force (Join-Path $TccTmp "tcc") $Dst
 $TccExe = Join-Path $Dst "tcc.exe"
 if (-not (Test-Path $TccExe)) { throw "tcc.exe missing after extract: $TccExe" }
 Write-Host "Staged toolchain-free overlay compiler: $TccExe"
+
+# Stage the overlay shim headers the runtime's tcc/gcc command compiles each
+# healed function against. On a source-less player box overlay_compile.cpp falls
+# back to <exe>/overlay_toolchain/include. The three headers #include each other
+# by filename, so flattening them into one dir resolves cleanly.
+$Inc = Join-Path $Toolchain "include"
+New-Item -ItemType Directory -Force $Inc | Out-Null
+$headers = @(
+    (Join-Path $EngineRoot "src\runtime\overlay_runtime_arm.h"),
+    (Join-Path $EngineRoot "src\runtime\overlay_abi.h"),
+    (Join-Path $EngineRoot "src\armv4t\runtime_arm_types.h")
+)
+foreach ($hh in $headers) {
+    if (-not (Test-Path $hh)) { throw "overlay shim header missing: $hh" }
+    Copy-Item $hh $Inc -Force
+}
+Write-Host "Staged overlay shim headers ($($headers.Count)) -> $Inc"

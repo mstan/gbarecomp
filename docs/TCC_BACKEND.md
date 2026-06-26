@@ -121,13 +121,29 @@ The `<os-arch>` token keeps cross-arch artifacts from colliding. The per-file
 
 ---
 
-## 6. Bundling for releases
+## 6. Bundling for releases (in-process — simpler than psxrecomp)
 
-`tools/fetch_tcc.ps1` fetches the fixed tcc-0.9.27 win64 build and stages it as
-`<Toolchain>/tcc/` (a self-contained `tcc.exe` + `libtcc.dll` + `include/` +
-`lib/`). A game's release packager calls it to populate
-`<exe_dir>/overlay_toolchain/tcc/`, which `tcc_path()` then finds at runtime. A
-dev box needs nothing staged — `auto` resolves to the g++ already on PATH.
+psxrecomp re-runs its recompiler via embedded Python to emit overlay C, so its
+release bundles python + tcc + the recompiler + `compile_overlays.py` + headers.
+gba emits the overlay C **in-process** (`overlay_emit`), so a gba release bundles
+only two things next to the exe:
+
+```
+<exe>/overlay_toolchain/
+  tcc/        TinyCC 0.9.27 — tcc.exe + libtcc.dll + include/ + lib/ (own headers)
+  include/    the 3 overlay shim headers: overlay_runtime_arm.h, overlay_abi.h,
+              runtime_arm_types.h (flattened; they #include each other by name)
+```
+
+`tools/fetch_tcc.ps1 -Toolchain <stage>\overlay_toolchain -EngineRoot <engine>`
+stages both; each game's `tools/make_release.ps1` calls it after copying the exe.
+
+At runtime (`overlay_compile.cpp`): `tcc_path()` finds `<exe>/overlay_toolchain/
+tcc/tcc.exe`, and `overlay_include_flags()` compiles each healed function against
+`<exe>/overlay_toolchain/include` whenever the baked dev `GBARECOMP_SRC_DIR` is
+absent (a shipped, source-less box). Both gcc and tcc use this resolution, so the
+shipped self-heal path is complete with **no system python or gcc**. A dev box
+needs nothing staged — `GBARECOMP_SRC_DIR` exists and `auto` resolves to g++.
 
 ---
 
