@@ -41,6 +41,27 @@ std::string gxx_path() {
     return "C:/msys64/mingw64/bin/g++.exe";
 }
 
+// The bundled, toolchain-free C compiler used to build overlay DLLs on a player
+// box with no g++. GBARECOMP_HEAL_TCC overrides; otherwise prefer the tcc the
+// release packager staged next to the exe (<exe_dir>/overlay_toolchain/tcc/
+// tcc.exe), falling back to a `tcc` on PATH for a dev box that has one.
+std::string tcc_path() {
+    if (const char* e = std::getenv("GBARECOMP_HEAL_TCC")) {
+        if (e[0]) return e;
+    }
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, sizeof(buf));
+    if (n > 0 && n < sizeof(buf)) {
+        fs::path cand =
+            fs::path(buf).parent_path() / "overlay_toolchain" / "tcc" / "tcc.exe";
+        std::error_code ec;
+        if (fs::exists(cand, ec)) return cand.string();
+    }
+#endif
+    return "tcc";
+}
+
 #ifdef _WIN32
 // Spawn a child process (NOT system()), redirect stdout+stderr to logpath,
 // block until exit, return the exit code (-1 on spawn failure).
@@ -71,7 +92,7 @@ int run_process(const std::string& cmdline, const std::string& logpath,
                              /*bInheritHandles=*/TRUE, CREATE_NO_WINDOW,
                              nullptr, nullptr, &si, &pi);
     if (!ok) {
-        if (err) *err = "CreateProcess(g++) failed: " +
+        if (err) *err = "CreateProcess(compiler) failed: " +
                         std::to_string(GetLastError());
         if (hlog != INVALID_HANDLE_VALUE) CloseHandle(hlog);
         if (hin  != INVALID_HANDLE_VALUE) CloseHandle(hin);
@@ -145,10 +166,15 @@ bool load_and_resolve(const std::string&, uint32_t, const GbaOverlayCallbacks*,
 
 }  // namespace
 
+const char* heal_backend_name(HealBackend b) {
+    return b == HealBackend::Tcc ? "tcc" : "gcc";
+}
+
 bool overlay_compile_one(const OverlayWorkItem& w,
                          const std::string& cache_dir,
                          const GbaOverlayCallbacks* cb,
                          bool compile_if_missing,
+                         HealBackend backend,
                          OverlayCompiled* out,
                          std::string* err) {
     if (!w.bytes || w.size == 0) {
@@ -203,24 +229,40 @@ bool overlay_compile_one(const OverlayWorkItem& w,
         }
 
         const std::string src = GBARECOMP_SRC_DIR;
-        std::string cmd =
-            "\"" + gxx_path() + "\""
-            " -O2 -std=gnu++17 -fno-exceptions -fno-rtti -shared"
-            " -I\"" + src + "/src/runtime\""
-            " -I\"" + src + "/src/armv4t\""
-            " -o \"" + dlltmp.generic_string() + "\""
-            // -x c++: the emitted body is C++ (extern \"C\" blocks, the shim's
-            // static-inline thunks) and must match the static corpus's C++
-            // semantics exactly. Explicit so it never depends on the driver's
-            // .c-suffix handling.
-            " -x c++ \"" + cpath.generic_string() + "\""
-            " -Wl,--export-all-symbols";
+        std::string cmd;
+        if (backend == HealBackend::Tcc) {
+            // tcc: a self-contained C compiler (own linker + headers), so it
+            // needs no host toolchain. The overlay is emitted C-clean (the
+            // extern \"C\" wrappers are __cplusplus-guarded), so tcc builds it
+            // as C; `tcc -shared` exports the global overlay_abi / overlay_init
+            // / func_<pc> symbols the loader resolves. No -O (tcc has no real
+            // optimizer) and no -x c++ (it is a C compiler).
+            cmd =
+                "\"" + tcc_path() + "\" -shared"
+                " -I\"" + src + "/src/runtime\""
+                " -I\"" + src + "/src/armv4t\""
+                " -o \"" + dlltmp.generic_string() + "\""
+                " \"" + cpath.generic_string() + "\"";
+        } else {
+            cmd =
+                "\"" + gxx_path() + "\""
+                " -O2 -std=gnu++17 -fno-exceptions -fno-rtti -shared"
+                " -I\"" + src + "/src/runtime\""
+                " -I\"" + src + "/src/armv4t\""
+                " -o \"" + dlltmp.generic_string() + "\""
+                // -x c++: under gcc the emitted body compiles as C++ to match
+                // the static corpus's C++ semantics exactly. Explicit so it
+                // never depends on the driver's .c-suffix handling.
+                " -x c++ \"" + cpath.generic_string() + "\""
+                " -Wl,--export-all-symbols";
+        }
 
         const int rc = run_process(cmd, logpath.string(), err);
         if (rc != 0) {
             if (err) {
-                *err = "g++ exit " + std::to_string(rc) + " compiling " +
-                       cpath.string() + " — see " + logpath.string();
+                *err = std::string(heal_backend_name(backend)) + " exit " +
+                       std::to_string(rc) + " compiling " + cpath.string() +
+                       " — see " + logpath.string();
             }
             fs::remove(dlltmp, ec);
             return false;

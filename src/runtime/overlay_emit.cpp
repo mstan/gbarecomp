@@ -51,17 +51,35 @@ std::string emit_overlay_c(uint32_t pc, bool thumb,
                   pc, thumb ? "thumb" : "arm", target->end_addr);
     out += hdr;
     out += "#include \"overlay_runtime_arm.h\"\n\n";
+    // The overlay body is plain C (g_cpu.R[..], C-style casts, C99 mixed decls)
+    // and the ABI/shim headers are __cplusplus-guarded, so this file compiles
+    // under BOTH g++ (the dev/release producer, C++) and tcc (the bundled,
+    // toolchain-free producer, C). OVL_EXPORT gives the three entry points C
+    // linkage under C++ and DLL-exports them so the loader's GetProcAddress
+    // resolves them: gcc would otherwise need -Wl,--export-all-symbols and tcc
+    // has no such flag, so the export attribute is on the symbols themselves.
+    // Keep this dual-toolchain-clean: no C++-only syntax below.
+    out += "#ifdef _WIN32\n"
+           "#define OVL_DLLEXPORT __declspec(dllexport)\n"
+           "#else\n"
+           "#define OVL_DLLEXPORT __attribute__((visibility(\"default\")))\n"
+           "#endif\n"
+           "#ifdef __cplusplus\n"
+           "#define OVL_EXPORT extern \"C\" OVL_DLLEXPORT\n"
+           "#else\n"
+           "#define OVL_EXPORT OVL_DLLEXPORT\n"
+           "#endif\n\n";
     // g_ovl is a plain (non-extern-C) global, matching the shim's extern decl;
-    // overlay_init() stores the host callbacks into it.
+    // overlay_init() stores the host callbacks into it. It is TU-local in
+    // practice (only the same file's shim thunks read it), so its linkage name
+    // is immaterial across C/C++.
     out += "const GbaOverlayCallbacks* g_ovl = 0;\n";
-    out += "extern \"C\" {\n";
     std::snprintf(hdr, sizeof(hdr),
-                  "uint32_t overlay_abi(void) { return %uu; }\n",
+                  "OVL_EXPORT uint32_t overlay_abi(void) { return %uu; }\n",
                   static_cast<unsigned>(GBA_OVERLAY_ABI_VERSION));
     out += hdr;
-    out += "void overlay_init(const GbaOverlayCallbacks* cb) { g_ovl = cb; }\n";
-    out += "}\n\n";
-    std::snprintf(hdr, sizeof(hdr), "extern \"C\" void func_%08X(void) {\n", pc);
+    out += "OVL_EXPORT void overlay_init(const GbaOverlayCallbacks* cb) { g_ovl = cb; }\n\n";
+    std::snprintf(hdr, sizeof(hdr), "OVL_EXPORT void func_%08X(void) {\n", pc);
     out += hdr;
     out += body;
     out += "}\n";

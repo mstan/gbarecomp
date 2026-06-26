@@ -116,39 +116,9 @@ add_library(gbarecomp_armv4t STATIC
     src/armv4t/runtime_arm.cpp
     src/armv4t/symbol_lookup.cpp
     src/armv4t/interpreter.cpp
-    # sljit_supports() — pure classification, no runtime/sljit deps, so it lives
-    # in armv4t and is linkable into the recompiler tool (heal-coverage measure).
-    src/armv4t/arm_sljit_support.cpp
 )
 target_include_directories(gbarecomp_armv4t PUBLIC src/armv4t)
 set_property(TARGET gbarecomp_armv4t PROPERTY POSITION_INDEPENDENT_CODE ON)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# sljit — Tier-2 in-process JIT backend (BSD-2-Clause; vendored in lib/sljit,
-# from psxrecomp/n64recomp). Single TU: sljitLir.c #includes the host-arch
-# backend it auto-detects (SLJIT_CONFIG_AUTO). The ARM Instr -> host emitter
-# (P3) and the runtime sljit producer (P5) link this. See lib/sljit/LICENSE.
-# Compiled with -w: it is vendored third-party C we do not own; its warnings
-# would otherwise drown the build (we keep -Wall/-Wextra on OUR code).
-# ─────────────────────────────────────────────────────────────────────────────
-add_library(sljit STATIC lib/sljit/sljit_src/sljitLir.c)
-target_include_directories(sljit PUBLIC lib/sljit/sljit_src)
-set_property(TARGET sljit PROPERTY POSITION_INDEPENDENT_CODE ON)
-if(NOT MSVC)
-    target_compile_options(sljit PRIVATE -w)
-endif()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# sljit_emit — the ARM Instr -> host machine code emitter (Tier-2 JIT producer),
-# the sljit counterpart to ArmCodegen (IR -> C). Consumes the SAME armv4t::Instr
-# and bakes the runtime ABI addresses (g_cpu, arm_*, runtime_tick) as immediates.
-# Kept a SEPARATE target so gbarecomp_armv4t (the portable decoder/IR/codegen)
-# stays sljit-free. See src/armv4t/arm_sljit.h + SLJIT.md.
-# ─────────────────────────────────────────────────────────────────────────────
-add_library(gbarecomp_sljit_emit STATIC src/armv4t/arm_sljit.cpp)
-target_include_directories(gbarecomp_sljit_emit PUBLIC src/armv4t)
-target_link_libraries(gbarecomp_sljit_emit PUBLIC gbarecomp_armv4t sljit)
-set_property(TARGET gbarecomp_sljit_emit PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # recompile_core — function discovery + per-function codegen, as a LIBRARY.
@@ -219,8 +189,6 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/overlay_emit.cpp
     src/runtime/overlay_loader.cpp
     src/runtime/overlay_compile.cpp
-    src/runtime/overlay_sljit_heal.cpp
-    src/runtime/sljit_gate.cpp
     src/runtime/host_platform.cpp
     src/runtime/host_window.cpp
     src/runtime/color_lut.cpp
@@ -253,13 +221,14 @@ else()
 endif()
 target_include_directories(gbarecomp_runtime PUBLIC src/runtime)
 # Bake the gbarecomp source root so the Stage-2 runtime compiler can find the
-# overlay shim headers (src/runtime + src/armv4t) when it invokes g++ on a
-# healed function. CMAKE_CURRENT_SOURCE_DIR is the gbarecomp worktree root even
+# overlay shim headers (src/runtime + src/armv4t) when it invokes g++ or the
+# bundled tcc on a healed function. CMAKE_CURRENT_SOURCE_DIR is the gbarecomp
+# worktree root even
 # when a game project (MinishCapRecomp) pulls us in via add_subdirectory.
 target_compile_definitions(gbarecomp_runtime PRIVATE
     GBARECOMP_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(gbarecomp_runtime PUBLIC
-    gbarecomp_gba gbarecomp_debug gbarecomp_recompile_core gbarecomp_sljit_emit
+    gbarecomp_gba gbarecomp_debug gbarecomp_recompile_core
     gbarecomp_heal_gate)
 set_property(TARGET gbarecomp_runtime PROPERTY POSITION_INDEPENDENT_CODE ON)
 if(GBARECOMP_SDL2_OK)
@@ -471,13 +440,6 @@ add_executable(heal_gate_tests tests/heal_gate/heal_gate_test.cpp)
 target_link_libraries(heal_gate_tests PRIVATE gbarecomp_heal_gate)
 add_test(NAME heal_gate_tests COMMAND heal_gate_tests)
 
-# sljit_smoke — P2 host-capability canary. JIT `f(a)=a+1234`, run it, check the
-# result. Proves the vendored JIT codegen + executable allocator work on this
-# host before the ARM emitter is built on top. See SLJIT.md P2.
-add_executable(sljit_smoke tests/sljit/smoke_test.c)
-target_link_libraries(sljit_smoke PRIVATE sljit)
-add_test(NAME sljit_smoke COMMAND sljit_smoke)
-
 # ─────────────────────────────────────────────────────────────────────
 # codegen_tests — L1 per-IrOp diff harness.
 #
@@ -533,61 +495,6 @@ target_include_directories(codegen_tests PRIVATE
     src/armv4t)
 target_link_libraries(codegen_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME codegen_tests COMMAND codegen_tests)
-
-# sljit_codegen_tests — L1 JIT-mode harness. Runs the SAME kTestCases corpus
-# through emit_instr_sljit and diffs each shard vs the interpreter (registers +
-# CPSR + memory + cycles). Reuses test_cases.cpp (corpus) + stubs.cpp (the
-# runtime-layer stubs the JIT'd code calls). See SLJIT.md §6.
-add_executable(sljit_codegen_tests
-    tests/codegen/sljit_test_main.cpp
-    tests/codegen/test_cases.cpp
-    tests/codegen/stubs.cpp
-)
-target_include_directories(sljit_codegen_tests PRIVATE
-    tests/codegen
-    src/armv4t)
-target_link_libraries(sljit_codegen_tests PRIVATE
-    gbarecomp_sljit_emit gbarecomp_armv4t)
-add_test(NAME sljit_codegen_tests COMMAND sljit_codegen_tests)
-
-# sljit_block_tests — whole-function composition (P5). Synthesizes instruction
-# sequences and diffs the JIT'd block (emit_block_sljit) vs the interpreter
-# stepping each, proving leaves chain through g_cpu with correct cycle totals.
-# Reuses tests/codegen/stubs.cpp (runtime_tick + bus). See SLJIT.md §5.1.
-add_executable(sljit_block_tests
-    tests/sljit/block_test.cpp
-    tests/codegen/stubs.cpp
-)
-target_include_directories(sljit_block_tests PRIVATE
-    tests/codegen
-    src/armv4t)
-target_link_libraries(sljit_block_tests PRIVATE
-    gbarecomp_sljit_emit gbarecomp_armv4t)
-add_test(NAME sljit_block_tests COMMAND sljit_block_tests)
-
-# sljit_function_tests — whole-function producer (P5). JITs a decoded function
-# (emit_function_sljit) and diffs it vs a mini-dispatch interpreter that follows
-# branches, covering straight-line, a backward-branch LOOP, and memory. See
-# SLJIT.md §5.1.
-add_executable(sljit_function_tests
-    tests/sljit/function_test.cpp
-    tests/codegen/stubs.cpp
-)
-target_include_directories(sljit_function_tests PRIVATE
-    tests/codegen
-    src/armv4t)
-target_link_libraries(sljit_function_tests PRIVATE
-    gbarecomp_sljit_emit gbarecomp_armv4t)
-add_test(NAME sljit_function_tests COMMAND sljit_function_tests)
-
-# gate_tests — offline P6 differential-gate state machine (promote + pin). Drives
-# sljit_gate::on_dispatch against a real GbaBus/GbaPpu + the interpreter bridge
-# (links the full runtime stack), the deterministic CI counterpart to the in-vivo
-# MinishCap promotion witness.
-add_executable(gate_tests tests/sljit/gate_test.cpp)
-target_include_directories(gate_tests PRIVATE src/armv4t src/runtime src/gba)
-target_link_gbarecomp_runtime_stack(gate_tests)
-add_test(NAME gate_tests COMMAND gate_tests)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # selfheal_stage2_bios_identical — Stage-2 GFP1 byte-identity gate. Proves a

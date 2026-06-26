@@ -3,7 +3,6 @@
 #include "overlay_loader.h"
 
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -16,9 +15,7 @@
 #include <unordered_set>
 
 #include "overlay_abi.h"
-#include "overlay_compile.h"
-#include "overlay_sljit_heal.h"   // in-process sljit producer (toolchain-less)
-#include "sljit_gate.h"           // P6 differential gate (validate shard vs interp)
+#include "overlay_compile.h"      // overlay_compile_one, HealBackend, heal_backend_name
 #include "runtime_arm.h"          // g_cpu, g_runtime_*, every runtime/bus/arm fn
 #include "runtime_bus_bridge.h"   // active_bus
 #include "../gba/gba_bus.h"       // rom_ptr / rom_size
@@ -40,12 +37,10 @@ struct HealedEntry {
     uint32_t addr  = 0;
     bool     thumb = false;
     void   (*fn)(void) = nullptr;
-    void*    module = nullptr;   // gcc: HMODULE; sljit: the JIT code block
+    void*    module = nullptr;   // HMODULE of the loaded shard DLL
     uint32_t crc = 0;
     uint32_t end = 0;
     uint64_t native_calls = 0;
-    bool     sljit = false;      // produced in-process (no DLL) vs a gcc DLL
-    bool     leaf  = false;      // sljit only: makes no calls → P6-gate-eligible
 };
 
 // ── Worker → game-thread result ────────────────────────────────────
@@ -53,15 +48,34 @@ struct ReadyEntry {
     uint64_t key = 0;
     bool     ok = false;
     OverlayCompiled c;
-    bool     sljit = false;   // produced by the in-process JIT (vs a gcc DLL)
-    bool     leaf  = false;   // sljit only: gate-eligible control flow
 };
 
+// ── Host arch token for the cache namespace ────────────────────────
+// Keeps a Windows-x64 gcc DLL and a future Linux-arm64 tcc DLL for the same
+// function in separate subdirs so a stale-arch artifact never wins.
+const char* overlay_arch_abi() {
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64))
+    return "windows-x64";
+#elif defined(_WIN32)
+    return "windows-x86";
+#elif defined(__APPLE__) && defined(__aarch64__)
+    return "macos-arm64";
+#elif defined(__APPLE__)
+    return "macos-x64";
+#elif defined(__aarch64__)
+    return "linux-arm64";
+#else
+    return "linux-x64";
+#endif
+}
+
 // ── State ──────────────────────────────────────────────────────────
-bool                     s_active = false;     // feature on AND inited
-bool                     s_ever_active = false;  // ever inited this session (sticky)
-std::string              s_cache_dir;          // cache_root/<image_sha1>
-std::vector<uint8_t>     s_bios_bytes;         // 16 KB BIOS snapshot (base 0)
+bool                     s_active = false;       // feature on AND inited
+bool                     s_ever_active = false;   // ever inited this session (sticky)
+std::string              s_cache_base;            // cache_root/<image_sha1>
+std::string              s_active_cache_dir;      // base/<backend>/<arch> (worker writes here)
+HealBackend              s_backend = HealBackend::Gcc;  // resolved producer
+std::vector<uint8_t>     s_bios_bytes;            // 16 KB BIOS snapshot (base 0)
 GbaOverlayCallbacks      g_callbacks{};
 
 // Game-thread-only:
@@ -69,35 +83,6 @@ std::unordered_map<uint64_t, HealedEntry> g_healed;
 std::unordered_set<uint64_t>              s_inflight;
 std::unordered_set<uint64_t>              s_failed;
 uint64_t                                  s_native_calls_total = 0;
-
-// Production backend for the heal tier. When sljit, a dispatch miss is healed
-// SYNCHRONOUSLY in-process (no toolchain, no DLL, no worker) — see
-// overlay_request_compile. Resolved once at init from GBARECOMP_HEAL_BACKEND
-// (=sljit), so the gcc DLL path stays the default + byte-identical.
-bool                                      s_use_sljit = false;
-// GBARECOMP_HEAL_SYNC=1: debug-only escape that compiles the sljit shard
-// SYNCHRONOUSLY on the game thread (the historical behaviour). Off by default;
-// the production rule is "the game thread never compiles." Kept for A/B only.
-bool                                      s_heal_sync = false;
-uint64_t                                  s_sljit_healed = 0;
-
-// sljit cross-session persistence: a manifest of healed (pc,thumb) keyed by ROM
-// sha1 (cache_dir/sljit_shards.txt). On a warm start each entry is re-JIT'd so the
-// path is native from launch — "interpreted once ever, then native forever". The
-// re-JIT is deterministic from the immutable ROM bytes; the P6 gate re-validates
-// lazily on first dispatch, exactly like a cold heal. Defined after
-// register_sljit_heal (forward-declared here for warm_load / overlay_request).
-std::string                  s_sljit_manifest;
-std::unordered_set<uint64_t> s_persisted;   // keys already written to the manifest
-
-// Force-heal demo (GBARECOMP_SLJIT_FORCE_HEAL=N): force the first N supported,
-// dispatch-reached functions to MISS the static tables so they self-heal via
-// sljit even on a fully-static build (a witnessed heal without a regen). s_force_yes
-// = chosen (always force-missed thereafter → served by the JIT'd shard); s_force_no
-// = already rejected (unsupported / undiscoverable), cached so we don't re-decode.
-unsigned                                  s_force_heal_limit = 0;
-std::unordered_set<uint64_t>              s_force_yes;
-std::unordered_set<uint64_t>              s_force_no;
 
 // Cross-thread work/ready queues:
 std::mutex                  s_work_mtx;
@@ -110,16 +95,64 @@ std::mutex                  s_ready_mtx;
 std::deque<ReadyEntry>      s_ready;
 std::atomic<int>            s_ready_pending{0};
 
-// Serializes sljit code generation. sljit's executable-memory allocator is not
-// guaranteed re-entrant across threads in every build config, and a debug
-// force-heal/sync path can call the emitter on the game thread concurrently
-// with the worker; one lock around every overlay_sljit_produce makes codegen
-// thread-safe regardless of the sljit build flags.
-std::mutex                  s_sljit_codegen_mtx;
+// The cache subdir a given backend writes to / is scanned from:
+//   recomp_cache/<image_sha1>/<gcc|tcc>/<os-arch>/<pc>_<crc>_<a|t>.dll
+std::string cache_dir_for(HealBackend b) {
+    return (fs::path(s_cache_base) / heal_backend_name(b) / overlay_arch_abi())
+        .string();
+}
 
-// Wall-time the GAME THREAD spends in codegen (sync/force/warm register_sljit_heal).
-// Async play keeps this flat (only the worker compiles). Nanoseconds, monotonic.
-std::atomic<uint64_t>       s_gt_compile_ns{0};
+// ── Toolchain probe: is a real g++/gcc reachable on PATH? ───────────
+// Determines the `auto` backend: a dev/production box (gcc present) produces
+// optimized gcc DLLs; a toolchain-less player box falls back to bundled tcc.
+bool gcc_toolchain_available() {
+    static int s_cached = -1;
+    if (s_cached >= 0) return s_cached != 0;
+    int found = 0;
+    if (const char* path = std::getenv("PATH"); path && *path) {
+#ifdef _WIN32
+        const char sep = ';';
+        static const char* exes[] = {"g++.exe", "gcc.exe", "cc.exe", "clang.exe"};
+#else
+        const char sep = ':';
+        static const char* exes[] = {"g++", "gcc", "cc", "clang"};
+#endif
+        const char* p = path;
+        while (*p && !found) {
+            const char* e = std::strchr(p, sep);
+            std::size_t dlen = e ? static_cast<std::size_t>(e - p) : std::strlen(p);
+            if (dlen > 0 && dlen < 480) {
+                for (const char* exe : exes) {
+                    char cand[512];
+                    std::snprintf(cand, sizeof(cand), "%.*s/%s",
+                                  static_cast<int>(dlen), p, exe);
+                    if (std::FILE* f = std::fopen(cand, "rb")) {
+                        std::fclose(f);
+                        found = 1;
+                        break;
+                    }
+                }
+            }
+            if (!e) break;
+            p = e + 1;
+        }
+    }
+    s_cached = found;
+    return found != 0;
+}
+
+// Resolve the production heal backend: GBARECOMP_HEAL_BACKEND = gcc | tcc |
+// auto (default auto). `auto` prefers gcc when a real toolchain is reachable
+// (the dev/release-quality producer), else the bundled, toolchain-free tcc.
+HealBackend resolve_backend() {
+    const char* be = std::getenv("GBARECOMP_HEAL_BACKEND");
+    if (be && be[0]) {
+        if (std::strcmp(be, "gcc") == 0) return HealBackend::Gcc;
+        if (std::strcmp(be, "tcc") == 0) return HealBackend::Tcc;
+        // anything else (incl. "auto") → auto-resolve below
+    }
+    return gcc_toolchain_available() ? HealBackend::Gcc : HealBackend::Tcc;
+}
 
 // ── Region resolution: the immutable code image a PC lives in ──────
 bool region_bytes(uint32_t pc, const uint8_t** bytes, std::size_t* size,
@@ -151,6 +184,7 @@ void fill_callbacks() {
     g_callbacks.runtime_insn_trace = &g_runtime_insn_trace;
     g_callbacks.runtime_cycles     = &g_runtime_cycles;
     g_callbacks.runtime_break_pc   = &g_runtime_break_pc;
+    g_callbacks.runtime_fn_entry_hook = &g_runtime_fn_entry_hook;
 
     g_callbacks.bus_read_u32  = bus_read_u32;
     g_callbacks.bus_read_u16  = bus_read_u16;
@@ -199,6 +233,10 @@ void fill_callbacks() {
 }
 
 // ── Worker thread ──────────────────────────────────────────────────
+// The game thread NEVER compiles. Every miss hands the immutable region to the
+// worker, which emits the overlay C and runs the resolved compiler (gcc or
+// tcc) to a cached DLL; the game thread installs it into g_healed at a frame
+// boundary (overlay_drain_ready). Keeps the 60 fps loop + audio stall-free.
 void worker_main() {
     for (;;) {
         OverlayWorkItem w;
@@ -212,46 +250,21 @@ void worker_main() {
 
         ReadyEntry r;
         r.key = heal_key(w.pc, w.thumb);
-        if (s_use_sljit) {
-            // In-process JIT, now OFF the game thread. Pure codegen from the
-            // immutable region bytes (decode + emit); the result is installed
-            // into g_healed by the game thread in overlay_drain_ready.
-            void (*fn)(void) = nullptr; void* code = nullptr;
-            uint32_t end = 0; bool leaf = false;
-            {
-                std::lock_guard<std::mutex> cg(s_sljit_codegen_mtx);
-                r.ok = overlay_sljit_produce(w.pc, w.thumb, w.bytes, w.size,
-                                             w.base, &fn, &code, &end, &leaf);
-            }
-            if (r.ok) {
-                r.sljit = true; r.leaf = leaf;
-                r.c.pc = w.pc; r.c.thumb = w.thumb;
-                r.c.fn = fn; r.c.module = code; r.c.end = end; r.c.crc = 0;
-                std::fprintf(stderr,
-                    "self_heal: HEALED 0x%08X (%s) -> sljit native [0x%08X,0x%08X) "
-                    "(async, worker thread); interpreter bridge stops for this PC.\n",
-                    w.pc, w.thumb ? "thumb" : "arm", w.pc, end);
-            } else {
-                std::fprintf(stderr,
-                    "self_heal: sljit DECLINED 0x%08X (%s) — interp bridge "
-                    "(emitter gap; precision over recall).\n",
-                    w.pc, w.thumb ? "thumb" : "arm");
-            }
+        std::string err;
+        r.ok = overlay_compile_one(w, s_active_cache_dir, &g_callbacks,
+                                   /*compile_if_missing=*/true, s_backend,
+                                   &r.c, &err);
+        if (r.ok) {
+            std::fprintf(stderr,
+                "self_heal: HEALED 0x%08X (%s) -> native via %s (crc=%08X, "
+                "[0x%08X,0x%08X)); the interpreter bridge stops for this PC.\n",
+                w.pc, w.thumb ? "thumb" : "arm", heal_backend_name(s_backend),
+                r.c.crc, w.pc, r.c.end);
         } else {
-            std::string err;
-            r.ok = overlay_compile_one(w, s_cache_dir, &g_callbacks,
-                                       /*compile_if_missing=*/true, &r.c, &err);
-            if (r.ok) {
-                std::fprintf(stderr,
-                    "self_heal: HEALED 0x%08X (%s) -> native (crc=%08X, "
-                    "[0x%08X,0x%08X)); the interpreter bridge stops for this PC.\n",
-                    w.pc, w.thumb ? "thumb" : "arm", r.c.crc, w.pc, r.c.end);
-            } else {
-                std::fprintf(stderr,
-                    "self_heal: compile FAILED for 0x%08X (%s): %s — staying on the "
-                    "interpreter bridge this session.\n",
-                    w.pc, w.thumb ? "thumb" : "arm", err.c_str());
-            }
+            std::fprintf(stderr,
+                "self_heal: compile FAILED for 0x%08X (%s): %s — staying on the "
+                "interpreter bridge this session.\n",
+                w.pc, w.thumb ? "thumb" : "arm", err.c_str());
         }
 
         {
@@ -262,22 +275,17 @@ void worker_main() {
     }
 }
 
-bool env_truthy(const char* name) {
-    const char* v = std::getenv(name);
-    if (!v || !v[0]) return false;
-    return !(std::strcmp(v, "0") == 0 || std::strcmp(v, "false") == 0 ||
-             std::strcmp(v, "off") == 0);
-}
-
-// Warm-load every cached DLL for this image (load-only: never compiles at
-// startup). Filenames are "<pc:08X>_<crc:08X>_<a|t>.dll"; we recover (pc, mode)
-// and let overlay_compile_one re-derive the extent + validate the CRC.
-int warm_load_cache() {
+// Warm-load every cached DLL in `dir` (load-only: never compiles at startup).
+// Filenames are "<pc:08X>_<crc:08X>_<a|t>.dll"; we recover (pc, mode) and let
+// overlay_compile_one re-derive the extent + validate the CRC. `seen` dedups
+// across the gcc and tcc namespaces so the higher-priority one (scanned first)
+// wins — consumption is producer-blind.
+int warm_load_cache_dir(const std::string& dir, HealBackend backend,
+                        std::unordered_set<uint64_t>& seen) {
     std::error_code ec;
-    if (!fs::exists(s_cache_dir, ec)) return 0;
+    if (!fs::exists(dir, ec)) return 0;
     int loaded = 0;
-    std::unordered_set<uint64_t> seen;
-    for (const auto& de : fs::directory_iterator(s_cache_dir, ec)) {
+    for (const auto& de : fs::directory_iterator(dir, ec)) {
         if (ec) break;
         if (!de.is_regular_file()) continue;
         const std::string fn = de.path().filename().string();
@@ -290,7 +298,7 @@ int warm_load_cache() {
             static_cast<uint32_t>(std::strtoul(fn.substr(0, 8).c_str(), nullptr, 16));
         const bool thumb = (mode == 't');
         const uint64_t key = heal_key(pc, thumb);
-        if (!seen.insert(key).second) continue;
+        if (!seen.insert(key).second) continue;  // already covered (gcc wins)
 
         OverlayWorkItem w;
         w.pc = pc;
@@ -299,8 +307,8 @@ int warm_load_cache() {
 
         OverlayCompiled c;
         std::string err;
-        if (overlay_compile_one(w, s_cache_dir, &g_callbacks,
-                                /*compile_if_missing=*/false, &c, &err)) {
+        if (overlay_compile_one(w, dir, &g_callbacks,
+                                /*compile_if_missing=*/false, backend, &c, &err)) {
             HealedEntry h;
             h.addr = pc; h.thumb = thumb; h.fn = c.fn; h.module = c.module;
             h.crc = c.crc; h.end = c.end;
@@ -311,21 +319,27 @@ int warm_load_cache() {
     return loaded;
 }
 
-}  // namespace
+// Warm-load both producer namespaces, gcc first so a shipped gcc DLL supersedes
+// a player's local tcc shard for the same function (gcc > tcc consumption).
+int warm_load_cache() {
+    std::unordered_set<uint64_t> seen;
+    int loaded = 0;
+    loaded += warm_load_cache_dir(cache_dir_for(HealBackend::Gcc),
+                                  HealBackend::Gcc, seen);
+    loaded += warm_load_cache_dir(cache_dir_for(HealBackend::Tcc),
+                                  HealBackend::Tcc, seen);
+    return loaded;
+}
 
-// sljit persistence helpers (defined after register_sljit_heal, used by
-// overlay_loader_init + overlay_request_compile above it).
-static void persist_sljit_shard(uint32_t pc, bool thumb);
-static int  warm_load_sljit_manifest();
+}  // namespace
 
 void overlay_loader_init(const std::string& cache_root,
                          const std::string& image_sha1,
                          const gba::GbaBios* bios) {
-    // Self-improving native healing is ON by default (toolchain-less sljit
-    // backend) so released games heal interpreter misses to native AND persist
-    // them across launches — interpreted once ever per path, native thereafter.
-    // Opt out for pure-interpreter runs (oracle diff / cycle-accurate trace) with
-    // GBARECOMP_SELFHEAL_RECOMPILE=0.
+    // Self-improving native healing is ON by default so released games heal
+    // interpreter misses to native AND persist them across launches (the cached
+    // DLLs warm-load next session). Opt out for pure-interpreter runs (oracle
+    // diff / cycle-accurate trace) with GBARECOMP_SELFHEAL_RECOMPILE=0.
     const char* sh_env = std::getenv("GBARECOMP_SELFHEAL_RECOMPILE");
     const bool sh_off = sh_env && (std::strcmp(sh_env, "0") == 0 ||
                                    std::strcmp(sh_env, "false") == 0 ||
@@ -343,11 +357,13 @@ void overlay_loader_init(const std::string& cache_root,
         (root_env && root_env[0]) ? root_env
                                   : (cache_root.empty() ? "recomp_cache"
                                                         : cache_root);
-    s_cache_dir = (fs::path(root) / image_sha1).string();
+    s_cache_base = (fs::path(root) / image_sha1).string();
+
+    // Resolve the producer (env > auto) and create its namespaced cache dir.
+    s_backend = resolve_backend();
+    s_active_cache_dir = cache_dir_for(s_backend);
     std::error_code ec;
-    fs::create_directories(s_cache_dir, ec);
-    s_sljit_manifest = (fs::path(s_cache_dir) / "sljit_shards.txt").string();
-    s_persisted.clear();
+    fs::create_directories(s_active_cache_dir, ec);
 
     // Snapshot the 16 KB BIOS as the immutable code image for BIOS heals.
     s_bios_bytes.clear();
@@ -362,34 +378,12 @@ void overlay_loader_init(const std::string& cache_root,
     s_active = true;
     s_ever_active = true;  // sticky: survives shutdown for the exit report
 
-    // Production backend: sljit (in-process, toolchain-less) is the DEFAULT —
-    // no compiler needed on the player's machine, and shards persist via the
-    // re-JIT manifest. Opt into the gcc DLL backend with GBARECOMP_HEAL_BACKEND=gcc
-    // (needs a toolchain; produces persisted DLLs instead).
-    {
-        const char* be = std::getenv("GBARECOMP_HEAL_BACKEND");
-        s_use_sljit = !(be != nullptr && std::strcmp(be, "gcc") == 0);
-        const char* hs = std::getenv("GBARECOMP_HEAL_SYNC");
-        s_heal_sync = (hs != nullptr && hs[0] && hs[0] != '0');
-        if (s_heal_sync)
-            std::printf("self_heal: WARNING GBARECOMP_HEAL_SYNC=1 — synchronous "
-                        "game-thread sljit heal (debug A/B; reintroduces stalls)\n");
-        const char* fh = std::getenv("GBARECOMP_SLJIT_FORCE_HEAL");
-        s_force_heal_limit = fh ? static_cast<unsigned>(std::strtoul(fh, nullptr, 10)) : 0u;
-        if (s_force_heal_limit && s_use_sljit)
-            std::printf("self_heal: FORCE-HEAL demo armed for up to %u functions\n",
-                        s_force_heal_limit);
-    }
-
     int warm = warm_load_cache();
-    // sljit shards persist as a re-JIT manifest (no DLLs); re-JIT them now so a
-    // previously-played game is native from launch.
-    if (s_use_sljit) warm += warm_load_sljit_manifest();
     s_stop.store(false);
     s_worker = std::thread(worker_main);
 
     std::printf("self_heal_recompile=ENABLED backend=%s cache=\"%s\" warm_loaded=%d\n",
-                s_use_sljit ? "sljit" : "gcc", s_cache_dir.c_str(), warm);
+                heal_backend_name(s_backend), s_active_cache_dir.c_str(), warm);
 }
 
 void overlay_loader_shutdown() {
@@ -402,81 +396,6 @@ void overlay_loader_shutdown() {
     // them at exit. Drain any last results so counters/banner are accurate.
     overlay_drain_ready();
     s_active = false;
-}
-
-// Produce + register an sljit shard for (pc, thumb) into g_healed (the caller
-// has already resolved region_bytes + dedup). Returns false if the emitter
-// declines. Internal-linkage so overlay_should_force_miss can call it too.
-static bool register_sljit_heal(uint32_t pc, bool thumb, const uint8_t* bytes,
-                                std::size_t size, uint32_t base, const char* tag) {
-    void (*fn)(void) = nullptr;
-    void* code = nullptr;
-    uint32_t end = 0;
-    bool leaf = false;
-    {
-        // Serialize against the worker thread's codegen (allocator safety).
-        std::lock_guard<std::mutex> cg(s_sljit_codegen_mtx);
-        // This runs on the GAME THREAD (sync/force/warm); time it so the
-        // regression is directly observable (see overlay_game_thread_compile_ns).
-        const auto t0 = std::chrono::steady_clock::now();
-        bool ok = overlay_sljit_produce(pc, thumb, bytes, size, base, &fn, &code, &end, &leaf);
-        const auto dt = std::chrono::steady_clock::now() - t0;
-        s_gt_compile_ns.fetch_add(
-            (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(dt).count(),
-            std::memory_order_relaxed);
-        if (!ok) return false;
-    }
-    HealedEntry h;
-    h.addr = pc; h.thumb = thumb; h.fn = fn; h.module = code;
-    h.end = end; h.sljit = true; h.leaf = leaf;
-    g_healed[heal_key(pc, thumb)] = h;
-    ++s_sljit_healed;
-    std::printf("self_heal: %s 0x%08X (%s) [0x%08X,0x%08X) — sljit native\n",
-                tag, pc, thumb ? "thumb" : "arm", pc, end);
-    return true;
-}
-
-// Append a successfully-healed sljit shard to the persistent manifest (once per
-// PC). Plain text "PPPPPPPP m\n" so it's diff-friendly + trivially re-read.
-static void persist_sljit_shard(uint32_t pc, bool thumb) {
-    if (s_sljit_manifest.empty()) return;
-    const uint64_t key = heal_key(pc, thumb);
-    if (!s_persisted.insert(key).second) return;  // already on disk
-    std::FILE* f = std::fopen(s_sljit_manifest.c_str(), "a");
-    if (!f) return;
-    std::fprintf(f, "%08X %c\n", pc, thumb ? 't' : 'a');
-    std::fclose(f);
-}
-
-// Warm start: re-JIT every shard recorded in the manifest so previously-healed
-// paths run native from the first launch onward (no interpreter bridge). Skips
-// entries already healed this session; declines/region-misses are dropped
-// silently (they'll re-heal on demand). Returns the count made native.
-static int warm_load_sljit_manifest() {
-    if (s_sljit_manifest.empty()) return 0;
-    std::FILE* f = std::fopen(s_sljit_manifest.c_str(), "r");
-    if (!f) return 0;
-    int loaded = 0;
-    char line[64];
-    while (std::fgets(line, sizeof(line), f)) {
-        unsigned pcv = 0;
-        char mode = 0;
-        if (std::sscanf(line, "%x %c", &pcv, &mode) != 2) continue;
-        if (mode != 'a' && mode != 't') continue;
-        const uint32_t pc = pcv & ~1u;
-        const bool thumb = (mode == 't');
-        const uint64_t key = heal_key(pc, thumb);
-        s_persisted.insert(key);  // it's already on disk; don't re-append
-        if (g_healed.count(key)) continue;
-        const uint8_t* bytes = nullptr;
-        std::size_t size = 0;
-        uint32_t base = 0;
-        if (!region_bytes(pc, &bytes, &size, &base)) continue;
-        if (register_sljit_heal(pc, thumb, bytes, size, base, "warm-sljit"))
-            ++loaded;
-    }
-    std::fclose(f);
-    return loaded;
 }
 
 void overlay_request_compile(uint32_t pc, bool thumb) {
@@ -496,24 +415,10 @@ void overlay_request_compile(uint32_t pc, bool thumb) {
         return;
     }
 
-    // Debug-only escape (GBARECOMP_HEAL_SYNC=1): the historical SYNCHRONOUS
-    // in-process sljit heal, on the game thread. Kept only for A/B measurement —
-    // it reintroduces the audio stall this change exists to remove.
-    if (s_use_sljit && s_heal_sync) {
-        if (register_sljit_heal(pc, thumb, bytes, size, base, "sljit-JIT'd(sync)"))
-            persist_sljit_shard(pc, thumb);
-        else {
-            s_failed.insert(key);
-            std::printf("self_heal: sljit DECLINED 0x%08X (%s) — interp bridge\n",
-                        pc, thumb ? "thumb" : "arm");
-        }
-        return;
-    }
-
-    // Production rule: the game thread NEVER compiles. Both backends (sljit
-    // in-process JIT and gcc DLL) hand the region to the worker thread; the game
-    // thread keeps interpreting this PC until the shard is installed at a frame
-    // boundary (overlay_drain_ready). First hit enqueues — it does not compile.
+    // Production rule: the game thread NEVER compiles. Hand the region to the
+    // worker thread; the game thread keeps interpreting this PC until the shard
+    // is installed at a frame boundary (overlay_drain_ready). First hit
+    // enqueues — it does not compile.
     OverlayWorkItem w;
     w.pc = pc; w.thumb = thumb;
     w.bytes = bytes; w.size = size; w.base = base;
@@ -541,16 +446,7 @@ void overlay_drain_ready() {
             HealedEntry h;
             h.addr = r.c.pc; h.thumb = r.c.thumb; h.fn = r.c.fn;
             h.module = r.c.module; h.crc = r.c.crc; h.end = r.c.end;
-            if (r.sljit) {
-                h.sljit = true; h.leaf = r.leaf;
-                ++s_sljit_healed;
-            }
             g_healed[r.key] = h;
-            if (r.sljit) {
-                // Persist so the NEXT launch re-JITs it up front (native from the
-                // start) — "interpreted once ever, then native forever."
-                persist_sljit_shard(r.c.pc, r.c.thumb);
-            }
         } else {
             s_failed.insert(r.key);
         }
@@ -565,7 +461,10 @@ bool overlay_query(uint32_t pc, bool thumb, uint64_t* native_calls) {
 }
 
 uint64_t overlay_game_thread_compile_ns() {
-    return s_gt_compile_ns.load(std::memory_order_relaxed);
+    // The game thread never compiles any more (both gcc and tcc run on the
+    // worker thread). Always 0 — kept so the coverage banner's stall metric
+    // stays wired and reads as a clean zero.
+    return 0;
 }
 
 void overlay_counters(uint64_t* healed_native, uint64_t* native_calls_total,
@@ -594,64 +493,8 @@ extern "C" int overlay_try_dispatch(uint32_t pc, int thumb) {
     if (it == gbarecomp::g_healed.end() || !it->second.fn) return 0;
     gbarecomp::HealedEntry& e = it->second;
 
-    // P6 differential gate (default off): for an sljit shard not yet promoted,
-    // run the interpreter pass (kept result) + validate the shard against it.
-    if (e.sljit && gbarecomp::sljit_gate::enabled()) {
-        switch (gbarecomp::sljit_gate::on_dispatch(pc, thumb != 0, e.leaf, e.fn)) {
-            case gbarecomp::sljit_gate::Decision::FallThrough:
-                return 0;  // pinned → the interpreter bridge runs it
-            case gbarecomp::sljit_gate::Decision::Handled:
-                return 1;  // gate already executed the function (via interp)
-            case gbarecomp::sljit_gate::Decision::RunBlind:
-                break;     // promoted / not gate-eligible → run native below
-        }
-    }
-
     ++e.native_calls;
     ++gbarecomp::s_native_calls_total;
     e.fn();
     return 1;
-}
-
-// Force-heal demo hook (off unless GBARECOMP_SLJIT_FORCE_HEAL=N): when it returns
-// 1, runtime_dispatch skips the static tables for this PC. We pick the first N
-// distinct, supported, dispatch-reached functions; each then misses → bridges
-// once through the interpreter → heals via sljit → runs as the JIT'd shard on
-// every subsequent hit. Zero cost when the demo is off (one branch). Game-thread
-// only (same as runtime_dispatch), so the sets need no locking.
-extern "C" int sljit_gate_is_validating();  // src/runtime/sljit_gate.cpp
-
-extern "C" int overlay_should_force_miss(uint32_t pc, int thumb_i) {
-    if (!gbarecomp::s_active || gbarecomp::s_force_heal_limit == 0) return 0;
-    // Never force-miss while the differential gate is re-running a shard: callees
-    // must serve their normal (static / already-healed) version there, matching
-    // what the gate's interpreter pass models. Force-missing a callee mid-
-    // validation heals it into a fresh sljit shard and perturbs the diff, which
-    // spuriously pins the parent (the SP/PC-wide divergences observed otherwise).
-    if (sljit_gate_is_validating()) return 0;
-    pc &= ~1u;
-    if (pc < 0x00004000u) return 0;  // never the BIOS (vectors/handlers are special)
-    const bool thumb = (thumb_i != 0);
-    const uint64_t key = gbarecomp::heal_key(pc, thumb);
-    if (gbarecomp::s_force_yes.count(key)) return 1;  // chosen → keep missing it
-    if (gbarecomp::s_force_no.count(key)) return 0;
-    if (gbarecomp::g_healed.count(key)) { gbarecomp::s_force_yes.insert(key); return 1; }
-    if (gbarecomp::s_force_yes.size() >= gbarecomp::s_force_heal_limit) return 0;
-
-    const uint8_t* bytes = nullptr;
-    std::size_t size = 0;
-    uint32_t base = 0;
-    if (!gbarecomp::region_bytes(pc, &bytes, &size, &base)) {
-        gbarecomp::s_force_no.insert(key);
-        return 0;
-    }
-    // Heal NOW and register the shard, so overlay_try_dispatch serves it on THIS
-    // hit — bypassing the interpreter bridge (whose stop-address contract does
-    // not fit a force-missed function and would otherwise run away).
-    if (gbarecomp::register_sljit_heal(pc, thumb, bytes, size, base, "FORCE-HEAL")) {
-        gbarecomp::s_force_yes.insert(key);
-        return 1;
-    }
-    gbarecomp::s_force_no.insert(key);
-    return 0;
 }

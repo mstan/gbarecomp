@@ -19,6 +19,19 @@
 
 namespace gbarecomp {
 
+// Which compiler turns the emitted overlay C into the cached DLL. Both produce
+// the SAME emitted source (overlay_emit makes it C-and-C++-clean) and the SAME
+// loadable artifact; they differ only in the toolchain and the cache namespace:
+//   * Gcc  — the dev default + release-quality producer. Needs a real g++ on the
+//            box; compiles the overlay as C++ (-x c++), optimized (-O2).
+//   * Tcc  — the bundled, toolchain-free producer for shipped player boxes.
+//            Self-contained (own linker + headers); compiles the overlay as C.
+// Consumption is producer-blind (the loader scans both cache namespaces, gcc
+// first), so a shipped gcc DLL supersedes a player's local tcc shard.
+enum class HealBackend { Gcc, Tcc };
+
+const char* heal_backend_name(HealBackend b);
+
 // One unit of self-heal work: the entry PC + ISA, plus the contiguous code
 // image it lives in. `bytes[guest_addr - base]` is the byte at guest_addr;
 // the image is immutable for the run (cart ROM or a BIOS snapshot), so the
@@ -49,10 +62,17 @@ struct OverlayCompiled {
 // On a successful load: ABI-gate the DLL, call its overlay_init(cb), resolve
 // func_<pc>, fill *out, return true. On any failure: return false and set
 // *err (the caller logs it loudly and stays on the interpreter bridge).
+//
+// `backend` selects the compiler used when compile_if_missing actually builds;
+// it is irrelevant on the load-only path (a DLL on disk loads the same way
+// whoever produced it). The caller passes the cache_dir already namespaced for
+// that backend (recomp_cache/<sha1>/<gcc|tcc>/<os-arch>), so the filename keys
+// stay producer-local.
 bool overlay_compile_one(const OverlayWorkItem& w,
                          const std::string& cache_dir,
                          const GbaOverlayCallbacks* cb,
                          bool compile_if_missing,
+                         HealBackend backend,
                          OverlayCompiled* out,
                          std::string* err);
 

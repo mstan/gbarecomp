@@ -198,11 +198,6 @@ extern "C" int overlay_try_dispatch(uint32_t /*pc*/, int /*thumb*/) {
     return 0;
 }
 
-// Force-heal demo hook — never forces a miss under test.
-extern "C" int overlay_should_force_miss(uint32_t /*pc*/, int /*thumb*/) {
-    return 0;
-}
-
 extern "C" void runtime_unimplemented_op(const char* op_name,
                                           uint32_t pc) {
     codegen_test::g_unimplemented_called = true;
