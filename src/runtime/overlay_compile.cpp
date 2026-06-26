@@ -42,6 +42,15 @@ std::string exe_dir() {
     return "";
 }
 
+// True under GBARECOMP_HEAL_BACKEND=auto-no-gcc: simulate a shipped, source-less,
+// gcc-less player box ON a dev machine — force the bundled tcc + bundled include
+// even though the dev source + gcc are present. Mirrors psxrecomp's
+// OVERLAY_BACKEND_AUTO_NO_GCC. (resolve_backend() maps the same value to tcc.)
+bool heal_simulate_shipped() {
+    const char* be = std::getenv("GBARECOMP_HEAL_BACKEND");
+    return be && std::strcmp(be, "auto-no-gcc") == 0;
+}
+
 // The C++ compiler used to build overlay DLLs. The dev machine has msys2
 // mingw64 g++ on PATH at run time (the runtime exits 127 without it anyway);
 // GBARECOMP_HEAL_CXX overrides for non-default installs.
@@ -76,14 +85,19 @@ std::string tcc_path() {
 // include (beside the bundled tcc). Used by BOTH gcc and tcc, so the gcc shipped
 // path is fixed too. Returns a leading-space-prefixed flag string.
 std::string overlay_include_flags() {
+    const std::string ed = exe_dir();
+    const std::string bundled =
+        ed.empty() ? std::string()
+                   : " -I\"" + (fs::path(ed) / "overlay_toolchain" / "include")
+                                   .generic_string() + "\"";
+    // Shipped simulation: ignore the dev source, use the bundled headers.
+    if (heal_simulate_shipped() && !bundled.empty()) return bundled;
+
     const std::string src = GBARECOMP_SRC_DIR;
     std::error_code ec;
     if (fs::exists(fs::path(src) / "src" / "runtime" / "overlay_runtime_arm.h", ec))
         return " -I\"" + src + "/src/runtime\" -I\"" + src + "/src/armv4t\"";
-    const std::string ed = exe_dir();
-    if (!ed.empty())
-        return " -I\"" +
-               (fs::path(ed) / "overlay_toolchain" / "include").generic_string() + "\"";
+    if (!bundled.empty()) return bundled;
     return " -I\"" + src + "/src/runtime\" -I\"" + src + "/src/armv4t\"";  // last resort
 }
 

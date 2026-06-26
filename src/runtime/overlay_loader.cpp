@@ -149,6 +149,10 @@ HealBackend resolve_backend() {
     if (be && be[0]) {
         if (std::strcmp(be, "gcc") == 0) return HealBackend::Gcc;
         if (std::strcmp(be, "tcc") == 0) return HealBackend::Tcc;
+        // auto-no-gcc: pretend this is a toolchain-less player box even though
+        // gcc is present — force tcc + the bundled include (heal_simulate_shipped
+        // in overlay_compile.cpp). Mirrors psxrecomp's OVERLAY_BACKEND_AUTO_NO_GCC.
+        if (std::strcmp(be, "auto-no-gcc") == 0) return HealBackend::Tcc;
         // anything else (incl. "auto") → auto-resolve below
     }
     return gcc_toolchain_available() ? HealBackend::Gcc : HealBackend::Tcc;
