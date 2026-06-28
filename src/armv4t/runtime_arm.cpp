@@ -380,6 +380,27 @@ extern "C" uint32_t runtime_fp_save_tail_csv(const char* path, uint32_t n) {
     return n;
 }
 
+// Filter the insn-fingerprint ring by guest PC: collect up to `max_hits`
+// cumulative-cycle stamps (oldest-first) for every recorded execution of `pc`.
+// The Δ between consecutive returned stamps is the offset-cancelled cycle ruler
+// (Axis 2) peered against the NBA oracle's cyc_anchor. Non-mutating; requires
+// the ring armed (GBARECOMP_INSN_TRACE) — empty otherwise.
+extern "C" uint32_t runtime_fp_query_pc(uint32_t pc, uint32_t max_hits,
+                                        unsigned long long* out_cycles) {
+    if (!g_fp || g_fp_count == 0 || !out_cycles || max_hits == 0) return 0;
+    uint32_t start = (g_fp_write + kFpSize - g_fp_count) % kFpSize;
+    uint32_t found = 0;
+    for (uint32_t i = 0; i < g_fp_count && found < max_hits; ++i) {
+        const RuntimeFpEntry& e = g_fp[(start + i) % kFpSize];
+        if (e.pc == pc) out_cycles[found++] = e.cycles;
+    }
+    return found;
+}
+
+// Read-only current recompiled-CPU PC, for always-on observability taps that
+// live outside the armv4t lib (the gba_io MMIO write-trace ring).
+extern "C" uint32_t runtime_current_pc(void) { return g_cpu.R[15]; }
+
 // ── IRQ-vector log (MC-HP-002) ─────────────────────────────────────
 // A dedicated, always-on, cycle-stamped log of EVERY IRQ vectoring. The
 // general trace ring (4096) is diluted by mem-writes (thousands/frame) so it
@@ -391,8 +412,7 @@ extern "C" uint32_t runtime_fp_save_tail_csv(const char* path, uint32_t n) {
 // running immediate path. Dumped as CSV on exit when GBARECOMP_IRQ_LOG is set.
 namespace {
 constexpr uint32_t kIrqLogSize = 1u << 17;   // 131072 vectors (~32k+ frames)
-struct IrqLogEntry { unsigned long long cycles; uint32_t src; uint32_t ret;
-                     uint32_t cpsr; uint32_t from_halt; };
+using IrqLogEntry = RuntimeIrqLogEntry;       // public type (runtime_arm.h)
 IrqLogEntry* g_irq_log = nullptr;
 uint32_t     g_irq_log_write = 0;
 uint32_t     g_irq_log_count = 0;
@@ -402,13 +422,14 @@ uint32_t     g_irq_log_count = 0;
 extern "C" uint32_t g_runtime_irq_from_halt = 0;
 
 extern "C" void runtime_irq_log_record(uint32_t src, uint32_t ret, uint32_t cpsr) {
-    static int armed = -1;
-    if (armed < 0) armed = std::getenv("GBARECOMP_IRQ_LOG") ? 1 : 0;
-    if (!armed) return;
+    // Always-on ring (Release too): recording is unconditional so the live
+    // irq_cap TCP query always has the window of interest without arming. The
+    // env GBARECOMP_IRQ_LOG only governs the separate on-exit CSV dump. Purely
+    // additive bookkeeping — does not alter IRQ behavior.
     if (!g_irq_log) {
         g_irq_log = static_cast<IrqLogEntry*>(
             std::calloc(kIrqLogSize, sizeof(IrqLogEntry)));
-        if (!g_irq_log) { armed = 0; return; }
+        if (!g_irq_log) return;
     }
     IrqLogEntry& e = g_irq_log[g_irq_log_write];
     e.cycles = g_runtime_cycles;
@@ -433,6 +454,21 @@ extern "C" uint32_t runtime_irq_log_save_file(const char* path) {
     }
     std::fclose(f);
     return g_irq_log_count;
+}
+
+extern "C" uint32_t runtime_irq_log_count(void) { return g_irq_log_count; }
+
+// Copy the most recent `max` IRQ-vector entries (oldest-first within the
+// window) for the live irq_cap TCP query. Non-mutating.
+extern "C" uint32_t runtime_irq_log_copy_recent(RuntimeIrqLogEntry* out,
+                                                uint32_t max) {
+    if (!out || max == 0 || !g_irq_log || g_irq_log_count == 0) return 0;
+    if (max > g_irq_log_count) max = g_irq_log_count;
+    uint32_t start = (g_irq_log_write + kIrqLogSize - max) % kIrqLogSize;
+    for (uint32_t i = 0; i < max; ++i) {
+        out[i] = g_irq_log[(start + i) % kIrqLogSize];
+    }
+    return max;
 }
 
 // ── SWI log (MC-HP-002 milestone-PC sequence) ──────────────────────

@@ -237,6 +237,71 @@ void cmd_audio_samples(gba::GbaBus& bus, std::string_view req,
     out += "}";
 }
 
+// Always-on, non-destructive capture-ring query. Unlike audio_samples (which
+// drains the playback FIFO), this reads a [start,count] window of the capture
+// ring backward from the live head without consuming anything — the probe
+// queries history, it does not arm/drain (ring-buffer discipline). Params:
+//   "count"  : samples to return (default 8192, cap 65536)
+//   "start"  : absolute sample index (samples_generated numbering). If absent,
+//              returns the most recent `count` samples (start = head - count).
+// Emits the mixed mono stream + raw per-channel arrays as little-endian int16
+// hex so the drift comparator can isolate PSG channels for the bit-check.
+void cmd_audio_cap(gba::GbaBus& bus, std::string_view req, std::string& out) {
+    const auto& audio = bus.audio();
+    uint64_t count = 8192;
+    uint64_t parsed = 0;
+    if (extract_uint(req, "\"count\"", parsed) ||
+        extract_uint(req, "\"max\"", parsed)) {
+        count = parsed;
+    }
+    if (count > gba::GbaAudio::kCapRingSize) count = gba::GbaAudio::kCapRingSize;
+
+    uint64_t head = audio.samples_generated();
+    uint64_t oldest = audio.capture_oldest_index();
+    uint64_t start;
+    if (extract_uint(req, "\"start\"", parsed)) {
+        start = parsed;
+    } else {
+        start = (head > count) ? head - count : oldest;
+    }
+
+    std::vector<gba::GbaAudio::CapSample> buf(static_cast<std::size_t>(count));
+    uint64_t first = 0;
+    std::size_t n = audio.query_capture(start, buf.size(), buf.data(), first);
+
+    auto emit_i16 = [&](const char* key, auto pick) {
+        std::vector<uint8_t> bytes(n * 2);
+        for (std::size_t i = 0; i < n; ++i) {
+            uint16_t u = static_cast<uint16_t>(pick(buf[i]));
+            bytes[i * 2 + 0] = static_cast<uint8_t>(u & 0xFFu);
+            bytes[i * 2 + 1] = static_cast<uint8_t>((u >> 8) & 0xFFu);
+        }
+        out += ",\"";
+        out += key;
+        out += "\":";
+        json_emit_hex(out, bytes.data(), bytes.size());
+    };
+
+    char hdr[224];
+    std::snprintf(hdr, sizeof(hdr),
+                  "{\"ok\":true,\"rate\":%u,\"count\":%llu,\"first\":%llu,"
+                  "\"head\":%llu,\"oldest\":%llu",
+                  static_cast<unsigned>(audio.sample_rate()),
+                  static_cast<unsigned long long>(n),
+                  static_cast<unsigned long long>(first),
+                  static_cast<unsigned long long>(head),
+                  static_cast<unsigned long long>(oldest));
+    out = hdr;
+    emit_i16("mixed",    [](const gba::GbaAudio::CapSample& s){ return s.mixed; });
+    emit_i16("ch1",      [](const gba::GbaAudio::CapSample& s){ return s.ch[0]; });
+    emit_i16("ch2",      [](const gba::GbaAudio::CapSample& s){ return s.ch[1]; });
+    emit_i16("ch3",      [](const gba::GbaAudio::CapSample& s){ return s.ch[2]; });
+    emit_i16("ch4",      [](const gba::GbaAudio::CapSample& s){ return s.ch[3]; });
+    emit_i16("direct_a", [](const gba::GbaAudio::CapSample& s){ return s.direct_a; });
+    emit_i16("direct_b", [](const gba::GbaAudio::CapSample& s){ return s.direct_b; });
+    out += "}";
+}
+
 void append_fifo_state(std::string& out, const char* name,
                        const gba::GbaAudio::FifoDebugState& fifo) {
     char hdr[160];
@@ -370,6 +435,165 @@ void cmd_runtime_trace(const TcpDebugServer::Context& ctx,
         out += item;
     }
     out += "]}";
+}
+
+// ── Cycle-anchor sampler (Axis 2) ──────────────────────────────────────
+// {"cmd":"cyc_anchor","pc":P,"hits":H} -> {ok,pc,armed,fp_count,count,cyc:[...]}.
+// Filters the always-on insn-fingerprint ring by guest PC and returns the
+// cumulative g_runtime_cycles stamp of each execution. Consecutive-hit Δ is the
+// offset-cancelled cycle ruler peered against the NBA oracle's cyc_anchor.
+// armed=0 means GBARECOMP_INSN_TRACE is off (ring empty) — the recomp build with
+// the ring armed is where this returns live data; the bios_smoke interpreter
+// mirrors into its own local ring and leaves this (recomp) ring empty.
+void cmd_cyc_anchor(std::string_view req, std::string& out) {
+    uint64_t pc = 0;
+    if (!extract_uint(req, "\"pc\"", pc)) { emit_error(out, "missing pc"); return; }
+    uint64_t hits = 256, parsed = 0;
+    if (extract_uint(req, "\"hits\"", parsed) ||
+        extract_uint(req, "\"count\"", parsed) ||
+        extract_uint(req, "\"max\"", parsed)) {
+        hits = parsed;
+    }
+    if (hits > 65536) hits = 65536;
+    std::vector<unsigned long long> cyc(static_cast<std::size_t>(hits));
+    uint32_t n = runtime_fp_query_pc(static_cast<uint32_t>(pc),
+                                     static_cast<uint32_t>(hits), cyc.data());
+    char hdr[160];
+    std::snprintf(hdr, sizeof(hdr),
+                  "{\"ok\":true,\"pc\":%llu,\"armed\":%u,\"fp_count\":%u,"
+                  "\"count\":%u,\"cyc\":[",
+                  static_cast<unsigned long long>(pc),
+                  g_runtime_insn_trace ? 1u : 0u,
+                  runtime_fp_count(), n);
+    out = hdr;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (i) out += ',';
+        char b[24];
+        std::snprintf(b, sizeof(b), "%llu", cyc[i]);
+        out += b;
+    }
+    out += "]}";
+}
+
+// ── IRQ raise/take ring query (Axis 3) ─────────────────────────────────
+// {"cmd":"irq_cap","count":C} -> {ok,total,count,entries:[{cycle,src,ret,cpsr,
+// from_halt}...]}. Dumps the most recent N IRQ vectorings (TAKE-time) from the
+// always-on IRQ-vector ring. `src` is the active IE&IF source mask at the
+// vector; `from_halt` distinguishes the wake-from-HALT path. NOTE: raise-time
+// (the IF-set instant) is not separately recorded — take-time only (burndown
+// Axis-3 gap). Populated by runtime_irq in the recompiled runtime.
+void cmd_irq_cap(std::string_view req, std::string& out) {
+    uint64_t count = 256, parsed = 0;
+    if (extract_uint(req, "\"count\"", parsed) ||
+        extract_uint(req, "\"max\"", parsed)) {
+        count = parsed;
+    }
+    if (count > 65536) count = 65536;
+    std::vector<RuntimeIrqLogEntry> buf(static_cast<std::size_t>(count));
+    uint32_t n = runtime_irq_log_copy_recent(buf.data(),
+                                             static_cast<uint32_t>(count));
+    char hdr[96];
+    std::snprintf(hdr, sizeof(hdr),
+                  "{\"ok\":true,\"total\":%u,\"count\":%u,\"entries\":[",
+                  runtime_irq_log_count(), n);
+    out = hdr;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (i) out += ',';
+        char item[200];
+        std::snprintf(item, sizeof(item),
+                      "{\"cycle\":%llu,\"src\":%u,\"ret\":%u,\"cpsr\":%u,"
+                      "\"from_halt\":%u}",
+                      buf[i].cycles, buf[i].src, buf[i].ret, buf[i].cpsr,
+                      buf[i].from_halt);
+        out += item;
+    }
+    out += "]}";
+}
+
+// ── MMIO write-trace ring query (Axis 4) ───────────────────────────────
+// {"cmd":"mmio_cap","count":C,"start":S?} -> {ok,total,oldest,first,count,
+// entries:[{cycle,addr,value,size,pc}...]}. Non-destructive window query of the
+// always-on IO write-trace ring (gba_io.cpp). Default returns the most recent
+// `count` writes; `start` requests an absolute index window.
+void cmd_mmio_cap(std::string_view req, std::string& out) {
+    uint64_t count = 4096, parsed = 0;
+    if (extract_uint(req, "\"count\"", parsed) ||
+        extract_uint(req, "\"max\"", parsed)) {
+        count = parsed;
+    }
+    if (count > 65536) count = 65536;
+    uint64_t total  = gba::gba_mmio_cap_total();
+    uint64_t oldest = gba::gba_mmio_cap_oldest();
+    uint64_t start;
+    if (extract_uint(req, "\"start\"", parsed)) {
+        start = parsed;
+    } else {
+        start = (total > count) ? total - count : oldest;
+    }
+    std::vector<gba::MmioCapEntry> buf(static_cast<std::size_t>(count));
+    uint64_t first = 0;
+    std::size_t n = gba::gba_mmio_cap_query(start, buf.size(), buf.data(), first);
+    char hdr[176];
+    std::snprintf(hdr, sizeof(hdr),
+                  "{\"ok\":true,\"total\":%llu,\"oldest\":%llu,\"first\":%llu,"
+                  "\"count\":%llu,\"entries\":[",
+                  static_cast<unsigned long long>(total),
+                  static_cast<unsigned long long>(oldest),
+                  static_cast<unsigned long long>(first),
+                  static_cast<unsigned long long>(n));
+    out = hdr;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (i) out += ',';
+        char item[224];
+        std::snprintf(item, sizeof(item),
+                      "{\"cycle\":%llu,\"addr\":%llu,\"value\":%llu,\"size\":%u,"
+                      "\"pc\":%llu}",
+                      static_cast<unsigned long long>(buf[i].cycle),
+                      static_cast<unsigned long long>(buf[i].addr),
+                      static_cast<unsigned long long>(buf[i].value),
+                      buf[i].size,
+                      static_cast<unsigned long long>(buf[i].pc));
+        out += item;
+    }
+    out += "]}";
+}
+
+// ── Determinism hook (Axis 7) ──────────────────────────────────────────
+// {"cmd":"state_hash"} -> {ok,cycles,iwram,ewram,vram,pal,oam,hash}. A cheap
+// read-only FNV-1a-64 over IWRAM+EWRAM+VRAM+PAL+OAM plus g_runtime_cycles, so a
+// run-twice determinism probe can compare end-state in one call. Per-region
+// hashes localize a divergence.
+void cmd_state_hash(const TcpDebugServer::Context& ctx, std::string& out) {
+    if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
+    auto fnv = [](const uint8_t* p, std::size_t n) -> uint64_t {
+        uint64_t h = 1469598103934665603ull;
+        for (std::size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+        return h;
+    };
+    uint64_t iw = fnv(ctx.bus->iwram_ptr(), 32 * 1024);
+    uint64_t ew = fnv(ctx.bus->ewram_ptr(), 256 * 1024);
+    uint64_t vr = fnv(ctx.bus->vram_ptr(), 96 * 1024);
+    uint64_t pa = fnv(ctx.bus->pal_ptr(), 1024);
+    uint64_t oa = fnv(ctx.bus->oam_ptr(), 1024);
+    unsigned long long cyc = g_runtime_cycles;
+    uint64_t all = 1469598103934665603ull;
+    uint64_t parts[6] = { iw, ew, vr, pa, oa, static_cast<uint64_t>(cyc) };
+    for (int k = 0; k < 6; ++k) {
+        const uint8_t* b = reinterpret_cast<const uint8_t*>(&parts[k]);
+        for (int j = 0; j < 8; ++j) { all ^= b[j]; all *= 1099511628211ull; }
+    }
+    char buf[400];
+    std::snprintf(buf, sizeof(buf),
+                  "{\"ok\":true,\"cycles\":%llu,\"iwram\":\"%016llx\","
+                  "\"ewram\":\"%016llx\",\"vram\":\"%016llx\",\"pal\":\"%016llx\","
+                  "\"oam\":\"%016llx\",\"hash\":\"%016llx\"}",
+                  cyc, static_cast<unsigned long long>(iw),
+                  static_cast<unsigned long long>(ew),
+                  static_cast<unsigned long long>(vr),
+                  static_cast<unsigned long long>(pa),
+                  static_cast<unsigned long long>(oa),
+                  static_cast<unsigned long long>(all));
+    out = buf;
 }
 
 void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
@@ -670,6 +894,11 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         cmd_audio_samples(*ctx.bus, req, out);
         return;
     }
+    if (contains("\"audio_cap\"")) {
+        if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
+        cmd_audio_cap(*ctx.bus, req, out);
+        return;
+    }
     if (contains("\"audio_state\"")) {
         if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
         cmd_audio_state(*ctx.bus, out);
@@ -682,6 +911,22 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
     }
     if (contains("\"runtime_trace\"")) {
         cmd_runtime_trace(ctx, req, out);
+        return;
+    }
+    if (contains("\"cyc_anchor\"")) {
+        cmd_cyc_anchor(req, out);
+        return;
+    }
+    if (contains("\"irq_cap\"")) {
+        cmd_irq_cap(req, out);
+        return;
+    }
+    if (contains("\"mmio_cap\"")) {
+        cmd_mmio_cap(req, out);
+        return;
+    }
+    if (contains("\"state_hash\"")) {
+        cmd_state_hash(ctx, out);
         return;
     }
     if (contains("\"registers\"")) {

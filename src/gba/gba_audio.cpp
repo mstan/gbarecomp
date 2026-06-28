@@ -29,6 +29,7 @@ constexpr std::size_t kRingSize = 1u << 14;  // 16384 samples ~ 0.5 s
 
 GbaAudio::GbaAudio() {
     ring_.assign(kRingSize, 0);
+    cap_ring_.assign(kCapRingSize, CapSample{});
     reset();
 }
 GbaAudio::~GbaAudio() = default;
@@ -466,6 +467,31 @@ void GbaAudio::ring_push(int16_t s) {
     ++samples_generated_;
 }
 
+void GbaAudio::cap_push(const CapSample& s) {
+    // Indexed by the absolute sample number that ring_push is about to assign
+    // (samples_generated_ is bumped by ring_push immediately after). Keeping
+    // the two in lockstep means cap_ring_[idx % N] holds the same sample the
+    // playback FIFO received at absolute index idx.
+    cap_ring_[samples_generated_ % kCapRingSize] = s;
+}
+
+std::size_t GbaAudio::query_capture(uint64_t start, std::size_t count,
+                                    CapSample* out, uint64_t& out_first) const {
+    if (cap_ring_.empty() || count == 0) { out_first = start; return 0; }
+    uint64_t oldest = capture_oldest_index();
+    uint64_t head   = samples_generated_;          // one past newest
+    if (start < oldest) start = oldest;
+    if (start >= head) { out_first = start; return 0; }
+    uint64_t avail = head - start;
+    std::size_t n = count < avail ? count
+                                  : static_cast<std::size_t>(avail);
+    for (std::size_t i = 0; i < n; ++i) {
+        out[i] = cap_ring_[(start + i) % kCapRingSize];
+    }
+    out_first = start;
+    return n;
+}
+
 std::size_t GbaAudio::drain_samples(int16_t* out, std::size_t max) {
     std::size_t n = 0;
     while (n < max && ring_tail_ != ring_head_) {
@@ -598,7 +624,8 @@ void GbaAudio::sample_until_current_time() {
     }
 }
 
-int16_t GbaAudio::mix_one_sample(uint32_t direct_slot, bool include_direct) {
+int16_t GbaAudio::mix_one_sample(uint32_t direct_slot, bool include_direct,
+                                 ChannelTap* tap) {
     if (!master_enable_) return 0;
 
     // Per-channel contributions in the range [-15, +15]. Routing
@@ -859,6 +886,21 @@ int16_t GbaAudio::mix_one_sample(uint32_t direct_slot, bool include_direct) {
 
     if (out > 32767)  out = 32767;
     if (out < -32767) out = -32767;
+
+    if (tap) {
+        // Raw per-channel synthesis values for the always-on capture ring.
+        // ch[] are the pure PSG outputs in [-15,15] (deterministic from the
+        // IO write stream → bit-reproducible). direct_* are the raw FIFO DAC
+        // bytes for this slot ([-128,127]); zero when include_direct=false.
+        tap->ch[0] = static_cast<int16_t>(ch1_sample);
+        tap->ch[1] = static_cast<int16_t>(ch2_sample);
+        tap->ch[2] = static_cast<int16_t>(ch3_sample);
+        tap->ch[3] = static_cast<int16_t>(ch4_sample);
+        tap->direct_a = include_direct
+            ? static_cast<int16_t>(fifo_a_.samples[direct_slot]) : 0;
+        tap->direct_b = include_direct
+            ? static_cast<int16_t>(fifo_b_.samples[direct_slot]) : 0;
+    }
     return static_cast<int16_t>(out);
 }
 
@@ -891,6 +933,7 @@ void GbaAudio::configure_shadow(const std::vector<Mp2kSig>& sigs,
 
 void GbaAudio::run_sample_event() {
     uint32_t samples = samples_per_event();
+    CapSample caps[kMaxSamplesPerEvent] = {};
     while (sample_index_ < samples) {
         uint32_t slot = sample_index_;
         bool substitute = false;
@@ -913,7 +956,8 @@ void GbaAudio::run_sample_event() {
         }
         // When the shadow is proven-live, mix PSG-only canon + the shadow's
         // direct-sound render; otherwise the full canon mix (incl. FIFO).
-        int16_t s = mix_one_sample(slot, /*include_direct=*/!substitute);
+        ChannelTap tap;
+        int16_t s = mix_one_sample(slot, /*include_direct=*/!substitute, &tap);
         if (substitute) {
             // Shadow output is the bus float domain (full-scale FIFO DAC =
             // 0.25). kShadowOutputScale maps it to our int16 direct-sound
@@ -928,9 +972,19 @@ void GbaAudio::run_sample_event() {
             s = static_cast<int16_t>(o);
         }
         current_samples_[slot] = s;
+        caps[slot].mixed = s;
+        caps[slot].ch[0] = tap.ch[0];
+        caps[slot].ch[1] = tap.ch[1];
+        caps[slot].ch[2] = tap.ch[2];
+        caps[slot].ch[3] = tap.ch[3];
+        caps[slot].direct_a = tap.direct_a;
+        caps[slot].direct_b = tap.direct_b;
         ++sample_index_;
     }
     for (uint32_t i = 0; i < samples; ++i) {
+        // cap_push first (keyed by samples_generated_ pre-increment), then
+        // ring_push which bumps samples_generated_ — keeps the two aligned.
+        cap_push(caps[i]);
         ring_push(current_samples_[i]);
     }
     sample_index_ = 0;

@@ -136,6 +136,43 @@ by a `<rom>.stateN` file. The BIOS image and ROM bytes are not stored in
 the snapshot — they are reloaded and hash-verified at launch, and the
 ROM-SHA-1 gate guarantees the match.
 
+## Accuracy-burndown query commands (always-on rings)
+
+Live, non-destructive window queries peered against the NanoBoyAdvance oracle
+(:19844) for the 7-axis accuracy burndown. Each reads an always-on ring or live
+state — no arming, no pause/step (ring-buffer discipline).
+
+```
+cyc_anchor {pc, hits?}      mmio_cap {count?, start?}
+irq_cap {count?}            state_hash
+audio_cap {count?, start?}  (see audio section)
+```
+
+- `cyc_anchor {"pc":P,"hits":H}` → `{ok,pc,armed,fp_count,count,cyc:[...]}`
+  (Axis 2). Filters the always-on insn-fingerprint ring by guest PC, returning
+  the cumulative `g_runtime_cycles` stamp of each execution of `pc` (up to
+  `hits`, default 256). Consecutive-hit Δ is the offset-cancelled cycle ruler.
+  `armed`=0 means `GBARECOMP_INSN_TRACE` is off (the ring is the only always-on
+  per-instruction (pc,cycle) source) → empty `cyc`. Live data comes from the
+  recompiled runtime with the ring armed; the `bios_smoke` interpreter mirrors
+  into its own local ring and leaves this (recomp) ring empty.
+- `irq_cap {"count":C}` → `{ok,total,count,entries:[{cycle,src,ret,cpsr,
+  from_halt}...]}` (Axis 3). Most recent N IRQ vectorings (TAKE-time) from the
+  always-on IRQ-vector ring. `src` = active IE&IF mask; `from_halt` flags the
+  wake-from-HALT path. NOTE: raise-time (IF-set instant) is not separately
+  recorded — take-time only. Populated by `runtime_irq` (recompiled runtime).
+- `mmio_cap {"count":C,"start":S?}` → `{ok,total,oldest,first,count,
+  entries:[{cycle,addr,value,size,pc}...]}` (Axis 4). Window query of the
+  always-on IO write-trace ring (`gba_io.cpp`, 262144 entries). Default returns
+  the most recent `count` writes; `start` selects an absolute-index window. A
+  32-bit IO write is recorded as ONE size-4 entry (the internal write16 split is
+  suppressed). `cycle`/`pc` are recomp-runtime globals (meaningful in the
+  recompiled runtime; under the interpreter only addr/value/size are).
+- `state_hash` → `{ok,cycles,iwram,ewram,vram,pal,oam,hash}` (Axis 7). Cheap
+  read-only FNV-1a-64 over IWRAM+EWRAM+VRAM+PAL+OAM + `g_runtime_cycles`. The
+  run-twice determinism probe compares end-state in one call; per-region hashes
+  localize a divergence.
+
 ## Comparison & verification
 
 ```
