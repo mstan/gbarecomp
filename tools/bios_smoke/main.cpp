@@ -406,7 +406,7 @@ int main(int argc, char** argv) {
                          "bios_smoke: --window requested but this build has no SDL2\n");
             return 1;
         }
-        if (!win.open(args.scale, "gbarecomp — BIOS")) {
+        if (!win.open(args.scale, 240, 160, "gbarecomp — BIOS")) {
             return 1;
         }
         live_fb.assign(gba::GbaPpu::kFramebufferBytes, 0);

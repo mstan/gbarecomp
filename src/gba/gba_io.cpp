@@ -11,7 +11,55 @@
 #include "gba_ppu.h"
 #include "snapshot.h"
 
+// Always-on MMIO write-trace ring (Axis 4). File-local statics mirroring the
+// runtime_arm.cpp ring style; lazily allocated on the first write. The cycle and
+// pc stamps come from the recomp runtime globals (declared here to avoid pulling
+// the ArmCpuState layout into this lib).
+extern "C" unsigned long long g_runtime_cycles;
+extern "C" uint32_t runtime_current_pc(void);
+
 namespace gba {
+namespace {
+MmioCapEntry* g_mmio_ring  = nullptr;
+uint64_t      g_mmio_write = 0;      // total committed writes (monotonic)
+bool          g_mmio_split = false;  // suppress nested write16 from write32
+
+inline void mmio_cap_record(uint32_t addr, uint32_t value, uint32_t size) {
+    if (!g_mmio_ring) {
+        g_mmio_ring = static_cast<MmioCapEntry*>(
+            std::calloc(kMmioCapRingSize, sizeof(MmioCapEntry)));
+        if (!g_mmio_ring) return;
+    }
+    MmioCapEntry& e = g_mmio_ring[g_mmio_write % kMmioCapRingSize];
+    e.cycle = g_runtime_cycles;
+    e.addr  = addr;
+    e.value = value;
+    e.size  = size;
+    e.pc    = runtime_current_pc();
+    ++g_mmio_write;
+}
+}  // namespace
+
+uint64_t gba_mmio_cap_total()  { return g_mmio_write; }
+uint64_t gba_mmio_cap_oldest() {
+    return g_mmio_write > kMmioCapRingSize ? g_mmio_write - kMmioCapRingSize : 0;
+}
+std::size_t gba_mmio_cap_query(uint64_t start, std::size_t count,
+                               MmioCapEntry* out, uint64_t& out_first) {
+    out_first = start;
+    if (!g_mmio_ring || count == 0 || !out) return 0;
+    uint64_t oldest = gba_mmio_cap_oldest();
+    uint64_t head   = g_mmio_write;
+    if (start < oldest) start = oldest;
+    if (start >= head) { out_first = start; return 0; }
+    uint64_t avail = head - start;
+    if (count > avail) count = static_cast<std::size_t>(avail);
+    out_first = start;
+    for (std::size_t i = 0; i < count; ++i) {
+        out[i] = g_mmio_ring[(start + i) % kMmioCapRingSize];
+    }
+    return count;
+}
 
 void GbaIo::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     w.bytes(io_.data(), io_.size());
@@ -84,6 +132,24 @@ std::unordered_set<uint64_t>& warned_set() {
 }
 
 }  // namespace
+
+// GBATEK § "GBA DMA Transfers" timing: transferring `units` data units costs
+// read 1N+(units-1)S + write 1N+(units-1)S bus cycles, plus a ~2-cycle startup.
+// N/S come from the source/dest region wait-states (GbaBus::access_cycles). The
+// region is taken from the start addresses (DMA blocks stay within one region in
+// practice; FIFO dest is fixed in IO). This is the cycle the CPU is stalled.
+uint32_t GbaIo::dma_transfer_cost(uint32_t src, uint32_t dst, bool transfer_32,
+                                  uint32_t units) const {
+    if (!bus_ || units == 0) return 0;
+    uint8_t w = transfer_32 ? 4u : 2u;
+    uint32_t rN = bus_->access_cycles(src, w, false);
+    uint32_t rS = bus_->access_cycles(src, w, true);
+    uint32_t wN = bus_->access_cycles(dst, w, false);
+    uint32_t wS = bus_->access_cycles(dst, w, true);
+    uint32_t read  = rN + (units - 1u) * rS;
+    uint32_t write = wN + (units - 1u) * wS;
+    return read + write + 2u;
+}
 
 // Run a DMA channel in immediate mode.
 //
@@ -168,6 +234,9 @@ void GbaIo::run_immediate_dma(int channel) {
         step_addr(d, dest_ctrl);
     }
 
+    // DMA stole this many bus cycles from the CPU.
+    dma_steal_cycles_ += dma_transfer_cost(sad, dad, transfer_32, word_count);
+
     // Clear enable bit unless repeat is set (we don't model repeat
     // yet — for immediate mode it should be 0 in real ROMs anyway).
     if ((cnt_h & 0x0200u) == 0) {
@@ -209,6 +278,7 @@ void GbaIo::run_timed_dma(int start_mode) {
 
         uint32_t s = dma_next_source_[channel];
         uint32_t d = dma_next_dest_[channel];
+        dma_steal_cycles_ += dma_transfer_cost(s, d, transfer_32, word_count);
         for (uint32_t k = 0; k < word_count; ++k) {
             if (transfer_32) bus_->write32(d, bus_->read32(s));
             else             bus_->write16(d, bus_->read16(s));
@@ -260,6 +330,8 @@ void GbaIo::run_sound_fifo_dma(int channel) {
     ++dma_runs_[channel];
     dma_words_[channel] += 4;
 
+    // Sound-FIFO DMA is always 4 units of 32-bit; dest (FIFO) is fixed.
+    dma_steal_cycles_ += dma_transfer_cost(sad, dad, /*transfer_32=*/true, 4);
     uint32_t s = sad;
     for (int i = 0; i < 4; ++i) {
         bus_->write32(dad, bus_->read32(s));
@@ -342,6 +414,29 @@ uint32_t GbaIo::cycles_until_next_timer_event() const {
 void GbaIo::request_irq(uint16_t bit) {
     uint16_t old = load_u16(&io_[IoReg::IF]);
     store_u16(&io_[IoReg::IF], static_cast<uint16_t>(old | bit));
+}
+
+void GbaIo::tick_sio(uint32_t cycles) {
+    if (!sio_transfer_active_) return;
+    if (cycles < sio_cycles_remaining_) {
+        sio_cycles_remaining_ -= cycles;
+        return;
+    }
+    // Transfer complete.
+    sio_transfer_active_  = false;
+    sio_cycles_remaining_ = 0;
+    // Auto-clear the start/busy bit.
+    uint16_t cnt = load_u16(&io_[IoReg::SIOCNT]);
+    store_u16(&io_[IoReg::SIOCNT], static_cast<uint16_t>(cnt & ~0x0080u));
+    // With no connected partner the shift register reads back all-ones.
+    store_u32(&io_[IoReg::SIODATA32], 0xFFFFFFFFu);
+    // Serial IRQ on completion if enabled (SIOCNT bit 14).
+    if (cnt & 0x4000u) request_irq(IrqSerial);
+}
+
+uint32_t GbaIo::cycles_until_next_sio_event() const {
+    if (!sio_transfer_active_) return 0xFFFFFFFFu;
+    return sio_cycles_remaining_ ? sio_cycles_remaining_ : 1u;
 }
 
 void GbaIo::set_keyinput(uint16_t keys) {
@@ -441,6 +536,7 @@ uint32_t GbaIo::read32(uint32_t off) {
 
 void GbaIo::write8(uint32_t off, uint8_t v) {
     if (off >= kIoSize) { warn_unhandled(off, v, true, 1); return; }
+    mmio_cap_record(0x04000000u + off, v, 1);
     // Audio registers (0x060..0x0AF) go to the audio subsystem on
     // top of the backing-array store, so the channel state machines
     // see triggers / envelope reloads / length resets.
@@ -481,6 +577,7 @@ void GbaIo::write8(uint32_t off, uint8_t v) {
 
 void GbaIo::write16(uint32_t off, uint16_t v) {
     if (off + 1 >= kIoSize) { warn_unhandled(off, v, true, 2); return; }
+    if (!g_mmio_split) mmio_cap_record(0x04000000u + off, v, 2);
     if (audio_ && off >= 0x060 && off <= 0x0AF) {
         audio_->write_io16(off, v);
     }
@@ -510,6 +607,31 @@ void GbaIo::write16(uint32_t off, uint16_t v) {
             // SOUNDCNT_H reset bits (FIFO A/B clear) are write-only.
             store_u16(&io_[off], static_cast<uint16_t>(v & ~0x8800u));
             return;
+        case IoReg::SIOCNT: {
+            // SIO control. In Normal mode with the internal shift clock
+            // (bit 0 = 1), writing the start/busy bit (bit 7) kicks a
+            // transfer; on completion the bit auto-clears and — if bit 14
+            // (IRQ enable) is set — the Serial IRQ fires. Games (e.g. the
+            // Minish Cap) re-arm it from the handler to get a periodic IRQ.
+            // External-clock (slave) transfers never complete without a
+            // partner, so we don't arm those. (GBATEK § "SIO Normal Mode".)
+            uint16_t old = load_u16(&io_[off]);
+            store_u16(&io_[off], v);
+            bool start_edge    = (old & 0x0080u) == 0 && (v & 0x0080u) != 0;
+            bool internal_clk  = (v & 0x0001u) != 0;
+            if (start_edge && internal_clk && !sio_transfer_active_) {
+                // Transfer duration: bit 1 = 2 MHz(1)/256 KHz(0) clock,
+                // bit 12 = 32-bit(1)/8-bit(0). Cycle table matches GBATEK /
+                // the cycle-accurate reference: {256K·8b, 2M·8b, 256K·32b,
+                // 2M·32b} = {512, 64, 2048, 256}.
+                static constexpr uint32_t kSioCycles[4] = {512u, 64u, 2048u,
+                                                           256u};
+                uint32_t idx = ((v >> 1) & 1u) | ((v >> 11) & 2u);
+                sio_cycles_remaining_ = kSioCycles[idx];
+                sio_transfer_active_  = true;
+            }
+            return;
+        }
         default:
             break;
     }
@@ -565,6 +687,7 @@ void GbaIo::write16(uint32_t off, uint16_t v) {
 
 void GbaIo::write32(uint32_t off, uint32_t v) {
     if (off + 3 >= kIoSize) { warn_unhandled(off, v, true, 4); return; }
+    mmio_cap_record(0x04000000u + off, v, 4);
     if (audio_ && off >= 0x060 && off <= 0x0AF) {
         audio_->write_io32(off, v);
         if (off == 0x080) {
@@ -577,9 +700,13 @@ void GbaIo::write32(uint32_t off, uint32_t v) {
     }
     // 32-bit IO writes are routed as two 16-bit writes so the
     // per-register quirks (DISPSTAT mask, IF write-1-to-clear, etc.)
-    // apply consistently.
+    // apply consistently. Suppress the nested write16 MMIO-ring taps so the
+    // 32-bit access is recorded as ONE size-4 entry (peer to the oracle), not
+    // two size-2 sub-writes — the split is purely our internal decomposition.
+    g_mmio_split = true;
     write16(off, static_cast<uint16_t>(v & 0xFFFF));
     write16(off + 2, static_cast<uint16_t>((v >> 16) & 0xFFFF));
+    g_mmio_split = false;
 }
 
 }  // namespace gba

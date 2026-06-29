@@ -73,6 +73,35 @@ public:
     // Total samples generated since reset — useful for sync diff.
     uint64_t samples_generated() const { return samples_generated_; }
 
+    // ── Always-on, non-destructive audio capture ring (observability) ──
+    // The playback FIFO (ring_) is consume-once and is drained by BOTH the
+    // SDL host pump and the legacy audio_samples TCP cmd (they compete). THIS
+    // ring is never drained: it records every generated mixed sample plus the
+    // raw per-channel PSG ([-15,15]) and Direct-Sound FIFO ([-128,127])
+    // contributions, keyed by the absolute samples_generated_ index. Probes
+    // QUERY a [start,count] window backward from the live head — never arm,
+    // never drain (project ring-buffer discipline). Sample-generation is
+    // cycle-deterministic, so PSG channels are bit-reproducible across runs.
+    struct CapSample {
+        int16_t mixed = 0;     // final mono mixer output (what playback hears)
+        int16_t ch[4] = {};    // SOUND1..4 raw synthesis value, range [-15,15]
+        int16_t direct_a = 0;  // Direct-Sound FIFO A raw byte for this slot
+        int16_t direct_b = 0;  // Direct-Sound FIFO B raw byte for this slot
+    };
+    static constexpr std::size_t kCapRingSize = 1u << 18;  // 262144 (~8 s @32k)
+
+    // Earliest absolute sample index still retained in the capture ring.
+    uint64_t capture_oldest_index() const {
+        return samples_generated_ > kCapRingSize
+                   ? samples_generated_ - kCapRingSize
+                   : 0;
+    }
+    // Copy up to `count` capture samples starting at absolute index `start`
+    // (clamped into the retained window) into `out`. Returns the number
+    // copied; sets `out_first` to the absolute index of out[0]. Non-mutating.
+    std::size_t query_capture(uint64_t start, std::size_t count,
+                              CapSample* out, uint64_t& out_first) const;
+
     struct FifoDebugState {
         uint8_t write = 0;
         uint8_t read = 0;
@@ -262,6 +291,11 @@ private:
     std::size_t ring_head_ = 0;
     std::size_t ring_tail_ = 0;
     uint64_t    samples_generated_ = 0;
+
+    // Always-on capture ring (see CapSample / query_capture above). Indexed
+    // by (absolute sample index % kCapRingSize). Allocated lazily on reset.
+    std::vector<CapSample> cap_ring_;
+    void cap_push(const CapSample& s);
     int16_t current_samples_[kMaxSamplesPerEvent] = {};
     uint32_t sample_index_ = 0;
     FifoTrace trace_[kFifoTraceSize] = {};
@@ -284,7 +318,15 @@ private:
     void ch4_trigger();
     // include_direct=false omits the Direct Sound FIFO contribution (PSG
     // only) — used when the MP2K shadow substitutes the direct-sound mix.
-    int16_t mix_one_sample(uint32_t direct_slot, bool include_direct = true);
+    // `tap`, if non-null, receives the raw per-channel breakdown for the
+    // always-on capture ring (does not affect the returned mixed sample).
+    struct ChannelTap {
+        int16_t ch[4] = {};
+        int16_t direct_a = 0;
+        int16_t direct_b = 0;
+    };
+    int16_t mix_one_sample(uint32_t direct_slot, bool include_direct = true,
+                           ChannelTap* tap = nullptr);
 
     // ── MP2K HLE shadow (verified-enhancement; default off) ──────
     Mp2kShadow shadow_{};

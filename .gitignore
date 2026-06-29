@@ -76,3 +76,4 @@ oracle/trace_out/
 recomp_coverage*.json
 recomp_master_misses*.toml.frag
 hang_trace.csv
+recomp_cache/

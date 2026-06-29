@@ -186,6 +186,22 @@ uint32_t runtime_fp_save_file(const char* path);
 // execution history leading into a freeze is on disk with no live interaction
 // (n==0 → whole ring). Requires GBARECOMP_INSN_TRACE armed. Returns records.
 uint32_t runtime_fp_save_tail_csv(const char* path, uint32_t n);
+// Cycle-anchor sampler (Axis 2 — accuracy burndown): filter the always-on
+// insn-fingerprint ring by guest PC, writing up to `max_hits` cumulative
+// g_runtime_cycles stamps (oldest-first) for every recorded execution of `pc`
+// into `out_cycles`. Returns the number written. The Δ between consecutive hits
+// is the offset-cancelled cycle "ruler" peer to the NBA oracle's cyc_anchor.
+// Requires GBARECOMP_INSN_TRACE armed (the ring is the only always-on
+// per-instruction (pc,cycle) source); returns 0 when the ring is empty.
+uint32_t runtime_fp_query_pc(uint32_t pc, uint32_t max_hits,
+                             unsigned long long* out_cycles);
+
+// Current recompiled-CPU guest PC (g_cpu.R[15]). Read-only accessor exposed so
+// always-on observability taps outside the armv4t lib (e.g. the gba_io MMIO
+// write-trace ring) can stamp the originating PC without coupling to the
+// ArmCpuState layout. Reflects the recomp register file (meaningful in the
+// recompiled runtime; the bios_smoke interpreter drives its own CPUState).
+uint32_t runtime_current_pc(void);
 
 // ── Function-entry hook (general debug observability) ──────────────────
 // When g_runtime_fn_entry_hook != nullptr the generated function prologue
@@ -217,6 +233,22 @@ extern uint32_t g_runtime_resume_pc;
 void runtime_irq_log_record(uint32_t src, uint32_t ret, uint32_t cpsr);
 uint32_t runtime_irq_log_save_file(const char* path);
 extern uint32_t g_runtime_irq_from_halt;
+// Live TCP query peer of the IRQ-vector log (Axis 3 — accuracy burndown). The
+// ring records the IRQ TAKE point (vectoring): cycle stamp, active source mask
+// (IE & IF), return address, saved CPSR, and the from-HALT flag. Raise-time (the
+// IF-set instant) is NOT separately recorded — this is take-time only; that gap
+// is noted in the burndown. Recording is always-on (Release too); the env
+// GBARECOMP_IRQ_LOG only governs the on-exit CSV dump.
+typedef struct RuntimeIrqLogEntry {
+    unsigned long long cycles;
+    uint32_t src;
+    uint32_t ret;
+    uint32_t cpsr;
+    uint32_t from_halt;
+} RuntimeIrqLogEntry;
+// Copy the most recent `max` IRQ-vector entries (oldest-first) into `out`.
+uint32_t runtime_irq_log_copy_recent(RuntimeIrqLogEntry* out, uint32_t max);
+uint32_t runtime_irq_log_count(void);
 // SWI log (milestone-PC sequence): every SWI with cycle + caller + r0/r1 +
 // BIOS IntrWait flags (0x03007FF8). Armed by env GBARECOMP_SWI_LOG.
 void runtime_swi_log_record(uint32_t imm, uint32_t ret, uint32_t r0,

@@ -443,7 +443,18 @@ extern "C" uint32_t runtime_mul_cycles(uint32_t rs_value,
 // and raising IRQ-pending bits (IF) as events occur — but WITHOUT taking the
 // IRQ. Shared by runtime_tick's normal path and the wake-from-HALT latency
 // pump, so the delay window ticks devices identically without re-vectoring.
+// True while inside tick_devices. Timed/FIFO DMA fires from here and accumulates
+// its stolen cycles in GbaIo; the drain (which itself ticks devices) must run
+// OUTSIDE this window to avoid re-entrancy — this guard makes that explicit.
+static bool g_in_device_tick = false;
+struct DeviceTickGuard {
+    bool prev;
+    DeviceTickGuard() : prev(g_in_device_tick) { g_in_device_tick = true; }
+    ~DeviceTickGuard() { g_in_device_tick = prev; }
+};
+
 static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
+    DeviceTickGuard _dtg;
     // Stage 2: materializing device state can raise IF, advance the PPU phase,
     // run timed DMA into watched RAM, etc. Any of these can change a polled
     // value or the timing rules, so it disturbs an in-flight idle proof.
@@ -453,14 +464,17 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
         uint32_t chunk = remaining;
         uint32_t until_sample = bus->audio().cycles_until_next_sample();
         uint32_t until_timer = bus->io().cycles_until_next_timer_event();
+        uint32_t until_sio = bus->io().cycles_until_next_sio_event();
         uint32_t until_ppu = ppu->cycles_until_next_event();
         if (until_sample < chunk) chunk = until_sample;
         if (until_timer < chunk) chunk = until_timer;
+        if (until_sio < chunk) chunk = until_sio;
         if (until_ppu < chunk) chunk = until_ppu;
         if (chunk == 0) chunk = 1;
 
         bus->audio().tick(chunk);
         bus->io().tick_timers(chunk);
+        bus->io().tick_sio(chunk);
 
         uint16_t vc_compare = static_cast<uint16_t>(
             (bus->io().dispstat() >> 8) & 0xFFu);
@@ -523,10 +537,36 @@ static inline void recompute_event_budget(gba::GbaBus* bus, gba::GbaPpu* ppu) {
     uint32_t h  = ppu->cycles_until_next_event();
     uint32_t ut = bus->io().cycles_until_next_timer_event();
     uint32_t us = bus->audio().cycles_until_next_sample();
+    uint32_t usio = bus->io().cycles_until_next_sio_event();
     if (ut < h) h = ut;
     if (us < h) h = us;
+    if (usio < h) h = usio;
     if (h == 0u) h = 1u;
     g_event_budget = static_cast<long long>(h);
+}
+
+// Charge DMA-stolen bus cycles (accumulated by the GbaIo DMA loops) to the
+// master clock and advance devices for that window — i.e. model cycle-stealing.
+// Called OUTSIDE tick_devices (end of runtime_tick for timed/FIFO DMA; after a
+// guest write for immediate DMA), so its own tick_devices is not re-entrant.
+// Guarded against the (currently unreachable) in-tick case for safety.
+static inline void drain_dma_steal(gba::GbaBus* bus, gba::GbaPpu* ppu) {
+    if (!bus || !ppu) return;
+    uint32_t cyc = bus->io().take_dma_steal_cycles();
+    if (cyc == 0) return;
+    g_runtime_cycles += cyc;
+    if (g_in_device_tick) {
+        // Defensive: defer the device-advance into the pending window.
+        g_pending_cycles += cyc;
+        g_event_budget   -= static_cast<long long>(cyc);
+        return;
+    }
+    if (g_pending_cycles) {
+        tick_devices(bus, ppu, static_cast<uint32_t>(g_pending_cycles));
+        g_pending_cycles = 0;
+    }
+    tick_devices(bus, ppu, cyc);
+    recompute_event_budget(bus, ppu);
 }
 
 // Materialize lagged device state up to 'now'. Called before any MMIO access so
@@ -548,7 +588,11 @@ extern "C" void runtime_mmio_catch_up(void) {
 extern "C" void runtime_resync_horizon(void) {
     auto* bus = gbarecomp::g_active_bus;
     auto* ppu = gbarecomp::g_active_ppu;
-    if (bus && ppu) recompute_event_budget(bus, ppu);
+    if (!bus || !ppu) return;
+    // An immediate-mode DMA may have been triggered by the just-completed guest
+    // write; charge its stolen cycles before re-arming the horizon.
+    drain_dma_steal(bus, ppu);
+    recompute_event_budget(bus, ppu);
 }
 
 extern "C" void runtime_tick(uint32_t cycles) {
@@ -573,6 +617,11 @@ extern "C" void runtime_tick(uint32_t cycles) {
         g_pending_cycles = 0;
         recompute_event_budget(bus, ppu);
     }
+
+    // A timed/FIFO DMA may have fired inside that flush; charge its stolen bus
+    // cycles (advancing the clock + devices) before the IRQ-eligibility check,
+    // so a DMA-end IRQ or a timer that overflowed during the steal is seen now.
+    drain_dma_steal(bus, ppu);
 
     if (bus->io().irq_pending() && (g_cpu.cpsr & CPSR_I_BIT) == 0) {
         g_runtime_irq_from_halt = bus->io().halted() ? 1u : 0u;

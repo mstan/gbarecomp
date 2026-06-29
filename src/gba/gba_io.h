@@ -39,6 +39,27 @@ class GbaPpu;
 class GbaIrq;
 class GbaAudio;
 
+// ── Always-on MMIO write-trace ring (Axis 4 — accuracy burndown) ──────
+// A non-destructive, always-on ring recording every committed IO-register
+// write {cycle, addr, value, size, pc} so the mmio_cap TCP probe can QUERY a
+// [start,count] window without arming (ring-buffer discipline). The tap lives
+// at the GbaIo::write8/16/32 commit path and is zero-effect on write behavior.
+// cycle = g_runtime_cycles and pc = recomp g_cpu.R[15] (both meaningful in the
+// recompiled runtime; under the bios_smoke interpreter only addr/value/size are
+// meaningful — it drives its own CPUState and does not tick g_runtime_cycles).
+struct MmioCapEntry {
+    unsigned long long cycle;
+    uint32_t addr;
+    uint32_t value;
+    uint32_t size;   // 1, 2, or 4 bytes
+    uint32_t pc;
+};
+constexpr std::size_t kMmioCapRingSize = 1u << 18;  // 262144 writes
+uint64_t    gba_mmio_cap_total();    // total writes ever recorded (monotonic)
+uint64_t    gba_mmio_cap_oldest();   // earliest absolute index still retained
+std::size_t gba_mmio_cap_query(uint64_t start, std::size_t count,
+                               MmioCapEntry* out, uint64_t& out_first);
+
 // Documented IO register addresses (all relative to 0x04000000).
 namespace IoReg {
 constexpr uint32_t DISPCNT   = 0x000;  // u16
@@ -49,6 +70,8 @@ constexpr uint32_t BG1CNT    = 0x00A;
 constexpr uint32_t BG2CNT    = 0x00C;
 constexpr uint32_t BG3CNT    = 0x00E;
 constexpr uint32_t SOUNDBIAS = 0x088;  // u16
+constexpr uint32_t SIODATA32 = 0x120;  // u32 (also SIOMULTI0..3)
+constexpr uint32_t SIOCNT    = 0x128;  // u16 (SIO control)
 constexpr uint32_t IE        = 0x200;  // u16
 constexpr uint32_t IF        = 0x202;  // u16  (write-1-to-clear)
 constexpr uint32_t WAITCNT   = 0x204;  // u16
@@ -158,6 +181,24 @@ public:
     void tick_timers(uint32_t cycles);
     uint32_t cycles_until_next_timer_event() const;
 
+    // Advance an in-flight SIO (Normal-mode, internal-clock) transfer by CPU
+    // cycles. On completion the start/busy bit clears, the shift register
+    // reads back open-bus (no partner), and the Serial IRQ fires if enabled
+    // (SIOCNT bit 14). Games use this as a periodic interrupt source — the
+    // handler re-kicks the transfer. (GBATEK § "SIO Normal Mode".)
+    void tick_sio(uint32_t cycles);
+    uint32_t cycles_until_next_sio_event() const;
+
+    // DMA cycle-stealing: a DMA transfer steals bus cycles from the CPU. The
+    // DMA loops accumulate their GBATEK transfer cost here; the runtime drains
+    // it (charging the master clock + advancing devices) at a safe point. Read
+    // and reset in one call. (GBATEK § "GBA DMA Transfers" timing.)
+    uint32_t take_dma_steal_cycles() {
+        uint32_t c = dma_steal_cycles_;
+        dma_steal_cycles_ = 0;
+        return c;
+    }
+
     // Save-state serialization. Captures the 1 KB IO page, halt flag,
     // and timer/DMA shadow state. Live wiring (ppu_/irq_/bus_/audio_)
     // is NOT serialized — it stays connected across a restore. See
@@ -185,6 +226,18 @@ private:
     uint32_t timer_accum_[4] = {0, 0, 0, 0};
     uint32_t dma_next_source_[4] = {0, 0, 0, 0};
     uint32_t dma_next_dest_[4] = {0, 0, 0, 0};
+
+    // In-flight SIO Normal-mode transfer (internal clock). Armed by a
+    // start-bit rising edge written to SIOCNT; counts down to completion.
+    bool     sio_transfer_active_ = false;
+    uint32_t sio_cycles_remaining_ = 0;
+
+    // Accumulated DMA-stolen bus cycles awaiting charge to the master clock.
+    uint32_t dma_steal_cycles_ = 0;
+    // GBATEK transfer cost of `units` accesses src->dst (read 1N+(n-1)S +
+    // write 1N+(n-1)S + 2 startup I-cycles), N/S from the bus wait-states.
+    uint32_t dma_transfer_cost(uint32_t src, uint32_t dst, bool transfer_32,
+                               uint32_t units) const;
 
     // Log an unknown / unhandled IO access. Logs once per (offset,
     // direction, width) tuple to keep the output bounded under the
