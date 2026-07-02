@@ -1089,9 +1089,33 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
         std::vector<uint8_t> save_bytes = bus.save().flash_enabled()
             ? bus.save().flash_bytes() : bus.save().eeprom_bytes();
-        if (!write_file(args.save_path, save_bytes, &err)) {
+        // Atomic write: write a sibling temp file, then rename it over the
+        // target. A crash / kill mid-write can then only ever lose the temp
+        // file — the real save file is either the previous complete state or
+        // the new complete state, never a torn/half-written mix. This matters
+        // because we now flush periodically during play (see the loop), not
+        // just once on exit.
+        const std::string tmp = args.save_path + ".tmp";
+        if (!write_file(tmp, save_bytes, &err)) {
             std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
             return false;
+        }
+        std::error_code ec;
+        std::filesystem::rename(tmp, args.save_path, ec);  // REPLACE_EXISTING on NTFS/POSIX
+        if (ec) {
+            // Rare filesystems refuse atomic rename-over; fall back to
+            // remove-then-rename (a narrower non-atomic window, still far
+            // better than writing the target in place).
+            std::error_code ec2;
+            std::filesystem::remove(args.save_path, ec2);
+            std::filesystem::rename(tmp, args.save_path, ec2);
+            if (ec2) {
+                std::fprintf(stderr,
+                             "[gbarecomp:runtime] save rename failed: %s\n",
+                             ec2.message().c_str());
+                std::filesystem::remove(tmp, ec2);
+                return false;
+            }
         }
         bus.save().clear_dirty();
         if (!args.quiet) {
@@ -1741,6 +1765,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     const uint64_t headless_base_frame = ppu.frame_count();
 
     int dispatches_since_pump = 0;
+    // Battery-save auto-flush debounce (see the loop body). ~1 s at 59.7 Hz.
+    constexpr uint64_t kSaveFlushIntervalFrames = 60;
+    uint64_t save_last_flush_frame = ppu.frame_count();
     if (args.window) pump_host_input();
 
     for (int i = 0; i < step_budget && !host_quit; ++i) {
@@ -1810,6 +1837,22 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             if (fc_now != wram_last_traced) {
                 wram_last_traced = fc_now;
                 wram_trace_tick();
+            }
+        }
+        // Save resilience: flush the battery save to disk shortly AFTER the
+        // game writes it, not only on a clean exit. Without this, a crash or a
+        // forced kill loses the entire session's progress (hours, for an RPG);
+        // with it, at most ~1 s of save activity is at risk. Dirty-gated (idle
+        // play never writes) and debounced by frame count so a completed
+        // in-game save reaches disk within ~1 s and a multi-sector flash write
+        // isn't hammered every frame. flush_save() writes atomically and clears
+        // the dirty flag. Runs on the game/step thread in both windowed and
+        // headless loops; the separate TCP debug path keeps exit-only flush.
+        if (bus.save().dirty()) {
+            uint64_t fc_now = ppu.frame_count();
+            if (fc_now - save_last_flush_frame >= kSaveFlushIntervalFrames) {
+                flush_save();
+                save_last_flush_frame = fc_now;
             }
         }
         if (!args.window && args.frames >= 0 &&
