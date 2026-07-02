@@ -313,6 +313,26 @@ BankedSlot mode_to_bank(uint8_t m) {
     }
 }
 
+// Swap the R8..R12 FIQ/normal bank on a mode change, mirroring the runtime's
+// bank_out/bank_in (runtime_arm.cpp): the outgoing mode's live R8..R12 are
+// saved into r8_12_fiq (if leaving FIQ) or r8_12_user (otherwise), then the
+// incoming mode's are loaded from the matching bank. For a non-FIQ↔non-FIQ move
+// this round-trips R8..R12 unchanged but keeps r8_12_user synced to the live
+// normal bank — the invariant the recompiled backend maintains (bank_out/bank_in
+// run on every old_bank!=new_bank transition). Without it the interpreter left
+// r8_12_user stale (its own "we don't model the full banking matrix yet" gap),
+// which the cosim's cpu sub-hash caught with all mode-visible regs matching
+// (LP-006). Callers apply it wherever they bank R13/R14. enter_irq/enter_swi
+// (bios_smoke-only, not the cosim/self-heal path) still lack it — follow-up.
+void swap_r8_12_banks(CPUState& cpu, uint8_t old_mode, uint8_t new_mode) {
+    const bool old_fiq = old_mode == static_cast<uint8_t>(Mode::FIQ);
+    const bool new_fiq = new_mode == static_cast<uint8_t>(Mode::FIQ);
+    for (int i = 0; i < 5; ++i)
+        (old_fiq ? cpu.r8_12_fiq : cpu.r8_12_user)[i] = cpu.R[8 + i];
+    for (int i = 0; i < 5; ++i)
+        cpu.R[8 + i] = (new_fiq ? cpu.r8_12_fiq : cpu.r8_12_user)[i];
+}
+
 uint32_t read_user_reg(const CPUState& cpu, int reg) {
     if (reg < 8 || reg == 15) return cpu.R[reg];
     if (reg < 13) {
@@ -392,6 +412,7 @@ void exception_return(CPUState& cpu, uint32_t new_pc) {
     auto new_bank = mode_to_bank(new_mode);
     cpu.R[13] = cpu.banked_sp[new_bank];
     cpu.R[14] = cpu.banked_lr[new_bank];
+    swap_r8_12_banks(cpu, old_mode, new_mode);
 
     cpu.R[15] = new_pc;
 }
@@ -422,6 +443,7 @@ void restore_cpsr_from_spsr(CPUState& cpu) {
     auto new_bank = mode_to_bank(new_mode);
     cpu.R[13] = cpu.banked_sp[new_bank];
     cpu.R[14] = cpu.banked_lr[new_bank];
+    swap_r8_12_banks(cpu, old_mode, new_mode);
 }
 
 bool is_priv_non_system(uint8_t mode) {
@@ -1046,14 +1068,12 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
 
             uint32_t newv = (old & ~byte_mask) | (src & byte_mask);
 
-            // A mode change requires us to swap banked R13/R14/SPSR
-            // in and out. We don't model the full banking matrix
-            // yet (R8..R12 FIQ banking is also a thing); for the
-            // BIOS bring-up subset, the most common transition is
-            // SVC → System (no SP/LR swap because System shares
-            // User's bank). When we hit the FIQ case or any other
-            // bank-affecting move, this stub leaves stale R13/R14
-            // — to be tightened in the next iteration.
+            // A mode change swaps the banked R13/R14 (below) and the
+            // R8..R12 FIQ/normal bank (swap_r8_12_banks) in and out,
+            // matching the runtime's bank_out/bank_in. System↔SVC (the
+            // common BIOS transition) shares the User bank for R13/R14 so
+            // only r8_12_user is touched (kept synced to the live normal
+            // bank — the cosim cpu-subhash invariant, LP-006).
             uint8_t new_mode = static_cast<uint8_t>(newv & 0x1Fu);
             uint8_t old_mode = cpu.cpsr.mode;
             cpu.cpsr.n = (newv >> 31) & 1u;
@@ -1086,6 +1106,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
                     cpu.banked_lr[old_bank] = cpu.R[14];
                     cpu.R[13] = cpu.banked_sp[new_bank];
                     cpu.R[14] = cpu.banked_lr[new_bank];
+                    swap_r8_12_banks(cpu, old_mode, new_mode);
                 }
             }
             break;

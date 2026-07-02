@@ -259,13 +259,25 @@ reproduced, and we chose not to fix immediately. Not a TODO list.
 - **Priority:** low. **Architecturally benign** — `r8_12_user` is invisible
   outside FIQ and no FIQ occurs in this boot; no functional effect, only the
   cosim full-state hash catches it. But it is the exact next first-divergence.
-- **Next step:** trace when `r8_12_user[3]/[4]` is written in each backend
-  around cp1162 (the recomp `bank_out/bank_in` vs the interpreter's msr /
-  `write_user_reg`), decide the correct banking semantics for the non-FIQ
-  r8–12 shadow, and fix the wrong side (recompiler/runtime or the reference
-  interpreter — NOT a cosim-hash exclusion; the bank is real state). Same
-  discipline as LP-005: the interpreter is the reference model, but confirm
-  which side matches hardware banking before changing the reference.
+- **Root cause:** The recomp's `bank_out`/`bank_in` (`runtime_arm.cpp`) swap the
+  R8..R12 FIQ/normal bank on **every** `old_bank != new_bank` transition (for
+  non-FIQ moves this round-trips R8..R12 but writes `r8_12_user = R[8..12]`,
+  keeping the shadow synced to the live normal bank). Its generated `msr` /
+  `runtime_exception_return` therefore keep `r8_12_user` current across the
+  handler's System↔SVC switches → 0/0. The **interpreter** only swapped
+  R13/R14 at all five mode-switch sites (its acknowledged "we don't model the
+  full banking matrix yet" gap), so force-interp left `r8_12_user` stale at the
+  SWI-entry value (0x1f/0x9c3). The recomp is the complete side; the
+  interpreter (reference model) was incomplete — completing it is the fix.
+- **Resolved:** 2026-07-02. Added `swap_r8_12_banks()` in `interpreter.cpp`
+  (mirrors `bank_out`/`bank_in`) and applied it at the interpreter's step-path
+  mode-switch sites — `MSR`, `exception_return`, `restore_cpsr_from_spsr`.
+  `enter_irq`/`enter_swi` (bios_smoke-only, not the cosim/self-heal path)
+  deferred as a noted follow-up per constrain-surface-area. **Validated:** cosim
+  recomp-vs-interp now runs **fully clean** through cp1280 / frame ~298 (max
+  90M cycles), all 5 checkpoints identical chains, "no divergence within --max"
+  (was FIRST DIVERGENCE at cp1162). L1 codegen diff harness 128/128;
+  interpreter_smoke OK.
 - **Diagnostics added this session (kept, env-gated / always-on):**
   `cyc_probe()` + `g_tick_ctx` tags in `runtime_bus_bridge.cpp` /
   `runtime_arm_default_aborts.cpp` (log every master-clock advance in a
