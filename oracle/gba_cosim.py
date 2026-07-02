@@ -50,11 +50,16 @@ def tail_file(path, max_bytes=8192):
         return f"<could not read {path}: {e}>"
 
 
-def launch(mode, port, stride):
+def launch(mode, port, stride, start_cycle=0):
     os.makedirs(LOGDIR, exist_ok=True)
     env = dict(os.environ)
     env["GBA_COSIM_PORT"] = str(port)
     env["GBA_COSIM_STRIDE"] = str(stride)
+    if start_cycle:
+        # Free-run (no checkpoints/parking) until this master cycle, then begin
+        # fine-grained checkpointing — lets us drill a transient skew window without
+        # walking every checkpoint from boot.
+        env["GBA_COSIM_START_CYCLE"] = str(start_cycle)
     # Both backends must execute every instruction identically: DISABLE Stage-2
     # idle-loop elision (recomp would jump the clock while interp steps the loop,
     # desyncing device state at a labeled checkpoint) and Stage-1 heal-recompile.
@@ -166,15 +171,18 @@ def main():
     ap.add_argument("--portb", type=int, default=19851)
     ap.add_argument("--inject-at", type=int, default=0)
     ap.add_argument("--inject", default="")  # ram:<region>:<off>:<xor>  or  reg:<idx>:<xor>
+    ap.add_argument("--start-cycle", type=int, default=0,
+                    help="free-run to this master cycle before checkpointing (drill window)")
     args = ap.parse_args()
 
-    print(f"launch A={args.a}:{args.porta}  B={args.b}:{args.portb}  stride={args.stride}", flush=True)
-    pa = launch(args.a, args.porta, args.stride)
-    pb = launch(args.b, args.portb, args.stride)
+    print(f"launch A={args.a}:{args.porta}  B={args.b}:{args.portb}  "
+          f"stride={args.stride} start={args.start_cycle}", flush=True)
+    pa = launch(args.a, args.porta, args.stride, args.start_cycle)
+    pb = launch(args.b, args.portb, args.stride, args.start_cycle)
     try:
         sa = connect(args.porta); sb = connect(args.portb)
         ia, ib = wait_parked(sa, sb)
-        max_cp = args.max // args.stride
+        max_cp = max(1, (args.max - args.start_cycle) // args.stride)
         print(f"both up; stepping up to {max_cp} checkpoints (stride {args.stride})", flush=True)
         print(f"initial park A cycle {ia.get('cycle')} cp {ia.get('cp')}  "
               f"B cycle {ib.get('cycle')} cp {ib.get('cp')}", flush=True)

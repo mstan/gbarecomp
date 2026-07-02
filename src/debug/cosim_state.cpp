@@ -24,6 +24,14 @@
 #include <cstddef>
 #include <cstdint>
 
+// Materialize lazily-accumulated device cycles (g_pending_cycles) to the current
+// master clock, exactly as a guest IO read does (runtime_bus_bridge.cpp). Without
+// this, state_hash reads timer/PPU counters that lag by the unflushed cycles, and
+// two backends sitting at different lazy-flush boundaries diff spuriously. Fires no
+// new events (the budget already accounts for these cycles) — a pure read-
+// consistency op. See COSIM_ORACLE.md "reading parked state must be side-effect-free".
+extern "C" void runtime_mmio_catch_up(void);
+
 namespace gbarecomp::cosim {
 namespace {
 
@@ -85,6 +93,10 @@ void inject_reg(int reg_index, uint32_t xor_val) {
 }
 
 uint64_t state_hash(SubHashes* sub) {
+    // Flush lazily-lagged device state to the current master clock so timer/PPU
+    // reads are consistent across backends regardless of lazy-flush boundaries.
+    runtime_mmio_catch_up();
+
     SubHashes s;
     gba::GbaBus* bus = gbarecomp::active_bus();
     gba::GbaPpu* ppu = gbarecomp::active_ppu();
