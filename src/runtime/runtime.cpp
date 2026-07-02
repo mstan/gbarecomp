@@ -129,6 +129,12 @@ struct Args {
     // unimplemented SWIs fall back to LLE even when true. --bios-hle /
     // --no-bios-hle and GBARECOMP_BIOS_HLE override at launch. See bios_hle.h.
     bool bios_hle = false;
+    // [bios] hle_keep_intro = true|false — when HLE is on, KEEP the real
+    // recompiled BIOS boot intro (only HLE the SWIs) instead of skipping it.
+    // Default false: HLE mode also boot-skips (synthesizes the post-boot state
+    // and jumps to the cart). --bios-hle-keep-intro / GBARECOMP_BIOS_HLE_KEEP_INTRO
+    // override. Ignored when HLE is off (LLE always plays the real intro).
+    bool bios_hle_keep_intro = false;
     // --widescreen <N> / [video].widescreen: opt-in view-area expansion. N =
     // extra columns rendered per side (left & right); 0 = OFF = byte-identical
     // to the faithful 240x160 build. Vertical expansion is deferred, so only
@@ -483,6 +489,8 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
             args->audio_shadow = (val == "true" || val == "1");
         } else if (section == "bios" && key == "hle") {
             args->bios_hle = (val == "true" || val == "1");
+        } else if (section == "bios" && key == "hle_keep_intro") {
+            args->bios_hle_keep_intro = (val == "true" || val == "1");
         }
     }
     return true;
@@ -672,6 +680,10 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
         }
         if (s == "--no-bios-hle") {
             args->bios_hle = false;
+            continue;
+        }
+        if (s == "--bios-hle-keep-intro") {
+            args->bios_hle_keep_intro = true;
             continue;
         }
         if (s == "--window") {
@@ -906,15 +918,17 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // (SWIs serviced in-runtime, unimplemented ones falling back to LLE).
     // Config default from [bios].hle / --bios-hle; GBARECOMP_BIOS_HLE overrides
     // (0 forces LLE, any other value forces HLE). Installs the runtime_swi hook.
-    {
-        bool hle = args.bios_hle;
-        if (const char* e = std::getenv("GBARECOMP_BIOS_HLE"))
-            hle = (e[0] && e[0] != '0');
-        gba::bios_hle_set_mode(hle ? gba::BiosHleMode::On : gba::BiosHleMode::Off);
-        if (!args.quiet)
-            std::printf("bios_backend=%s\n",
-                        gba::bios_hle_mode_name(gba::bios_hle_mode()));
-    }
+    // The boot-skip decision (below, after reset_recomp_cpu) reads args.bios_hle
+    // + args.bios_hle_keep_intro, so resolve the env overrides into args here.
+    if (const char* e = std::getenv("GBARECOMP_BIOS_HLE"))
+        args.bios_hle = (e[0] && e[0] != '0');
+    if (const char* e = std::getenv("GBARECOMP_BIOS_HLE_KEEP_INTRO"))
+        args.bios_hle_keep_intro = (e[0] && e[0] != '0');
+    gba::bios_hle_set_mode(args.bios_hle ? gba::BiosHleMode::On
+                                         : gba::BiosHleMode::Off);
+    if (!args.quiet)
+        std::printf("bios_backend=%s\n",
+                    gba::bios_hle_mode_name(gba::bios_hle_mode()));
 
     // WIP KILL-SWITCH — widescreen is force-disabled everywhere.
     // The view-area expansion + Step C margin sidecar are work-in-progress: the
@@ -1092,6 +1106,18 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     runtime_init(&bus);
     reset_recomp_cpu();
     self_heal_reset();  // fresh coverage tally for this machine bring-up
+
+    // Boot HLE: skip the BIOS intro. On a fresh boot (never when resuming a
+    // savestate) with HLE on and no keep-intro opt-out, synthesize the post-boot
+    // handoff state and jump to the cart entry instead of running the recompiled
+    // boot ROM. LLE (default) always plays the real intro; the recompiled BIOS
+    // stays linked for IRQ dispatch (vector 0x18) + SWI fallback either way.
+    const bool boot_skip = args.bios_hle && !args.bios_hle_keep_intro &&
+                           args.load_state.empty();
+    if (boot_skip) gba::bios_hle_boot_skip(0x08000000u);
+    if (!args.quiet && args.load_state.empty())
+        std::printf("bios_boot=%s\n",
+                    boot_skip ? "HLE (intro skipped)" : "LLE (real intro)");
     // Stamp the persisted miss/coverage logs with the game's identity so they
     // are never ambiguous about their source (and so per-game default
     // filenames don't clobber each other).

@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 namespace gba {
 
 enum class BiosHleMode {
@@ -36,5 +38,15 @@ BiosHleMode bios_hle_mode();
 
 // Human-readable label for the banner.
 const char* bios_hle_mode_name(BiosHleMode mode);
+
+// Boot HLE — skip the BIOS intro. Instead of running the recompiled boot ROM
+// (logo + chime) from reset, synthesize the machine state the real BIOS leaves
+// at cart handoff (per-mode stack pointers, System mode, cleared registers, the
+// zeroed user-IRQ-handler pointer at 0x03007FFC) and set PC to `cart_entry`
+// (normally 0x08000000). The recompiled BIOS stays linked and still services
+// IRQs (vector 0x18) and any SWIs HLE does not cover — only the boot ANIMATION
+// is skipped. Call once, on a fresh boot (never when resuming a savestate),
+// AFTER reset_recomp_cpu(). LLE (the default) always plays the real intro.
+void bios_hle_boot_skip(uint32_t cart_entry);
 
 }  // namespace gba

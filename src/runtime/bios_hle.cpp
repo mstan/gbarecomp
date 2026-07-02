@@ -510,6 +510,30 @@ void bios_hle_set_mode(BiosHleMode mode) {
     g_bios_hle_hook = (mode == BiosHleMode::On) ? &dispatch : nullptr;
 }
 
+void bios_hle_boot_skip(uint32_t cart_entry) {
+    // Synthesize the state the real BIOS leaves when it hands off to the cart
+    // (GBATEK "GBA Reset"; the same state NanoBoyAdvance / mGBA HLE reproduce),
+    // then jump straight to the cart entry — the boot logo/chime never runs.
+    // reset_recomp_cpu() already seeded the canonical banked SPs; we flip to
+    // System mode, point the active SP at the System/User bank, clear the
+    // low registers, and zero the user IRQ-handler pointer the recompiled BIOS
+    // dispatcher (vector 0x18) reads. R13/R14/R15 are set explicitly below.
+    for (int i = 0; i < 13; ++i) g_cpu.R[i] = 0;
+    g_cpu.banked_sp[ARM_BANK_SUPERVISOR] = 0x03007FE0u;
+    g_cpu.banked_sp[ARM_BANK_IRQ]        = 0x03007FA0u;
+    g_cpu.banked_sp[ARM_BANK_USER]       = 0x03007F00u;
+    g_cpu.banked_lr[ARM_BANK_SUPERVISOR] = 0;
+    g_cpu.banked_lr[ARM_BANK_IRQ]        = 0;
+    g_cpu.R[13] = 0x03007F00u;   // active SP = System/User bank
+    g_cpu.R[14] = 0;
+    g_cpu.cpsr  = 0x0000001Fu;   // System mode, ARM state, IRQ/FIQ enabled
+    g_cpu.R[15] = cart_entry;
+    // User IRQ handler pointer the BIOS IRQ dispatcher reads; the game installs
+    // its own during init. Zero = none yet. (IME defaults to 0, so no IRQ can
+    // vector before the game programs IE/IME anyway.)
+    bus_write_u32(0x03007FFCu, 0);
+}
+
 BiosHleMode bios_hle_mode() { return g_mode; }
 
 const char* bios_hle_mode_name(BiosHleMode mode) {
