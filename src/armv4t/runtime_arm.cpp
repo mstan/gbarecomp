@@ -298,6 +298,13 @@ extern "C" unsigned g_runtime_insn_trace = 0;
 extern "C" void (*g_runtime_fn_entry_hook)(uint32_t) = nullptr;
 extern "C" uint32_t g_runtime_resume_pc = 0u;
 
+// BIOS-HLE hook (see runtime_arm.h). nullptr = disabled = pure LLE (the
+// recompiled BIOS handles every SWI; byte-identical to the un-hooked build).
+// When installed (gba::bios_hle_set_mode), runtime_swi consults it BEFORE the
+// SVC-mode exception entry; a return of 1 means the SWI was serviced in HLE and
+// the guest resumes at LR with no BIOS dispatch. 0 falls through to LLE.
+extern "C" int (*g_bios_hle_hook)(uint32_t swi_num) = nullptr;
+
 namespace {
 // ~8M instructions of history (~60+ PPU-frames). The recomp runs several frames
 // ahead of the interp oracle in cumulative cycle (boot step_frame overshoot), so
@@ -1083,6 +1090,22 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     runtime_trace_event(RUNTIME_TRACE_SWI, return_address, swi_imm, saved_cpsr, 0);
     runtime_swi_log_record(swi_imm, return_address, g_cpu.R[0], g_cpu.R[1],
                            g_cpu.R[2], g_cpu.R[14], bus_read_u32(0x03007FF8u));
+
+    // ── BIOS HLE (opt-in alternative to the recompiled/LLE BIOS) ────────
+    // When an HLE handler is installed and it services this SWI, the guest
+    // resumes at LR (already in g_cpu.R[15], set by the SWI codegen) with NO
+    // SVC-mode entry and NO BIOS dispatch — the hook computes the effect on
+    // g_cpu + memory directly and charges its own cycle cost. A return of 0
+    // (default, and for any SWI the HLE layer does not implement) falls through
+    // to the recompiled BIOS below. LLE therefore stays fully load-bearing and
+    // remains the correctness oracle; HLE is purely additive. The SWI number is
+    // decoded the way the real BIOS reads it: THUMB from the low byte, ARM from
+    // bits 23..16 (arm_decode stores the full 24-bit comment in swi_imm).
+    if (g_bios_hle_hook) {
+        bool thumb = (saved_cpsr & CPSR_T_BIT) != 0;
+        uint32_t swi_num = thumb ? (swi_imm & 0xFFu) : ((swi_imm >> 16) & 0xFFu);
+        if (g_bios_hle_hook(swi_num)) return;
+    }
 
     // Switch to SVC mode. SPSR_svc gets the pre-SWI CPSR. LR_svc gets
     // the return address. R8..R12 don't change unless leaving FIQ.

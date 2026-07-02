@@ -325,6 +325,18 @@ extern uint32_t g_runtime_break_pc;
 void runtime_swi(uint32_t swi_imm);
 void runtime_irq(uint32_t return_address);
 
+// ── BIOS HLE hook (opt-in alternative to the recompiled/LLE BIOS) ──────
+// nullptr (the default) = pure LLE: runtime_swi always enters SVC mode and
+// dispatches the recompiled BIOS, byte-identical to a build without HLE. When
+// installed (by gba::bios_hle_set_mode(), see src/runtime/bios_hle.h),
+// runtime_swi consults it BEFORE the SVC-mode entry with the decoded SWI number
+// (0..0xFF). The hook returns 1 if it fully serviced the call — guest resumes at
+// LR, no BIOS dispatch — or 0 to fall through to the recompiled BIOS (the case
+// for every SWI the HLE layer does not implement). LLE stays load-bearing and
+// remains the verification oracle; HLE never becomes the oracle. This is the
+// PRINCIPLES.md "verified-enhancement HLE" carve-out: opt-in, reverts to LLE.
+extern int (*g_bios_hle_hook)(uint32_t swi_num);
+
 // ── PSR transfer ───────────────────────────────────────────────────
 // MRS/MSR helpers. Routing through the runtime lets us validate mode
 // transitions and keep banked registers coherent.

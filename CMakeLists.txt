@@ -193,6 +193,7 @@ set_property(TARGET gbarecomp_heal_gate PROPERTY POSITION_INDEPENDENT_CODE ON)
 # ─────────────────────────────────────────────────────────────────────────────
 add_library(gbarecomp_runtime STATIC
     src/runtime/runtime.cpp
+    src/runtime/bios_hle.cpp
     src/runtime/generated_dispatch.cpp
     src/runtime/runtime_bus_bridge.cpp
     src/runtime/arm_cpu_bridge.cpp

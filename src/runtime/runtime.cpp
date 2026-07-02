@@ -22,6 +22,7 @@
 #include "runtime.h"
 
 #include "asset_picker.h"
+#include "bios_hle.h"
 #include "gba_bios.h"
 #include "gba_bus.h"
 #include "gba_ppu.h"
@@ -123,6 +124,11 @@ struct Args {
     // [audio] shadow = true|false — arm the MP2K verified-enhancement shadow
     // mixer (default off). GBARECOMP_AUDIO_SHADOW overrides at launch.
     bool audio_shadow = false;
+    // [bios] hle = true|false — service SWIs via High-Level Emulation instead
+    // of the recompiled real BIOS (LLE). Default false = LLE (the oracle);
+    // unimplemented SWIs fall back to LLE even when true. --bios-hle /
+    // --no-bios-hle and GBARECOMP_BIOS_HLE override at launch. See bios_hle.h.
+    bool bios_hle = false;
     // --widescreen <N> / [video].widescreen: opt-in view-area expansion. N =
     // extra columns rendered per side (left & right); 0 = OFF = byte-identical
     // to the faithful 240x160 build. Vertical expansion is deferred, so only
@@ -475,6 +481,8 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
             if (parse_int(val.c_str(), &n) && n >= 0) args->widescreen = n;
         } else if (section == "audio" && key == "shadow") {
             args->audio_shadow = (val == "true" || val == "1");
+        } else if (section == "bios" && key == "hle") {
+            args->bios_hle = (val == "true" || val == "1");
         }
     }
     return true;
@@ -656,6 +664,14 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
         }
         if (s == "--quiet") {
             args->quiet = true;
+            continue;
+        }
+        if (s == "--bios-hle") {
+            args->bios_hle = true;
+            continue;
+        }
+        if (s == "--no-bios-hle") {
+            args->bios_hle = false;
             continue;
         }
         if (s == "--window") {
@@ -885,6 +901,20 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gba::GbaPpu ppu;
     bus.set_bios(&bios);
     bus.request_audio_shadow(args.audio_shadow);  // [audio].shadow default; env can override
+
+    // BIOS backend select: LLE (recompiled BIOS, the default + oracle) vs HLE
+    // (SWIs serviced in-runtime, unimplemented ones falling back to LLE).
+    // Config default from [bios].hle / --bios-hle; GBARECOMP_BIOS_HLE overrides
+    // (0 forces LLE, any other value forces HLE). Installs the runtime_swi hook.
+    {
+        bool hle = args.bios_hle;
+        if (const char* e = std::getenv("GBARECOMP_BIOS_HLE"))
+            hle = (e[0] && e[0] != '0');
+        gba::bios_hle_set_mode(hle ? gba::BiosHleMode::On : gba::BiosHleMode::Off);
+        if (!args.quiet)
+            std::printf("bios_backend=%s\n",
+                        gba::bios_hle_mode_name(gba::bios_hle_mode()));
+    }
 
     // WIP KILL-SWITCH — widescreen is force-disabled everywhere.
     // The view-area expansion + Step C margin sidecar are work-in-progress: the

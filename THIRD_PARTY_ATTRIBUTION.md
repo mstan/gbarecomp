@@ -23,3 +23,18 @@ upstreams are reproduced in their repositories.
 Each ported file carries an attribution header pointing here. Ported
 code remains under the upstream's MIT OR Apache-2.0 terms; this notice
 and those headers satisfy the attribution requirement.
+
+## mGBA
+
+- **Upstream:** https://github.com/mgba-emu/mgba (vendored at `third_party/mgba`)
+- **Author:** Jeffrey Pfau and contributors
+- **License:** MPL-2.0
+
+| Our file | Upstream source | What was ported |
+|---|---|---|
+| `src/runtime/bios_hle.{h,cpp}` | `src/gba/bios.c` | GBA BIOS SWI High-Level Emulation: the Div/Sqrt/ArcTan/ArcTan2 fixed-point routines and stall formulas, the LZ77 / Huffman / run-length / diff-unfilter decompressors, BitUnPack, the (float) affine-matrix builders, and MidiKey2Freq. Re-implemented in C++ against this project's `g_cpu` + bus bridge. HLE is opt-in; LLE (the recompiled real BIOS) remains the default and the correctness oracle (PRINCIPLES.md "verified-enhancement HLE"). |
+
+Portions of `src/runtime/bios_hle.cpp` are derived from mGBA and remain
+subject to the MPL-2.0; the upstream source is vendored under
+`third_party/mgba/src/gba/bios.c`, satisfying the license's source-availability
+requirement.
