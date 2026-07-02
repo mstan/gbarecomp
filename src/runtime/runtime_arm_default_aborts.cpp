@@ -673,6 +673,42 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
 // the dispatch inside runtime_irq) is a v2 item.
 extern "C" int g_force_interp = 0;
 
+// The recomp routes EVERY guest data access through these bridge accessors
+// (runtime_bus_bridge.cpp), which do runtime_mmio_catch_up() on IO addresses —
+// materializing lazily-lagged device state MID-instruction — plus the idle-disturb
+// epoch bump and unmapped-read trace. The interpreter's raw GbaBus accessors skip
+// all of that, so a timed sound-FIFO DMA cycle-steal lands at a different
+// instruction boundary between the two backends (a benign ±N transient that nets to
+// zero, but it flags the cosim). Routing the force-interp interpreter's DATA
+// accesses through the SAME bridge makes the two memory paths bit-identical.
+extern "C" uint8_t  bus_read_u8 (uint32_t);
+extern "C" uint16_t bus_read_u16(uint32_t);
+extern "C" uint32_t bus_read_u32(uint32_t);
+extern "C" void     bus_write_u8 (uint32_t, uint8_t);
+extern "C" void     bus_write_u16(uint32_t, uint16_t);
+extern "C" void     bus_write_u32(uint32_t, uint32_t);
+
+namespace {
+// armv4t::Bus adapter whose data accesses forward to the runtime bridge (identical
+// to the recomp path). access_cycles forwards to the real bus (the bridge's
+// runtime_mem_cycles does the same), so cycle COST is unchanged — only the
+// device-materialization timing is now matched. NOT used for the instruction FETCH
+// (code fetches don't route through the bridge in the recomp either).
+struct ForceInterpBus : armv4t::Bus {
+    gba::GbaBus* raw;
+    explicit ForceInterpBus(gba::GbaBus* b) : raw(b) {}
+    uint8_t  read8 (uint32_t a) override { return bus_read_u8(a); }
+    uint16_t read16(uint32_t a) override { return bus_read_u16(a); }
+    uint32_t read32(uint32_t a) override { return bus_read_u32(a); }
+    void write8 (uint32_t a, uint8_t  v) override { bus_write_u8(a, v); }
+    void write16(uint32_t a, uint16_t v) override { bus_write_u16(a, v); }
+    void write32(uint32_t a, uint32_t v) override { bus_write_u32(a, v); }
+    uint32_t access_cycles(uint32_t a, uint8_t w, bool s) const override {
+        return raw->access_cycles(a, w, s);
+    }
+};
+}  // namespace
+
 extern "C" void runtime_force_interp_step(void) {
     using gbarecomp::active_bus;
     gba::GbaBus* bus = active_bus();
@@ -700,9 +736,13 @@ extern "C" void runtime_force_interp_step(void) {
         insn = armv4t::ArmDecoder::decode(bus->read32(pc), pc);
     }
 
+    // Data accesses route through the runtime bridge (device catch-up matched to
+    // the recomp); the instruction fetch above stayed on the raw bus, as in the
+    // recomp (generated code does not re-fetch its own opcode via the bridge).
+    ForceInterpBus fib(bus);
     std::uint32_t cyc = 1;
     const armv4t::Interpreter::Result r =
-        armv4t::Interpreter::step(cpu, *bus, insn, &cyc);
+        armv4t::Interpreter::step(cpu, fib, insn, &cyc);
 
     if (r == armv4t::Interpreter::Result::NotImplemented ||
         r == armv4t::Interpreter::Result::Undefined) {
