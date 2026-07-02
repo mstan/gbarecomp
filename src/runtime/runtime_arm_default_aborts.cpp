@@ -777,6 +777,23 @@ extern "C" void runtime_force_interp_step(void) {
         runtime_tick(cyc);
     }
     bus->set_bios_access_enabled(g_cpu.R[15] < 0x00004000u);
+
+    // Post-HALT open-bus prefetch latch — faithfulness parity with the recomp.
+    // The recomp's generated code is a contiguous block stream: after the
+    // instruction that writes HALTCNT, control falls through to the NEXT block's
+    // prologue, which latches the BIOS prefetch for the post-halt PC and only THEN
+    // yields on `halted`. The force-interp path instead returns to step_once, whose
+    // halt branch intercepts before the next instruction — so that final latch is
+    // missed and the open-bus value freezes one instruction early (cosim LP-004:
+    // recomp latched prefetch_word(0x348)=BIOS[0x350]=PC+8, the correct ARM fetch;
+    // force-interp froze at prefetch_word(0x344)=PC+4). Re-latch here for the new
+    // PC when we just halted, matching the recomp's fall-through prologue. (Only
+    // the HALT path needs this: a VBlank-spin yield goes through the
+    // runtime_should_yield() call at the TOP of this function, which already
+    // latches; HALT is checked in step_once before this function is entered.)
+    if (bus->io().halted() && g_cpu.R[15] < 0x00004000u) {
+        bus->latch_bios_prefetch(g_cpu.R[15], (g_cpu.cpsr & CPSR_T_BIT) != 0);
+    }
 }
 
 // runtime_dispatch_miss — Stage-1 self-healing entry: log the miss, enqueue a

@@ -199,8 +199,12 @@ void handle_line(sock_t s, char* line) {
         // timer / DMA-latch split when the `io` sub-hash diverges.
         gba::GbaBus* bus = gbarecomp::active_bus();
         if (!bus) { send_line(s, "err no-bus\n"); return; }
-        char big[1024];
-        bus->io().cosim_dump(big, static_cast<int>(sizeof big));
+        char io_line[960];
+        int n = bus->io().cosim_dump(io_line, static_cast<int>(sizeof io_line));
+        if (n > 0 && io_line[n - 1] == '\n') io_line[n - 1] = '\0';  // strip trailing NL
+        char big[1088];
+        std::snprintf(big, sizeof big, "%s prefetch_raw %08x\n",
+                      io_line, bus->bios_open_bus());
         send_line(s, big); return;
     }
     if (!std::strcmp(cmd, "inject")) {
