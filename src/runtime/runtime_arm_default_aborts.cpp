@@ -678,6 +678,15 @@ extern "C" void runtime_force_interp_step(void) {
     gba::GbaBus* bus = active_bus();
     if (!bus) return;
 
+    // Per-instruction prologue, matching the generated-code prologue exactly
+    // (arm_codegen.cpp: "if (runtime_should_yield()) return;"). runtime_should_yield
+    // ALSO latches the BIOS open-bus prefetch (runtime_bus_bridge.cpp) while PC is in
+    // the BIOS, so the interp backend maintains the SAME bios_prefetch_ / open-bus
+    // state the recomp does — without this the co-sim's prefetch sub-hash split every
+    // BIOS instruction. On a yield, return without executing (step_once re-enters
+    // next iteration), exactly as the generated function returns to the runner.
+    if (runtime_should_yield()) return;
+
     armv4t::CPUState cpu{};
     gbarecomp::load_arm_cpu_into_interp(g_cpu, cpu);
     const std::uint32_t pc = cpu.R[15];
