@@ -188,6 +188,90 @@ reproduced, and we chose not to fix immediately. Not a TODO list.
   frames so run to ~273), `fp_pair_diff.py` to name the first
   cycle-charge mismatch, then reconcile — and separately, model WAITCNT
   in `access_cycles` (both backends) since it is currently unmodeled.
+- **[ROOT-CAUSED + FIXED 2026-07-02] WAITCNT was a red herring.** The fp
+  cycle-trace (`build-interp` run twice, `FORCE_INTERP` 0/1, `INSN_TRACE`
+  + `FP_SAVE`, `fp_pair_diff.py`) showed the two backends are **pc-identical
+  and register-identical for all 7,362,482 instructions** of the boot — the
+  ONLY difference is a single per-instruction cycle mismatch at
+  **pc=0x00000188** (BIOS SWI epilogue `movs pc, lr`, `e1b0f00e`): recomp
+  charges **0**, interpreter charges **3**. `access_cycles`/WAITCNT is shared
+  and never varies, so it was not the cause.
+  - **Mechanism (env-gated `cyc_probe` + `g_tick_ctx` tags in
+    `runtime_bus_bridge.cpp` / `runtime_arm_default_aborts.cpp`):**
+    `0x188` occurs 12× in boot; recomp charges 0 for all 12 (self-consistent);
+    the interpreter charges 0 for 11 and **3 for one** — the return from
+    **SWI 0x01 (RegisterRamReset)** at ROM `0x080b14e4`→`0x080b14e6`. That one
+    SWI's handler is long (RAM clear, runs in System mode), so a
+    VBlank-start **yield fires mid-handler**; the recomp resumes the handler
+    **generated** (`[gen]`, exception-return charges 0) while force-interp
+    resumes it **interpreted** (`[finterp]`, exception-return charges 3).
+    The 3-cycle gap is the disagreement between the two cycle models for the
+    `movs pc,lr` exception return.
+  - **The recompiler was wrong, not the harness.** `emit_data_processing`'s
+    exception-return path (`arm_codegen.cpp` ~L583) did
+    `runtime_exception_return(r_var); return;` **without** first ticking the
+    `_cyc` it had already computed as base+2 (the non-branch PC-write refill,
+    via `writes_pc_nonbranch`). Its two sibling sites tick correctly — the
+    normal PC-write path (~L652) and BOTH LDM exception-return paths
+    (~L931/L996, the `ldmfd sp!,{...pc}^` IRQ-return idiom). So IRQ returns
+    were charged right; only `movs/subs pc,lr` SWI returns dropped their
+    2S+1N refill. Interpreter (the reference model), hardware (ARM7TDMI TRM:
+    data-proc PC-write = 2S+1N), and the codegen's own computed `_cyc` all
+    agree the cost is 3.
+  - **Fix:** add `runtime_tick(cyc_var_for(ins))` before
+    `runtime_exception_return` in the data-proc exception-return path
+    (`arm_codegen.cpp emit_data_processing`), matching the LDM path.
+    Recompiler-only; no generated file hand-edited.
+- **Resolved:** 2026-07-02. Fix applied to `arm_codegen.cpp`; BIOS
+  regenerated (`gba_recompile --bios bios/gba_bios.bin --config
+  bios/gba_bios.toml` → diff = exactly 3 `runtime_tick` lines added at the
+  BIOS exception-return sites 0x64/0x13C/0x188, nothing else). **Validated:**
+  fp cycle-trace now shows **zero (cycle,pc) divergence over all 7,362,465
+  aligned records** (was 1); cosim `clock` sub-hash now matches
+  (`79a6c7…` both); L1 codegen diff harness 128/128; bus/interpreter/decoder
+  smoke tests pass. `heal_gate_tests` fails to LINK (undefined core runtime
+  symbols) — pre-existing target-linkage gap, unrelated. Superseded by LP-006
+  (the next divergence the cosim now advances to).
+
+### LP-006: recomp-vs-interp cpu-subhash split — stale `r8_12_user` bank (frame ~272)
+- **Observed:** 2026-07-02, immediately after the LP-005 fix let the cosim
+  run past cp1162. New FIRST DIVERGENCE at the SAME checkpoint (cp1162 /
+  frame ~272 / cycle ~76.5M) — but now the **only** differing sub-hash is
+  `cpu`; iwram/ewram/vram/pal/oam/io/audio/ppu/save/prefetch **and clock**
+  all match.
+- **Detail:** All architecturally-visible CPU state is byte-identical
+  between backends (R0–R15, cpsr, and every `banked_sp/lr/spsr`). The split
+  is in `r8_12_user` (the User/System r8–r12 shadow bank, hashed by
+  `cosim_state.cpp hash_cpu` but not mode-visible): the cosim `cpu` dump
+  (extended this session with `ur8..12`/`fr8..12`) shows
+  **recomp `ur11=0 ur12=0` vs interp `ur11=0x1f ur12=0x9c3`**. `r8_12_fiq`
+  matches. It surfaces at the RegisterRamReset (SWI 0x01) handler — the same
+  mid-handler-yield → force-interp-interprets-the-BIOS path that exposed
+  LP-005.
+- **Analysis so far:** The interpreter's `MSR` mode-switch (`interpreter.cpp`
+  ~L1081) only swaps `banked_sp/banked_lr` (R13/R14), never `r8_12_user`; and
+  `write_user_reg` only writes `r8_12_user` in FIQ mode. So neither backend
+  should touch `r8_12_user` during this non-FIQ (System↔SVC) handler — yet
+  they diverge here (values matched through cp1161). Open question: which
+  backend writes `r8_12_user` at this SWI, and which is correct. Likely the
+  recomp's `bank_out/bank_in` (`runtime_arm.cpp`) updates the non-FIQ r8–12
+  shadow where the interpreter leaves it stale (or vice versa).
+- **Priority:** low. **Architecturally benign** — `r8_12_user` is invisible
+  outside FIQ and no FIQ occurs in this boot; no functional effect, only the
+  cosim full-state hash catches it. But it is the exact next first-divergence.
+- **Next step:** trace when `r8_12_user[3]/[4]` is written in each backend
+  around cp1162 (the recomp `bank_out/bank_in` vs the interpreter's msr /
+  `write_user_reg`), decide the correct banking semantics for the non-FIQ
+  r8–12 shadow, and fix the wrong side (recompiler/runtime or the reference
+  interpreter — NOT a cosim-hash exclusion; the bank is real state). Same
+  discipline as LP-005: the interpreter is the reference model, but confirm
+  which side matches hardware banking before changing the reference.
+- **Diagnostics added this session (kept, env-gated / always-on):**
+  `cyc_probe()` + `g_tick_ctx` tags in `runtime_bus_bridge.cpp` /
+  `runtime_arm_default_aborts.cpp` (log every master-clock advance in a
+  `GBARECOMP_CYC_LO..HI` window, tagged gen/finterp/bridge — the tool that
+  cracked LP-005); and the `ur/fr` bank fields in the cosim `cpu` dump
+  (`cosim.cpp`).
 
 ---
 

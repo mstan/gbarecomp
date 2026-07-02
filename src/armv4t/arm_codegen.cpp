@@ -582,7 +582,15 @@ bool emit_data_processing(std::ostringstream& body, const Instr& ins,
     if (ins.set_flags) {
         if (excpt_return) {
             // Exception return: don't touch flags here; restore from SPSR.
+            // Tick the instruction's cost (base + the +2 non-branch PC-write
+            // refill folded into _cyc at line ~1320) BEFORE transferring —
+            // exactly as the normal PC-write path (rd==15 below) and the LDM
+            // exception-return path (ldmfd sp!,{...pc}^) do. Omitting it made
+            // `movs/subs pc, lr` exception returns (the GBA BIOS SWI epilogue
+            // at 0x188) charge 0 instead of their 2S+1N refill — the LP-005
+            // cosim divergence: generated=0 vs interpreter reference=3.
             body << indent << "if (" << mode_is_priv_non_system_expr() << ") {\n"
+                 << indent << "    runtime_tick(" << cyc_var_for(ins) << ");\n"
                  << indent << "    runtime_exception_return(" << r_var << ");\n"
                  << indent << "    return;\n"
                  << indent << "}\n";
