@@ -20,7 +20,9 @@
 
 #include "cosim.h"
 #include "cosim_state.h"
-#include "runtime_arm.h"   // g_cpu (ArmCpuState), g_runtime_cycles
+#include "runtime_arm.h"          // g_cpu (ArmCpuState), g_runtime_cycles
+#include "gba_bus.h"              // GbaBus / GbaIo (dev field dump)
+#include "runtime_bus_bridge.h"   // gbarecomp::active_bus()
 
 #include <cstdint>
 #include <cstdio>
@@ -191,6 +193,15 @@ void handle_line(sock_t s, char* line) {
         }
         std::snprintf(p, rem, "\n");
         send_line(s, out); return;
+    }
+    if (!std::strcmp(cmd, "dev")) {
+        // Device-timing field dump (IO subsystem): field-diff which register /
+        // timer / DMA-latch split when the `io` sub-hash diverges.
+        gba::GbaBus* bus = gbarecomp::active_bus();
+        if (!bus) { send_line(s, "err no-bus\n"); return; }
+        char big[1024];
+        bus->io().cosim_dump(big, static_cast<int>(sizeof big));
+        send_line(s, big); return;
     }
     if (!std::strcmp(cmd, "inject")) {
         char what[8] = {0}; unsigned a = 0, b = 0, c = 0;

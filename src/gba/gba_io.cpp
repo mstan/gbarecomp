@@ -75,6 +75,45 @@ void GbaIo::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     for (int i = 0; i < 4; ++i) w.u32(dma_next_dest_[i]);
 }
 
+uint64_t GbaIo::cosim_hash() const {
+    // Guest-architectural IO only — EXCLUDES unmapped_count_ / dma_runs_ /
+    // dma_words_ (emulator bookkeeping; see the header). Mirrors serialize()'s
+    // field set minus those counters.
+    uint64_t h = 1469598103934665603ull;
+    auto f = [&](const void* p, std::size_t n) {
+        const auto* b = static_cast<const uint8_t*>(p);
+        for (std::size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+    };
+    f(io_.data(), io_.size());
+    const uint8_t hb = halted_ ? 1u : 0u; f(&hb, 1);
+    f(timer_reload_,     sizeof timer_reload_);
+    f(timer_counter_,    sizeof timer_counter_);
+    f(timer_control_,    sizeof timer_control_);
+    f(timer_accum_,      sizeof timer_accum_);
+    f(dma_next_source_,  sizeof dma_next_source_);
+    f(dma_next_dest_,    sizeof dma_next_dest_);
+    return h;
+}
+
+int GbaIo::cosim_dump(char* out, int cap) const {
+    auto rd16 = [&](uint32_t off) -> unsigned {
+        return static_cast<unsigned>(io_[off] | (io_[off + 1] << 8));
+    };
+    int n = std::snprintf(out, cap,
+        "ie %04x if %04x ime %d dispstat %04x waitcnt %04x halted %d",
+        ie(), if_reg(), ime() ? 1 : 0, dispstat(), rd16(0x204), halted_ ? 1 : 0);
+    for (int i = 0; i < 4 && n < cap; ++i)
+        n += std::snprintf(out + n, cap - n,
+            " t%d_cnt %04x t%d_rld %04x t%d_ctl %04x t%d_acc %08x",
+            i, timer_counter_[i], i, timer_reload_[i],
+            i, timer_control_[i], i, timer_accum_[i]);
+    for (int i = 0; i < 4 && n < cap; ++i)
+        n += std::snprintf(out + n, cap - n, " d%d_src %08x d%d_dst %08x",
+            i, dma_next_source_[i], i, dma_next_dest_[i]);
+    if (n < cap) n += std::snprintf(out + n, cap - n, "\n");
+    return n;
+}
+
 void GbaIo::deserialize(gbarecomp::debug::SnapshotReader& r) {
     r.bytes(io_.data(), io_.size());
     halted_         = r.boolean();

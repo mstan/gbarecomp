@@ -111,7 +111,9 @@ uint64_t state_hash(SubHashes* sub) {
         s.vram  = fnv(kFnvOff, bus->vram_ptr(), 96u * 1024u);
         s.pal   = fnv(kFnvOff, bus->pal_ptr(), 1024u);
         s.oam   = fnv(kFnvOff, bus->oam_ptr(), 1024u);
-        s.io    = hash_serialized([&](gbarecomp::debug::SnapshotWriter& w) { bus->io().serialize(w); });
+        // io: architectural-only hash (excludes unmapped_count_/dma_runs_/dma_words_
+        // bookkeeping that legitimately differs by backend access frequency).
+        s.io    = bus->io().cosim_hash();
         s.audio = hash_serialized([&](gbarecomp::debug::SnapshotWriter& w) { bus->audio().serialize(w); });
         s.save  = hash_serialized([&](gbarecomp::debug::SnapshotWriter& w) { bus->save().serialize(w); });
         s.prefetch = fnv_u32(kFnvOff, bus->bios_open_bus());

@@ -153,6 +153,20 @@ public:
 
     // For tests / debug.
     std::size_t unmapped_count() const { return unmapped_count_; }
+
+    // Canonical FNV-1a-64 hash of the GUEST-ARCHITECTURAL IO state for the
+    // first-divergence co-sim oracle (COSIM_ORACLE.md): the MMIO register file
+    // (IE/IF/IME/WAITCNT/DISPSTAT/timer/DMA regs) + halt + timer prescaler phase +
+    // latched DMA addresses. DELIBERATELY EXCLUDES emulator bookkeeping counters
+    // (unmapped_count_, dma_runs_, dma_words_) that legitimately differ between the
+    // recomp and interp backends by access frequency without being a guest
+    // divergence — hashing them re-creates the poll-count false-positive the method
+    // exists to avoid. (serialize() keeps them; they are advisory save-state stats.)
+    uint64_t cosim_hash() const;
+
+    // Human-readable field dump of the architectural IO state for co-sim
+    // field-diffing (which io register/timer/DMA field split). Writes one line.
+    int cosim_dump(char* out, int cap) const;
     void reset_unmapped_count() { unmapped_count_ = 0; }
     const uint8_t* raw() const { return io_.data(); }
     std::size_t dma_runs(int ch) const { return dma_runs_[ch]; }

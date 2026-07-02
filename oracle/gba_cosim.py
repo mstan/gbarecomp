@@ -223,6 +223,8 @@ def main():
                 print("  (the FIRST subsystem hash that differs is where it split)", flush=True)
                 print("  --- A cpu ---\n  " + cmd(sa, "cpu"), flush=True)
                 print("  --- B cpu ---\n  " + cmd(sb, "cpu"), flush=True)
+                print("  --- A dev ---\n  " + cmd(sa, "dev"), flush=True)
+                print("  --- B dev ---\n  " + cmd(sb, "dev"), flush=True)
                 print("  --- A window ---\n" + dump_window(sa, 16), flush=True)
                 print("  --- B window ---\n" + dump_window(sb, 16), flush=True)
                 return
