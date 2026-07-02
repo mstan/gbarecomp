@@ -191,6 +191,17 @@ void handle_line(sock_t s, char* line) {
                 i, g_cpu.banked_sp[i], i, g_cpu.banked_lr[i], i, g_cpu.banked_spsr[i]);
             p += w; rem -= w;
         }
+        // r8..r12 User/System bank + FIQ bank — hashed by hash_cpu() but not
+        // architecturally visible in the current mode, so a cpu-subhash split
+        // with all R[]/banked sp/lr/spsr matching localizes to one of these.
+        for (int i = 0; i < 5 && rem > 20; ++i) {
+            w = std::snprintf(p, rem, " ur%d %08x", 8 + i, g_cpu.r8_12_user[i]);
+            p += w; rem -= w;
+        }
+        for (int i = 0; i < 5 && rem > 20; ++i) {
+            w = std::snprintf(p, rem, " fr%d %08x", 8 + i, g_cpu.r8_12_fiq[i]);
+            p += w; rem -= w;
+        }
         std::snprintf(p, rem, "\n");
         send_line(s, out); return;
     }

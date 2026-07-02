@@ -527,6 +527,28 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
     }
 }
 
+// ── LP-005 clock-event probe (env GBARECOMP_CYC_LO / GBARECOMP_CYC_HI) ───────
+// One-shot diagnostic: when g_runtime_cycles is within [LO,HI], log every event
+// that advances the master clock (runtime_tick, drain_dma_steal, resync) with
+// the current guest PC. Off by default (both env unset). Harness-only; compiled
+// out cost is a single env read cached in statics.
+extern "C" const char* g_tick_ctx = "gen";  // set by interp/bridge paths around runtime_tick
+static inline void cyc_probe(const char* what, uint32_t amt) {
+    static long long lo = -1, hi = -1;
+    if (lo < 0) {
+        const char* l = std::getenv("GBARECOMP_CYC_LO");
+        const char* h = std::getenv("GBARECOMP_CYC_HI");
+        lo = l ? std::atoll(l) : 0;
+        hi = h ? std::atoll(h) : 0;
+    }
+    if (hi == 0) return;  // probe disabled
+    unsigned long long now = g_runtime_cycles;
+    if (static_cast<long long>(now) < lo ||
+        static_cast<long long>(now) > hi) return;
+    std::fprintf(stderr, "[cycprobe] %-12s [%s] +%u  clk=%llu->%llu  pc=%08x cpsr=%08x\n",
+                 what, g_tick_ctx, amt, now, now + amt, g_cpu.R[15], g_cpu.cpsr);
+}
+
 // ── Stage 1: lazy device catch-up state ─────────────────────────────────────
 // g_pending_cycles: guest cycles advanced on the master clock but not yet
 // materialized into device state. g_event_budget: cycles remaining until the
@@ -558,6 +580,7 @@ static inline void drain_dma_steal(gba::GbaBus* bus, gba::GbaPpu* ppu) {
     if (!bus || !ppu) return;
     uint32_t cyc = bus->io().take_dma_steal_cycles();
     if (cyc == 0) return;
+    cyc_probe("dma_steal", cyc);
     g_runtime_cycles += cyc;
     if (g_in_device_tick) {
         // Defensive: defer the device-advance into the pending window.
@@ -595,6 +618,7 @@ extern "C" void runtime_resync_horizon(void) {
     if (!bus || !ppu) return;
     // An immediate-mode DMA may have been triggered by the just-completed guest
     // write; charge its stolen cycles before re-arming the horizon.
+    cyc_probe("resync", 0);
     drain_dma_steal(bus, ppu);
     recompute_event_budget(bus, ppu);
 }
@@ -609,6 +633,7 @@ extern "C" void runtime_tick(uint32_t cycles) {
     auto* ppu = gbarecomp::g_active_ppu;
     if (!bus || !ppu || cycles == 0) return;
 
+    cyc_probe("tick", cycles);
     g_runtime_cycles += cycles;
     // Lazy device catch-up: advance the master clock every instruction (cheap),
     // but materialize device state only when the next-event horizon is reached.
@@ -654,6 +679,7 @@ extern "C" void runtime_tick(uint32_t cycles) {
                 tick_devices(bus, ppu, static_cast<uint32_t>(g_pending_cycles));
                 g_pending_cycles = 0;
             }
+            cyc_probe("irq_wake", gba::kIrqWakeDelayCycles);
             g_runtime_cycles += gba::kIrqWakeDelayCycles;
             tick_devices(bus, ppu, gba::kIrqWakeDelayCycles);
             recompute_event_budget(bus, ppu);

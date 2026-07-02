@@ -394,6 +394,9 @@ void record_and_log_miss(std::uint32_t pc, bool thumb) {
 // cheap pre-flight of how deep the shard re-run would recurse. Reset at entry.
 extern "C" uint32_t g_bridge_max_call_depth = 0;
 
+// LP-005 probe: tick-origin tag consumed by cyc_probe() in runtime_bus_bridge.cpp.
+extern "C" const char* g_tick_ctx;
+
 // Set by runtime_irq() in runtime_arm.cpp (>0 while an IRQ handler is on the host
 // stack). When an in-handler SWI unwinds and runtime_irq() re-dispatches a mid-
 // handler PC that MISSES, the bridge must DRIVE the handler forward (heal back to
@@ -560,7 +563,7 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
             // self-delivers any pending IRQ via runtime_irq into the
             // recompiled BIOS (mutating g_cpu), so sync around it.
             gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
-            runtime_tick(cyc);
+            g_tick_ctx = "bridge"; runtime_tick(cyc); g_tick_ctx = "gen";
             gbarecomp::load_arm_cpu_into_interp(g_cpu, cpu);
         }
 
@@ -774,7 +777,7 @@ extern "C" void runtime_force_interp_step(void) {
         // Normal / Branched: tick the instruction's cost. runtime_tick
         // self-delivers any pending IRQ via runtime_irq into the recompiled BIOS.
         gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
-        runtime_tick(cyc);
+        g_tick_ctx = "finterp"; runtime_tick(cyc); g_tick_ctx = "gen";
     }
     bus->set_bios_access_enabled(g_cpu.R[15] < 0x00004000u);
 
