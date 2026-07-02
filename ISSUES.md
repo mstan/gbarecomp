@@ -102,7 +102,7 @@ reproduced, and we chose not to fix immediately. Not a TODO list.
   audio assertion that the sample buffer matches to within LP-002
   tolerances.
 
-### LP-004: MinishCap open-bus prefetch latch differs across backends during HALT
+### LP-004: [RESOLVED 2026-07-02] open-bus prefetch latch differs across backends during HALT
 - **Observed:** 2026-07-01, by the recomp-vs-interp first-divergence
   co-simulation oracle (`COSIM_ORACLE.md`).
 - **Detail:** After the harness-fidelity fix (`be01a1b`: force-interp
@@ -147,6 +147,47 @@ reproduced, and we chose not to fix immediately. Not a TODO list.
   Still low priority (benign in effect) but now clearly worth a proper
   fix. Gate 1 (recomp-vs-recomp) passed on FireRed (305 cp, 0 diverge)
   with RTC pinned via `RECOMP_RTC_EPOCH`.
+- **Resolved:** 2026-07-02, commit `c6a9df5`. Raw `prefetch_raw` values
+  (added to the cosim `dev` dump) + BIOS disassembly showed the CPU
+  halted at PC=0x348: recomp latched `prefetch_word(0x348)` =
+  `BIOS[0x350]` = `e8bd4010` (the correct ARM PC+8 fetch); force-interp
+  froze at `BIOS[0x34c]` = `0afffffc` (PC+4, one instruction behind).
+  **The recomp was correct** — this was a harness (force-interp) bug,
+  NOT a shipped-recomp bug. Cause: the recomp's contiguous generated
+  block stream runs the *next* block's prologue (which latches the
+  post-halt PC) before the yield-check bails on `halted`; the
+  force-interp path returns to `step_once`, whose halt branch
+  intercepts first and skips that latch. Fix (harness-only, shipped
+  code untouched): the force-interp driver re-latches the BIOS prefetch
+  for the new PC when it just halted, mirroring the recomp's
+  fall-through prologue. Verified: MinishCap recomp-vs-interp clean
+  frame 6 → frame 272 (~44× further). BIOS-level, so it clears FireRed
+  too. Superseded by LP-005 (the next divergence).
+
+### LP-005: recomp-vs-interp 3-cycle skew under WAITCNT prefetch (frame ~272)
+- **Observed:** 2026-07-02, cosim recomp-vs-interp after the LP-004 fix.
+- **Detail:** At cp1162 / frame ~272 the two backends diverge with a
+  genuine **3-cycle clock skew** (A cyc 76536923 vs B 76536926; the
+  `clock`, `cpu`, `audio`, `ppu` sub-hashes all split; prefetch / io /
+  memory match). The `dev` dump shows **`waitcnt 0x4014`** — the Game
+  Pak **prefetch buffer** (bit 0x4000) + non-zero waitstates are
+  enabled — with DMA3 active (`d3_src 03007ee0 d3_dst 02000030`).
+- **Suspected class:** WAITCNT / Game-Pak-prefetch cycle-timing
+  (burndown axis-2, the "+42-cycle boot skew / WAITCNT remains" item).
+  Note `gba_bus.cpp access_cycles` currently returns **hardcoded
+  "Default WAITCNT 0x0000" ROM costs and ignores the WAITCNT register +
+  the prefetch-enable bit** — so ROM-access timing is unmodeled when
+  the game programs WAITCNT. That is a *shared* helper (would mis-time
+  both backends equally), so the recomp-vs-interp *skew* is likely a
+  second-order difference in when a prefetch/branch cost is charged
+  under WAITCNT; the fp cycle trace will name the exact instruction.
+- **Priority:** low→medium (first genuine cycle-timing divergence not
+  yet root-caused; likely the real axis-2 lead).
+- **Next step when picked up:** capture both fp rings near frame 273
+  (`GBARECOMP_INSN_TRACE=1` + `GBARECOMP_FP_SAVE`; ring holds ~7–8
+  frames so run to ~273), `fp_pair_diff.py` to name the first
+  cycle-charge mismatch, then reconcile — and separately, model WAITCNT
+  in `access_cycles` (both backends) since it is currently unmodeled.
 
 ---
 
