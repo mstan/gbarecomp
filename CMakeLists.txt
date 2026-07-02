@@ -35,6 +35,16 @@ option(GBARECOMP_STATIC_RELEASE
     "Statically link SDL2 + the mingw C++ runtime into release exes"
     OFF)
 
+# First-divergence co-simulation oracle (COSIM_ORACLE.md). When ON, compiles the
+# cosim full-state hash + cycle-keyed park/step TCP engine and arms the runtime_tick
+# checkpoint hook. Defined PUBLIC on gbarecomp_debug so it propagates through
+# gbarecomp_runtime (runtime.cpp / runtime_bus_bridge.cpp) to the game exe. The
+# force-interp backend (g_force_interp / GBARECOMP_FORCE_INTERP) is always compiled
+# and independent of this option. OFF = byte-identical to a normal build.
+option(GBA_COSIM
+    "Build the first-divergence co-simulation oracle (state hash + TCP park/step)"
+    OFF)
+
 find_path(SDL2_INCLUDE_DIR
     NAMES SDL.h
     PATH_SUFFIXES SDL2 SDL2/include
@@ -254,14 +264,24 @@ add_library(gbarecomp_debug STATIC
     src/debug/snapshot.cpp
     src/debug/ws_provenance.cpp
     src/debug/ws_sidecar.cpp
+    # First-divergence co-sim engine + full-state hash. Empty TUs unless
+    # GBA_COSIM is defined (guarded internally), so safe in the normal build.
+    src/debug/cosim.cpp
+    src/debug/cosim_state.cpp
 )
 target_include_directories(gbarecomp_debug PUBLIC src/debug)
-# ws_provenance.cpp consults the active bus via runtime_bus_bridge.h.
+# ws_provenance.cpp + cosim_state.cpp consult the active bus via runtime_bus_bridge.h.
 target_include_directories(gbarecomp_debug PRIVATE src/runtime)
 target_link_libraries(gbarecomp_debug PUBLIC gbarecomp_gba)
 set_property(TARGET gbarecomp_debug PROPERTY POSITION_INDEPENDENT_CODE ON)
 if(WIN32 OR MSYS)
     target_link_libraries(gbarecomp_debug PUBLIC ws2_32)
+endif()
+# Propagate GBA_COSIM PUBLIC so the cosim files here, the runtime_tick hook in
+# gbarecomp_runtime, and runtime.cpp's cosim_init() all compile the oracle in.
+if(GBA_COSIM)
+    target_compile_definitions(gbarecomp_debug PUBLIC GBA_COSIM)
+    message(STATUS "gbarecomp: GBA_COSIM ON — first-divergence oracle compiled in")
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────

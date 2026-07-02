@@ -648,6 +648,88 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
     return 1;
 }
 
+// ── Whole-program force-interpreter backend (GBA_COSIM / GBARECOMP_FORCE_INTERP) ──
+// The recomp-vs-interp co-simulation's "interp" backend (COSIM_ORACLE.md §1). Set
+// from env at startup (runtime.cpp); when nonzero, the main loop calls
+// runtime_force_interp_step() once per guest instruction INSTEAD of dispatching a
+// generated function. Each call fetches/decodes/steps ONE instruction through the
+// reference interpreter and advances the shared machine through the SAME
+// runtime_tick (master clock + device catch-up + IRQ self-delivery into the
+// recompiled BIOS) and runtime_swi (recompiled BIOS SWI) the generated backend
+// uses. So the two co-sim backends share the ENTIRE device / IRQ / BIOS /
+// master-clock path and differ ONLY in how a main-thread guest instruction is
+// executed — isolating recompiler codegen correctness. This is the proven
+// self-heal bridge body (runtime_bridge_interpret) minus the subtree stop/heal/
+// call-nest return contract: there is no native frame to return to, and guest
+// branches are handled inside the interpreter, so runtime_dispatch is never
+// called from here.
+//
+// v1 LIMITATION (documented, closeable later): SWI handlers route through
+// runtime_swi and IRQ handlers through runtime_tick -> runtime_irq, both of which
+// run the RECOMPILED BIOS (and any game IRQ callback the BIOS dispatches runs
+// generated). So BIOS + IRQ-handler code executes recompiled on BOTH co-sim sides
+// and is NOT compared. Acceptable for v1 (BIOS is gate-validated flawless) and it
+// keeps device/IRQ timing byte-identical across backends. Closing it (force-interp
+// the dispatch inside runtime_irq) is a v2 item.
+extern "C" int g_force_interp = 0;
+
+extern "C" void runtime_force_interp_step(void) {
+    using gbarecomp::active_bus;
+    gba::GbaBus* bus = active_bus();
+    if (!bus) return;
+
+    armv4t::CPUState cpu{};
+    gbarecomp::load_arm_cpu_into_interp(g_cpu, cpu);
+    const std::uint32_t pc = cpu.R[15];
+    bus->set_bios_access_enabled(pc < 0x00004000u);
+    if (g_runtime_insn_trace) runtime_insn_fp();
+
+    armv4t::Instr insn{};
+    if (cpu.thumb) {
+        insn = armv4t::ThumbDecoder::decode(bus->read16(pc), pc);
+    } else {
+        insn = armv4t::ArmDecoder::decode(bus->read32(pc), pc);
+    }
+
+    std::uint32_t cyc = 1;
+    const armv4t::Interpreter::Result r =
+        armv4t::Interpreter::step(cpu, *bus, insn, &cyc);
+
+    if (r == armv4t::Interpreter::Result::NotImplemented ||
+        r == armv4t::Interpreter::Result::Undefined) {
+        // A genuine interpreter gap. The interpreter is the reference model here;
+        // stay loud (PRINCIPLES.md "Genuine interpreter gaps still abort loudly").
+        gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
+        std::fprintf(stderr,
+            "runtime_arm: FORCE-INTERP hit interpreter %s at pc=0x%08X. The "
+            "reference interpreter cannot execute this op; add its lowering in "
+            "src/armv4t/interpreter.cpp.\n",
+            r == armv4t::Interpreter::Result::Undefined ? "Undefined"
+                                                        : "NotImplemented",
+            pc);
+        runtime_trace_dump_recent(96);
+        std::abort();
+    }
+
+    if (r == armv4t::Interpreter::Result::Swi) {
+        // Route the SWI through the recompiled BIOS exactly as generated SWI
+        // codegen (and the self-heal bridge) does: set the return address, then
+        // runtime_swi (masks IRQs, ticks the SWI's cycles, dispatches the
+        // recompiled BIOS SWI vector). Do NOT use the interpreter's enter_swi,
+        // and do NOT additionally tick here.
+        const std::uint32_t next_pc = pc + (cpu.thumb ? 2u : 4u);
+        gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
+        g_cpu.R[15] = next_pc;
+        runtime_swi(insn.swi_imm);
+    } else {
+        // Normal / Branched: tick the instruction's cost. runtime_tick
+        // self-delivers any pending IRQ via runtime_irq into the recompiled BIOS.
+        gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
+        runtime_tick(cyc);
+    }
+    bus->set_bios_access_enabled(g_cpu.R[15] < 0x00004000u);
+}
+
 // runtime_dispatch_miss — Stage-1 self-healing entry: log the miss, enqueue a
 // Stage-2 heal (so the NEXT hit dispatches native), then bridge through the
 // interpreter via runtime_bridge_interpret. See that function's note above.

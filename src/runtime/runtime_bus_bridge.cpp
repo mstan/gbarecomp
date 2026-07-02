@@ -13,6 +13,10 @@
 #include "../gba/gba_m4a.h"
 #include "../gba/gba_ppu.h"
 
+#ifdef GBA_COSIM
+#include "../debug/cosim.h"   // cosim_on_tick() — first-divergence checkpoint hook
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -656,6 +660,17 @@ extern "C" void runtime_tick(uint32_t cycles) {
         }
         runtime_irq(g_cpu.R[15]);
     }
+
+#ifdef GBA_COSIM
+    // First-divergence co-simulation checkpoint. runtime_tick is the shared
+    // per-instruction master-clock advance for BOTH backends (generated code emits
+    // it per instruction; the force-interp driver calls it per instruction), so
+    // this is the alignment clock: it records/parks at cycle-stride boundaries so
+    // the recomp and interp instances stop at identical guest cycles. Placed at the
+    // very end so g_runtime_cycles reflects this instruction's cost + any DMA-steal
+    // / HALT-wake cycles added above. See COSIM_ORACLE.md §3.
+    cosim_on_tick();
+#endif
 }
 
 // ── Stage 2: idle-loop elision prover ───────────────────────────────────────

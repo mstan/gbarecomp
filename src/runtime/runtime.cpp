@@ -35,6 +35,9 @@
 #include "sha1.h"
 #include "snapshot.h"
 #include "tcp_debug_server.h"
+#ifdef GBA_COSIM
+#include "cosim.h"           // cosim_init() — first-divergence oracle TCP server
+#endif
 #include "ws_provenance.h"
 #include "ws_sidecar.h"
 
@@ -891,6 +894,24 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // mappings; see docs/WIDESCREEN_STEPC_PLAN.md "Status: WIP / disabled").
     // The code is intentionally RETAINED, not removed, for future work. To
     // re-enable for development, set GBARECOMP_WS_WIP=1.
+    // Co-simulation "interp" backend select. When GBARECOMP_FORCE_INTERP is set,
+    // the main loop interprets every main-thread guest instruction instead of
+    // dispatching generated code (device/IRQ/BIOS/clock path unchanged). This is
+    // the interp side of the recomp-vs-interp first-divergence oracle; the recomp
+    // side is the same binary with the flag unset. See COSIM_ORACLE.md §1.
+    if (const char* fi = std::getenv("GBARECOMP_FORCE_INTERP")) {
+        g_force_interp = (fi[0] && fi[0] != '0') ? 1 : 0;
+        if (g_force_interp && !args.quiet)
+            std::printf("force-interp: main-thread instructions interpreted "
+                        "(recomp backend disabled)\n");
+    }
+
+#ifdef GBA_COSIM
+    // Start the first-divergence oracle TCP server before the guest runs. The
+    // checkpoint hook in runtime_tick parks the guest at cycle-stride boundaries.
+    cosim_init();
+#endif
+
     const char* ws_wip_env = std::getenv("GBARECOMP_WS_WIP");
     const bool ws_wip_enabled =
         ws_wip_env && ws_wip_env[0] && ws_wip_env[0] != '0';
@@ -1161,7 +1182,15 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             return true;
         }
 
-        runtime_dispatch(g_cpu.R[15]);
+        // Co-simulation "interp" backend: interpret one guest instruction rather
+        // than dispatching generated code. Reuses runtime_tick/runtime_swi so the
+        // device/IRQ/BIOS/clock path is identical to the recomp backend; only
+        // main-thread instruction execution differs. See COSIM_ORACLE.md §1.
+        if (g_force_interp) {
+            runtime_force_interp_step();
+        } else {
+            runtime_dispatch(g_cpu.R[15]);
+        }
         ++taken;
         sync_frame_counter();
         return true;

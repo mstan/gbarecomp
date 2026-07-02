@@ -112,6 +112,15 @@ void runtime_dispatch(uint32_t target_pc);
 void runtime_dispatch_with_exchange(uint32_t target_pc);
 void runtime_dispatch_miss(uint32_t target_pc);
 
+// Whole-program force-interpreter backend (co-simulation "interp" side). When
+// g_force_interp != 0, the main run loop calls runtime_force_interp_step() once
+// per guest instruction instead of dispatching generated code — interpreting the
+// main thread while reusing runtime_tick / runtime_swi for the device/IRQ/BIOS
+// path (so both co-sim backends share everything but instruction execution). Set
+// from GBARECOMP_FORCE_INTERP at startup. See COSIM_ORACLE.md §1.
+extern int g_force_interp;
+void runtime_force_interp_step(void);
+
 // True iff a STATIC (recompiled) dispatch-table entry exists for this guest PC
 // + instruction-set state. The on-miss bridge uses it to detect re-entry into
 // statically recompiled code and hand control back (heal-to-static) when it has
