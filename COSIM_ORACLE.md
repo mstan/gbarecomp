@@ -301,3 +301,22 @@ Gate 1 must pass"):
   cycle-charge skew between the recomp codegen cost model and the interpreter's
   Interpreter::step insn_cycles. NEXT: drill to the exact instruction and reconcile the
   two cost models (the real accuracy burndown). Commits 5f847c0/268351d/ad3f8e2/095d990.
+- 2026-07-02: MinishCap burndown past frame 272 — TWO first-divergences root-caused + fixed
+  (see ISSUES.md LP-005/LP-006). (a) **LP-005** (commit 2b265bc): recompiler `arm_codegen.cpp`
+  dropped the pipeline-refill cycles on the `movs/subs pc,lr` exception-return (the BIOS SWI-return
+  idiom at 0x188) — computed `_cyc=3` but `return`ed before the tick, while its sibling LDM
+  exception-return + normal PC-write paths tick correctly. Charged 0 not 3; surfaced only when
+  force-interp interpreted a VBlank-yield-resumed BIOS handler. Fixed → fp cycle-trace 0/7,362,465.
+  (b) **LP-006** (commit b73f574): the reference interpreter didn't bank R8..R12 on mode switch (its
+  own acknowledged gap) while the runtime's bank_out/bank_in do — left `r8_12_user` stale, a cpu-subhash
+  split with every mode-visible reg matching. Added `swap_r8_12_banks()` at the interpreter's MSR /
+  exception_return / restore_cpsr_from_spsr sites (enter_irq/enter_swi bios_smoke-only, deferred).
+  Diagnostics that cracked both (commit 9ed5db4): env-gated `cyc_probe` + `g_tick_ctx` tick-origin
+  tags + cosim `cpu` dump ur/fr banks. MinishCap now CLEAN through cp1280/frame ~298 (max 90M cyc),
+  all checkpoints identical chains. L1 codegen harness 128/128. Both fixes BIOS-level (game-independent).
+  BREADTH (all carts regenerated + rebuilt with the fixes, recomp-vs-interp, stride 65536, max 90M cyc):
+  **MinishCap, LeafGreen, AND Emerald all cosim CLEAN through cp1280 / frame ~298** — every checkpoint
+  identical chains, "no divergence within --max". The BIOS-level fixes hold across all three games; no
+  game-specific divergence surfaced through frame ~298. Emerald build-cosim newly configured this session
+  (mirrors FRLG: GBA_COSIM=ON, GBARECOMP_ROOT=worktree). NEXT unexplored: run past frame ~320 (attract
+  loops), or into input/gameplay, to surface deeper divergences; NBA §8 independent-oracle still unbuilt.
