@@ -102,6 +102,41 @@ reproduced, and we chose not to fix immediately. Not a TODO list.
   audio assertion that the sample buffer matches to within LP-002
   tolerances.
 
+### LP-004: MinishCap open-bus prefetch latch differs across backends during HALT
+- **Observed:** 2026-07-01, by the recomp-vs-interp first-divergence
+  co-simulation oracle (`COSIM_ORACLE.md`).
+- **Detail:** After the harness-fidelity fix (`be01a1b`: force-interp
+  data accesses routed through the runtime bus bridge), the recomp and
+  force-interp backends are **per-instruction bit-identical (cycle +
+  PC) for all 799,688 instructions** of a 7-frame MinishCap boot trace.
+  The cosim then halts on ONE residual: during the BIOS
+  `IntrWait`/HALT loop (BIOS pc ~0x348, frame 6+, `halted=1`), the
+  **open-bus prefetch sub-hash differs**. Every other subsystem is
+  identical at that checkpoint — CPU/CPSR, IWRAM, EWRAM, VRAM, PAL,
+  OAM, IO (IE/IF/IME/timers/DMA/WAITCNT), audio, PPU, and the master
+  clock all match. The difference is **persistent** (frozen while
+  halted; does not self-heal, unlike the DMA-steal transient that
+  `be01a1b` removed). It is the Game-Pak/BIOS open-bus latch
+  (`gba_bus.cpp` `bios_prefetch_` / `latch_bios_prefetch`): the two
+  backends latched a different prefetch word at the last BIOS
+  instruction before halting.
+- **Impact:** benign in effect — dead state UNLESS the guest reads the
+  protected-BIOS region or unmapped memory (open bus) while this value
+  is latched (the one load-bearing class: see
+  `project_mc_hp_002_animation_reframe`). No incorrect open-bus read
+  observed here, so not safe to dismiss but not observed to matter.
+- **Priority:** low. Cannot be adjudicated recomp-vs-interp (both are
+  ours); resolving "which backend is right" needs the independent
+  cycle-accurate oracle (NanoBoyAdvance :19844 / mGBA :19843) — the
+  `COSIM_ORACLE.md` §8 escalation, not yet built.
+- **Next step when picked up:** (1) add raw `bios_open_bus()` to the
+  cosim `dev` dump; capture both backends' latched value + last
+  pre-halt PC. (2) Adjudicate vs NBA/mGBA — whichever matches the
+  hardware open-bus value at that PC is correct. (3) Fix the wrong
+  side's latch timing in the recompiler/runtime (never a stub or a
+  cosim-hash exclusion — the latch is real state, cf. MC-HP-002).
+  Watching whether FireRed reproduces the class.
+
 ---
 
 ## Resolved
