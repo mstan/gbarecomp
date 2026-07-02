@@ -135,7 +135,18 @@ reproduced, and we chose not to fix immediately. Not a TODO list.
   hardware open-bus value at that PC is correct. (3) Fix the wrong
   side's latch timing in the recompiler/runtime (never a stub or a
   cosim-hash exclusion — the latch is real state, cf. MC-HP-002).
-  Watching whether FireRed reproduces the class.
+- **CONFIRMED BIOS-LEVEL / game-independent (2026-07-02):** FireRed
+  reproduces the class with a BYTE-IDENTICAL signature — at the same
+  cp30 / frame 6 / `halted=1`, FireRed's `cpu` (434a8bb4…), `io`
+  (e7e682bb…), and BOTH prefetch values (A=057f…, B=6fa6…) exactly
+  match MinishCap's; only `iwram`/`save` differ between the games.
+  Both titles boot through the same recompiled BIOS into the identical
+  `IntrWait`/HALT state, so the split is in the shared BIOS prefetch
+  path, not in any game's code. Impact upgraded accordingly: it is not
+  MinishCap-specific — one BIOS-path fix resolves it for every game.
+  Still low priority (benign in effect) but now clearly worth a proper
+  fix. Gate 1 (recomp-vs-recomp) passed on FireRed (305 cp, 0 diverge)
+  with RTC pinned via `RECOMP_RTC_EPOCH`.
 
 ---
 
