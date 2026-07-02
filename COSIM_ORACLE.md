@@ -287,3 +287,17 @@ Gate 1 must pass"):
   complete and a whole-program fetch/decode/step/SWI/IRQ driver already exists (self-heal
   bridge + bios_smoke). §1 reduces to routing `runtime_dispatch` through it under a
   force-interp flag. Awaiting sign-off before writing engine code (plan-first gate).
+- 2026-07-01: BUILT §1–§6 (user go-ahead "build it all"). §1 force-interp is a
+  per-instruction driver reusing runtime_tick/runtime_swi (NOT hooking runtime_dispatch
+  — the interpreter handles guest branches itself; only SWI/IRQ route through recompiled
+  BIOS). Checkpoint hook is in runtime_tick (verified per-instruction in both backends via
+  arm_codegen). io hash uses GbaIo::cosim_hash() (architectural only) not serialize()
+  (which carries bookkeeping counters). ALL GATES PASS (recomp²=0, interp²=0, inject
+  halts+localizes). Iteration: (1) FIXED prefetch split (force-interp now calls
+  runtime_should_yield() = the generated prologue's BIOS-prefetch latch); (2) FIXED io
+  bookkeeping false-positive (excluded unmapped_count_/dma_runs_/dma_words_); (3) OPEN
+  genuine divergence — timer0 counter off ~6 at cycle ~1.6M (frame 5, BIOS pc~0x1774),
+  timer enabled prescaler/1 ⇒ TM0 enabled ~6 master-cycles apart = a per-instruction
+  cycle-charge skew between the recomp codegen cost model and the interpreter's
+  Interpreter::step insn_cycles. NEXT: drill to the exact instruction and reconcile the
+  two cost models (the real accuracy burndown). Commits 5f847c0/268351d/ad3f8e2/095d990.
