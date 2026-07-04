@@ -91,3 +91,13 @@ is ARM/THUMB decode, condition codes, flags, interworking, block
 discovery, IR, and codegen. The non-reusable surface is everything in
 `src/gba/`. This separation is what lets `gbarecomp` later contribute
 to an ARM9 / 3DS-style effort without contaminating either side.
+
+---
+
+<p align="center">
+  <sub><b>R.A.I.D. — Retro AI Development</b> · a Discord for AI-assisted retro reverse-engineering, decomp &amp; recomp</sub>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/Ad9BwSzctP"><img src=".github/raid-discord.png" alt="Join the Retro AI Development (R.A.I.D.) Discord" width="200"></a>
+</p>
