@@ -97,3 +97,13 @@ For a strict static-coverage acceptance run, set
 healing shards, or bridge a missing dispatch through the interpreter; the first
 missing static PC aborts loudly. Pair it with BIOS HLE disabled when validating
 the fully LLE path.
+
+---
+
+<p align="center">
+  <sub><b>R.A.I.D. — Retro AI Development</b> · a Discord for AI-assisted retro reverse-engineering, decomp &amp; recomp</sub>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/Ad9BwSzctP"><img src=".github/raid-discord.png" alt="Join the Retro AI Development (R.A.I.D.) Discord" width="200"></a>
+</p>
