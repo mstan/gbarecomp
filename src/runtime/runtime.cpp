@@ -20,6 +20,7 @@
 // step_once() becomes a real `runtime_dispatch` driver.
 
 #include "runtime.h"
+#include "view_config.h"
 
 #include "asset_picker.h"
 #include "bios_hle.h"
@@ -135,12 +136,11 @@ struct Args {
     // and jumps to the cart). --bios-hle-keep-intro / GBARECOMP_BIOS_HLE_KEEP_INTRO
     // override. Ignored when HLE is off (LLE always plays the real intro).
     bool bios_hle_keep_intro = false;
-    // --widescreen <N> / [video].widescreen: opt-in view-area expansion. N =
-    // extra columns rendered per side (left & right); 0 = OFF = byte-identical
-    // to the faithful 240x160 build. Vertical expansion is deferred, so only
-    // the horizontal margin is exposed. Clamped to GbaPpu::kMaxExtraX. The
-    // GBARECOMP_WIDESCREEN env var overrides at launch.
-    int widescreen = 0;
+    // Canonical logical output width. 240 is the faithful GBA view. The new
+    // --view-width / [video].view_width interface names the actual result;
+    // legacy `widescreen=N` inputs are converted immediately to 240 + 2*N so
+    // there is never a second source of truth downstream.
+    int view_width = 240;
 };
 
 std::string trim(std::string_view in) {
@@ -482,9 +482,16 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
             args->save_size = static_cast<std::size_t>(n);
         } else if (section == "video" && key == "screen") {
             args->screen = val;
+        } else if (section == "video" && key == "view_width") {
+            int n = 0;
+            if (parse_int(val.c_str(), &n) && n >= 240) args->view_width = n;
         } else if (section == "video" && key == "widescreen") {
             int n = 0;
-            if (parse_int(val.c_str(), &n) && n >= 0) args->widescreen = n;
+            int width = 240;
+            if (parse_int(val.c_str(), &n) &&
+                legacy_extra_to_view_width(n, &width)) {
+                args->view_width = width;
+            }
         } else if (section == "audio" && key == "shadow") {
             args->audio_shadow = (val == "true" || val == "1");
         } else if (section == "bios" && key == "hle") {
@@ -507,7 +514,7 @@ void find_config_arg(int argc, char** argv, Args* args) {
              s == "--rom-sha1" || s == "--steps" || s == "--frames" ||
              s == "--scale" || s == "--tcp" || s == "--dump-bmp" ||
              s == "--dump-png" || s == "--load-state" ||
-             s == "--widescreen" ||
+             s == "--view-width" || s == "--widescreen" ||
              s == "--save" || s == "--save-path") &&
             i + 1 < argc) {
             ++i;
@@ -655,10 +662,21 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             args->load_state = v;
             continue;
         }
+        if (s == "--view-width") {
+            const char* v = need_value("--view-width");
+            if (!v) return false;
+            if (!parse_int(v, &args->view_width) || args->view_width < 240) {
+                if (err) *err = "invalid --view-width value (expected >= 240)";
+                return false;
+            }
+            continue;
+        }
         if (s == "--widescreen") {
             const char* v = need_value("--widescreen");
             if (!v) return false;
-            if (!parse_int(v, &args->widescreen) || args->widescreen < 0) {
+            int extra = 0;
+            if (!parse_int(v, &extra) ||
+                !legacy_extra_to_view_width(extra, &args->view_width)) {
                 if (err) *err = "invalid --widescreen value (expected >= 0)";
                 return false;
             }
@@ -746,14 +764,27 @@ std::size_t count_nonzero(const uint8_t* p, std::size_t n) {
 
 }  // namespace
 
-// Opt-in view-area expansion master switch + parameter (the runner owns
-// enhancement policy). The future per-game widescreen injector externs these
-// from generated cart code to gate its map/camera widening on g_ws_active and
-// scale by g_ws_extra. 0/0 = faithful 240x160; set once from --widescreen.
+// Opt-in view-area expansion master switch + parameters (the runner owns
+// enhancement policy). Legacy injectors may continue to read g_ws_extra for a
+// symmetric view; new code should use the explicit output/side dimensions.
+// The inactive state is the faithful 240x160 view.
 extern "C" unsigned g_ws_active = 0;
 extern "C" unsigned g_ws_extra  = 0;
+extern "C" unsigned g_ws_extra_left  = 0;
+extern "C" unsigned g_ws_extra_right = 0;
+extern "C" unsigned g_ws_view_width  = 240;
 
 int run_game(int argc, char** argv, const RunOptions& opts) {
+    // run_game is normally process-terminal, but tests and launchers may invoke
+    // it more than once. Game-owned enhancement hooks never leak into a later
+    // faithful run in the same process.
+    gba::g_rom_read32_override = nullptr;
+    gba::g_ws_tilemap_provider = nullptr;
+    gba::g_ws_obj_x_provider = nullptr;
+    gba::g_ws_pillarbox = 0;
+    gba::g_ws_pillarbox_left = 0;
+    gba::g_ws_pillarbox_right = 0;
+    g_runtime_fn_entry_hook = nullptr;
     Args args;
 
     // Seed built-in defaults from the caller (the per-game runner).
@@ -930,14 +961,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         std::printf("bios_backend=%s\n",
                     gba::bios_hle_mode_name(gba::bios_hle_mode()));
 
-    // WIP KILL-SWITCH — widescreen is force-disabled everywhere.
-    // The view-area expansion + Step C margin sidecar are work-in-progress: the
-    // off-screen margins render visibly wrong (stale/misaligned tiles) while the
-    // camera scrolls, because the host-side owner-ring world origin is unreliable
-    // (a savestate / partially-seeded ring yields inconsistent ring-slot->world
-    // mappings; see docs/WIDESCREEN_STEPC_PLAN.md "Status: WIP / disabled").
-    // The code is intentionally RETAINED, not removed, for future work. To
-    // re-enable for development, set GBARECOMP_WS_WIP=1.
+    // GBARECOMP_WS_WIP is an explicit development override for exercising the
+    // generic expanded renderer in games that have not advertised capability.
+    // Production authorization comes only from RunOptions::max_view_width.
+    // The separate Pokémon-specific Step C sidecar remains WIP-gated below.
     // Co-simulation "interp" backend select. When GBARECOMP_FORCE_INTERP is set,
     // the main loop interprets every main-thread guest instruction instead of
     // dispatching generated code (device/IRQ/BIOS/clock path unchanged). This is
@@ -973,35 +1000,72 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     const bool ws_wip_enabled =
         ws_wip_env && ws_wip_env[0] && ws_wip_env[0] != '0';
 
-    // View-area expansion (opt-in enhancement). GBARECOMP_WIDESCREEN overrides
-    // the --widescreen / [video].widescreen value at launch (matches the
-    // screen/shadow override convention). N = extra columns per side; 0 = the
-    // faithful 240x160 view (byte-identical). The PPU clamps to kMaxExtraX.
+    // View-area expansion (opt-in enhancement). The canonical setting is a
+    // total logical width. GBARECOMP_VIEW_WIDTH overrides --view-width /
+    // [video].view_width. The old GBARECOMP_WIDESCREEN=N form remains a
+    // compatibility alias for 240 + 2*N. Only opted-in games can expand.
     {
-        int ws = args.widescreen;
-        if (const char* e = std::getenv("GBARECOMP_WIDESCREEN")) {
+        int requested_width = args.view_width;
+        bool modern_env_valid = false;
+        if (const char* e = std::getenv("GBARECOMP_VIEW_WIDTH")) {
             int n = 0;
-            if (parse_int(e, &n) && n >= 0) ws = n;
-        }
-        if (ws != 0 && !ws_wip_enabled) {
-            if (!args.quiet)
+            if (parse_int(e, &n) && n >= 240) {
+                requested_width = n;
+                modern_env_valid = true;
+            } else if (!args.quiet) {
                 std::fprintf(stderr,
-                    "[gbarecomp:runtime] widescreen is WIP and force-disabled; "
-                    "rendering the faithful 240x160 view. Set GBARECOMP_WS_WIP=1 "
-                    "to enable it for development (see "
-                    "docs/WIDESCREEN_STEPC_PLAN.md)\n");
-            ws = 0;
+                    "[gbarecomp:runtime] ignoring invalid "
+                    "GBARECOMP_VIEW_WIDTH='%s' (expected >= 240)\n", e);
+            }
         }
-        ppu.set_view_margins(static_cast<uint32_t>(ws),
-                             static_cast<uint32_t>(ws), 0, 0);
-        g_ws_extra  = static_cast<unsigned>(ppu.view_extra_left());
+        if (!modern_env_valid) {
+            if (const char* e = std::getenv("GBARECOMP_WIDESCREEN")) {
+                int n = 0;
+                int width = 240;
+                if (parse_int(e, &n) &&
+                    legacy_extra_to_view_width(n, &width)) {
+                    requested_width = width;
+                }
+            }
+        }
+        const ViewGeometry geometry = resolve_view_geometry(
+            requested_width, opts.max_view_width, ws_wip_enabled,
+            gba::GbaPpu::kMaxRenderWidth);
+        if (geometry.width == 240 && requested_width != 240 &&
+            !ws_wip_enabled && opts.max_view_width <= 240 && !args.quiet) {
+            std::fprintf(stderr,
+                "[gbarecomp:runtime] extended view requested at %dx160, "
+                "but this game has not opted in; rendering faithful 240x160\n",
+                requested_width);
+        } else if (geometry.width < static_cast<unsigned>(requested_width) &&
+                   !args.quiet) {
+            std::fprintf(stderr,
+                "[gbarecomp:runtime] requested view %dx160 exceeds this "
+                "game's validated maximum; clamping to %ux160\n",
+                requested_width, geometry.width);
+        }
+        ppu.set_view_margins(geometry.extra_left, geometry.extra_right, 0, 0);
+        args.view_width = static_cast<int>(ppu.render_width());
+        g_ws_extra_left  = static_cast<unsigned>(ppu.view_extra_left());
+        g_ws_extra_right = static_cast<unsigned>(ppu.view_extra_right());
+        // Legacy single-margin consumers use the larger side for odd widths so
+        // 241x160 cannot appear inactive merely because the left split is 0.
+        g_ws_extra = std::max(g_ws_extra_left, g_ws_extra_right);
+        g_ws_view_width = ppu.render_width();
         g_ws_active = ppu.view_expanded() ? 1u : 0u;
+        if (ppu.view_expanded() && opts.extended_view_init) {
+            opts.extended_view_init(ppu.view_extra_left(),
+                                    ppu.view_extra_right());
+        }
         if (ppu.view_expanded() && !args.quiet) {
             std::fprintf(stderr,
-                "[gbarecomp:runtime] view-area expansion ON: +%u px/side "
-                "(render %ux%u); set --widescreen 0 for the faithful view\n",
+                "[gbarecomp:runtime] extended view ON: requested=%dx160 "
+                "effective=%ux%u margins=%u/%u; set --view-width 240 for "
+                "the faithful view\n",
+                requested_width,
+                ppu.render_width(), ppu.render_height(),
                 static_cast<unsigned>(ppu.view_extra_left()),
-                ppu.render_width(), ppu.render_height());
+                static_cast<unsigned>(ppu.view_extra_right()));
         }
     }
     bus.set_rom(rom.data(), rom.size());
@@ -1392,6 +1456,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         // the load. The interp re-origins its own cycles_elapsed identically.)
         g_runtime_cycles = 0;
         runtime_fp_reset();
+        ++g_runtime_state_epoch;
         return true;
     };
 
@@ -2135,7 +2200,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 // Only when widescreen is actually on (no point, and avoids any
                 // synthetic-draw side effects, when off). Otherwise capture the
                 // live ring (eviction).
-                if (ws_sidecar_active_mode() && args.widescreen > 0)
+                if (ws_sidecar_active_mode() && args.view_width > 240)
                     ws_sidecar_active_fill();
                 else if (!ws_sidecar_active_mode())
                     ws_sidecar_sync_frame();
@@ -2217,7 +2282,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         // margins) via the guest's own draw, then force a FRESH render so the
         // wide path reads the filled cache instead of the run-time latched FB.
         bool fresh = false;
-        if (ws_sidecar_enabled() && args.widescreen > 0 &&
+        if (ws_sidecar_enabled() && args.view_width > 240 &&
             ws_sidecar_active_mode()) {
             ws_sidecar_active_fill();
             fresh = true;
@@ -2264,12 +2329,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // for the final guest state. GBARECOMP_WS_PROBE_DUMP=<path>.
     if (ws_provenance_armed()) {
         if (const char* wsp = std::getenv("GBARECOMP_WS_PROBE_DUMP")) {
-            if (wsp[0]) ws_provenance_dump(wsp, args.widescreen);
+            if (wsp[0]) ws_provenance_dump(wsp, g_ws_extra);
         }
     }
     if (ws_sidecar_enabled()) {
         if (const char* scp = std::getenv("GBARECOMP_WS_SC_DUMP")) {
-            if (scp[0]) ws_sidecar_dump(scp, args.widescreen);
+            if (scp[0]) ws_sidecar_dump(scp, g_ws_extra);
         }
     }
 

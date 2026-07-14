@@ -98,18 +98,19 @@ extern "C" unsigned long long g_runtime_cycles = 0;
 // prover (runtime_idle_backedge) requires it unchanged across the two proof
 // iterations. See runtime_arm.h.
 extern "C" unsigned long long g_idle_disturb_epoch = 0;
+extern "C" unsigned long long g_runtime_state_epoch = 0;
 // Diagnostics for the exit banner: cycles/iterations the prover fast-forwarded.
 static unsigned long long g_idle_skipped_cycles = 0;
 static unsigned long long g_idle_skipped_iters  = 0;
 static unsigned long long g_idle_confirmed_sites = 0;
 
 // P6 sljit differential gate — shadow-tick mode. While g_runtime_shadow_tick is
-// set (only during a healed shard's throwaway VALIDATION re-run), runtime_tick
+// set (during a throwaway validation or transactional guest re-run), runtime_tick
 // accumulates the shard's cycle cost into g_runtime_shadow_cycles and does
-// NOTHING else: no device pump, no IRQ delivery, no real-clock advance — because
-// the interpreter pass (the kept result) already pumped those for this window.
-// Without this the shard's re-run would double-pump the PPU/audio/timers and
-// re-deliver IRQs. Default 0 → normal play / the gcc path are untouched.
+// NOTHING else: no device pump, no IRQ delivery, no real-clock advance. MMIO
+// catch-up/rescheduling obey the same contract below; otherwise merely reaching
+// a trapped MMIO access could mutate devices before the transaction rejects it.
+// Default 0 → normal play / the gcc path are untouched.
 extern "C" unsigned          g_runtime_shadow_tick   = 0;
 extern "C" unsigned long long g_runtime_shadow_cycles = 0;
 
@@ -603,6 +604,11 @@ static inline void drain_dma_steal(gba::GbaBus* bus, gba::GbaPpu* ppu) {
 // already accounts for these cycles (runtime_tick debited it as they accrued),
 // so it is left unchanged here.
 extern "C" void runtime_mmio_catch_up(void) {
+    // A shadow/transactional re-run must not materialize the real machine's
+    // pending time. The bus observer will reject or diagnose the MMIO access;
+    // flushing here first would irreversibly advance PPU/audio/timers despite
+    // the guest transaction subsequently being rolled back.
+    if (g_runtime_shadow_tick) return;
     auto* bus = gbarecomp::g_active_bus;
     auto* ppu = gbarecomp::g_active_ppu;
     if (!bus || !ppu || g_pending_cycles == 0) return;
@@ -613,6 +619,11 @@ extern "C" void runtime_mmio_catch_up(void) {
 // Recompute the next-event horizon after a config-changing MMIO write (timer
 // reload/control, DISPSTAT, DMA registers, etc. move the next event).
 extern "C" void runtime_resync_horizon(void) {
+    // Device stores are suppressed by the shadow transaction's bus observer.
+    // Do not drain DMA or rewrite the real scheduler horizon for that rejected
+    // store. This also keeps the established shadow-tick promise symmetric with
+    // runtime_mmio_catch_up() and runtime_tick().
+    if (g_runtime_shadow_tick) return;
     auto* bus = gbarecomp::g_active_bus;
     auto* ppu = gbarecomp::g_active_ppu;
     if (!bus || !ppu) return;

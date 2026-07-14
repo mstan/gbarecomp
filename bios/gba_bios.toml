@@ -573,9 +573,8 @@ resume = true
 name = "bios_resume_0B90"
 note = "IRQ-return continuation observed during paired VBlank stepping; STRH inside the 0x00000B8A..0x00000B96 loop"
 
-[[extra_func]]
-addr = 0x00000C20
+[[resume_range]]
+start = 0x00000C14
+end = 0x00000C24
 mode = "arm"
-resume = true
-name = "bios_resume_0C20"
-note = "executed exception-return continuation; interior of generated host 0x00000C14..0x00000C24"
+note = "LLE-observed IRQ returns inside the CpuFastSet loop; cover the reviewed generated host extent"

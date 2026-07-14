@@ -1,12 +1,12 @@
 # Widescreen Step C — Strategy A (widen the guest field BG ring 32→64)
 
-> ## Status: WIP — FORCE-DISABLED (2026-06-21)
+> ## Status: Pokémon Step C sidecar WIP / disabled by default (2026-07-14)
 >
-> The widescreen view expansion and the Step C margin sidecar are **disabled in
-> every build**. The runner force-clamps `--widescreen`/`[video].widescreen` to 0
-> and does not arm the sidecar unless `GBARECOMP_WS_WIP=1` is set (development
-> escape hatch). The faithful 240×160 view is always rendered; OFF remains
-> byte-identical (unchanged).
+> The generic expanded-view surface is available only to game runners that opt
+> in with `RunOptions::max_view_width`; all other games clamp to faithful
+> 240x160. This document describes the separate Pokémon-specific Step C margin
+> sidecar, which is still not production-authorized and does not arm unless
+> `GBARECOMP_WS_WIP=1` is set. OFF remains byte-identical (unchanged).
 >
 > **Why disabled:** the off-screen margins render visibly wrong (stale /
 > misaligned tiles) while the camera scrolls. Root cause established this session:
@@ -33,7 +33,7 @@
 > fundamental owner-ring unreliability.
 >
 > **Guest-camera origin (Option A) — IMPLEMENTED 2026-06-21, IMPROVED but not
-> perfect; feature stays force-disabled.** The margin world origin is now derived
+> perfect; the Pokémon sidecar stays disabled by default.** The margin world origin is now derived
 > from guest state instead of the host owner ring (`camera_origin()` in
 > `src/debug/ws_sidecar.cpp`): fine position from the LIVE BG scroll
 > (`(scroll>>3)&31 + C2`, C2=12x/14y — empirically invariant, so it tracks the
@@ -48,8 +48,8 @@
 > still appear during motion (user-observed "less bad but not gone"). Suspects for
 > next time: per-scanline scroll vs the once-per-frame coarse window, the cache
 > fill region vs the live origin under fast motion, and map-connection borders
-> (neighbor tileset not loaded). The feature remains force-disabled (WIP) pending
-> that cleanup.
+> (neighbor tileset not loaded). The sidecar remains WIP-only pending that
+> cleanup.
 
 Opt-in 16:9 widescreen for Pokémon FRLG overworld. **OFF = byte-identical /
 system-faithful** (the gate); **ON = the guest renders a true 64-tile-wide field

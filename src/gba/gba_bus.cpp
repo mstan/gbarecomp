@@ -16,6 +16,9 @@
 
 namespace gba {
 
+extern "C" int (*g_rom_read32_override)(std::uint32_t, std::uint32_t,
+                                         std::uint32_t*) = nullptr;
+
 GbaBus::GbaBus() {
     io_dispatch_.set_audio(&audio_);
 }
@@ -235,7 +238,15 @@ uint32_t GbaBus::read32(uint32_t addr) {
             if (is_eeprom_addr(addr, save_)) {
                 return save_.eeprom_read_bit();
             }
-            if (rom_ && off + 3 < rom_size_) return load_u32(&rom_[off]);
+            if (rom_ && off + 3 < rom_size_) {
+                const uint32_t original = load_u32(&rom_[off]);
+                uint32_t overridden = original;
+                if (g_rom_read32_override &&
+                    g_rom_read32_override(addr, original, &overridden)) {
+                    return overridden;
+                }
+                return original;
+            }
             // No-cart open-bus: two consecutive halfwords.
             uint32_t hw_lo = (off >> 1) & 0xFFFFu;
             uint32_t hw_hi = ((off >> 1) + 1) & 0xFFFFu;

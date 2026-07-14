@@ -484,8 +484,13 @@ target_link_libraries(irq_tests PRIVATE gbarecomp_gba)
 add_test(NAME irq_tests COMMAND irq_tests)
 
 add_executable(ppu_smoke_tests tests/ppu_smoke/test_main.cpp)
+target_include_directories(ppu_smoke_tests PRIVATE src/runtime)
 target_link_libraries(ppu_smoke_tests PRIVATE gbarecomp_gba)
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
+
+add_executable(presentation_layout_tests tests/presentation_layout/test_main.cpp)
+target_include_directories(presentation_layout_tests PRIVATE src/runtime)
+add_test(NAME presentation_layout_tests COMMAND presentation_layout_tests)
 
 # P6 differential-gate primitives (offline; full-RAM snapshot/restore/diff).
 add_executable(heal_gate_tests

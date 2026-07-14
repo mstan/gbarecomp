@@ -25,6 +25,9 @@ extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
 // world — used for non-overworld screens (menus, battles, transitions) so they
 // are letterboxed rather than garbled. Set per-frame by the runtime policy.
 extern "C" int g_ws_pillarbox = 0;
+extern "C" int g_ws_pillarbox_left = 0;
+extern "C" int g_ws_pillarbox_right = 0;
+extern "C" int (*g_ws_obj_x_provider)(int, int*) = nullptr;
 
 GbaPpu::GbaPpu()  = default;
 GbaPpu::~GbaPpu() = default;
@@ -842,15 +845,42 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                                  kVanW, kVanH);
         obj_window_mask = obj_window_storage;
     }
-    auto window_control = [&](uint32_t x) -> uint16_t {
+    auto window_control_at_hx = [&](int hx) -> uint16_t {
         if (!any_window) return 0x3Fu;
-        int hx = static_cast<int>(x) - static_cast<int>(ox);
         if (win0_row && win_h_in(0x40, hx)) return winin & 0x3Fu;
         if (win1_row && win_h_in(0x42, hx)) return (winin >> 8) & 0x3Fu;
         if (obj_window_mask && hx >= 0 && hx < static_cast<int>(kVanW) &&
             obj_window_mask[hx])
             return static_cast<uint16_t>((winout >> 8) & 0x3Fu);
         return static_cast<uint16_t>(winout & 0x3Fu);
+    };
+    // A guest-authored window has no defined continuation beyond the native
+    // 240-pixel scanline. Extend it into the margins only when every authentic
+    // pixel selects the same window control. Sampling just an edge and the
+    // center misses narrow apertures (including OBJ-window stencils) that lie
+    // between those probes and can leak scenery around transitions.
+    uint16_t uniform_window_control = window_control_at_hx(0);
+    bool window_control_is_uniform = true;
+    if (g_ws_tilemap_provider && any_window) {
+        for (int hx = 1; hx < static_cast<int>(kVanW); ++hx) {
+            if (window_control_at_hx(hx) != uniform_window_control) {
+                window_control_is_uniform = false;
+                break;
+            }
+        }
+    }
+    const bool black_nonuniform_window_margins =
+        g_ws_tilemap_provider && any_window && !window_control_is_uniform;
+    auto window_control = [&](uint32_t x) -> uint16_t {
+        int hx = static_cast<int>(x) - static_cast<int>(ox);
+        if (g_ws_tilemap_provider &&
+            (hx < 0 || hx >= static_cast<int>(kVanW))) {
+            // A non-uniform guest window (iris, wipe, HUD aperture) has no
+            // authored meaning outside 240px. Only extend a uniform scanline;
+            // otherwise fail the margin closed instead of leaking around it.
+            return window_control_is_uniform ? uniform_window_control : 0u;
+        }
+        return window_control_at_hx(hx);
     };
     auto layer_enabled = [&](uint32_t x, uint32_t layer_bit) -> bool {
         return (window_control(x) & (1u << layer_bit)) != 0;
@@ -916,14 +946,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
         uint32_t block_cols = width_tiles / 32u;
         for (uint32_t x = 0; x < out_w; ++x) {
             int hx = static_cast<int>(x) - static_cast<int>(ox);
-            const bool margin = (hx < 0 || hx >= 240);
-            // The guest window (WIN0/1) is authored for the 240px view, so a
-            // margin falls to WINOUT and would be culled. When the sidecar can
-            // supply the extended world for this margin, bypass the window cull
-            // so it renders; central columns (and vanilla-wide margins without a
-            // sidecar) keep the faithful window behavior.
-            const bool sidecar_margin = margin && g_ws_tilemap_provider != nullptr;
-            if (!sidecar_margin && !layer_enabled(x, layer)) continue;
+            if (!layer_enabled(x, layer)) continue;
             uint32_t tex_x = static_cast<uint32_t>(hx + static_cast<int>(hofs)) &
                              (width_px - 1u);
             uint32_t tex_y = (y + vofs) & (height_px - 1u);
@@ -1062,11 +1085,18 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             int sw = kSpriteWH[shape][size][0];
             int sh = kSpriteWH[shape][size][1];
             int sy = static_cast<int>(attr0 & 0xFFu);
-            // OAM X: keep the 9-bit signed decode (do NOT clamp); the sprite is
-            // then tested against the expanded viewport below.
-            int sx = static_cast<int>(attr1 & 0x1FFu);
+            // OAM X is normally signed 9-bit. An opted-in game may reinterpret
+            // values that its widened guest writer emitted beyond hardware X.
+            const int raw_sx = static_cast<int>(attr1 & 0x1FFu);
+            int sx = raw_sx;
             if (sy >= 160) sy -= 256;
-            if (sx & 0x100) sx -= 0x200;
+            int provided_sx = sx;
+            if (g_ws_obj_x_provider &&
+                g_ws_obj_x_provider(raw_sx, &provided_sx)) {
+                sx = provided_sx;
+            } else if (sx & 0x100) {
+                sx -= 0x200;
+            }
             bool color256 = (attr0 & 0x2000u) != 0;
             uint32_t tile_num = attr2 & 0x3FFu;
             uint32_t palette_bank = (attr2 >> 12) & 0xFu;
@@ -1169,7 +1199,13 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
         uint8_t* dst = row + x * 3;
         // Pillarbox policy: black out the margin columns on non-overworld
         // screens so menus/battles are letterboxed, not garbled.
-        if (g_ws_pillarbox && (x < ox || x >= ox + 240u)) {
+        const bool left_margin = x < ox;
+        const bool right_margin = x >= ox + 240u;
+        if ((black_nonuniform_window_margins &&
+             (left_margin || right_margin)) ||
+            (g_ws_pillarbox && (left_margin || right_margin)) ||
+            (g_ws_pillarbox_left && left_margin) ||
+            (g_ws_pillarbox_right && right_margin)) {
             dst[0] = dst[1] = dst[2] = 0;
             continue;
         }

@@ -148,6 +148,42 @@ bool parse_extra_funcs(const toml::array& arr,
     return true;
 }
 
+bool parse_resume_ranges(const toml::array& arr,
+                         std::vector<ConfigResumeRange>& out) {
+    for (std::size_t i = 0; i < arr.size(); ++i) {
+        const auto* t = arr[i].as_table();
+        if (!t) {
+            std::fprintf(stderr, "%s[[resume_range]] entry %zu is not a table\n",
+                         kAbortHeader, i);
+            return false;
+        }
+        ConfigResumeRange r;
+        bool ok = true;
+        std::string err;
+        r.start = get_u32_field(*t, "start", true, ok, err);
+        r.end = get_u32_field(*t, "end", true, ok, err);
+        std::string mode_s = get_string_field(*t, "mode", true, ok, err);
+        if (!ok || !parse_mode(mode_s, r.mode)) {
+            std::fprintf(stderr,
+                "%s[[resume_range]] entry %zu: start/end and mode "
+                "(arm or thumb) are required\n", kAbortHeader, i);
+            return false;
+        }
+        const uint32_t step = r.mode == CpuMode::Thumb ? 2u : 4u;
+        if (r.start >= r.end || (r.start % step) != 0 ||
+            (r.end % step) != 0 || r.end - r.start > 0x1000u) {
+            std::fprintf(stderr,
+                "%s[[resume_range]] entry %zu: invalid, unaligned, or larger "
+                "than 0x1000 bytes [0x%08X,0x%08X)\n",
+                kAbortHeader, i, r.start, r.end);
+            return false;
+        }
+        r.note = get_string_field(*t, "note", false, ok, err);
+        out.push_back(std::move(r));
+    }
+    return true;
+}
+
 bool parse_data_ranges(const toml::array& arr,
                        std::vector<ConfigDataRange>& out) {
     for (std::size_t i = 0; i < arr.size(); ++i) {
@@ -348,6 +384,44 @@ bool validate_cross_section(const Config& cfg) {
             }
         }
     }
+    for (const auto& rr : cfg.resume_ranges) {
+        const std::uint64_t program_start = cfg.program.load_address;
+        const std::uint64_t program_end =
+            program_start + static_cast<std::uint64_t>(cfg.program.size);
+        bool in_code_image = rr.start >= program_start && rr.end <= program_end;
+        for (const auto& cc : cfg.code_copies) {
+            const std::uint64_t copy_start = cc.runtime_start;
+            const std::uint64_t copy_end =
+                copy_start + static_cast<std::uint64_t>(cc.size);
+            in_code_image = in_code_image ||
+                (rr.start >= copy_start && rr.end <= copy_end);
+        }
+        if (!in_code_image) {
+            std::fprintf(stderr,
+                "%s[[resume_range]] [0x%08X,0x%08X) is outside the "
+                "program image and declared [[code_copy]] spans\n",
+                kAbortHeader, rr.start, rr.end);
+            return false;
+        }
+        for (const auto& dr : cfg.data_ranges) {
+            if (rr.start < dr.end && dr.start < rr.end) {
+                std::fprintf(stderr,
+                    "%s[[resume_range]] [0x%08X,0x%08X) overlaps "
+                    "[[data_range]] [0x%08X,0x%08X)\n",
+                    kAbortHeader, rr.start, rr.end, dr.start, dr.end);
+                return false;
+            }
+        }
+        for (const auto& ex : cfg.exclude_funcs) {
+            if (ex.addr >= rr.start && ex.addr < rr.end) {
+                std::fprintf(stderr,
+                    "%s[[exclude_func]] 0x%08X falls inside "
+                    "[[resume_range]] [0x%08X,0x%08X)\n",
+                    kAbortHeader, ex.addr, rr.start, rr.end);
+                return false;
+            }
+        }
+    }
     // jump_table table bytes overlapping a data_range is also wrong
     // (the table bytes are AUTO-excluded, declaring them as data
     // is harmless but suggests confusion — accept silently for now).
@@ -438,6 +512,11 @@ bool load_config(const std::string& path, Config& out) {
         if (!parse_extra_funcs(*ef, out.extra_funcs)) return false;
     }
 
+    // [[resume_range]]
+    if (auto rr = tbl["resume_range"].as_array()) {
+        if (!parse_resume_ranges(*rr, out.resume_ranges)) return false;
+    }
+
     // [[data_range]]
     if (auto dr = tbl["data_range"].as_array()) {
         if (!parse_data_ranges(*dr, out.data_ranges)) return false;
@@ -508,6 +587,7 @@ void print_config_summary(const Config& cfg) {
     std::printf("  identity sha1:         %s (verified)\n",
                 hex_lower(cfg.identity.sha1).c_str());
     std::printf("  extra_func entries:    %zu\n", cfg.extra_funcs.size());
+    std::printf("  resume_range entries:  %zu\n", cfg.resume_ranges.size());
     std::printf("  data_range entries:    %zu\n", cfg.data_ranges.size());
     std::printf("  code_copy entries:     %zu\n", cfg.code_copies.size());
     std::printf("  jump_table entries:    %zu\n", cfg.jump_tables.size());

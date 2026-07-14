@@ -84,6 +84,17 @@ Targets:
 
 ---
 
+## Opt-in expanded view
+
+Game runners that implement their own safe scene/render policy may advertise a
+logical width above the native 240 pixels with `RunOptions::max_view_width`.
+Users then select a total width with `[video].view_width`, `--view-width`, or
+`GBARECOMP_VIEW_WIDTH`; height remains 160. The default is always faithful
+240x160, and requests for a game that has not opted in are clamped to 240. See
+`ENHANCEMENTS.md` and `docs/TOML_SCHEMA.md` for the contract and legacy aliases.
+
+---
+
 ## Reuse target
 
 The `src/armv4t/` tree is intentionally portable. The reusable surface

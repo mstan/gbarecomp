@@ -62,6 +62,12 @@ mode = "thumb"
 resume = true                    # optional interior exception-return alias
 note = "IRQ return into a containing function"
 
+[[resume_range]]
+start = 0x08001000               # real host entry
+end   = 0x08001020               # exclusive, aligned end
+mode  = "thumb"
+note  = "Observed interruptible hot function"
+
 [[data_range]]
 start = 0x000001A0
 end   = 0x000001C0              # [start, end) — exclusive upper bound
@@ -130,6 +136,18 @@ enters the containing generated function, whose resume prologue jumps to that
 instruction. If no compatible containing function is found, the candidate stays
 a standalone function so the gap remains visible instead of being silently
 attached to the wrong host.
+
+### `[[resume_range]]` (zero or more)
+
+A bounded declaration for a reviewed function that has produced asynchronous
+IRQ returns at multiple interior instructions. `start` is the real function
+entry and `end` is its exclusive, aligned extent. The recompiler keeps the host
+whole and emits resume aliases for every aligned instruction after `start`.
+This avoids reactively listing one `[[extra_func]] resume = true` entry per
+observed interrupt timing while remaining narrower than a whole-program policy.
+Ranges are capped at 0x1000 bytes, must remain inside the program image or a
+declared `[[code_copy]]` runtime span, and may not overlap `[[data_range]]` or
+contain an `[[exclude_func]]` address.
 
 **Deduplication against the finder:**
 
@@ -317,6 +335,25 @@ The metric of finder quality is the trend of `manual_seeds_only`
 downward over time, with `redundant_manual` rising proportionally
 (or staying flat as the TOML grows for new use cases). `finder_rejected_walks`
 counts how often a `data_range` saved us from a false positive.
+
+## Runtime video settings
+
+The runtime also consumes an optional `[video]` table. These keys do not affect
+static discovery or generated code:
+
+```toml
+[video]
+screen = "frontlit"
+view_width = 240
+```
+
+`view_width` is the total logical output width in GBA pixels. Height remains
+160. `240` is faithful and is the universal default. Values above 240 are
+honored only when the game runner advertises an equal-or-larger
+`RunOptions::max_view_width`; otherwise the runtime clamps to 240. Command-line
+`--view-width` and environment `GBARECOMP_VIEW_WIDTH` override TOML in that
+order. Legacy `widescreen=N` inputs map to `240 + 2*N` immediately and are kept
+only for compatibility.
 
 ## Hash-anchored
 

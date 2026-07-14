@@ -4,10 +4,11 @@
 // uses it; otherwise the same symbols compile as no-op stubs so
 // headless builds (CI, BIOS smoke without --window) still link.
 //
-// The window owns a 240x160 streaming texture matching the GBA
-// framebuffer pixel format (RGB888). present() uploads a frame and
-// flips. pump() drains the OS event queue, returns a quit flag and
-// a packed GBA KEYINPUT value (active-low, 1 = released).
+// The window owns a logical-size streaming texture matching the active GBA
+// framebuffer pixel format (RGB888). The host window is resizable; present()
+// maximally fills an aspect-correct viewport; exact multiples retain whole-pixel
+// scaling. pump() drains the OS event queue, returns a quit flag and a packed GBA
+// KEYINPUT value (active-low, 1 = released).
 
 #pragma once
 

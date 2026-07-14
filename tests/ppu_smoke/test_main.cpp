@@ -1,9 +1,14 @@
 #include "gba_ppu.h"
+#include "view_config.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <vector>
 
 namespace {
 
@@ -32,6 +37,20 @@ struct Fixture {
     std::array<uint8_t, gba::GbaPpu::kFramebufferBytes> rgb{};
     gba::GbaPpu ppu;
 };
+
+int test_positive_obj_x(int raw_x, int* out_x) {
+    if (raw_x >= 0x100 && raw_x < 288 && out_x) {
+        *out_x = raw_x;
+        return 1;
+    }
+    return 0;
+}
+
+int test_margin_tilemap(int bg, int, int, uint16_t* out_entry) {
+    if (bg != 0 || !out_entry) return 0;
+    *out_entry = 0;
+    return 1;
+}
 
 void test_alpha_native_domain_and_green_precision() {
     Fixture f;
@@ -75,11 +94,225 @@ void test_brightness_native_domain_and_green_precision() {
     expect_pixel(f.rgb.data(), 24, 49, 16, "darken native-domain rounding");
 }
 
+void test_extended_view_geometry_and_clamp() {
+    gba::GbaPpu ppu;
+    ppu.set_view_margins(24, 24, 0, 0);
+    if (ppu.render_width() != 288 || ppu.render_height() != 160 ||
+        ppu.view_extra_left() != 24 || ppu.view_extra_right() != 24) {
+        std::fprintf(stderr, "extended-view 288x160 geometry mismatch\n");
+        std::exit(1);
+    }
+
+    ppu.set_view_margins(1000, 1000, 7, 9);
+    if (ppu.render_width() != gba::GbaPpu::kMaxRenderWidth ||
+        ppu.render_height() != gba::GbaPpu::kScreenHeight ||
+        ppu.view_extra_top() != 0 || ppu.view_extra_bottom() != 0) {
+        std::fprintf(stderr, "extended-view clamp mismatch\n");
+        std::exit(1);
+    }
+}
+
+void test_extended_view_capability_policy() {
+    using gbarecomp::resolve_view_geometry;
+    constexpr uint32_t kEngineMax = gba::GbaPpu::kMaxRenderWidth;
+
+    auto g = resolve_view_geometry(288, 240, false, kEngineMax);
+    if (g.width != 240 || g.extra_left != 0 || g.extra_right != 0) {
+        std::fprintf(stderr, "unsupported extended view was not inert\n");
+        std::exit(1);
+    }
+    g = resolve_view_geometry(288, 320, false, kEngineMax);
+    if (g.width != 288 || g.extra_left != 24 || g.extra_right != 24) {
+        std::fprintf(stderr, "opted-in 288x160 geometry mismatch\n");
+        std::exit(1);
+    }
+    g = resolve_view_geometry(368, 320, false, kEngineMax);
+    if (g.width != 320 || g.extra_left != 40 || g.extra_right != 40) {
+        std::fprintf(stderr, "per-game maximum was not enforced\n");
+        std::exit(1);
+    }
+    g = resolve_view_geometry(288, 240, true, kEngineMax);
+    if (g.width != 288) {
+        std::fprintf(stderr, "development override did not bypass capability\n");
+        std::exit(1);
+    }
+    g = resolve_view_geometry(285, 320, false, kEngineMax);
+    if (g.width != 285 || g.extra_left != 22 || g.extra_right != 23) {
+        std::fprintf(stderr, "odd extended-view split mismatch\n");
+        std::exit(1);
+    }
+
+    const int legacy_extra[] = {0, 20, 22, 24, 40};
+    const int expected_width[] = {240, 280, 284, 288, 320};
+    for (std::size_t i = 0; i < std::size(legacy_extra); ++i) {
+        int width = 0;
+        if (!gbarecomp::legacy_extra_to_view_width(legacy_extra[i], &width) ||
+            width != expected_width[i]) {
+            std::fprintf(stderr, "legacy widescreen conversion mismatch\n");
+            std::exit(1);
+        }
+    }
+    int ignored = 0;
+    if (gbarecomp::legacy_extra_to_view_width(-1, &ignored) ||
+        gbarecomp::legacy_extra_to_view_width(
+            std::numeric_limits<int>::max(), &ignored)) {
+        std::fprintf(stderr, "legacy widescreen overflow was accepted\n");
+        std::exit(1);
+    }
+}
+
+void test_extended_view_preserves_authentic_center() {
+    Fixture f;
+    const uint16_t dispcnt = 0x0100;  // Mode 0, BG0.
+    store16(&f.io[0x08], 0x0180);     // 256 colors, screen block 1.
+    store16(&f.io[0x10], 13);         // Non-tile-aligned horizontal scroll.
+    store16(&f.io[0x12], 5);          // Non-tile-aligned vertical scroll.
+
+    // Give every texel and palette entry a deterministic nontrivial value so
+    // the comparison covers tile selection, scrolling, and RGB conversion.
+    for (std::size_t i = 0; i < 64; ++i) f.vram[i] = static_cast<uint8_t>(i + 1);
+    for (std::size_t i = 0; i < 32u * 32u; ++i)
+        store16(&f.vram[0x800 + i * 2], static_cast<uint16_t>(i & 1u));
+    for (unsigned i = 1; i < 256; ++i)
+        store16(&f.pal[i * 2], static_cast<uint16_t>(
+            (i & 31u) | (((i * 3u) & 31u) << 5) | (((i * 7u) & 31u) << 10)));
+
+    std::vector<uint8_t> authentic(gba::GbaPpu::kFramebufferBytes, 0);
+    f.ppu.render(authentic.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+
+    constexpr uint32_t kLeft = 24;
+    f.ppu.set_view_margins(kLeft, kLeft, 0, 0);
+    std::vector<uint8_t> wide(gba::GbaPpu::kMaxFramebufferBytes, 0);
+    f.ppu.render(wide.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+
+    const std::size_t wide_stride = f.ppu.render_width() * 3u;
+    const std::size_t authentic_stride = gba::GbaPpu::kScreenWidth * 3u;
+    for (uint32_t y = 0; y < gba::GbaPpu::kScreenHeight; ++y) {
+        const uint8_t* got = wide.data() + y * wide_stride + kLeft * 3u;
+        const uint8_t* expected = authentic.data() + y * authentic_stride;
+        if (std::memcmp(got, expected, authentic_stride) != 0) {
+            std::fprintf(stderr,
+                         "extended-view center differs from authentic row %u\n", y);
+            std::exit(1);
+        }
+    }
+}
+
+void test_extended_view_obj_x_is_explicitly_opt_in() {
+    Fixture f;
+    for (std::size_t i = 0; i < 128; ++i)
+        store16(&f.oam[i * 8], 0x0200);  // Disable every OBJ.
+    store16(&f.oam[0], 0x0000);          // Enable OBJ 0 at Y=0.
+    store16(&f.oam[2], 0x0100);          // Raw 9-bit X=256.
+    store16(&f.oam[4], 0x0000);          // 4bpp tile 0, OBJ palette 0.
+    f.vram[0x10000] = 0x11;              // First two texels use color 1.
+    store16(&f.pal[0x202], 0x001F);      // OBJ color 1 = red.
+
+    gba::g_ws_obj_x_provider = test_positive_obj_x;
+    f.ppu.render(f.rgb.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    // The faithful renderer must ignore the extended-view provider.
+    expect_pixel(f.rgb.data(), 0, 0, 0, "faithful OBJ X remained signed");
+
+    f.ppu.set_view_margins(24, 24, 0, 0);
+    std::vector<uint8_t> wide(gba::GbaPpu::kMaxFramebufferBytes, 0);
+    f.ppu.render(wide.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    const std::size_t extended_x = (256u + 24u) * 3u;
+    expect_pixel(wide.data() + extended_x, 255, 0, 0,
+                 "opted-in extended OBJ X");
+    gba::g_ws_obj_x_provider = nullptr;
+}
+
+void test_extended_view_extends_nearest_window_edge() {
+    Fixture f;
+    store16(&f.io[0x08], 0x0180);  // BG0 256-color, screen block 1.
+    std::fill_n(f.vram.begin(), 64, static_cast<uint8_t>(1));
+    store16(&f.vram[0x800], 0);
+    store16(&f.pal[2], 0x001F);     // Red.
+    store16(&f.io[0x40], 0x00F0);   // WIN0 X=[0,240).
+    store16(&f.io[0x44], 0x00A0);   // WIN0 Y=[0,160).
+    store16(&f.io[0x48], 0x0001);   // WIN0 enables BG0.
+    store16(&f.io[0x4A], 0x0000);   // WINOUT disables everything.
+    f.ppu.set_view_margins(24, 24, 0, 0);
+    gba::g_ws_tilemap_provider = test_margin_tilemap;
+    std::vector<uint8_t> wide(gba::GbaPpu::kMaxFramebufferBytes, 0);
+    f.ppu.render(wide.data(), 0x2100, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(wide.data(), 255, 0, 0,
+                 "left margin inherited visible window edge");
+    expect_pixel(wide.data() + (287u * 3u), 255, 0, 0,
+                 "right margin inherited visible window edge");
+
+    // With both authentic edges outside a smaller iris, margins inherit the
+    // masked edge instead of bypassing WINOUT.
+    store16(&f.io[0x40], 0x32BE);   // WIN0 X=[50,190).
+    std::fill(wide.begin(), wide.end(), 0);
+    f.ppu.render(wide.data(), 0x2100, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(wide.data(), 0, 0, 0,
+                 "left margin inherited masked iris edge");
+    expect_pixel(wide.data() + (287u * 3u), 0, 0, 0,
+                 "right margin inherited masked iris edge");
+
+    // Inverse apertures can make the authentic edge visible while the center
+    // is hidden. Extending that edge would leak scenery around a closed wipe.
+    store16(&f.io[0x48], 0x0000);
+    store16(&f.io[0x4A], 0x0001);
+    std::fill(wide.begin(), wide.end(), 0);
+    f.ppu.render(wide.data(), 0x2100, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(wide.data(), 0, 0, 0,
+                 "inverse aperture failed margin closed");
+    expect_pixel(wide.data() + (287u * 3u), 0, 0, 0,
+                 "inverse aperture failed right margin closed");
+
+    // A narrow guest mask between the edge and center probes is still a
+    // non-uniform scanline. The former edge/center-only classifier missed it
+    // and extended visible WINOUT into both margins.
+    store16(&f.io[0x40], 0x1428);   // WIN0 X=[20,40), covers no edge or center.
+    store16(&f.io[0x48], 0x0000);   // WIN0 disables BG0.
+    store16(&f.io[0x4A], 0x0001);   // WINOUT enables BG0.
+    store16(&f.pal[0], 0x03E0);      // Nonblack green backdrop.
+    std::vector<uint8_t> authentic(gba::GbaPpu::kFramebufferBytes, 0);
+    f.ppu.set_view_margins(0, 0, 0, 0);
+    f.ppu.render(authentic.data(), 0x2100, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    f.ppu.set_view_margins(24, 24, 0, 0);
+    std::fill(wide.begin(), wide.end(), 0);
+    f.ppu.render(wide.data(), 0x2100, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(wide.data(), 0, 0, 0,
+                 "narrow off-center mask failed left margin closed");
+    expect_pixel(wide.data() + (287u * 3u), 0, 0, 0,
+                 "narrow off-center mask failed right margin closed");
+    for (uint32_t row = 0; row < gba::GbaPpu::kScreenHeight; ++row) {
+        const uint8_t* got = wide.data() +
+            (row * f.ppu.render_width() + f.ppu.view_extra_left()) * 3u;
+        const uint8_t* expected = authentic.data() +
+            row * gba::GbaPpu::kScreenWidth * 3u;
+        if (std::memcmp(got, expected,
+                        gba::GbaPpu::kScreenWidth * 3u) != 0) {
+            std::fprintf(stderr,
+                         "narrow mask changed authentic center row %u\n", row);
+            std::exit(1);
+        }
+    }
+    gba::g_ws_tilemap_provider = nullptr;
+}
+
 } // namespace
 
 int main() {
     test_alpha_native_domain_and_green_precision();
     test_brightness_native_domain_and_green_precision();
+    test_extended_view_geometry_and_clamp();
+    test_extended_view_capability_policy();
+    test_extended_view_preserves_authentic_center();
+    test_extended_view_obj_x_is_explicitly_opt_in();
+    test_extended_view_extends_nearest_window_edge();
     std::puts("ppu_smoke_tests: PASS");
     return 0;
 }

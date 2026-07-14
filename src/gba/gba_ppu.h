@@ -176,5 +176,10 @@ private:
 extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
                                         uint16_t* out_entry);
 extern "C" int g_ws_pillarbox;  // Step C policy: black margins on non-field screens
+extern "C" int g_ws_pillarbox_left;
+extern "C" int g_ws_pillarbox_right;
+// Optional per-game interpretation of the 9-bit OBJ X field in expanded-view
+// rendering. Hardware-faithful signed decoding remains the default.
+extern "C" int (*g_ws_obj_x_provider)(int raw_x, int* out_x);
 
 }  // namespace gba

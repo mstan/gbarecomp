@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "color_lut.h"
+#include "presentation_layout.h"
 
 #if defined(GBARECOMP_HAVE_SDL2)
 
@@ -140,7 +141,7 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
                                  SDL_WINDOWPOS_CENTERED,
                                  SDL_WINDOWPOS_CENTERED,
                                  win_w, win_h,
-                                 SDL_WINDOW_SHOWN);
+                                 SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!b->window) {
         std::fprintf(stderr, "host_window: SDL_CreateWindow failed: %s\n",
                      SDL_GetError());
@@ -164,7 +165,12 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         delete b;
         return false;
     }
-    SDL_RenderSetLogicalSize(b->renderer, base_w, base_h);
+    // The destination viewport is computed explicitly in present() so resizing
+    // maximally fills the drawable at the active logical framebuffer's exact
+    // aspect ratio. Exact multiples retain integer scale; texture filtering is
+    // nearest-neighbor for every size.
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
+    SDL_SetRenderDrawColor(b->renderer, 0, 0, 0, 255);
 
     b->texture = SDL_CreateTexture(b->renderer,
                                    SDL_PIXELFORMAT_RGB24,
@@ -301,7 +307,18 @@ void HostWindow::present(const uint8_t* rgb888) {
     }
     SDL_UpdateTexture(b->texture, nullptr, rgb888, b->base_w * 3);
     SDL_RenderClear(b->renderer);
-    SDL_RenderCopy(b->renderer, b->texture, nullptr, nullptr);
+    int drawable_w = 0;
+    int drawable_h = 0;
+    if (SDL_GetRendererOutputSize(b->renderer, &drawable_w, &drawable_h) != 0) {
+        SDL_GetWindowSize(b->window, &drawable_w, &drawable_h);
+    }
+    const PresentationLayout layout = compute_presentation_layout(
+        drawable_w, drawable_h, b->base_w, b->base_h);
+    if (layout.width > 0 && layout.height > 0) {
+        const SDL_Rect destination = {
+            layout.x, layout.y, layout.width, layout.height};
+        SDL_RenderCopy(b->renderer, b->texture, nullptr, &destination);
+    }
     SDL_RenderPresent(b->renderer);
 }
 
@@ -355,7 +372,8 @@ HostWindow::~HostWindow() = default;
 
 bool HostWindow::is_available() { return false; }
 
-bool HostWindow::open(int /*scale*/, const char* /*title*/, const char* /*screen*/) {
+bool HostWindow::open(int /*scale*/, int /*base_w*/, int /*base_h*/,
+                      const char* /*title*/, const char* /*screen*/) {
     std::fprintf(stderr,
                  "host_window: built without SDL2; --window unavailable\n");
     return false;

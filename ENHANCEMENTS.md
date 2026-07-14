@@ -97,9 +97,27 @@ never disturbing the LLE default or the accurate HLE-on-LLE path.
 
 ---
 
-## 3. Widescreen / expanded view — WIP
+## 3. Widescreen / expanded view
 
-Opt-in view-area expansion (Pokémon FRLG first). Design + status in
-`docs/WIDESCREEN_STEPC_PLAN.md`; runner master switch `g_ws_active` / `g_ws_extra`
-(default 0/0 = faithful 240×160). Currently WIP / kill-switched
-(`GBARECOMP_WS_WIP`).
+The shared PPU can expose a wider logical surface without changing the GBA's
+160-line height. The faithful 240x160 renderer remains the default and uses its
+original code path. A game opts in by setting `RunOptions::max_view_width` above
+240, and the user selects a total logical width with `[video].view_width`,
+`--view-width`, or `GBARECOMP_VIEW_WIDTH`. Unsupported games clamp to 240, so a
+stale preference cannot change them. The older `widescreen=N` spelling remains
+a compatibility alias for `240 + 2*N`.
+
+The shared surface is only the mechanical capability. Each opted-in game still
+owns scene policy and any camera, tile-streaming, spawn, or culling changes
+needed to produce authentic content in the added margins. Unsupported scenes
+must pillarbox rather than expose stale VRAM. `GBARECOMP_WS_WIP=1` is an explicit
+development override for renderer experiments; the Pokemon-specific Step C
+sidecar remains WIP-gated and is not a correctness layer. Its design and known
+limitations remain in `docs/WIDESCREEN_STEPC_PLAN.md`.
+
+Two null-by-default seams support narrow game-owned LLE work without changing
+the faithful renderer: `g_rom_read32_override` can replace reviewed cartridge
+literal reads after ROM identity verification, and `g_ws_obj_x_provider` can
+interpret an opted-in game's extended OBJ coordinates in the wide PPU path.
+Neither is consulted by native 240x160 OBJ rendering; games must prove their
+coordinate invariant and leave both hooks unset unless expanded view is active.

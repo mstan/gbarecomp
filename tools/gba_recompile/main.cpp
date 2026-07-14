@@ -832,6 +832,15 @@ int main(int argc, char** argv) {
             seed.alias_candidate = ef.resume;  // interior/resume seed -> alias
             finder.add_seed(seed);
         }
+        for (const auto& rr : cfg.resume_ranges) {
+            const uint32_t step = rr.mode == CpuMode::Thumb ? 2u : 4u;
+            finder.add_seed(FunctionSeed{rr.start, rr.mode, {}});
+            for (uint32_t pc = rr.start + step; pc < rr.end; pc += step) {
+                FunctionSeed seed{pc, rr.mode, {}};
+                seed.alias_candidate = true;
+                finder.add_seed(seed);
+            }
+        }
     }
 
     if (cli.bios_mode) {

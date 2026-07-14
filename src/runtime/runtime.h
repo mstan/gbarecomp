@@ -24,6 +24,17 @@ struct RunOptions {
     const char*   builtin_game_name = nullptr;
     const char*   builtin_rom_sha1  = nullptr;
     std::uint32_t builtin_rom_crc32 = 0;
+
+    // Extended horizontal view is a game-owned enhancement capability, not a
+    // generic emulator toggle. Values above the native 240 are the opt-in;
+    // the default therefore makes stale config/environment settings inert.
+    std::uint16_t max_view_width = 240;
+
+    // Optional game-owned content initializer. Called exactly once, and only
+    // after a non-native view has been authorized and applied. Keeping this
+    // null at 240 preserves the generated function-entry fast path too.
+    void (*extended_view_init)(std::uint32_t extra_left,
+                               std::uint32_t extra_right) = nullptr;
 };
 
 int run_game(int argc, char** argv, const RunOptions& opts = {});

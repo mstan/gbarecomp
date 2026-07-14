@@ -291,6 +291,9 @@ void runtime_idle_backedge(uint32_t header_pc);
 // across the two proof iterations. (Correctness-first: false invalidations
 // only cost a re-prove; a missed bump would be unsound.)
 extern unsigned long long g_idle_disturb_epoch;
+// Monotonic host-side notification for presentation caches that are not part
+// of the serialized GBA state. Incremented after every successful state load.
+extern unsigned long long g_runtime_state_epoch;
 // Cumulative guest-cycle clock. Incremented by runtime_tick on EVERY tick
 // (per-instruction exec ticks AND halt-pump chunks), so it is the authoritative
 // total-cycle count — unlike runtime.cpp's `cycles_elapsed`, which only tallied

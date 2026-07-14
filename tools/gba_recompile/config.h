@@ -69,6 +69,15 @@ struct ConfigExtraFunc {
     bool        resume = false;
 };
 
+// An explicitly reviewed interruptible host span. Every aligned instruction
+// after start and before end becomes an interior resume alias.
+struct ConfigResumeRange {
+    uint32_t    start = 0;
+    uint32_t    end = 0;
+    CpuMode     mode = CpuMode::Arm;
+    std::string note;
+};
+
 struct ConfigDataRange {
     uint32_t    start = 0;
     uint32_t    end = 0;    // [start, end)
@@ -103,6 +112,7 @@ struct Config {
     ConfigProgram           program;
     ConfigIdentity          identity;
     std::vector<ConfigExtraFunc>    extra_funcs;
+    std::vector<ConfigResumeRange>  resume_ranges;
     std::vector<ConfigDataRange>    data_ranges;
     std::vector<ConfigCodeCopy>     code_copies;
     std::vector<ConfigJumpTable>    jump_tables;

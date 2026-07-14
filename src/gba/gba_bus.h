@@ -27,6 +27,13 @@ namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
 namespace gba {
 
+// Optional game-owned, read-only ROM literal override. This is intended for
+// narrowly scoped, opt-in LLE patches where the original guest code must see a
+// configuration-derived constant. Returning non-zero accepts *out_value.
+extern "C" int (*g_rom_read32_override)(std::uint32_t address,
+                                         std::uint32_t original_value,
+                                         std::uint32_t* out_value);
+
 // Write-chokepoint observer for the P6 sljit differential gate. While one is
 // registered (gate validation only — null during all normal play and the gcc
 // path), GbaBus::write{8,16,32} notify it BEFORE applying each store, so the
@@ -194,6 +201,11 @@ public:
     // normal play / the gcc path → the hook is one predicted-untaken branch per
     // store. Owned by the caller (the gate); GbaBus only holds the pointer.
     void set_write_observer(BusWriteObserver* obs) { write_observer_ = obs; }
+    BusWriteObserver* exchange_write_observer(BusWriteObserver* obs) {
+        BusWriteObserver* previous = write_observer_;
+        write_observer_ = obs;
+        return previous;
+    }
 
 private:
     // Notify a registered write observer of a pending store; returns true if the
