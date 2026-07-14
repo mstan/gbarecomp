@@ -303,13 +303,37 @@ endfunction()
 add_executable(gba_scan tools/gba_scan/main.cpp)
 target_link_libraries(gba_scan PRIVATE gbarecomp_armv4t gbarecomp_gba)
 
+# A local toml++ checkout remains useful for offline development, but it is
+# intentionally ignored.  Fresh clones/worktrees must still be able to build
+# gba_recompile, so resolve the pinned upstream dependency into the build tree
+# when the local single-header checkout is absent.
+find_path(GBARECOMP_TOMLPP_INCLUDE_DIR
+    NAMES toml.hpp
+    HINTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tomlpp"
+    NO_DEFAULT_PATH)
+if(NOT GBARECOMP_TOMLPP_INCLUDE_DIR)
+    include(FetchContent)
+    set(TOMLPLUSPLUS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(TOMLPLUSPLUS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(tomlplusplus
+        GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
+        GIT_TAG 30172438cee64926dc41fdd9c11fb3ba5b2ba9de)
+    FetchContent_MakeAvailable(tomlplusplus)
+    set(GBARECOMP_TOMLPP_INCLUDE_DIR "${tomlplusplus_SOURCE_DIR}")
+    message(STATUS
+        "gbarecomp: fetched pinned toml++ v3.4.0 for gba_recompile")
+else()
+    message(STATUS
+        "gbarecomp: using local toml++ at ${GBARECOMP_TOMLPP_INCLUDE_DIR}")
+endif()
+
 add_executable(gba_recompile
     tools/gba_recompile/main.cpp
     tools/gba_recompile/config.cpp)
 target_include_directories(gba_recompile PRIVATE
     tools/gba_recompile
     src/armv4t
-    third_party/tomlpp)
+    "${GBARECOMP_TOMLPP_INCLUDE_DIR}")
 target_link_libraries(gba_recompile PRIVATE
     gbarecomp_recompile_core gbarecomp_armv4t gbarecomp_gba)
 
@@ -416,6 +440,10 @@ add_executable(decoder_smoke tests/armv4t/decoder_smoke.cpp)
 target_link_libraries(decoder_smoke PRIVATE gbarecomp_armv4t)
 add_test(NAME decoder_smoke COMMAND decoder_smoke)
 
+add_executable(function_finder_tests tests/recompile/function_finder_test.cpp)
+target_link_libraries(function_finder_tests PRIVATE gbarecomp_recompile_core)
+add_test(NAME function_finder_tests COMMAND function_finder_tests)
+
 # Self-heal proposal clustering — pure logic, links only the standalone
 # clustering TU (no runtime/bus/overlay dependencies).
 add_executable(selfheal_cluster_test
@@ -436,8 +464,11 @@ add_executable(thumb_tests tests/thumb/test_main.cpp)
 target_link_libraries(thumb_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME thumb_tests COMMAND thumb_tests)
 
-add_executable(bus_tests tests/bus/test_main.cpp)
-target_link_libraries(bus_tests PRIVATE gbarecomp_gba)
+add_executable(bus_tests
+    tests/bus/test_main.cpp
+    tools/bios_smoke/dispatch_stub.cpp)
+target_include_directories(bus_tests PRIVATE src/debug)
+target_link_gbarecomp_runtime_stack(bus_tests)
 add_test(NAME bus_tests COMMAND bus_tests)
 
 add_executable(dma_tests tests/dma/test_main.cpp)
@@ -457,7 +488,9 @@ target_link_libraries(ppu_smoke_tests PRIVATE gbarecomp_gba)
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
 
 # P6 differential-gate primitives (offline; full-RAM snapshot/restore/diff).
-add_executable(heal_gate_tests tests/heal_gate/heal_gate_test.cpp)
+add_executable(heal_gate_tests
+    tests/heal_gate/heal_gate_test.cpp
+    tests/heal_gate/runtime_stubs.cpp)
 target_link_libraries(heal_gate_tests PRIVATE gbarecomp_heal_gate)
 add_test(NAME heal_gate_tests COMMAND heal_gate_tests)
 

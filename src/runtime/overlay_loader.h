@@ -18,6 +18,8 @@
 // Doctrine (PRINCIPLES.md): healed-from-cache is STILL NOT fully static — the
 // build is done only when the merged TOML makes the static corpus cover it.
 // See self_heal.h.
+// GBARECOMP_STRICT_STATIC=1 is the acceptance gate: it disables cache loading,
+// background compilation, and interpreter bridging; any dispatch miss aborts.
 
 #pragma once
 

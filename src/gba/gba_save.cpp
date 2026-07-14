@@ -12,6 +12,46 @@ GbaSave::GbaSave() {
 
 GbaSave::~GbaSave() = default;
 
+void GbaSave::configure_sram(std::size_t bytes) {
+    // Commercial GBA SRAM cartridges use a 32 KiB part. Retain 64 KiB as a
+    // hardware-plausible option for homebrew/config overrides, but reject
+    // arbitrary sizes so address folding remains deterministic.
+    if (bytes != 32 * 1024 && bytes != 64 * 1024) bytes = kDefaultSramSize;
+    sram_enabled_ = true;
+    sram_size_ = bytes;
+    sram_data_.assign(bytes, 0xFF);
+    dirty_ = false;
+}
+
+uint8_t GbaSave::sram_read(uint32_t off) const {
+    if (!sram_enabled_ || sram_data_.empty()) return 0xFF;
+    return sram_data_[static_cast<std::size_t>(off) % sram_size_];
+}
+
+void GbaSave::sram_write(uint32_t off, uint8_t value) {
+    if (!sram_enabled_ || sram_data_.empty()) return;
+    std::size_t index = static_cast<std::size_t>(off) % sram_size_;
+    if (sram_data_[index] != value) {
+        sram_data_[index] = value;
+        dirty_ = true;
+    }
+}
+
+bool GbaSave::load_sram_bytes(const uint8_t* data, std::size_t bytes) {
+    if (!sram_enabled_ || (!data && bytes != 0) || bytes > sram_size_) {
+        return false;
+    }
+    sram_data_.assign(sram_size_, 0xFF);
+    if (bytes != 0) std::copy(data, data + bytes, sram_data_.begin());
+    dirty_ = false;
+    return true;
+}
+
+std::vector<uint8_t> GbaSave::sram_bytes() const {
+    if (!sram_enabled_) return {};
+    return sram_data_;
+}
+
 void GbaSave::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     w.boolean(eeprom_enabled_);
     w.boolean(dirty_);
@@ -43,6 +83,15 @@ void GbaSave::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     if (!flash_data_.empty()) {
         w.bytes(flash_data_.data(), flash_data_.size());
     }
+
+    // SRAM state is an optional trailing block for compatibility with
+    // snapshots written before SRAM support existed.
+    w.boolean(sram_enabled_);
+    w.u64(sram_size_);
+    w.u32(static_cast<uint32_t>(sram_data_.size()));
+    if (!sram_data_.empty()) {
+        w.bytes(sram_data_.data(), sram_data_.size());
+    }
 }
 
 void GbaSave::deserialize(gbarecomp::debug::SnapshotReader& r) {
@@ -73,6 +122,14 @@ void GbaSave::deserialize(gbarecomp::debug::SnapshotReader& r) {
     uint32_t flash_len = r.u32();
     flash_data_.assign(flash_len, 0xFF);
     if (flash_len) r.bytes(flash_data_.data(), flash_len);
+
+    // SRAM state (optional trailing block).
+    if (r.remaining() == 0) return;
+    sram_enabled_ = r.boolean();
+    sram_size_ = static_cast<std::size_t>(r.u64());
+    uint32_t sram_len = r.u32();
+    sram_data_.assign(sram_len, 0xFF);
+    if (sram_len) r.bytes(sram_data_.data(), sram_len);
 }
 
 void GbaSave::configure_eeprom(std::size_t bytes) {

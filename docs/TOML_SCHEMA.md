@@ -43,6 +43,8 @@ id           = "gba_bios"
 load_address = 0x00000000
 size         = 0x00004000
 entry_pc     = 0x00000000
+speculative_literal_harvest = false # optional; default true
+codegen_shards = 16                 # optional; default 1
 
 [identity]
 sha1 = "300c20df6731a33952ded8c436f7f186d25d3492"   # required, abort on mismatch
@@ -53,6 +55,12 @@ addr = 0x00000000
 mode = "arm"
 name = "reset_vector"           # optional; default: afunc_XXXXXXXX / tfunc_XXXXXXXX
 note = "BIOS reset entry"       # optional documentation
+
+[[extra_func]]
+addr = 0x00000B6C
+mode = "thumb"
+resume = true                    # optional interior exception-return alias
+note = "IRQ return into a containing function"
 
 [[data_range]]
 start = 0x000001A0
@@ -91,6 +99,8 @@ reason = "literal pool walked as code by finder pre-vX.Y"
 | `load_address` | int hex | Where the binary's first byte maps in CPU memory. |
 | `size`         | int hex | Byte size of the binary (must match the file on disk). |
 | `entry_pc`     | int hex | Initial PC. Seeded as `[[extra_func]]` automatically; declaring it again is a redundant no-op. |
+| `speculative_literal_harvest` | bool | Optional, default `true`. Harvest plausible callback pointers from PC-relative literal loads. Set `false` for evidence-driven strict-static corpora where runtime-observed `[[extra_func]]` roots are preferred over speculative reachability. Direct branch discovery is unchanged. |
+| `codegen_shards` | int | Optional, default `1`, range 1..256. Deterministically partitions emitted guest functions into `recompiled_NNN.cpp` translation units. Stable address hashing and write-if-changed output keep unrelated shards untouched when a reviewed seed is added. |
 
 ### `[identity]` (required)
 
@@ -105,12 +115,21 @@ Hand-declared function entry points the finder might miss
 (indirect dispatch targets, jump-table-only entries, gaps in finder
 coverage).
 
-| key    | type    | required | meaning |
-|--------|---------|----------|---------|
-| `addr` | int hex | yes      | First byte of the function. |
-| `mode` | string  | yes      | `"arm"` or `"thumb"`. Must match the actual instruction encoding at `addr`. |
-| `name` | string  | no       | Function name in generated C. Default: `afunc_AAAAAAAA` (ARM) or `tfunc_AAAAAAAA` (THUMB). |
-| `note` | string  | no       | Free-form documentation. Ignored by the recompiler. |
+| key           | type    | required | meaning |
+|---------------|---------|----------|---------|
+| `addr`        | int hex | yes      | First byte of the function, or an interior resume address when `resume = true`. |
+| `source_addr` | int hex | no       | Immutable ROM backing address for an observed relocated RAM entry. The source/runtime bias propagates through direct CFG edges, including placements that overlap a fixed `code_copy` range. |
+| `mode`        | string  | yes      | `"arm"` or `"thumb"`. Must match the actual instruction encoding at `addr`. |
+| `resume`      | bool    | no       | Default `false`. Mark an interior IRQ/SWI return PC so it is rolled into its containing function and emitted as a thin resume alias. |
+| `name`        | string  | no       | Function name in generated C. Default: `afunc_AAAAAAAA` (ARM) or `tfunc_AAAAAAAA` (THUMB). |
+| `note`        | string  | no       | Free-form documentation. Ignored by the recompiler. |
+
+Use `resume = true` only after confirming that `addr` is an instruction inside
+an already rooted function. The alias wrapper records the requested guest PC and
+enters the containing generated function, whose resume prologue jumps to that
+instruction. If no compatible containing function is found, the candidate stays
+a standalone function so the gap remains visible instead of being silently
+attached to the wrong host.
 
 **Deduplication against the finder:**
 

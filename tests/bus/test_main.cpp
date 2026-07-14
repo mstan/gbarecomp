@@ -9,7 +9,9 @@
 #include <vector>
 
 #include "gba_rom_header.h"
+#include "gba_bus.h"
 #include "gba_save.h"
+#include "snapshot.h"
 
 namespace {
 
@@ -148,6 +150,71 @@ void test_sram_signature() {
                static_cast<int>(gba::SaveType::SRAM));
 }
 
+void test_sram_controller_and_snapshot() {
+    gba::GbaSave save;
+    save.configure_sram(32 * 1024);
+    check_bool("sram_controller", "enabled", save.sram_enabled(), true);
+    check_eq("sram_controller", "size", save.sram_size(),
+             static_cast<std::size_t>(32 * 1024));
+    check_eq("sram_controller", "blank", save.sram_read(0x1234), 0xFFu);
+
+    save.sram_write(0x1234, 0x5A);
+    check_eq("sram_controller", "written", save.sram_read(0x1234), 0x5Au);
+    check_eq("sram_controller", "32k_mirror", save.sram_read(0x9234), 0x5Au);
+    check_bool("sram_controller", "write_dirty", save.dirty(), true);
+    save.clear_dirty();
+    save.sram_write(0x9234, 0x5A);
+    check_bool("sram_controller", "same_write_clean", save.dirty(), false);
+
+    gbarecomp::debug::SnapshotWriter writer;
+    save.serialize(writer);
+    gba::GbaSave restored;
+    gbarecomp::debug::SnapshotReader reader(writer.buffer().data(),
+                                             writer.buffer().size());
+    restored.deserialize(reader);
+    check_bool("sram_snapshot", "reader_ok", reader.ok(), true);
+    check_bool("sram_snapshot", "enabled", restored.sram_enabled(), true);
+    check_eq("sram_snapshot", "size", restored.sram_size(),
+             static_cast<std::size_t>(32 * 1024));
+    check_eq("sram_snapshot", "byte", restored.sram_read(0x1234), 0x5Au);
+
+    std::array<uint8_t, 3> persisted{{0x10, 0x20, 0x30}};
+    check_bool("sram_persist", "load",
+               restored.load_sram_bytes(persisted.data(), persisted.size()), true);
+    check_eq("sram_persist", "prefix", restored.sram_read(2), 0x30u);
+    check_eq("sram_persist", "fill", restored.sram_read(3), 0xFFu);
+    check_bool("sram_persist", "load_clean", restored.dirty(), false);
+}
+
+void test_sram_bus_width_and_region_mirroring() {
+    gba::GbaBus bus;
+    bus.save().configure_sram(32 * 1024);
+
+    bus.write16(0x0E000001u, 0xABCDu);
+    check_eq("sram_bus", "write16_low_byte", bus.read8(0x0E000001u), 0xCDu);
+    check_eq("sram_bus", "read16_replicates", bus.read16(0x0E000001u), 0xCDCDu);
+
+    // The 32 KiB SRAM address lines mirror throughout the 0E/0F save region.
+    bus.write32(0x0F008002u, 0x12345678u);
+    check_eq("sram_bus", "region_mirror", bus.read8(0x0E000002u), 0x78u);
+    check_eq("sram_bus", "read32_replicates", bus.read32(0x0E000002u),
+             0x78787878u);
+}
+
+void test_bios_undocumented_io_write() {
+    gba::GbaBus bus;
+    check_eq("undoc_io_410", "initial_unhandled",
+             bus.io().unmapped_count(), static_cast<std::size_t>(0));
+    bus.write8(0x04000410u, 0xFFu);
+    check_eq("undoc_io_410", "bios_write_handled",
+             bus.io().unmapped_count(), static_cast<std::size_t>(0));
+    // Neighboring extended-IO writes remain loud; only the observed register
+    // is admitted.
+    bus.write8(0x04000411u, 0xFFu);
+    check_eq("undoc_io_410", "neighbor_unhandled",
+             bus.io().unmapped_count(), static_cast<std::size_t>(1));
+}
+
 void test_flash1m_beats_flash() {
     // FLASH1M_V must win over the bare FLASH_V prefix detection.
     auto rom = build_synthetic_rom("GAME", "XXXX", "00", 0x00,
@@ -249,6 +316,9 @@ int main() {
     test_corrupt_header();
     test_no_save_signature();
     test_sram_signature();
+    test_sram_controller_and_snapshot();
+    test_sram_bus_width_and_region_mirroring();
+    test_bios_undocumented_io_write();
     test_flash1m_beats_flash();
     test_eeprom_8k_read_write();
     test_eeprom_persistence_bytes_and_dirty();

@@ -943,9 +943,22 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // dispatching generated code (device/IRQ/BIOS/clock path unchanged). This is
     // the interp side of the recomp-vs-interp first-divergence oracle; the recomp
     // side is the same binary with the flag unset. See COSIM_ORACLE.md §1.
-    if (const char* fi = std::getenv("GBARECOMP_FORCE_INTERP")) {
+    g_force_interp = 0;
+    if (const char* fi = std::getenv("GBARECOMP_FORCE_INTERP"))
         g_force_interp = (fi[0] && fi[0] != '0') ? 1 : 0;
-        if (g_force_interp && !args.quiet)
+    const char* strict_env = std::getenv("GBARECOMP_STRICT_STATIC");
+    const bool strict_requested =
+        strict_env && strict_env[0] != '\0' && strict_env[0] != '0';
+    if (g_force_interp && strict_requested) {
+        std::fprintf(stderr,
+                     "force_interp=REJECTED strict static mode requires the "
+                     "generated native backend\n");
+        return 1;
+    }
+    if (!args.quiet) {
+        std::printf("force_interp=%s\n",
+                    g_force_interp ? "ENABLED" : "DISABLED");
+        if (g_force_interp)
             std::printf("force-interp: main-thread instructions interpreted "
                         "(recomp backend disabled)\n");
     }
@@ -992,7 +1005,46 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     }
     bus.set_rom(rom.data(), rom.size());
-    if (header.save_type == gba::SaveType::EEPROM) {
+    if (header.save_type == gba::SaveType::SRAM) {
+        std::size_t sram_bytes = args.save_size ? args.save_size : (32 * 1024);
+        bus.save().configure_sram(sram_bytes);
+
+        if (args.save_path.empty()) {
+            std::filesystem::path save_path(args.rom);
+            save_path.replace_extension(".sav");
+            args.save_path = save_path.string();
+        }
+
+        std::error_code ec;
+        if (!args.save_path.empty() &&
+            std::filesystem::exists(args.save_path, ec)) {
+            std::vector<uint8_t> save_bytes;
+            if (!read_file(args.save_path, &save_bytes, &err)) {
+                std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
+                return 1;
+            }
+            if (save_bytes.size() > bus.save().sram_size()) {
+                std::fprintf(stderr,
+                             "[gbarecomp:runtime] save file too large: %s "
+                             "(%zu bytes, SRAM is %zu bytes)\n",
+                             args.save_path.c_str(), save_bytes.size(),
+                             bus.save().sram_size());
+                return 1;
+            }
+            if (!bus.save().load_sram_bytes(save_bytes.data(),
+                                            save_bytes.size())) {
+                std::fprintf(stderr,
+                             "[gbarecomp:runtime] failed to load SRAM save %s\n",
+                             args.save_path.c_str());
+                return 1;
+            }
+            if (!args.quiet) {
+                std::printf("save_loaded path=\"%s\" size=%zu/%zu\n",
+                            args.save_path.c_str(), save_bytes.size(),
+                            bus.save().sram_size());
+            }
+        }
+    } else if (header.save_type == gba::SaveType::EEPROM) {
         std::size_t eeprom_bytes = args.save_size ? args.save_size : (8 * 1024);
         bus.save().configure_eeprom(eeprom_bytes);
 
@@ -1083,12 +1135,15 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     auto flush_save = [&]() -> bool {
         const bool has_save =
-            bus.save().eeprom_enabled() || bus.save().flash_enabled();
+            bus.save().sram_enabled() || bus.save().eeprom_enabled() ||
+            bus.save().flash_enabled();
         if (!has_save || args.save_path.empty() || !bus.save().dirty()) {
             return true;
         }
-        std::vector<uint8_t> save_bytes = bus.save().flash_enabled()
-            ? bus.save().flash_bytes() : bus.save().eeprom_bytes();
+        std::vector<uint8_t> save_bytes = bus.save().sram_enabled()
+            ? bus.save().sram_bytes()
+            : (bus.save().flash_enabled() ? bus.save().flash_bytes()
+                                          : bus.save().eeprom_bytes());
         // Atomic write: write a sibling temp file, then rename it over the
         // target. A crash / kill mid-write can then only ever lose the temp
         // file — the real save file is either the previous complete state or
@@ -1241,6 +1296,18 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (const char* sl = std::getenv("GBARECOMP_SWI_LOG")) {
             uint32_t n = runtime_swi_log_save_file(sl);
             std::printf("swi_log_saved path=\"%s\" records=%u\n", sl, n);
+        }
+        if (const char* iw = std::getenv("GBARECOMP_IWRAM_DUMP")) {
+            std::ofstream dump(iw, std::ios::binary | std::ios::trunc);
+            dump.write(reinterpret_cast<const char*>(bus.iwram_ptr()),
+                       32 * 1024);
+            if (dump) {
+                std::printf("iwram_dump_saved path=\"%s\" bytes=32768\n", iw);
+            } else {
+                std::fprintf(stderr,
+                    "[gbarecomp:runtime] could not write IWRAM dump \"%s\"\n",
+                    iw);
+            }
         }
     };
 
@@ -1594,10 +1661,120 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     uint64_t last_presented_frame = ppu.frame_count();
 
+    // Optional frame-indexed KEYINPUT trace. Interactive discovery records
+    // every observed key-state change and flushes it immediately; strict
+    // acceptance can replay the frame-indexed trace from the same initial
+    // SRAM. The trace is input evidence only and never reads or steers guest
+    // state.
+    struct InputTraceEvent {
+        uint64_t frame = 0;
+        uint16_t keyinput = 0x03FFu;
+    };
+    const char* input_record_env = std::getenv("GBARECOMP_INPUT_RECORD");
+    const char* input_replay_env = std::getenv("GBARECOMP_INPUT_REPLAY");
+    const bool input_record_requested = input_record_env && input_record_env[0];
+    const bool input_replay_requested = input_replay_env && input_replay_env[0];
+    if (input_record_requested && input_replay_requested) {
+        std::fprintf(stderr,
+                     "[gbarecomp:runtime] GBARECOMP_INPUT_RECORD and "
+                     "GBARECOMP_INPUT_REPLAY are mutually exclusive\n");
+        runtime_shutdown();
+        return 1;
+    }
+
+    std::ofstream input_record_stream;
+    bool input_record_have_value = false;
+    uint16_t input_record_last_value = 0x03FFu;
+    if (input_record_requested) {
+        input_record_stream.open(input_record_env,
+                                 std::ios::out | std::ios::trunc);
+        if (!input_record_stream) {
+            std::fprintf(stderr,
+                         "[gbarecomp:runtime] could not create input trace %s\n",
+                         input_record_env);
+            runtime_shutdown();
+            return 1;
+        }
+        input_record_stream << "# gbarecomp-keyinput-v1\n";
+        input_record_stream << "# frame,keyinput_active_low\n";
+        input_record_stream.flush();
+        if (!args.quiet)
+            std::printf("input_record=ENABLED path=\"%s\"\n", input_record_env);
+    }
+
+    std::vector<InputTraceEvent> input_replay_events;
+    std::size_t input_replay_index = 0;
+    if (input_replay_requested) {
+        std::ifstream replay(input_replay_env);
+        if (!replay) {
+            std::fprintf(stderr,
+                         "[gbarecomp:runtime] could not open input trace %s\n",
+                         input_replay_env);
+            runtime_shutdown();
+            return 1;
+        }
+        std::string line;
+        uint64_t previous_frame = 0;
+        bool have_previous = false;
+        while (std::getline(replay, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            unsigned long long frame = 0;
+            unsigned keyinput = 0;
+            if (std::sscanf(line.c_str(), "%llu,0x%x", &frame, &keyinput) != 2 ||
+                keyinput > 0x03FFu ||
+                (have_previous && frame < previous_frame)) {
+                std::fprintf(stderr,
+                             "[gbarecomp:runtime] invalid input trace line: %s\n",
+                             line.c_str());
+                runtime_shutdown();
+                return 1;
+            }
+            input_replay_events.push_back(
+                {static_cast<uint64_t>(frame), static_cast<uint16_t>(keyinput)});
+            previous_frame = static_cast<uint64_t>(frame);
+            have_previous = true;
+        }
+        if (input_replay_events.empty()) {
+            std::fprintf(stderr,
+                         "[gbarecomp:runtime] input trace has no events: %s\n",
+                         input_replay_env);
+            runtime_shutdown();
+            return 1;
+        }
+        if (!args.quiet)
+            std::printf("input_replay=ENABLED path=\"%s\" events=%zu\n",
+                        input_replay_env, input_replay_events.size());
+    } else if (!args.quiet) {
+        std::printf("input_replay=DISABLED\n");
+    }
+
+    auto apply_input_replay = [&]() {
+        if (!input_replay_requested) return;
+        const uint64_t frame = ppu.frame_count();
+        while (input_replay_index + 1 < input_replay_events.size() &&
+               input_replay_events[input_replay_index + 1].frame <= frame) {
+            ++input_replay_index;
+        }
+        if (input_replay_events[input_replay_index].frame <= frame)
+            bus.io().set_keyinput(
+                input_replay_events[input_replay_index].keyinput);
+    };
+
     auto pump_host_input = [&]() {
         if (!args.window) return;
         auto ev = win.pump();
-        bus.io().set_keyinput(ev.keyinput);
+        if (!input_replay_requested) bus.io().set_keyinput(ev.keyinput);
+        if (input_record_requested &&
+            (!input_record_have_value || ev.keyinput != input_record_last_value)) {
+            char row[64];
+            std::snprintf(row, sizeof(row), "%llu,0x%04X\n",
+                          static_cast<unsigned long long>(ppu.frame_count()),
+                          static_cast<unsigned>(ev.keyinput));
+            input_record_stream << row;
+            input_record_stream.flush();
+            input_record_have_value = true;
+            input_record_last_value = ev.keyinput;
+        }
         if (ev.quit) host_quit = true;
         if (pacer) pacer->set_uncapped(ev.fast_forward);
         if (ev.save_slot) {
@@ -1720,11 +1897,35 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // across the interpreter profiler and this recompiled runtime. Has no
     // effect on --window (host keyboard wins) or verify/oracle runs.
     // GBARECOMP_DEMO_INPUT modes: unset = off; "walk" = sustained-direction
-    // overworld walker (crosses screen boundaries to surface transition-time
-    // finder gaps); any other value = the menu/masher track.
+    // walker from reset; "campaign" = menu/cutscene track until gameplay then
+    // the walker; "campaign-combat" = the same deterministic opening followed
+    // by a rightward action-platformer stress track (move/attack/jump/dash);
+    // "campaign-traverse" = a more aggressive dash-jump route intended to
+    // clear terrain/escort bottlenecks while continuing hardware-only attacks;
+    // "campaign-safe" = the same full-height terrain traversal without dash,
+    // preserving health by avoiding sustained contact pressure;
+    // "campaign-clear" = campaign-safe through the saber handoff, followed by
+    // a selectable input-only boss strategy (GBARECOMP_BOSS_STRATEGY);
+    // any other value = the menu/masher track.
     const char* demo_env = std::getenv("GBARECOMP_DEMO_INPUT");
     const bool demo_input = !args.window && demo_env != nullptr;
     const bool demo_walk = demo_env && std::strcmp(demo_env, "walk") == 0;
+    const bool demo_campaign =
+        demo_env && std::strcmp(demo_env, "campaign") == 0;
+    const bool demo_campaign_combat =
+        demo_env && std::strcmp(demo_env, "campaign-combat") == 0;
+    const bool demo_campaign_traverse =
+        demo_env && std::strcmp(demo_env, "campaign-traverse") == 0;
+    const bool demo_campaign_safe =
+        demo_env && std::strcmp(demo_env, "campaign-safe") == 0;
+    const bool demo_campaign_clear =
+        demo_env && std::strcmp(demo_env, "campaign-clear") == 0;
+    const char* boss_strategy_env = std::getenv("GBARECOMP_BOSS_STRATEGY");
+    // golem_attempt is the reviewed deterministic route that triggers the
+    // opening Golem and reaches the Z-Saber finish attempt. It currently
+    // retries rather than proving the kill; other values remain available for
+    // input-only route experiments.
+    const std::string boss_strategy = boss_strategy_env ? boss_strategy_env : "golem_attempt";
     auto demo_keyinput_for_frame = [](uint64_t frame) -> uint16_t {
         enum : uint16_t {
             KEY_A = 1u << 0, KEY_B = 1u << 1, KEY_START = 1u << 3,
@@ -1755,6 +1956,123 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if ((frame % 60) < 2) btn |= KEY_A;
         return static_cast<uint16_t>(0x03FFu & ~btn);  // KEYINPUT active-low
     };
+    // Generic side-scrolling combat stress track. It uses hardware KEYINPUT
+    // only: hold right, pulse B frequently, jump with A, and periodically hold
+    // L so games that map it to dash exercise combined movement. Keeping this
+    // separate from "campaign" preserves the established oracle replay.
+    auto combat_keyinput_for_frame = [](uint64_t frame) -> uint16_t {
+        enum : uint16_t {
+            KEY_A = 1u << 0, KEY_B = 1u << 1, KEY_L = 1u << 9,
+            KEY_RIGHT = 1u << 4,
+        };
+        uint16_t btn = KEY_RIGHT;
+        if ((frame % 12u) < 3u) btn |= KEY_B;
+        const uint64_t motion_phase = frame % 180u;
+        if (motion_phase < 50u) btn |= KEY_L;
+        if (motion_phase >= 30u && motion_phase < 40u) btn |= KEY_A;
+        return static_cast<uint16_t>(0x03FFu & ~btn);
+    };
+    // Traversal stress track: keep forward pressure, dash for most of each
+    // cycle, and hold jump long enough to reach full height.  B remains a
+    // short edge-triggered pulse so terrain traversal still fights enemies.
+    auto traverse_keyinput_for_frame = [](uint64_t frame) -> uint16_t {
+        enum : uint16_t {
+            KEY_A = 1u << 0, KEY_B = 1u << 1, KEY_L = 1u << 9,
+            KEY_RIGHT = 1u << 4,
+        };
+        uint16_t btn = KEY_RIGHT;
+        if ((frame % 10u) < 3u) btn |= KEY_B;
+        const uint64_t motion_phase = frame % 120u;
+        if (motion_phase < 75u) btn |= KEY_L;
+        if (motion_phase >= 18u && motion_phase < 50u) btn |= KEY_A;
+        return static_cast<uint16_t>(0x03FFu & ~btn);
+    };
+    // Safer traversal track: retain the long jumps needed for opening-stage
+    // geometry, frequent buster pulses, and steady forward movement, but omit
+    // dash so Zero does not continuously force contact with enemies/bosses.
+    auto safe_keyinput_for_frame = [](uint64_t frame) -> uint16_t {
+        enum : uint16_t {
+            KEY_A = 1u << 0, KEY_B = 1u << 1, KEY_RIGHT = 1u << 4,
+        };
+        uint16_t btn = KEY_RIGHT;
+        if ((frame % 10u) < 3u) btn |= KEY_B;
+        const uint64_t motion_phase = frame % 120u;
+        if (motion_phase >= 18u && motion_phase < 50u) btn |= KEY_A;
+        return static_cast<uint16_t>(0x03FFu & ~btn);
+    };
+    // Opening Golem strategy matrix. This is deterministic KEYINPUT
+    // orchestration only: it neither reads nor writes guest state. The route
+    // branches after the observed saber-handoff window so experiments share
+    // the same LLE approach to the boss.
+    auto boss_keyinput_for_frame = [&boss_strategy](uint64_t frame) -> uint16_t {
+        enum : uint16_t {
+            KEY_A = 1u << 0, KEY_B = 1u << 1,
+            KEY_RIGHT = 1u << 4, KEY_LEFT = 1u << 5, KEY_R = 1u << 8,
+        };
+        uint16_t btn = 0;
+        const uint64_t phase = frame % 120u;
+        if (boss_strategy == "golem_attempt") {
+            // The safe traversal reaches the stable pre-trigger room at local
+            // frame 5500. Approach Ciel and advance the scripted loss/handoff,
+            // then close a bounded distance and repeatedly use B: the handoff
+            // equips Z-Saber as the main weapon for this encounter.
+            constexpr uint64_t kTrigger = 5500u;
+            if (frame < kTrigger) {
+                if (phase >= 18u && phase < 50u) btn |= KEY_A;
+                if (phase >= 30u && phase < 38u) btn |= KEY_R;
+            } else {
+                const uint64_t encounter = frame - kTrigger;
+                if (encounter < 54u) {
+                    btn |= KEY_RIGHT;
+                } else if (encounter < 700u) {
+                    if (((encounter - 54u) % 12u) < 4u) btn |= KEY_A;
+                } else if (encounter < 4200u) {
+                    const uint64_t scripted_phase = (encounter - 700u) % 120u;
+                    if (scripted_phase >= 18u && scripted_phase < 50u) btn |= KEY_A;
+                    if (scripted_phase >= 30u && scripted_phase < 38u) btn |= KEY_R;
+                } else {
+                    const uint64_t finish = encounter - 4200u;
+                    if (finish < 120u) {
+                        if ((finish % 12u) < 4u) btn |= KEY_A;
+                    } else {
+                        const uint64_t active = finish - 120u;
+                        if (active < 70u) btn |= KEY_RIGHT;
+                        if (active >= 50u && (active % 12u) < 4u) btn |= KEY_B;
+                        const uint64_t finish_phase = active % 120u;
+                        if (finish_phase >= 18u && finish_phase < 50u) btn |= KEY_A;
+                    }
+                }
+            }
+        } else if (boss_strategy == "stand_fire") {
+            if ((frame % 10u) < 3u) btn |= KEY_B;
+        } else if (boss_strategy == "jump_fire") {
+            if ((frame % 10u) < 3u) btn |= KEY_B;
+            if (phase >= 18u && phase < 50u) btn |= KEY_A;
+        } else if (boss_strategy == "retreat_jump_fire") {
+            if (frame < 180u) btn |= KEY_LEFT;
+            if ((frame % 10u) < 3u) btn |= KEY_B;
+            if (phase >= 18u && phase < 50u) btn |= KEY_A;
+        } else if (boss_strategy == "jump_slash") {
+            if (phase >= 18u && phase < 50u) btn |= KEY_A;
+            if (phase >= 30u && phase < 36u) btn |= KEY_B;
+        } else if (boss_strategy == "charge_jump") {
+            // Hold B to charge, then release near the top of a full jump.
+            if (phase < 72u) btn |= KEY_B;
+            if (phase >= 30u && phase < 66u) btn |= KEY_A;
+        } else if (boss_strategy == "saber_jump") {
+            if (phase >= 18u && phase < 50u) btn |= KEY_A;
+            if (phase >= 30u && phase < 38u) btn |= KEY_R;
+        } else if (boss_strategy == "saber_charge_jump") {
+            // X gives the Z-Saber in the sub-weapon slot: charge/release R.
+            if (phase < 72u) btn |= KEY_R;
+            if (phase >= 30u && phase < 66u) btn |= KEY_A;
+        } else {  // baseline: retain the safe route's forward pressure.
+            btn |= KEY_RIGHT;
+            if ((frame % 10u) < 3u) btn |= KEY_B;
+            if (phase >= 18u && phase < 50u) btn |= KEY_A;
+        }
+        return static_cast<uint16_t>(0x03FFu & ~btn);
+    };
     uint64_t demo_last_frame = ~uint64_t{0};
     uint64_t sc_last_frame = ~uint64_t{0};  // widescreen sidecar per-frame sync
 
@@ -1768,16 +2086,41 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // Battery-save auto-flush debounce (see the loop body). ~1 s at 59.7 Hz.
     constexpr uint64_t kSaveFlushIntervalFrames = 60;
     uint64_t save_last_flush_frame = ppu.frame_count();
+    if (input_replay_requested) apply_input_replay();
     if (args.window) pump_host_input();
 
     for (int i = 0; i < step_budget && !host_quit; ++i) {
         if (!step_once()) break;
-        if (demo_input) {
+        if (input_replay_requested) {
+            apply_input_replay();
+        } else if (demo_input) {
             const uint64_t fc = ppu.frame_count();
             if (fc != demo_last_frame) {
                 demo_last_frame = fc;
-                bus.io().set_keyinput(demo_walk ? walk_keyinput_for_frame(fc)
-                                                : demo_keyinput_for_frame(fc));
+                // The opening cutscene reaches controllable gameplay near
+                // frame 9000 under the deterministic menu/dialogue track.
+                // "campaign" switches there to sustained movement so static
+                // discovery covers actual rooms instead of repeatedly opening
+                // the status menu. This is input-only test orchestration: no
+                // guest state or timing is injected.
+                constexpr uint64_t kCampaignWalkStart = 9000;
+                constexpr uint64_t kCampaignBossStart = 14500;
+                const uint16_t keys = demo_walk
+                    ? walk_keyinput_for_frame(fc)
+                    : (demo_campaign_clear && fc >= kCampaignBossStart)
+                        ? boss_keyinput_for_frame(fc - kCampaignBossStart)
+                    : (demo_campaign_clear && fc >= kCampaignWalkStart)
+                        ? safe_keyinput_for_frame(fc - kCampaignWalkStart)
+                    : (demo_campaign_safe && fc >= kCampaignWalkStart)
+                        ? safe_keyinput_for_frame(fc - kCampaignWalkStart)
+                    : (demo_campaign_traverse && fc >= kCampaignWalkStart)
+                        ? traverse_keyinput_for_frame(fc - kCampaignWalkStart)
+                    : (demo_campaign_combat && fc >= kCampaignWalkStart)
+                        ? combat_keyinput_for_frame(fc - kCampaignWalkStart)
+                        : (demo_campaign && fc >= kCampaignWalkStart)
+                            ? walk_keyinput_for_frame(fc - kCampaignWalkStart)
+                            : demo_keyinput_for_frame(fc);
+                bus.io().set_keyinput(keys);
             }
         }
         // Widescreen sidecar: capture the live tilemap ring once per guest

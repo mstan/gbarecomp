@@ -340,6 +340,19 @@ int warm_load_cache() {
 void overlay_loader_init(const std::string& cache_root,
                          const std::string& image_sha1,
                          const gba::GbaBios* bios) {
+    // Acceptance/CI mode: prove that the linked static corpus is sufficient.
+    // Do not even inspect the overlay cache, because a warm shard would hide a
+    // missing generated dispatch entry before runtime_dispatch_miss can fail.
+    const char* strict_env = std::getenv("GBARECOMP_STRICT_STATIC");
+    const bool strict_static =
+        strict_env && strict_env[0] != '\0' && strict_env[0] != '0';
+    if (strict_static) {
+        s_active = false;
+        std::printf("strict_static=ENABLED self_heal_recompile=DISABLED "
+                    "cache_load=DISABLED interpreter_bridge=ABORT\n");
+        return;
+    }
+
     // Self-improving native healing is ON by default so released games heal
     // interpreter misses to native AND persist them across launches (the cached
     // DLLs warm-load next session). Opt out for pure-interpreter runs (oracle

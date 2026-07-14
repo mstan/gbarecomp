@@ -91,3 +91,9 @@ is ARM/THUMB decode, condition codes, flags, interworking, block
 discovery, IR, and codegen. The non-reusable surface is everything in
 `src/gba/`. This separation is what lets `gbarecomp` later contribute
 to an ARM9 / 3DS-style effort without contaminating either side.
+
+For a strict static-coverage acceptance run, set
+`GBARECOMP_STRICT_STATIC=1`. The runtime will not load cached overlays, compile
+healing shards, or bridge a missing dispatch through the interpreter; the first
+missing static PC aborts loudly. Pair it with BIOS HLE disabled when validating
+the fully LLE path.

@@ -805,6 +805,34 @@ extern "C" void runtime_force_interp_step(void) {
 extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     const std::uint32_t entry_pc = target_pc & ~1u;
     const bool entry_thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+    static bool miss_iwram_captured = false;
+    if (!miss_iwram_captured &&
+        entry_pc >= 0x03000000u && entry_pc < 0x03008000u) {
+        if (const char* path = std::getenv("GBARECOMP_MISS_IWRAM_DUMP")) {
+            if (gba::GbaBus* bus = gbarecomp::active_bus()) {
+                if (std::FILE* f = std::fopen(path, "wb")) {
+                    std::fwrite(bus->iwram_ptr(), 1, 32 * 1024, f);
+                    std::fclose(f);
+                    miss_iwram_captured = true;
+                    std::fprintf(stderr,
+                        "runtime_arm: captured live IWRAM at RAM dispatch miss "
+                        "pc=0x%08X path=\"%s\"\n", entry_pc, path);
+                }
+            }
+        }
+    }
+    const char* strict_env = std::getenv("GBARECOMP_STRICT_STATIC");
+    const bool strict_static =
+        strict_env && strict_env[0] != '\0' && strict_env[0] != '0';
+    if (strict_static) {
+        std::fprintf(stderr,
+            "runtime_arm: STRICT_STATIC dispatch miss for pc=0x%08X (%s) — "
+            "interpreter and overlay fallback are disabled. Add reviewed "
+            "static discovery/code-copy metadata and regenerate.\n",
+            entry_pc, entry_thumb ? "thumb" : "arm");
+        runtime_trace_dump_recent(96);
+        std::abort();
+    }
     record_and_log_miss(entry_pc, entry_thumb);
     gbarecomp::overlay_request_compile(entry_pc, entry_thumb);
     runtime_bridge_interpret(entry_pc, entry_thumb, /*forced_stop_pc=*/0u,

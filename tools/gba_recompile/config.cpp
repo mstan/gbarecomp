@@ -125,6 +125,13 @@ bool parse_extra_funcs(const toml::array& arr,
                 kAbortHeader, i, err.c_str());
             return false;
         }
+        e.source_addr = get_u32_field(*t, "source_addr", false, ok, err);
+        if (!ok) {
+            std::fprintf(stderr,
+                "%s[[extra_func]] entry %zu: %s\n",
+                kAbortHeader, i, err.c_str());
+            return false;
+        }
         std::string mode_s = get_string_field(*t, "mode", true, ok, err);
         if (!ok || !parse_mode(mode_s, e.mode)) {
             std::fprintf(stderr,
@@ -382,6 +389,17 @@ bool load_config(const std::string& path, Config& out) {
         out.program.load_address = get_u32_field   (t, "load_address", true,  ok, err);
         out.program.size         = get_u32_field   (t, "size",         true,  ok, err);
         out.program.entry_pc     = get_u32_field   (t, "entry_pc",     true,  ok, err);
+        out.program.speculative_literal_harvest =
+            t["speculative_literal_harvest"].value_or(true);
+        out.program.codegen_shards = static_cast<uint32_t>(
+            t["codegen_shards"].value_or<int64_t>(1));
+        if (out.program.codegen_shards == 0 ||
+            out.program.codegen_shards > 256) {
+            std::fprintf(stderr,
+                "%s[program]: codegen_shards must be in [1, 256]\n",
+                kAbortHeader);
+            return false;
+        }
         if (!ok) {
             std::fprintf(stderr, "%s[program]: %s\n",
                          kAbortHeader, err.c_str());
@@ -483,6 +501,10 @@ void print_config_summary(const Config& cfg) {
     std::printf("  size:                  0x%08X (%u bytes)\n",
                 cfg.program.size, cfg.program.size);
     std::printf("  entry_pc:              0x%08X\n", cfg.program.entry_pc);
+    std::printf("  speculative literals:  %s\n",
+                cfg.program.speculative_literal_harvest
+                    ? "enabled" : "disabled");
+    std::printf("  codegen shards:         %u\n", cfg.program.codegen_shards);
     std::printf("  identity sha1:         %s (verified)\n",
                 hex_lower(cfg.identity.sha1).c_str());
     std::printf("  extra_func entries:    %zu\n", cfg.extra_funcs.size());

@@ -27,6 +27,18 @@ public:
     GbaSave();
     ~GbaSave();
 
+    // Battery-backed asynchronous SRAM. The common GBA part is 256 Kbit
+    // (32 KiB) on an 8-bit Game Pak bus. Wider CPU accesses replicate the
+    // addressed byte on reads and write only the low byte; GbaBus owns those
+    // width semantics and calls these byte primitives.
+    void configure_sram(std::size_t bytes = 32 * 1024);
+    bool sram_enabled() const { return sram_enabled_; }
+    std::size_t sram_size() const { return sram_size_; }
+    uint8_t sram_read(uint32_t off) const;
+    void sram_write(uint32_t off, uint8_t value);
+    bool load_sram_bytes(const uint8_t* data, std::size_t bytes);
+    std::vector<uint8_t> sram_bytes() const;
+
     void configure_eeprom(std::size_t bytes);
     bool eeprom_enabled() const { return eeprom_enabled_; }
 
@@ -64,7 +76,12 @@ public:
     void deserialize(gbarecomp::debug::SnapshotReader& r);
 
 private:
+    static constexpr std::size_t kDefaultSramSize = 32 * 1024;
     static constexpr std::size_t kMaxEepromSize = 8 * 1024;
+
+    bool sram_enabled_ = false;
+    std::size_t sram_size_ = 0;
+    std::vector<uint8_t> sram_data_;
 
     bool eeprom_enabled_ = false;
     bool dirty_ = false;

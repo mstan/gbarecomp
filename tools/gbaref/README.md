@@ -66,6 +66,10 @@ copy `bios/gba_bios.bin` here for hardware-accurate boot (else it HLEs the BIOS)
 - `GBAREF_TRACE` — output path (default `gbaref_trace.jsonl`)
 - `GBAREF_WATCH_LO` / `GBAREF_WATCH_HI` — restrict traced GBA addresses
 - `GBAREF_QUIT_FRAMES` — headless frame cap
+- `GBAREF_DEMO_INPUT=campaign` — deterministic menu/campaign hardware-input track
+- `GBAREF_INPUT_PREROLL` — released frames before that track (default 1)
+- `GBAREF_DUMP_PPM` — write the final core framebuffer as binary RGB PPM
+- `GBAREF_NO_TRACE=1` — skip WRAM scanning for framebuffer-only oracle runs
 - `GBAREF_SYSRAM_BASE` — base addr if the core sends no memory map (fallback)
 
 ## RAM parity (what's actually diff-able)

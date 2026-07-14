@@ -24,6 +24,7 @@ Thumbs.db
 # diagnostic artifacts, not source; regenerate as needed.
 *.bmp
 *.png
+*.ppm
 *.rgb
 *.log
 

@@ -608,6 +608,50 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         out = "{\"ok\":true,\"who\":\"gbarecomp_native\"}";
         return;
     }
+    // Batched deterministic frame stepping. This mirrors the independent
+    // emulator-oracle control surface: KEYINPUT is written once, then held
+    // while real guest code and devices advance for N VBlank intervals.
+    // It is test orchestration only--no guest state or timing is injected.
+    if (contains("\"run_frames\"")) {
+        if (!ctx.step) {
+            emit_error(out, "step callback not wired");
+            return;
+        }
+        uint64_t count = 0;
+        if (!extract_uint(req, "\"n\"", count)) {
+            emit_error(out, "missing n");
+            return;
+        }
+        constexpr uint64_t kMaxBatchFrames = 1'000'000ull;
+        if (count > kMaxBatchFrames) {
+            emit_error(out, "n too large");
+            return;
+        }
+        uint64_t keyinput = 0;
+        if (extract_uint(req, "\"keyinput\"", keyinput)) {
+            if (!ctx.bus) {
+                emit_error(out, "bus unavailable");
+                return;
+            }
+            ctx.bus->io().set_keyinput(
+                static_cast<uint16_t>(keyinput & 0x03FFu));
+        }
+        uint64_t completed = 0;
+        for (; completed < count; ++completed) {
+            if (!ctx.step()) {
+                step_failed = true;
+                break;
+            }
+        }
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+                      "{\"ok\":%s,\"frames\":%llu,\"frame\":%llu}",
+                      completed == count ? "true" : "false",
+                      static_cast<unsigned long long>(completed),
+                      static_cast<unsigned long long>(frame_counter(ctx)));
+        out = buf;
+        return;
+    }
     if (contains("\"frame\"") && !contains("\"emu_")) {
         emit_ok_int(out, "frame", frame_counter(ctx));
         return;

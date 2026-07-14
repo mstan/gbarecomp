@@ -60,6 +60,11 @@ static SDL_Texture*  g_tex;
 static int g_tex_w = 0, g_tex_h = 0;
 static retro_pixel_format g_fmt = RETRO_PIXEL_FORMAT_0RGB1555;
 static SDL_GameController* g_pad = nullptr;
+static std::vector<uint8_t> g_last_rgb;
+static unsigned g_last_w = 0, g_last_h = 0;
+static bool g_demo_campaign = false;
+static uint32_t g_input_preroll = 1;
+static uint32_t g_quit_frame_cap = 0;
 
 static void open_first_pad() {
     if (g_pad) return;
@@ -88,6 +93,7 @@ static FILE* g_log;
 static const char* g_log_path = "gbaref_trace.jsonl";
 static bool g_primed = false;
 static uint32_t g_frame = 0;
+static bool g_trace_enabled = true;
 
 static void add_region_if_ram(const void* ptr, uint32_t base, uint32_t len) {
     if (!ptr || !len) return;
@@ -191,10 +197,44 @@ static void ensure_texture(unsigned w, unsigned h) {
     g_tex_w = w; g_tex_h = h;
 }
 static void cb_video(const void* data, unsigned w, unsigned h, size_t pitch) {
-    if (data && w && h) { ensure_texture(w, h); SDL_UpdateTexture(g_tex, nullptr, data, (int)pitch); }
-    SDL_RenderClear(g_ren);
-    if (g_tex) SDL_RenderCopy(g_ren, g_tex, nullptr, nullptr);
-    SDL_RenderPresent(g_ren);
+    // A deterministic headless oracle only needs the terminal framebuffer.
+    // Avoid converting/uploading 15,000 throwaway intermediate frames.
+    if (g_quit_frame_cap && g_frame + 1 < g_quit_frame_cap) return;
+    if (data && w && h) {
+        ensure_texture(w, h);
+        if (g_tex) SDL_UpdateTexture(g_tex, nullptr, data, (int)pitch);
+        g_last_w = w; g_last_h = h;
+        g_last_rgb.assign((size_t)w * h * 3, 0);
+        auto expand5 = [](unsigned v) -> uint8_t { return (uint8_t)((v << 3) | (v >> 2)); };
+        for (unsigned y = 0; y < h; ++y) {
+            const uint8_t* row = (const uint8_t*)data + y * pitch;
+            for (unsigned x = 0; x < w; ++x) {
+                uint8_t r, g, b;
+                if (g_fmt == RETRO_PIXEL_FORMAT_XRGB8888) {
+                    uint32_t c; std::memcpy(&c, row + x * 4, sizeof c);
+                    r = (uint8_t)(c >> 16); g = (uint8_t)(c >> 8); b = (uint8_t)c;
+                } else {
+                    uint16_t c; std::memcpy(&c, row + x * 2, sizeof c);
+                    if (g_fmt == RETRO_PIXEL_FORMAT_RGB565) {
+                        // Normalize the core's host RGB565 back to logical GBA
+                        // RGB555. mGBA stores the 5-bit GBA green as an even
+                        // 6-bit host channel; expanding all six bits would add
+                        // a frontend-format artifact to oracle comparisons.
+                        r = expand5((c >> 11) & 31); g = expand5((c >> 6) & 31); b = expand5(c & 31);
+                    } else {
+                        r = expand5((c >> 10) & 31); g = expand5((c >> 5) & 31); b = expand5(c & 31);
+                    }
+                }
+                size_t p = ((size_t)y * w + x) * 3;
+                g_last_rgb[p] = r; g_last_rgb[p + 1] = g; g_last_rgb[p + 2] = b;
+            }
+        }
+    }
+    if (g_ren) {
+        SDL_RenderClear(g_ren);
+        if (g_tex) SDL_RenderCopy(g_ren, g_tex, nullptr, nullptr);
+        SDL_RenderPresent(g_ren);
+    }
 }
 static void cb_audio_sample(int16_t, int16_t) {}
 static size_t cb_audio_batch(const int16_t*, size_t frames) { return frames; }
@@ -204,6 +244,36 @@ static void cb_input_poll(void) {}
 //   A=Z, B=X, Select=RShift, Start=Enter, dpad=arrows, L=S, R=A.
 static int16_t cb_input_state(unsigned port, unsigned device, unsigned, unsigned id) {
     if (port != 0 || device != RETRO_DEVICE_JOYPAD) return 0;
+    if (g_demo_campaign) {
+        if (g_frame < g_input_preroll) return 0;
+        const uint32_t frame = g_frame - g_input_preroll;
+        uint16_t pressed = 0;
+        if (frame >= 9000) {
+            static const uint16_t dirs[] = { 0x10, 0x80, 0x20, 0x40 };
+            const uint32_t walk = frame - 9000;
+            pressed = dirs[(walk / 180) % 4];
+            if ((walk % 60) < 2) pressed |= 0x01;
+        } else {
+            static const uint16_t buttons[] = {
+                0x08, 0x01, 0x01, 0x80, 0x01, 0x10,
+                0x02, 0x01, 0x20, 0x01, 0x40, 0x02,
+            };
+            if (((frame / 6) & 1u) == 0)
+                pressed = buttons[(frame / 12) % (sizeof buttons / sizeof buttons[0])];
+        }
+        uint16_t mask = 0;
+        switch (id) {
+            case RETRO_DEVICE_ID_JOYPAD_A:     mask = 0x01; break;
+            case RETRO_DEVICE_ID_JOYPAD_B:     mask = 0x02; break;
+            case RETRO_DEVICE_ID_JOYPAD_START: mask = 0x08; break;
+            case RETRO_DEVICE_ID_JOYPAD_RIGHT: mask = 0x10; break;
+            case RETRO_DEVICE_ID_JOYPAD_LEFT:  mask = 0x20; break;
+            case RETRO_DEVICE_ID_JOYPAD_UP:    mask = 0x40; break;
+            case RETRO_DEVICE_ID_JOYPAD_DOWN:  mask = 0x80; break;
+            default: return 0;
+        }
+        return (pressed & mask) != 0;
+    }
     const Uint8* ks = SDL_GetKeyboardState(nullptr);
     SDL_Scancode sc; SDL_GameControllerButton gb;
     switch (id) {
@@ -261,6 +331,9 @@ int main(int argc, char** argv) {
     if (const char* p = getenv("GBAREF_TRACE")) if (p[0]) g_log_path = p;
     if (const char* p = getenv("GBAREF_WATCH_LO")) if (p[0]) g_watch_lo = (uint32_t)strtoul(p,nullptr,0);
     if (const char* p = getenv("GBAREF_WATCH_HI")) if (p[0]) g_watch_hi = (uint32_t)strtoul(p,nullptr,0);
+    if (const char* p = getenv("GBAREF_DEMO_INPUT")) g_demo_campaign = std::strcmp(p, "campaign") == 0;
+    if (const char* p = getenv("GBAREF_INPUT_PREROLL")) if (p[0]) g_input_preroll = (uint32_t)strtoul(p,nullptr,0);
+    if (const char* p = getenv("GBAREF_NO_TRACE")) g_trace_enabled = !(p[0] && std::strcmp(p, "0") != 0);
 
     g_core = LoadLibraryA(corePath);
     if (!g_core) { fprintf(stderr,"LoadLibrary failed: %s (err %lu)\n", corePath, GetLastError()); return 2; }
@@ -329,14 +402,17 @@ int main(int argc, char** argv) {
 
     long quit_frames = 0;
     if (const char* qf = getenv("GBAREF_QUIT_FRAMES")) if (qf[0]) quit_frames = atol(qf);
+    if (quit_frames > 0) g_quit_frame_cap = (uint32_t)quit_frames;
 
     SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK) != 0) { fprintf(stderr,"SDL_Init: %s\n",SDL_GetError()); return 5; }
     open_first_pad();
     g_win = SDL_CreateWindow("gbaref (libretro GBA oracle) — Fn load / Shift+Fn save / Backspace clear-trace",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, vw*3, vh*3, SDL_WINDOW_RESIZABLE);
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, vw*3, vh*3,
+        SDL_WINDOW_RESIZABLE | (quit_frames > 0 ? SDL_WINDOW_HIDDEN : 0));
     g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    SDL_RenderSetLogicalSize(g_ren, vw, vh);
+    if (!g_ren) g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_SOFTWARE);
+    if (g_ren) SDL_RenderSetLogicalSize(g_ren, vw, vh);
 
     printf("RUN. KB: arrows=DPad Z=A X=B S=L A=R Enter=Start RShift=Select | "
            "F1-F12=LOAD slot, Shift+F1-F12=SAVE | D=dump IWRAM+EWRAM | "
@@ -365,14 +441,25 @@ int main(int argc, char** argv) {
         }
         p_retro_run();
         g_frame++;
-        trace_tick();
+        if (g_trace_enabled) trace_tick();
         if (quit_frames > 0 && g_frame >= (uint32_t)quit_frames) running = false;
-        for (;;) {
+        for (; quit_frames <= 0;) {
             Uint64 now=SDL_GetPerformanceCounter();
             double el=(double)(now-prev);
             if (el>=target) { prev=now; break; }
             double rem_ms=(target-el)*1000.0/(double)freq;
             if (rem_ms>1.5) SDL_Delay((Uint32)(rem_ms-1.0));
+        }
+    }
+    if (const char* path = getenv("GBAREF_DUMP_PPM")) {
+        if (path[0] && !g_last_rgb.empty()) {
+            FILE* f = fopen(path, "wb");
+            if (f) {
+                fprintf(f, "P6\n%u %u\n255\n", g_last_w, g_last_h);
+                fwrite(g_last_rgb.data(), 1, g_last_rgb.size(), f);
+                fclose(f);
+                printf("[framebuffer f%u -> %s]\n", g_frame, path);
+            }
         }
     }
     if (g_log) fflush(g_log);

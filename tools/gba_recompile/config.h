@@ -40,6 +40,13 @@ struct ConfigProgram {
     uint32_t    load_address = 0;
     uint32_t    size = 0;
     uint32_t    entry_pc = 0;
+    // Speculative PC-relative literal harvesting is useful for early
+    // exploration, but can misclassify data as code. Targets that drive a
+    // strict static corpus can disable it and add only observed callbacks.
+    bool        speculative_literal_harvest = true;
+    // Number of deterministic C++ translation units used for emitted guest
+    // bodies. One preserves the legacy recompiled.cpp output.
+    uint32_t    codegen_shards = 1;
 };
 
 struct ConfigIdentity {
@@ -49,6 +56,9 @@ struct ConfigIdentity {
 
 struct ConfigExtraFunc {
     uint32_t    addr = 0;
+    // Optional immutable ROM backing for a relocated RAM entry. Discovery
+    // propagates this source/runtime bias through its direct CFG edges.
+    uint32_t    source_addr = 0;
     CpuMode     mode = CpuMode::Arm;
     std::string name;       // optional; finder generates one if empty
     std::string note;       // documentation only

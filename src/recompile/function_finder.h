@@ -192,6 +192,12 @@ public:
     // function whose address matches is dropped from the output.
     void add_exclude(uint32_t addr, const std::string& reason);
 
+    // Enable/disable speculative code-pointer harvesting from PC-relative
+    // literal loads. Direct control-flow discovery is unaffected.
+    void set_speculative_literal_harvest(bool enabled) {
+        speculative_literal_harvest_enabled_ = enabled;
+    }
+
     // Run discovery starting from all seeds. Bounded by
     // `max_functions` to avoid runaways during bring-up.
     void run(std::size_t max_functions = 4096);
@@ -262,6 +268,7 @@ private:
     // a dead func_XXXX, never a hard data_range collision. (Stage 0.1,
     // ported from jrickey gba-recomp analyze.rs literal-pool scan.)
     std::vector<FunctionSeed>        literal_pool_seeds_;
+    bool speculative_literal_harvest_enabled_ = true;
 
     bool addr_in_rom(uint32_t addr) const {
         return addr >= rom_base_ &&

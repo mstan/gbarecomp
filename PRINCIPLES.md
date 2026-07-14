@@ -167,6 +167,12 @@ Only the *dispatch* gate (miss → abort) is replaced by self-healing.
   miss, interprets the block to bridge, triggers an on-the-fly
   recompile into the code cache, and returns; subsequent hits run
   native.
+- Acceptance and coverage-regression runs set
+  `GBARECOMP_STRICT_STATIC=1`. This disables overlay cache loading,
+  background healing, and interpreter bridging; any dispatch miss
+  aborts immediately. A successful strict run proves the linked static
+  corpus covered every executed PC rather than merely reporting that a
+  fallback happened to be unused.
 - The bridged path must diff **bit-identical** to the mGBA oracle —
   bridging is behavior-preserving or it is a bug.
 - New diff harnesses are still encouraged; the interpreter-vs-recomp

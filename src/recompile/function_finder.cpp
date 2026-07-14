@@ -200,6 +200,41 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
     } else if (!map_addr_to_source(entry_addr, &entry_source)) {
         return;
     }
+
+    // An explicit source address describes one observed placement of a
+    // position-independent ROM routine in RAM. Fixed code_copy ranges may
+    // overlap that placement (stack copies naturally move as call depth
+    // changes), so instruction fetches for this walk must retain the seed's
+    // source/runtime bias instead of consulting the first global range again.
+    auto walk_source_for = [&](uint32_t addr, uint32_t* source) -> bool {
+        const int64_t delta = static_cast<int64_t>(addr) -
+            static_cast<int64_t>(entry_addr);
+        const int64_t mapped = static_cast<int64_t>(entry_source) + delta;
+        if (mapped < 0 || mapped > 0xFFFFFFFFll) return false;
+        *source = static_cast<uint32_t>(mapped);
+        return addr_in_rom(*source);
+    };
+    auto can_read_walk_at = [&](uint32_t addr, uint32_t len) -> bool {
+        uint32_t source = 0;
+        if (!walk_source_for(addr, &source)) return false;
+        return static_cast<uint64_t>(source - rom_base_) + len <= rom_size_;
+    };
+    auto read_walk_u16 = [&](uint32_t addr) -> uint16_t {
+        uint32_t source = 0;
+        walk_source_for(addr, &source);
+        const std::size_t off = source - rom_base_;
+        return static_cast<uint16_t>(rom_[off]) |
+            (static_cast<uint16_t>(rom_[off + 1]) << 8);
+    };
+    auto read_walk_u32 = [&](uint32_t addr) -> uint32_t {
+        uint32_t source = 0;
+        walk_source_for(addr, &source);
+        const std::size_t off = source - rom_base_;
+        return static_cast<uint32_t>(rom_[off]) |
+            (static_cast<uint32_t>(rom_[off + 1]) << 8) |
+            (static_cast<uint32_t>(rom_[off + 2]) << 16) |
+            (static_cast<uint32_t>(rom_[off + 3]) << 24);
+    };
     uint64_t key = visit_key(entry_addr, entry_mode);
     if (visited_.find(key) != visited_.end()) return;
 
@@ -588,6 +623,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         return false;
     };
     auto maybe_harvest_literal = [&](uint32_t word) {
+        if (!speculative_literal_harvest_enabled_) return;
         ++stats_.literal_pool_words_seen;
         CpuMode tmode;
         uint32_t tgt;
@@ -835,7 +871,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         return true;
     };
 
-    while (count++ < kMaxInstrs && can_read_at(pc, step)) {
+    while (count++ < kMaxInstrs && can_read_walk_at(pc, step)) {
         // If we ever decode from inside a data_range, that's a hard
         // error — TOML asserted "no code here" but our walk got here
         // anyway. Recorded; finder continues so multiple collisions
@@ -847,9 +883,9 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
 
         armv4t::Instr ins;
         if (entry_mode == CpuMode::Thumb) {
-            ins = armv4t::ThumbDecoder::decode(read_u16(pc), pc);
+            ins = armv4t::ThumbDecoder::decode(read_walk_u16(pc), pc);
         } else {
-            ins = armv4t::ArmDecoder::decode(read_u32(pc), pc);
+            ins = armv4t::ArmDecoder::decode(read_walk_u32(pc), pc);
         }
 
         if (ins.is_undefined) {
@@ -887,9 +923,9 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         // worklist gets the right address.
         if (entry_mode == CpuMode::Thumb &&
             ins.op == armv4t::IrOp::BL_prefix &&
-            can_read_at(pc + 2, 2)) {
+            can_read_walk_at(pc + 2, 2)) {
             armv4t::Instr lower = armv4t::ThumbDecoder::decode(
-                read_u16(pc + 2), pc + 2);
+                read_walk_u16(pc + 2), pc + 2);
             if (lower.op == armv4t::IrOp::BL_suffix) {
                 uint32_t full = ins.branch_target + lower.swi_imm;
                 full &= ~uint32_t{1};  // strip THUMB bit if encoded
@@ -986,46 +1022,24 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             // BX is the ARMv4T interworking instruction, so it gets
             // target mode from bit 0. Plain DP writes to PC keep the
             // current instruction-set state; bit 0 is not an exchange.
-            uint8_t src_reg = 255;  // sentinel
-            bool src_is_bx = false;
+            // DP writes to PC are already handled by the evaluators above.
+            // Resolve only BX here: using its operand as the final target is
+            // valid, while doing that for ADD/EOR/etc. invents code edges.
             if (ins.op == armv4t::IrOp::BX && ins.rm < 16) {
-                src_reg = ins.rm;
-                src_is_bx = true;
-            } else if (ins.rd == 15 &&
-                       ins.op2.kind == armv4t::Op2::Kind::Shifted &&
-                       !ins.op2.shifted.by_register &&
-                       ins.op2.shifted.imm_or_rs == 0 &&
-                       ins.op2.shifted.rm < 16) {
-                // DP write to PC with op2 = plain register: this is
-                // either `mov pc, Rn` (computed jump) or some other
-                // DP-PC pattern. If the source register is tracked,
-                // we know the target.
-                src_reg = ins.op2.shifted.rm;
-            }
-            if (src_reg < 16) {
                 uint32_t raw = 0;
                 bool raw_known = false;
-                if (src_reg == 15) {
+                if (ins.rm == 15) {
                     raw = ins.pc + (entry_mode == CpuMode::Thumb ? 4u : 8u);
                     if (entry_mode == CpuMode::Thumb) raw &= ~uint32_t{3};
                     raw_known = true;
-                } else if (reg_const[src_reg].known) {
-                    raw = reg_const[src_reg].value;
+                } else if (reg_const[ins.rm].known) {
+                    raw = reg_const[ins.rm].value;
                     raw_known = true;
                 }
                 if (raw_known) {
-                    uint32_t tgt = raw & ~uint32_t{1};
-                    CpuMode tgt_mode = entry_mode;
-                    if (src_is_bx) {
-                        tgt_mode = (raw & 1u) ? CpuMode::Thumb : CpuMode::Arm;
-                    }
-                    if (tgt != 0 && can_read_at(
-                            tgt, tgt_mode == CpuMode::Thumb ? 2u : 4u) &&
-                        !addr_in_data_range(tgt)) {
-                        mode_switch_seeds_.push_back(
-                            FunctionSeed{tgt, tgt_mode, ""});
-                        ++stats_.branch_targets_discovered;
-                    }
+                    CpuMode tgt_mode = (raw & 1u)
+                        ? CpuMode::Thumb : CpuMode::Arm;
+                    enqueue_resolved_target(raw, tgt_mode, "branch");
                 }
             }
             if (ins.op == armv4t::IrOp::BX &&
@@ -1072,7 +1086,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 }
             } else if (entry_mode == CpuMode::Thumb &&
                        ins.op == armv4t::IrOp::BL_prefix &&
-                       can_read_at(ins.pc + 2, 2)) {
+                       can_read_walk_at(ins.pc + 2, 2)) {
                 // THUMB BL is a prefix/suffix halfword PAIR; the full
                 // target only exists once combined. This is the dominant
                 // dispatch form — `bl <bx-dest veneer>` — so without it
@@ -1080,7 +1094,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 // pair (same math as the finder's direct-BL handling),
                 // then check the veneer it lands on.
                 armv4t::Instr lo = armv4t::ThumbDecoder::decode(
-                    read_u16(ins.pc + 2), ins.pc + 2);
+                    read_walk_u16(ins.pc + 2), ins.pc + 2);
                 if (lo.op == armv4t::IrOp::BL_suffix) {
                     uint32_t full =
                         (ins.branch_target + lo.swi_imm) & ~uint32_t{1};
@@ -1279,16 +1293,32 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                     }
                 }
             }
-        } else if (ins.op == armv4t::IrOp::LDM &&
-                   ins.block.load &&
-                   ins.block.writeback &&
-                   ins.block.rn < 16) {
-            reg_const[ins.block.rn].known = false;
-            reg_sym[ins.block.rn].known = false;
-            reg_scaled[ins.block.rn].known = false;
-            reg_table[ins.block.rn].known = false;
-            invalidate_mem_base(ins.block.rn);
-            invalidate_sym_base(ins.block.rn);
+        } else if (ins.op == armv4t::IrOp::LDM && ins.block.load) {
+            // Every listed register is overwritten from memory. This is
+            // especially important for the common THUMB return veneer
+            // `pop {rN}; bx rN`: retaining an older literal constant for rN
+            // invents a static BX target and can make data decode as code.
+            uint16_t loaded = ins.block.reg_list;
+            if (loaded == 0) loaded = static_cast<uint16_t>(1u << 15);
+            for (uint8_t reg = 0; reg < 16; ++reg) {
+                if ((loaded & (1u << reg)) == 0) continue;
+                reg_const[reg].known = false;
+                reg_sym[reg].known = false;
+                reg_scaled[reg].known = false;
+                reg_table[reg].known = false;
+                reg_bound[reg].known = false;
+                invalidate_mem_base(reg);
+                invalidate_sym_base(reg);
+            }
+            if (ins.block.writeback && ins.block.rn < 16) {
+                reg_const[ins.block.rn].known = false;
+                reg_sym[ins.block.rn].known = false;
+                reg_scaled[ins.block.rn].known = false;
+                reg_table[ins.block.rn].known = false;
+                reg_bound[ins.block.rn].known = false;
+                invalidate_mem_base(ins.block.rn);
+                invalidate_sym_base(ins.block.rn);
+            }
         }
 
         // Snapshot Rd's tracked constant BEFORE the const-tracker below
@@ -1695,8 +1725,20 @@ void FunctionFinder::run(std::size_t max_functions) {
             if (!enqueued.insert(k).second) continue;  // already queued
             // Propagate speculation: a branch target reached only from a
             // speculative (literal-pool) walk is itself speculative.
+            uint32_t target_source = 0;
+            if (fn.source_addr != fn.addr) {
+                const int64_t delta = static_cast<int64_t>(t) -
+                    static_cast<int64_t>(fn.addr);
+                const int64_t mapped = static_cast<int64_t>(fn.source_addr) +
+                    delta;
+                if (mapped >= 0 && mapped <= 0xFFFFFFFFll &&
+                    addr_in_rom(static_cast<uint32_t>(mapped))) {
+                    target_source = static_cast<uint32_t>(mapped);
+                }
+            }
             discovered_seeds.push_back(
-                QueuedSeed{FunctionSeed{t, fn.mode, "", 0, s.speculative},
+                QueuedSeed{FunctionSeed{t, fn.mode, "", target_source,
+                                        s.speculative},
                            current_required});
             if (current_required) {
                 ++required_remaining;
@@ -1772,6 +1814,11 @@ void FunctionFinder::run(std::size_t max_functions) {
         return alias_candidate_keys_.count(k) != 0;
     };
 
+    auto source_bias = [](const Function& f) -> int64_t {
+        return static_cast<int64_t>(f.source_addr) -
+            static_cast<int64_t>(f.addr);
+    };
+
     // Set end_addr to the next same-mode function start when adjacent
     // (approximate boundary). ARM and THUMB entries occupy the same byte
     // address space but do not share instruction boundaries; a false-start
@@ -1783,6 +1830,13 @@ void FunctionFinder::run(std::size_t max_functions) {
         if (is_alias_candidate(functions_[i])) continue;  // extent unused
         for (std::size_t j = i + 1; j < functions_.size(); ++j) {
             if (functions_[j].mode != functions_[i].mode) continue;
+            // Overlapping RAM placements of the same immutable routine are
+            // separate static CFGs. A function from another placement must
+            // not truncate this one's emitted body merely because its runtime
+            // address happens to fall in the interval.
+            if (source_bias(functions_[j]) != source_bias(functions_[i])) {
+                continue;
+            }
             if (is_alias_candidate(functions_[j])) continue;  // not a boundary
             if (functions_[j].addr > functions_[i].addr) {
                 functions_[i].end_addr = std::min(
@@ -1816,6 +1870,7 @@ void FunctionFinder::run(std::size_t max_functions) {
                 if (j == i) continue;
                 const Function& h = functions_[j];
                 if (is_alias_candidate(h) || h.mode != c.mode) continue;
+                if (source_bias(h) != source_bias(c)) continue;
                 if (h.addr < c.addr && c.addr < h.end_addr) {
                     if (best == SIZE_MAX ||
                         h.addr > functions_[best].addr) {

@@ -9,12 +9,12 @@ must:
 3. Be referenced only from `CMakeLists.txt`. No third-party code is
    moved into `src/`.
 
-## Planned imports (none vendored yet)
+## Build-time dependencies
 
 | Library | Use | License | Where |
 |---------|-----|---------|-------|
 | `fmt` | text formatting in tools | MIT | likely `third_party/fmt/` |
-| `toml++` or `tomlplusplus` | `game.toml` parsing | MIT | likely `third_party/toml++/` |
+| `toml++` v3.4.0 | `game.toml` parsing | MIT | optional ignored checkout at `third_party/tomlpp/`; otherwise CMake FetchContent at pinned commit `30172438` |
 | `cxxopts` | CLI parsing in tools | MIT | likely `third_party/cxxopts/` |
 | `nlohmann/json` | debug TCP responses | MIT | likely `third_party/json/` |
 

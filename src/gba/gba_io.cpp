@@ -502,9 +502,11 @@ void GbaIo::warn_unhandled(uint32_t off, uint32_t value, bool is_write, uint8_t 
                    (is_write ? 1u : 0u);
     if (warned_set().insert(key).second) {
         std::fprintf(stderr,
-                     "[gba:io] unhandled %s%u @ 0x%08x = 0x%x\n",
+                     "[gba:io] unhandled %s%u @ 0x%08x = 0x%x "
+                     "pc=0x%08x cycles=%llu\n",
                      is_write ? "W" : "R", width,
-                     0x04000000u + off, value);
+                     0x04000000u + off, value, runtime_current_pc(),
+                     static_cast<unsigned long long>(g_runtime_cycles));
     }
 }
 
@@ -574,6 +576,13 @@ uint32_t GbaIo::read32(uint32_t off) {
 // ─────────────────────────────────────────────────────────────────────
 
 void GbaIo::write8(uint32_t off, uint8_t v) {
+    if (off == IoReg::UNDOC_410) {
+        // The retail BIOS writes FF here during reset. Hardware exposes this
+        // as an undocumented 8-bit write-only register; no verified side
+        // effect is known, so record the committed write and do nothing else.
+        mmio_cap_record(0x04000000u + off, v, 1);
+        return;
+    }
     if (off >= kIoSize) { warn_unhandled(off, v, true, 1); return; }
     mmio_cap_record(0x04000000u + off, v, 1);
     // Audio registers (0x060..0x0AF) go to the audio subsystem on

@@ -94,6 +94,13 @@ mode = "arm"
 name = "swi_vector"
 
 [[extra_func]]
+addr = 0x00000164
+mode = "arm"
+resume = true
+name = "bios_resume_0164"
+note = "LLE-observed asynchronous resume inside the generated host rooted at 0x00000140"
+
+[[extra_func]]
 addr = 0x00000170
 mode = "arm"
 name = "swi_complete"
@@ -521,3 +528,54 @@ mode = "arm"
 name = "bios_resume_0C0C"
 note = "exception-return resume; mid-fn of 0x00000C04 (FireRed miss-log)"
 
+# Additional exception-return PCs observed while booting Mega Man Zero through
+# the real BIOS.  Disassembly confirms each address is inside the named host
+# function, so these must be resume aliases rather than standalone functions.
+[[extra_func]]
+addr = 0x00000B4E
+mode = "thumb"
+resume = true
+name = "bios_resume_0B4E"
+note = "LLE-observed asynchronous resume; loop interior of 0x00000B4C"
+
+[[extra_func]]
+addr = 0x00000746
+mode = "thumb"
+resume = true
+name = "bios_resume_0746"
+note = "exception-return resume; mid-function of 0x00000738"
+
+[[extra_func]]
+addr = 0x00000B6C
+mode = "thumb"
+resume = true
+name = "bios_resume_0B6C"
+note = "exception-return resume; loop interior of 0x00000B4C"
+
+[[extra_func]]
+addr = 0x00000FFC
+mode = "arm"
+resume = true
+name = "bios_resume_0FFC"
+note = "exception-return resume; ARM loop interior ending at 0x00001000"
+
+[[extra_func]]
+addr = 0x00000B92
+mode = "thumb"
+resume = true
+name = "bios_resume_0B92"
+note = "executed exception-return continuation; interior of generated host 0x00000B8A..0x00000B96"
+
+[[extra_func]]
+addr = 0x00000B90
+mode = "thumb"
+resume = true
+name = "bios_resume_0B90"
+note = "IRQ-return continuation observed during paired VBlank stepping; STRH inside the 0x00000B8A..0x00000B96 loop"
+
+[[extra_func]]
+addr = 0x00000C20
+mode = "arm"
+resume = true
+name = "bios_resume_0C20"
+note = "executed exception-return continuation; interior of generated host 0x00000C14..0x00000C24"

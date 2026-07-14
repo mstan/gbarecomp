@@ -155,19 +155,50 @@ inline void to_rgb888(uint16_t c, uint8_t* out) {
     out[2] = static_cast<uint8_t>((b << 3) | (b >> 2));
 }
 
-inline void blend_alpha_rgb888(const uint8_t* top,
-                               const uint8_t* bottom,
-                               uint32_t eva,
-                               uint32_t evb,
-                               uint8_t* out) {
+inline uint16_t blend_alpha_gba555(uint16_t top,
+                                   uint16_t bottom,
+                                   uint32_t eva,
+                                   uint32_t evb) {
     if (eva > 16) eva = 16;
     if (evb > 16) evb = 16;
-    for (int i = 0; i < 3; ++i) {
-        uint32_t v = (static_cast<uint32_t>(top[i]) * eva +
-                      static_cast<uint32_t>(bottom[i]) * evb) >> 4;
-        if (v > 255) v = 255;
-        out[i] = static_cast<uint8_t>(v);
-    }
+    const uint32_t tr = top & 31u;
+    const uint32_t tg = ((top >> 4) & 62u) | (top >> 15);
+    const uint32_t tb = (top >> 10) & 31u;
+    const uint32_t br = bottom & 31u;
+    const uint32_t bg = ((bottom >> 4) & 62u) | (bottom >> 15);
+    const uint32_t bb = (bottom >> 10) & 31u;
+
+    // The GBA blends in its native color domain, rounds to nearest (+8 before
+    // the 4-bit division), and carries a sixth green precision bit in palette
+    // bit 15. Only after blending is green reduced to the displayed 5 bits.
+    // Doing this on already-expanded RGB888 values produces subtly wrong colors.
+    const uint32_t r = std::min(31u, (tr * eva + br * evb + 8u) >> 4);
+    const uint32_t g6 = std::min(63u, (tg * eva + bg * evb + 8u) >> 4);
+    const uint32_t b = std::min(31u, (tb * eva + bb * evb + 8u) >> 4);
+    return static_cast<uint16_t>((b << 10) | ((g6 >> 1) << 5) | r);
+}
+
+inline uint16_t brighten_gba555(uint16_t color, uint32_t evy) {
+    if (evy > 16) evy = 16;
+    uint32_t r = color & 31u;
+    uint32_t g6 = ((color >> 4) & 62u) | (color >> 15);
+    uint32_t b = (color >> 10) & 31u;
+    r += ((31u - r) * evy + 8u) >> 4;
+    g6 += ((63u - g6) * evy + 8u) >> 4;
+    b += ((31u - b) * evy + 8u) >> 4;
+    return static_cast<uint16_t>((b << 10) | ((g6 >> 1) << 5) | r);
+}
+
+inline uint16_t darken_gba555(uint16_t color, uint32_t evy) {
+    if (evy > 16) evy = 16;
+    uint32_t r = color & 31u;
+    uint32_t g6 = ((color >> 4) & 62u) | (color >> 15);
+    uint32_t b = (color >> 10) & 31u;
+    // Hardware rounds the subtractive term with +7 rather than +8.
+    r -= (r * evy + 7u) >> 4;
+    g6 -= (g6 * evy + 7u) >> 4;
+    b -= (b * evy + 7u) >> 4;
+    return static_cast<uint16_t>((b << 10) | ((g6 >> 1) << 5) | r);
 }
 
 inline uint16_t load_u16_le(const uint8_t* p) {
@@ -353,6 +384,7 @@ void render_scanline_internal(uint8_t* rgb,
 
     struct PixelCandidate {
         uint8_t rgb[3] = {0, 0, 0};
+        uint16_t color = 0;
         int key = 0x7FFFFFFF;
         uint8_t layer = 5;
         bool target1 = false;
@@ -420,12 +452,14 @@ void render_scanline_internal(uint8_t* rgb,
 
     PixelCandidate top[GbaPpu::kScreenWidth];
     PixelCandidate second[GbaPpu::kScreenWidth];
+    const uint16_t backdrop_color = load_u16_le(&pal[0]);
     uint8_t backdrop_rgb[3];
-    to_rgb888(load_u16_le(&pal[0]), backdrop_rgb);
+    to_rgb888(backdrop_color, backdrop_rgb);
     for (uint32_t x = 0; x < kScreenWidth; ++x) {
         top[x].rgb[0] = backdrop_rgb[0];
         top[x].rgb[1] = backdrop_rgb[1];
         top[x].rgb[2] = backdrop_rgb[2];
+        top[x].color = backdrop_color;
         top[x].key = 0x70000000;
         top[x].layer = 5;
         top[x].target1 = blend_enabled(x) && ((first_targets & (1u << 5)) != 0);
@@ -433,15 +467,14 @@ void render_scanline_internal(uint8_t* rgb,
         top[x].valid = true;
     }
     auto submit = [&](uint32_t x,
-                      const uint8_t* rgbv,
+                      uint16_t color,
                       int key,
                       uint8_t layer,
                       bool target1,
                       bool target2) {
         PixelCandidate cand;
-        cand.rgb[0] = rgbv[0];
-        cand.rgb[1] = rgbv[1];
-        cand.rgb[2] = rgbv[2];
+        cand.color = color;
+        to_rgb888(color, cand.rgb);
         cand.key = key;
         cand.layer = layer;
         cand.target1 = target1;
@@ -516,9 +549,8 @@ void render_scanline_internal(uint8_t* rgb,
             }
             if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
 
-            uint8_t rgbv[3];
-            to_rgb888(load_u16_le(&pal[pal_idx * 2]), rgbv);
-            submit(x, rgbv,
+            const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
+            submit(x, color,
                    static_cast<int>(bg_priority * 256u + 128u + layer),
                    static_cast<uint8_t>(layer),
                    blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
@@ -570,9 +602,8 @@ void render_scanline_internal(uint8_t* rgb,
             if (tile_addr >= 96u * 1024u) continue;
             uint8_t pal_idx = vram[tile_addr];
             if (pal_idx == 0) continue;
-            uint8_t rgbv[3];
-            to_rgb888(load_u16_le(&pal[pal_idx * 2]), rgbv);
-            submit(x, rgbv,
+            const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
+            submit(x, color,
                    static_cast<int>(bg_priority * 256 + 128 + layer),
                    static_cast<uint8_t>(layer),
                    blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
@@ -663,12 +694,11 @@ void render_scanline_internal(uint8_t* rgb,
                     if (pal_index == 0) return;
                     pal_index = static_cast<uint8_t>(pal_index | (palette_bank << 4));
                 }
-                uint8_t rgbv[3];
-                to_rgb888(load_u16_le(&obj_pal[pal_index * 2]), rgbv);
+                const uint16_t color = load_u16_le(&obj_pal[pal_index * 2]);
                 uint32_t ux = static_cast<uint32_t>(screen_x);
                 bool t1 = blend_enabled(ux) &&
                     obj_mode == 1;
-                submit(ux, rgbv, key, 4, t1, obj_target2);
+                submit(ux, color, key, 4, t1, obj_target2);
             };
             if (rot_scale) {
                 int bw = disable_or_double ? sw * 2 : sw;
@@ -729,21 +759,17 @@ void render_scanline_internal(uint8_t* rgb,
         if ((effect == 1 || top[x].layer == 4) &&
             top[x].target1 && second[x].valid && second[x].target2 &&
             !(top[x].layer == 4 && second[x].layer == 4)) {
-            blend_alpha_rgb888(top[x].rgb, second[x].rgb,
-                               bldalpha & 0x1Fu,
-                               (bldalpha >> 8) & 0x1Fu,
-                               dst);
+            const uint16_t blended = blend_alpha_gba555(
+                top[x].color, second[x].color,
+                bldalpha & 0x1Fu, (bldalpha >> 8) & 0x1Fu);
+            to_rgb888(blended, dst);
         } else if ((effect == 2u || effect == 3u) && bldy != 0u && top[x].target1) {
-            // Brightness fade on first-target pixels (BLDCNT effect 2/3, gated by
-            // the window's color-effect-enable via top[x].target1):
-            //   brighten: I' = I + (255-I)*BLDY/16   darken: I' = I - I*BLDY/16
-            // Drives fade-to-white / fade-to-black room transitions (MC-HP-003).
-            for (int c = 0; c < 3; ++c) {
-                int v = top[x].rgb[c];
-                if (effect == 2u) v += ((255 - v) * static_cast<int>(bldy)) / 16;
-                else              v -= (v * static_cast<int>(bldy)) / 16;
-                dst[c] = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
-            }
+            // Brightness, like alpha, operates on native GBA channels before
+            // RGB888 expansion and observes palette bit 15 as green precision.
+            const uint16_t adjusted = effect == 2u
+                ? brighten_gba555(top[x].color, bldy)
+                : darken_gba555(top[x].color, bldy);
+            to_rgb888(adjusted, dst);
         } else {
             dst[0] = top[x].rgb[0];
             dst[1] = top[x].rgb[1];
@@ -779,6 +805,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
 
     struct PixelCandidate {
         uint8_t rgb[3] = {0, 0, 0};
+        uint16_t color = 0;
         int key = 0x7FFFFFFF;
         uint8_t layer = 5;
         bool target1 = false;
@@ -840,24 +867,25 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
 
     PixelCandidate top[GbaPpu::kMaxRenderWidth];
     PixelCandidate second[GbaPpu::kMaxRenderWidth];
+    const uint16_t backdrop_color = load_u16_le(&pal[0]);
     uint8_t backdrop_rgb[3];
-    to_rgb888(load_u16_le(&pal[0]), backdrop_rgb);
+    to_rgb888(backdrop_color, backdrop_rgb);
     for (uint32_t x = 0; x < out_w; ++x) {
         top[x].rgb[0] = backdrop_rgb[0];
         top[x].rgb[1] = backdrop_rgb[1];
         top[x].rgb[2] = backdrop_rgb[2];
+        top[x].color = backdrop_color;
         top[x].key = 0x70000000;
         top[x].layer = 5;
         top[x].target1 = blend_enabled(x) && ((first_targets & (1u << 5)) != 0);
         top[x].target2 = (second_targets & (1u << 5)) != 0;
         top[x].valid = true;
     }
-    auto submit = [&](uint32_t x, const uint8_t* rgbv, int key, uint8_t layer,
+    auto submit = [&](uint32_t x, uint16_t color, int key, uint8_t layer,
                       bool target1, bool target2) {
         PixelCandidate cand;
-        cand.rgb[0] = rgbv[0];
-        cand.rgb[1] = rgbv[1];
-        cand.rgb[2] = rgbv[2];
+        cand.color = color;
+        to_rgb888(color, cand.rgb);
         cand.key = key;
         cand.layer = layer;
         cand.target1 = target1;
@@ -944,9 +972,8 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                     pal_idx | static_cast<uint8_t>(palette_bank << 4));
             }
             if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
-            uint8_t rgbv[3];
-            to_rgb888(load_u16_le(&pal[pal_idx * 2]), rgbv);
-            submit(x, rgbv,
+            const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
+            submit(x, color,
                    static_cast<int>(bg_priority * 256u + 128u + layer),
                    static_cast<uint8_t>(layer),
                    blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
@@ -993,9 +1020,8 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             if (tile_addr >= 96u * 1024u) continue;
             uint8_t pal_idx = vram[tile_addr];
             if (pal_idx == 0) continue;
-            uint8_t rgbv[3];
-            to_rgb888(load_u16_le(&pal[pal_idx * 2]), rgbv);
-            submit(x, rgbv,
+            const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
+            submit(x, color,
                    static_cast<int>(bg_priority * 256 + 128 + layer),
                    static_cast<uint8_t>(layer),
                    blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
@@ -1087,11 +1113,10 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                     if (pal_index == 0) return;
                     pal_index = static_cast<uint8_t>(pal_index | (palette_bank << 4));
                 }
-                uint8_t rgbv[3];
-                to_rgb888(load_u16_le(&obj_pal[pal_index * 2]), rgbv);
+                const uint16_t color = load_u16_le(&obj_pal[pal_index * 2]);
                 uint32_t ux = static_cast<uint32_t>(screen_x);
                 bool t1 = blend_enabled(ux) && obj_mode == 1;
-                submit(ux, rgbv, key, 4, t1, obj_target2);
+                submit(ux, color, key, 4, t1, obj_target2);
             };
             if (rot_scale) {
                 int bw = disable_or_double ? sw * 2 : sw;
@@ -1157,15 +1182,15 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
         if ((effect == 1 || top[x].layer == 4) &&
             top[x].target1 && second[x].valid && second[x].target2 &&
             !(top[x].layer == 4 && second[x].layer == 4)) {
-            blend_alpha_rgb888(top[x].rgb, second[x].rgb,
-                               bldalpha & 0x1Fu, (bldalpha >> 8) & 0x1Fu, dst);
+            const uint16_t blended = blend_alpha_gba555(
+                top[x].color, second[x].color,
+                bldalpha & 0x1Fu, (bldalpha >> 8) & 0x1Fu);
+            to_rgb888(blended, dst);
         } else if ((effect == 2u || effect == 3u) && bldy != 0u && top[x].target1) {
-            for (int c = 0; c < 3; ++c) {
-                int v = top[x].rgb[c];
-                if (effect == 2u) v += ((255 - v) * static_cast<int>(bldy)) / 16;
-                else              v -= (v * static_cast<int>(bldy)) / 16;
-                dst[c] = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
-            }
+            const uint16_t adjusted = effect == 2u
+                ? brighten_gba555(top[x].color, bldy)
+                : darken_gba555(top[x].color, bldy);
+            to_rgb888(adjusted, dst);
         } else {
             dst[0] = top[x].rgb[0];
             dst[1] = top[x].rgb[1];
