@@ -484,7 +484,7 @@ target_link_libraries(irq_tests PRIVATE gbarecomp_gba)
 add_test(NAME irq_tests COMMAND irq_tests)
 
 add_executable(ppu_smoke_tests tests/ppu_smoke/test_main.cpp)
-target_include_directories(ppu_smoke_tests PRIVATE src/runtime)
+target_include_directories(ppu_smoke_tests PRIVATE src/runtime src/debug)
 target_link_libraries(ppu_smoke_tests PRIVATE gbarecomp_gba)
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
 

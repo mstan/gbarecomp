@@ -41,6 +41,7 @@ struct Backend {
     std::vector<uint8_t> graded_fb;  // scratch RGB888 (base_w*base_h*3)
     int base_w = 240;   // logical surface width  (240 faithful, wider if expanded)
     int base_h = 160;   // logical surface height (160; vertical expansion deferred)
+    bool expanded_view = false;  // native games retain the historical SDL path
 };
 
 // Resolve the screen model: the per-game [video].screen from game.toml
@@ -135,13 +136,16 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     auto* b = new Backend{};
     b->base_w = base_w;
     b->base_h = base_h;
+    b->expanded_view = base_w != 240 || base_h != 160;
     const int win_w = base_w * scale;
     const int win_h = base_h * scale;
+    const Uint32 window_flags = SDL_WINDOW_SHOWN |
+        (b->expanded_view ? SDL_WINDOW_RESIZABLE : 0u);
     b->window = SDL_CreateWindow(title ? title : "gbarecomp",
                                  SDL_WINDOWPOS_CENTERED,
                                  SDL_WINDOWPOS_CENTERED,
                                  win_w, win_h,
-                                 SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+                                 window_flags);
     if (!b->window) {
         std::fprintf(stderr, "host_window: SDL_CreateWindow failed: %s\n",
                      SDL_GetError());
@@ -165,12 +169,17 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         delete b;
         return false;
     }
-    // The destination viewport is computed explicitly in present() so resizing
-    // maximally fills the drawable at the active logical framebuffer's exact
-    // aspect ratio. Exact multiples retain integer scale; texture filtering is
-    // nearest-neighbor for every size.
-    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
-    SDL_SetRenderDrawColor(b->renderer, 0, 0, 0, 255);
+    if (b->expanded_view) {
+        // The destination viewport is computed explicitly in present() so
+        // resizing maximally fills the drawable at the selected widescreen
+        // aspect. Exact multiples retain integer scale and nearest filtering.
+        SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
+        SDL_SetRenderDrawColor(b->renderer, 0, 0, 0, 255);
+    } else {
+        // Non-opting games retain the historical fixed 240x160 SDL logical
+        // renderer, including its window flags and copy path.
+        SDL_RenderSetLogicalSize(b->renderer, base_w, base_h);
+    }
 
     b->texture = SDL_CreateTexture(b->renderer,
                                    SDL_PIXELFORMAT_RGB24,
@@ -307,17 +316,21 @@ void HostWindow::present(const uint8_t* rgb888) {
     }
     SDL_UpdateTexture(b->texture, nullptr, rgb888, b->base_w * 3);
     SDL_RenderClear(b->renderer);
-    int drawable_w = 0;
-    int drawable_h = 0;
-    if (SDL_GetRendererOutputSize(b->renderer, &drawable_w, &drawable_h) != 0) {
-        SDL_GetWindowSize(b->window, &drawable_w, &drawable_h);
-    }
-    const PresentationLayout layout = compute_presentation_layout(
-        drawable_w, drawable_h, b->base_w, b->base_h);
-    if (layout.width > 0 && layout.height > 0) {
-        const SDL_Rect destination = {
-            layout.x, layout.y, layout.width, layout.height};
-        SDL_RenderCopy(b->renderer, b->texture, nullptr, &destination);
+    if (!b->expanded_view) {
+        SDL_RenderCopy(b->renderer, b->texture, nullptr, nullptr);
+    } else {
+        int drawable_w = 0;
+        int drawable_h = 0;
+        if (SDL_GetRendererOutputSize(b->renderer, &drawable_w, &drawable_h) != 0) {
+            SDL_GetWindowSize(b->window, &drawable_w, &drawable_h);
+        }
+        const PresentationLayout layout = compute_presentation_layout(
+            drawable_w, drawable_h, b->base_w, b->base_h);
+        if (layout.width > 0 && layout.height > 0) {
+            const SDL_Rect destination = {
+                layout.x, layout.y, layout.width, layout.height};
+            SDL_RenderCopy(b->renderer, b->texture, nullptr, &destination);
+        }
     }
     SDL_RenderPresent(b->renderer);
 }

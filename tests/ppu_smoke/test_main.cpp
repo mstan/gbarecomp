@@ -1,4 +1,5 @@
 #include "gba_ppu.h"
+#include "snapshot.h"
 #include "view_config.h"
 
 #include <algorithm>
@@ -52,6 +53,19 @@ int test_margin_tilemap(int bg, int, int, uint16_t* out_entry) {
     return 1;
 }
 
+int g_bg_x_provider_calls = 0;
+
+int test_bg_x_provider(int bg, int output_x, int, int* out_hw_x) {
+    ++g_bg_x_provider_calls;
+    if (bg != 0) return 0;
+    if (output_x == 0 && out_hw_x) {
+        *out_hw_x = 0;
+        return 1;
+    }
+    if (output_x == 24) return -1;
+    return 0;
+}
+
 void test_alpha_native_domain_and_green_precision() {
     Fixture f;
     // Mode 0 BG0, 256-color tile 0 at character base 0, map at 0x800.
@@ -103,6 +117,20 @@ void test_extended_view_geometry_and_clamp() {
         std::exit(1);
     }
 
+    ppu.set_view_margins(72, 72, 0, 0);
+    if (ppu.render_width() != 384 || ppu.view_extra_left() != 72 ||
+        ppu.view_extra_right() != 72) {
+        std::fprintf(stderr, "extended-view 384x160 geometry mismatch\n");
+        std::exit(1);
+    }
+
+    ppu.set_view_margins(120, 120, 0, 0);
+    if (ppu.render_width() != 480 ||
+        ppu.render_width() != gba::GbaPpu::kMaxRenderWidth) {
+        std::fprintf(stderr, "extended-view 480x160 capacity mismatch\n");
+        std::exit(1);
+    }
+
     ppu.set_view_margins(1000, 1000, 7, 9);
     if (ppu.render_width() != gba::GbaPpu::kMaxRenderWidth ||
         ppu.render_height() != gba::GbaPpu::kScreenHeight ||
@@ -131,6 +159,21 @@ void test_extended_view_capability_policy() {
         std::fprintf(stderr, "per-game maximum was not enforced\n");
         std::exit(1);
     }
+    g = resolve_view_geometry(384, 480, false, kEngineMax);
+    if (g.width != 384 || g.extra_left != 72 || g.extra_right != 72) {
+        std::fprintf(stderr, "opted-in 384x160 geometry mismatch\n");
+        std::exit(1);
+    }
+    g = resolve_view_geometry(480, 480, false, kEngineMax);
+    if (g.width != 480 || g.extra_left != 120 || g.extra_right != 120) {
+        std::fprintf(stderr, "opted-in 480x160 geometry mismatch\n");
+        std::exit(1);
+    }
+    g = resolve_view_geometry(600, 600, false, kEngineMax);
+    if (g.width != 480 || g.extra_left != 120 || g.extra_right != 120) {
+        std::fprintf(stderr, "480x160 engine capacity was not enforced\n");
+        std::exit(1);
+    }
     g = resolve_view_geometry(288, 240, true, kEngineMax);
     if (g.width != 288) {
         std::fprintf(stderr, "development override did not bypass capability\n");
@@ -142,8 +185,8 @@ void test_extended_view_capability_policy() {
         std::exit(1);
     }
 
-    const int legacy_extra[] = {0, 20, 22, 24, 40};
-    const int expected_width[] = {240, 280, 284, 288, 320};
+    const int legacy_extra[] = {0, 20, 22, 24, 40, 72, 120};
+    const int expected_width[] = {240, 280, 284, 288, 320, 384, 480};
     for (std::size_t i = 0; i < std::size(legacy_extra); ++i) {
         int width = 0;
         if (!gbarecomp::legacy_extra_to_view_width(legacy_extra[i], &width) ||
@@ -181,23 +224,160 @@ void test_extended_view_preserves_authentic_center() {
     f.ppu.render(authentic.data(), dispcnt, f.io.data(), f.vram.data(),
                  f.oam.data(), f.pal.data());
 
-    constexpr uint32_t kLeft = 24;
-    f.ppu.set_view_margins(kLeft, kLeft, 0, 0);
+    std::vector<uint8_t> wide(gba::GbaPpu::kMaxFramebufferBytes, 0);
+    const std::size_t authentic_stride = gba::GbaPpu::kScreenWidth * 3u;
+    for (const uint32_t extra : {24u, 72u, 120u}) {
+        f.ppu.set_view_margins(extra, extra, 0, 0);
+        std::fill(wide.begin(), wide.end(), 0);
+        f.ppu.render(wide.data(), dispcnt, f.io.data(), f.vram.data(),
+                     f.oam.data(), f.pal.data());
+        const std::size_t wide_stride = f.ppu.render_width() * 3u;
+        for (uint32_t y = 0; y < gba::GbaPpu::kScreenHeight; ++y) {
+            const uint8_t* got = wide.data() +
+                y * wide_stride + extra * 3u;
+            const uint8_t* expected = authentic.data() + y * authentic_stride;
+            if (std::memcmp(got, expected, authentic_stride) != 0) {
+                std::fprintf(stderr,
+                             "extended-view %ux160 center differs from "
+                             "authentic row %u\n",
+                             f.ppu.render_width(), y);
+                std::exit(1);
+            }
+        }
+    }
+}
+
+void test_extended_bg_sample_remap_is_opt_in_and_native_inert() {
+    Fixture f;
+    const uint16_t dispcnt = 0x0100;  // Mode 0, BG0.
+    store16(&f.io[0x08], 0x0180);     // 256 colors, screen block 1.
+    std::fill_n(&f.vram[0], 64, 1);   // Tile 0: red.
+    std::fill_n(&f.vram[64], 64, 2);  // Tile 1: blue.
+    store16(&f.vram[0x800], 0);       // Authentic hardware X=0.
+    store16(&f.vram[0x800 + 29 * 2], 1);  // Wrapped wide X=-24.
+    store16(&f.pal[0], 0x03E0);       // Green backdrop.
+    store16(&f.pal[2], 0x001F);       // Red tile 0.
+    store16(&f.pal[4], 0x7C00);       // Blue tile 1.
+
+    gba::g_ws_bg_x_provider = test_bg_x_provider;
+    g_bg_x_provider_calls = 0;
+    f.ppu.render(f.rgb.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    if (g_bg_x_provider_calls != 0) {
+        std::fprintf(stderr, "native renderer called wide BG remap provider\n");
+        std::exit(1);
+    }
+    expect_pixel(f.rgb.data(), 255, 0, 0,
+                 "native BG changed by wide remap provider");
+
+    f.ppu.set_view_margins(24, 24, 0, 0);
     std::vector<uint8_t> wide(gba::GbaPpu::kMaxFramebufferBytes, 0);
     f.ppu.render(wide.data(), dispcnt, f.io.data(), f.vram.data(),
                  f.oam.data(), f.pal.data());
+    if (g_bg_x_provider_calls == 0) {
+        std::fprintf(stderr, "wide renderer did not call BG remap provider\n");
+        std::exit(1);
+    }
+    expect_pixel(wide.data(), 255, 0, 0,
+                 "wide BG remap did not sample authentic X");
+    expect_pixel(wide.data() + 24u * 3u, 0, 255, 0,
+                 "wide BG suppress did not expose backdrop");
+    gba::g_ws_bg_x_provider = nullptr;
+}
 
-    const std::size_t wide_stride = f.ppu.render_width() * 3u;
-    const std::size_t authentic_stride = gba::GbaPpu::kScreenWidth * 3u;
+void test_extended_view_snapshot_latch_policy() {
+    constexpr std::size_t kPpuHeaderBytes = 3u * 4u + 2u + 8u + 1u;
+    constexpr std::size_t kSnapshotBytes =
+        kPpuHeaderBytes + gba::GbaPpu::kFramebufferBytes;
+
+    // Native serialization remains the historical fixed header followed by the
+    // contiguous 240x160 latch, byte for byte.
+    gba::GbaPpu native;
+    uint8_t* native_latch = const_cast<uint8_t*>(native.latched_framebuffer());
+    for (std::size_t i = 0; i < gba::GbaPpu::kFramebufferBytes; ++i)
+        native_latch[i] = static_cast<uint8_t>((i * 17u + 11u) & 0xFFu);
+    native.mark_framebuffer_latched();
+    gbarecomp::debug::SnapshotWriter native_writer;
+    native.serialize(native_writer);
+    std::vector<uint8_t> historical(kSnapshotBytes, 0);
+    historical[kPpuHeaderBytes - 1u] = 1u;
+    std::memcpy(historical.data() + kPpuHeaderBytes, native_latch,
+                gba::GbaPpu::kFramebufferBytes);
+    if (native_writer.buffer() != historical) {
+        std::fprintf(stderr, "native PPU snapshot bytes changed\n");
+        std::exit(1);
+    }
+
+    // A 480-wide latch must serialize the authentic center row-by-row, not the
+    // first 240x160 bytes of its wider row-major allocation.
+    gba::GbaPpu wide;
+    wide.set_view_margins(120, 120, 0, 0);
+    uint8_t* wide_latch = const_cast<uint8_t*>(wide.latched_framebuffer());
+    for (uint32_t y = 0; y < wide.render_height(); ++y) {
+        for (uint32_t x = 0; x < wide.render_width(); ++x) {
+            for (uint32_t channel = 0; channel < 3; ++channel) {
+                wide_latch[(static_cast<std::size_t>(y) * wide.render_width() + x) *
+                               3u + channel] =
+                    static_cast<uint8_t>((y * 7u + x * 3u + channel) & 0xFFu);
+            }
+        }
+    }
+    wide.mark_framebuffer_latched();
+    gbarecomp::debug::SnapshotWriter wide_writer;
+    wide.serialize(wide_writer);
+    if (wide_writer.size() != kSnapshotBytes) {
+        std::fprintf(stderr, "wide PPU snapshot layout size changed\n");
+        std::exit(1);
+    }
+    const uint8_t* payload = wide_writer.buffer().data() + kPpuHeaderBytes;
+    constexpr std::size_t kNativeStride = gba::GbaPpu::kScreenWidth * 3u;
     for (uint32_t y = 0; y < gba::GbaPpu::kScreenHeight; ++y) {
-        const uint8_t* got = wide.data() + y * wide_stride + kLeft * 3u;
-        const uint8_t* expected = authentic.data() + y * authentic_stride;
-        if (std::memcmp(got, expected, authentic_stride) != 0) {
-            std::fprintf(stderr,
-                         "extended-view center differs from authentic row %u\n", y);
+        const uint8_t* expected = wide_latch +
+            (static_cast<std::size_t>(y) * wide.render_width() + 120u) * 3u;
+        if (std::memcmp(payload + y * kNativeStride, expected,
+                        kNativeStride) != 0) {
+            std::fprintf(stderr, "wide snapshot center crop failed at row %u\n", y);
             std::exit(1);
         }
     }
+
+    // Native loads retain the stored center latch. Wide loads consume the same
+    // fixed payload but invalidate it because no serialized margin pixels exist.
+    gba::GbaPpu native_loaded;
+    gba::g_ws_pillarbox = 0;
+    gba::g_ws_pillarbox_left = 7;
+    gba::g_ws_pillarbox_right = 9;
+    gbarecomp::debug::SnapshotReader native_reader(
+        wide_writer.buffer().data(), wide_writer.size());
+    native_loaded.deserialize(native_reader);
+    if (!native_reader.ok() || native_reader.remaining() != 0 ||
+        !native_loaded.has_latched_framebuffer() ||
+        std::memcmp(native_loaded.latched_framebuffer(), payload,
+                    gba::GbaPpu::kFramebufferBytes) != 0) {
+        std::fprintf(stderr, "wide-to-native snapshot latch restore failed\n");
+        std::exit(1);
+    }
+    if (gba::g_ws_pillarbox != 0 || gba::g_ws_pillarbox_left != 7 ||
+        gba::g_ws_pillarbox_right != 9) {
+        std::fprintf(stderr, "native snapshot load changed margin policy\n");
+        std::exit(1);
+    }
+
+    gba::GbaPpu wide_loaded;
+    wide_loaded.set_view_margins(120, 120, 0, 0);
+    gba::g_ws_pillarbox = 0;
+    gba::g_ws_pillarbox_left = 1;
+    gba::g_ws_pillarbox_right = 1;
+    gbarecomp::debug::SnapshotReader wide_reader(
+        wide_writer.buffer().data(), wide_writer.size());
+    wide_loaded.deserialize(wide_reader);
+    if (!wide_reader.ok() || wide_reader.remaining() != 0 ||
+        wide_loaded.has_latched_framebuffer() || gba::g_ws_pillarbox != 1 ||
+        gba::g_ws_pillarbox_left != 0 || gba::g_ws_pillarbox_right != 0) {
+        std::fprintf(stderr, "wide snapshot presentation latch was not invalidated\n");
+        std::exit(1);
+    }
+    gba::g_ws_pillarbox = 0;
 }
 
 void test_extended_view_obj_x_is_explicitly_opt_in() {
@@ -311,6 +491,8 @@ int main() {
     test_extended_view_geometry_and_clamp();
     test_extended_view_capability_policy();
     test_extended_view_preserves_authentic_center();
+    test_extended_bg_sample_remap_is_opt_in_and_native_inert();
+    test_extended_view_snapshot_latch_policy();
     test_extended_view_obj_x_is_explicitly_opt_in();
     test_extended_view_extends_nearest_window_edge();
     std::puts("ppu_smoke_tests: PASS");

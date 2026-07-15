@@ -331,6 +331,93 @@ bool run_call_return_stack_cases() {
     return true;
 }
 
+int thumb_alu_imm_test_override(uint32_t pc, uint32_t original,
+                                uint32_t* out) {
+    if (pc != 0x0800E2D2u || original != 12u) return 0;
+    *out = 15u;
+    return 1;
+}
+
+int thumb_alu_imm_accept_everything(uint32_t, uint32_t, uint32_t* out) {
+    *out = 99u;
+    return 1;
+}
+
+bool run_thumb_alu_immediate_override_cases() {
+    std::size_t sub_idx = kTestCasesCount;
+    std::size_t add_idx = kTestCasesCount;
+    std::size_t unconfigured_idx = kTestCasesCount;
+    for (std::size_t i = 0; i < kTestCasesCount; ++i) {
+        if (std::strcmp(kTestCases[i].name,
+                        "thumb_sub_imm_override_fixture") == 0) {
+            sub_idx = i;
+        } else if (std::strcmp(kTestCases[i].name,
+                               "thumb_add_imm_override_fixture") == 0) {
+            add_idx = i;
+        } else if (std::strcmp(kTestCases[i].name, "thumb_mov_imm") == 0) {
+            unconfigured_idx = i;
+        }
+    }
+    if (sub_idx == kTestCasesCount || add_idx == kTestCasesCount ||
+        unconfigured_idx == kTestCasesCount) {
+        std::printf("FAIL thumb_alu_immediate_override: fixture missing\n");
+        return false;
+    }
+
+    codegen_test::bus_reset(0u, 64u * 1024u);
+    std::memset(&g_cpu, 0, sizeof(g_cpu));
+    g_cpu.R[1] = 100u;
+    g_cpu.cpsr = (1u << 5) | 0x1Fu;
+    g_runtime_thumb_alu_imm_override = thumb_alu_imm_test_override;
+    kTestFns[sub_idx]();
+    if (g_cpu.R[1] != 85u || cpsr_c() != 1u || cpsr_n() != 0u ||
+        cpsr_z() != 0u || cpsr_v() != 0u) {
+        std::printf("FAIL thumb_alu_immediate_override: accepted value/flags "
+                    "r1=%u cpsr=0x%08X\n", g_cpu.R[1], g_cpu.cpsr);
+        g_runtime_thumb_alu_imm_override = nullptr;
+        return false;
+    }
+
+    // The callback rejects this other exact PC, so the original immediate
+    // remains in force.
+    std::memset(&g_cpu, 0, sizeof(g_cpu));
+    g_cpu.R[5] = 100u;
+    g_cpu.cpsr = (1u << 5) | 0x1Fu;
+    kTestFns[add_idx]();
+    if (g_cpu.R[5] != 112u) {
+        std::printf("FAIL thumb_alu_immediate_override: rejected site changed "
+                    "r5=%u\n", g_cpu.R[5]);
+        g_runtime_thumb_alu_imm_override = nullptr;
+        return false;
+    }
+
+    // Even an accepting callback cannot affect an ordinary THUMB immediate:
+    // the generator omitted the chokepoint because PC 0x100 was not opted in.
+    std::memset(&g_cpu, 0, sizeof(g_cpu));
+    g_cpu.cpsr = (1u << 5) | 0x1Fu;
+    g_runtime_thumb_alu_imm_override = thumb_alu_imm_accept_everything;
+    kTestFns[unconfigured_idx]();
+    if (g_cpu.R[0] != 5u) {
+        std::printf("FAIL thumb_alu_immediate_override: unconfigured site "
+                    "changed r0=%u\n", g_cpu.R[0]);
+        g_runtime_thumb_alu_imm_override = nullptr;
+        return false;
+    }
+
+    // Null is the faithful fast path.
+    g_runtime_thumb_alu_imm_override = nullptr;
+    std::memset(&g_cpu, 0, sizeof(g_cpu));
+    g_cpu.R[1] = 100u;
+    g_cpu.cpsr = (1u << 5) | 0x1Fu;
+    kTestFns[sub_idx]();
+    if (g_cpu.R[1] != 88u) {
+        std::printf("FAIL thumb_alu_immediate_override: null path r1=%u\n",
+                    g_cpu.R[1]);
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -346,6 +433,7 @@ int main() {
         if (!run_case(kTestCases[i], i)) ++failures;
     }
     if (!run_call_return_stack_cases()) ++failures;
+    if (!run_thumb_alu_immediate_override_cases()) ++failures;
     if (failures) {
         std::printf("\ncodegen_tests: %d / %zu failed\n",
                     failures, kTestCasesCount);

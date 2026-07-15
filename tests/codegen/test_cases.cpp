@@ -799,6 +799,27 @@ const TestCase kTestCases[] = {
         false, 0, 0,
     },
 
+    // Exact-PC fixtures for the opt-in THUMB ALU-immediate chokepoint. The
+    // ordinary differential pass runs with its callback null, proving that
+    // generated code remains bit-exact by default. A focused runtime test
+    // separately installs a callback and exercises accept/reject paths.
+    {
+        "thumb_sub_imm_override_fixture",
+        true, 0x0800E2D2u, 0x0000390Cu,  // SUBS r1, #12
+        {0, 100, 0, 0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x0800E2D2u},
+        (1u<<5) | MODE_SYSTEM,
+        nullptr, 0,
+        false, 0, 0,
+    },
+    {
+        "thumb_add_imm_override_fixture",
+        true, 0x0800E31Cu, 0x0000350Cu,  // ADDS r5, #12
+        {0, 0, 0, 0, 0,100,0,0, 0,0,0,0, 0,0,0, 0x0800E31Cu},
+        (1u<<5) | MODE_SYSTEM,
+        nullptr, 0,
+        false, 0, 0,
+    },
+
     // ── THUMB fmt9 STR r1, [r0, #0]  (0x6001) ───────────────────────
     {
         "thumb_str_imm",

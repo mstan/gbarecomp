@@ -78,6 +78,15 @@ struct ConfigResumeRange {
     std::string note;
 };
 
+// Exact THUMB data-processing instruction whose immediate operand may be
+// replaced by a game-owned runtime enhancement callback. Merely declaring a
+// callback in the runner is insufficient: generated code contains the
+// chokepoint only at these reviewed PCs.
+struct ConfigThumbAluImmediateOverride {
+    uint32_t    addr = 0;
+    std::string note;
+};
+
 struct ConfigDataRange {
     uint32_t    start = 0;
     uint32_t    end = 0;    // [start, end)
@@ -113,6 +122,8 @@ struct Config {
     ConfigIdentity          identity;
     std::vector<ConfigExtraFunc>    extra_funcs;
     std::vector<ConfigResumeRange>  resume_ranges;
+    std::vector<ConfigThumbAluImmediateOverride>
+        thumb_alu_immediate_overrides;
     std::vector<ConfigDataRange>    data_ranges;
     std::vector<ConfigCodeCopy>     code_copies;
     std::vector<ConfigJumpTable>    jump_tables;

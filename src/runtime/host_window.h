@@ -5,10 +5,10 @@
 // headless builds (CI, BIOS smoke without --window) still link.
 //
 // The window owns a logical-size streaming texture matching the active GBA
-// framebuffer pixel format (RGB888). The host window is resizable; present()
-// maximally fills an aspect-correct viewport; exact multiples retain whole-pixel
-// scaling. pump() drains the OS event queue, returns a quit flag and a packed GBA
-// KEYINPUT value (active-low, 1 = released).
+// framebuffer pixel format (RGB888). Expanded views opt into a resizable,
+// aspect-correct viewport; the faithful 240x160 path retains the historical
+// fixed SDL presentation. pump() drains the OS event queue, returns a quit flag
+// and a packed GBA KEYINPUT value (active-low, 1 = released).
 
 #pragma once
 

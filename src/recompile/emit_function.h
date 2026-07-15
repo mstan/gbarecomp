@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "function_finder.h"  // gbarecomp::Function, CpuMode
 
@@ -28,13 +29,17 @@ namespace gbarecomp {
 std::string emit_function_body_str(
     const Function& fn, const uint8_t* rom, std::size_t rom_size,
     uint32_t rom_base,
-    const std::unordered_map<uint64_t, std::string>& names_by_key);
+    const std::unordered_map<uint64_t, std::string>& names_by_key,
+    const std::unordered_set<uint32_t>*
+        thumb_alu_immediate_override_pcs = nullptr);
 
 // Thin FILE* wrapper: emit_function_body_str + fputs. Used by the offline
 // tool's write_body() so its output stays byte-identical.
 void emit_function_body(
     std::FILE* f, const Function& fn, const uint8_t* rom,
     std::size_t rom_size, uint32_t rom_base,
-    const std::unordered_map<uint64_t, std::string>& names_by_key);
+    const std::unordered_map<uint64_t, std::string>& names_by_key,
+    const std::unordered_set<uint32_t>*
+        thumb_alu_immediate_override_pcs = nullptr);
 
 }  // namespace gbarecomp

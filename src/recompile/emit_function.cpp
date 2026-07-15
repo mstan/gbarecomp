@@ -44,7 +44,9 @@ void appendf(std::string& out, const char* fmt, ...) {
 std::string emit_function_body_str(
     const Function& fn, const uint8_t* rom, std::size_t rom_size,
     uint32_t rom_base,
-    const std::unordered_map<uint64_t, std::string>& func_names_by_key) {
+    const std::unordered_map<uint64_t, std::string>& func_names_by_key,
+    const std::unordered_set<uint32_t>*
+        thumb_alu_immediate_override_pcs) {
     std::string out;
 
     const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
@@ -53,6 +55,8 @@ std::string emit_function_body_str(
     ctx.current_function_addr = fn.addr;
     ctx.current_function_end_addr = fn.end_addr;
     ctx.current_function_thumb = (fn.mode == CpuMode::Thumb);
+    ctx.thumb_alu_immediate_override_pcs =
+        thumb_alu_immediate_override_pcs;
     const uint32_t fn_source_addr = fn.source_addr ? fn.source_addr : fn.addr;
 
     auto source_offset_for = [&](uint32_t guest_pc, uint32_t len,
@@ -391,9 +395,12 @@ std::string emit_function_body_str(
 void emit_function_body(
     std::FILE* f, const Function& fn, const uint8_t* rom,
     std::size_t rom_size, uint32_t rom_base,
-    const std::unordered_map<uint64_t, std::string>& func_names_by_key) {
+    const std::unordered_map<uint64_t, std::string>& func_names_by_key,
+    const std::unordered_set<uint32_t>*
+        thumb_alu_immediate_override_pcs) {
     std::string body = emit_function_body_str(fn, rom, rom_size, rom_base,
-                                              func_names_by_key);
+                                              func_names_by_key,
+                                              thumb_alu_immediate_override_pcs);
     std::fwrite(body.data(), 1, body.size(), f);
 }
 

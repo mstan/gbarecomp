@@ -19,6 +19,8 @@ namespace gba {
 // Layering-clean: the PPU only calls a nullable pointer; the sidecar owns it.
 extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
                                         uint16_t* out_entry) = nullptr;
+extern "C" int (*g_ws_bg_x_provider)(int bg, int output_x, int screen_y,
+                                     int* out_hw_x) = nullptr;
 
 // Widescreen pillarbox (Step C policy): when nonzero, the wide path renders the
 // margin columns (outside the central 240) as solid black instead of extended
@@ -39,11 +41,25 @@ void GbaPpu::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     w.u16(vcount_);
     w.u64(frame_count_);
     w.boolean(has_latched_fb_);
-    // Serialize ONLY the vanilla 240x160 region so the snapshot layout is
-    // unchanged when view-area expansion is compiled in (kSnapshotVersion is
-    // version-locked; the oversized tail is never saved). The latch is a
-    // present-time artifact re-rendered next frame, so this is lossless.
-    w.bytes(latched_fb_.data(), kFramebufferBytes);
+    // Snapshot layout remains the fixed native 240x160 payload. At native width
+    // retain the historical byte-for-byte path. A wide latch is row-major at
+    // render_width(), so its first kFramebufferBytes are NOT the native image;
+    // explicitly crop the authentic center instead. This also makes a wide save
+    // useful when loaded later in faithful mode.
+    if (!view_expanded()) {
+        w.bytes(latched_fb_.data(), kFramebufferBytes);
+    } else {
+        std::array<uint8_t, kFramebufferBytes> center{};
+        constexpr std::size_t kNativeStride = kScreenWidth * 3u;
+        const std::size_t wide_stride = render_width() * 3u;
+        const std::size_t center_x = extra_left_ * 3u;
+        for (std::size_t y = 0; y < kScreenHeight; ++y) {
+            std::memcpy(center.data() + y * kNativeStride,
+                        latched_fb_.data() + y * wide_stride + center_x,
+                        kNativeStride);
+        }
+        w.bytes(center.data(), center.size());
+    }
 }
 
 void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
@@ -52,8 +68,27 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
     cycle_in_dot_    = r.u32();
     vcount_          = r.u16();
     frame_count_     = r.u64();
-    has_latched_fb_  = r.boolean();
-    r.bytes(latched_fb_.data(), kFramebufferBytes);
+    const bool serialized_latch = r.boolean();
+    if (!view_expanded()) {
+        // Historical native-width restore path, deliberately unchanged.
+        has_latched_fb_ = serialized_latch;
+        r.bytes(latched_fb_.data(), kFramebufferBytes);
+    } else {
+        // The fixed-size payload has no authored wide margins. Consume it to
+        // preserve snapshot framing, then invalidate only the presentation
+        // latch; the next present renders a fresh wide frame from restored GBA
+        // state. Device timing/frame counters above remain fully restored.
+        std::array<uint8_t, kFramebufferBytes> native_latch{};
+        r.bytes(native_latch.data(), native_latch.size());
+        has_latched_fb_ = false;
+        // A host may re-present immediately after load, before a game-owned
+        // state-epoch hook has invalidated/rebuilt its margin caches. Fail those
+        // unauthored margins closed for that interim render; the game's normal
+        // publish policy reauthorizes them once restored-state data is ready.
+        g_ws_pillarbox = 1;
+        g_ws_pillarbox_left = 0;
+        g_ws_pillarbox_right = 0;
+    }
 }
 
 void GbaPpu::reset() {
@@ -947,7 +982,17 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
         for (uint32_t x = 0; x < out_w; ++x) {
             int hx = static_cast<int>(x) - static_cast<int>(ox);
             if (!layer_enabled(x, layer)) continue;
-            uint32_t tex_x = static_cast<uint32_t>(hx + static_cast<int>(hofs)) &
+            int sample_hx = hx;
+            if (g_ws_bg_x_provider) {
+                int provided_hx = hx;
+                const int action = g_ws_bg_x_provider(
+                    static_cast<int>(layer), static_cast<int>(x),
+                    static_cast<int>(y), &provided_hx);
+                if (action < 0) continue;
+                if (action > 0) sample_hx = provided_hx;
+            }
+            uint32_t tex_x = static_cast<uint32_t>(
+                                 sample_hx + static_cast<int>(hofs)) &
                              (width_px - 1u);
             uint32_t tex_y = (y + vofs) & (height_px - 1u);
             uint32_t tile_x = tex_x >> 3;
@@ -962,10 +1007,10 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             // the true off-screen world tile, use it; if it's armed but has no
             // data, leave the pixel transparent (no seam) rather than draw the
             // wrap. With no sidecar, keep vanilla wide behavior.
-            if (hx < 0 || hx >= 240) {
+            if (sample_hx < 0 || sample_hx >= 240) {
                 if (g_ws_tilemap_provider) {
                     uint16_t ext;
-                    if (g_ws_tilemap_provider(static_cast<int>(layer), hx,
+                    if (g_ws_tilemap_provider(static_cast<int>(layer), sample_hx,
                                               static_cast<int>(y), &ext)) {
                         entry = ext;
                     } else {

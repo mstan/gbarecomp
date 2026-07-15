@@ -68,6 +68,10 @@ end   = 0x08001020               # exclusive, aligned end
 mode  = "thumb"
 note  = "Observed interruptible hot function"
 
+[[thumb_alu_immediate_override]]
+addr = 0x08002010                # exact THUMB ALU-immediate instruction PC
+note = "Opt-in game enhancement constant"
+
 [[data_range]]
 start = 0x000001A0
 end   = 0x000001C0              # [start, end) — exclusive upper bound
@@ -148,6 +152,23 @@ observed interrupt timing while remaining narrower than a whole-program policy.
 Ranges are capped at 0x1000 bytes, must remain inside the program image or a
 declared `[[code_copy]]` runtime span, and may not overlap `[[data_range]]` or
 contain an `[[exclude_func]]` address.
+
+### `[[thumb_alu_immediate_override]]` (zero or more)
+
+Declares one reviewed, halfword-aligned THUMB data-processing instruction whose
+decoded immediate operand may consult the optional game-owned
+`g_runtime_thumb_alu_imm_override` callback. Code generation emits the runtime
+chokepoint only at the exact listed PC. With no entries—the universal
+default—all immediates remain compile-time literals and generated code has no
+callback check or performance cost. The callback's null/reject path preserves
+the original decoded value. Entries must lie in the program image or a declared
+`[[code_copy]]` span and may not lie in `[[data_range]]`.
+
+This is intended for narrow, opt-in LLE-derived enhancement constants, not for
+general guest patching. A listing does not make an ARM instruction or a THUMB
+load/store offset overrideable; only a matching THUMB ALU immediate reaches the
+hook. Runtime-healed overlays remain generic and do not consume this static
+per-game allowlist, so an opted-in site must be present in the static corpus.
 
 **Deduplication against the finder:**
 

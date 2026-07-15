@@ -43,6 +43,29 @@ extern "C" {
 
 extern ArmCpuState g_cpu;
 
+// Optional game-owned override for immediate operands in recompiled THUMB
+// data-processing instructions. Generated code passes the exact guest
+// instruction PC and decoded immediate, and uses *out_value only when the
+// callback returns non-zero. nullptr preserves the original instruction.
+typedef int (*RuntimeThumbAluImmediateOverride)(uint32_t instruction_pc,
+                                                uint32_t original_value,
+                                                uint32_t* out_value);
+extern RuntimeThumbAluImmediateOverride g_runtime_thumb_alu_imm_override;
+
+// Only exact PCs opted in by the recompiler config call this helper. The
+// universal/default generated path keeps the compile-time operand and emits no
+// call at all; a configured site's null/reject path still returns it unchanged.
+static inline uint32_t runtime_thumb_alu_immediate(uint32_t instruction_pc,
+                                                   uint32_t original_value) {
+    uint32_t overridden = original_value;
+    if (g_runtime_thumb_alu_imm_override &&
+        g_runtime_thumb_alu_imm_override(instruction_pc, original_value,
+                                         &overridden)) {
+        return overridden;
+    }
+    return original_value;
+}
+
 static inline uint32_t cpsr_n(void) { return (g_cpu.cpsr & CPSR_N_BIT) ? 1u : 0u; }
 static inline uint32_t cpsr_z(void) { return (g_cpu.cpsr & CPSR_Z_BIT) ? 1u : 0u; }
 static inline uint32_t cpsr_c(void) { return (g_cpu.cpsr & CPSR_C_BIT) ? 1u : 0u; }

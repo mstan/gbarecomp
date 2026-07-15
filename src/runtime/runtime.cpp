@@ -781,10 +781,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gba::g_rom_read32_override = nullptr;
     gba::g_ws_tilemap_provider = nullptr;
     gba::g_ws_obj_x_provider = nullptr;
+    gba::g_ws_bg_x_provider = nullptr;
     gba::g_ws_pillarbox = 0;
     gba::g_ws_pillarbox_left = 0;
     gba::g_ws_pillarbox_right = 0;
     g_runtime_fn_entry_hook = nullptr;
+    g_runtime_thumb_alu_imm_override = nullptr;
     Args args;
 
     // Seed built-in defaults from the caller (the per-game runner).

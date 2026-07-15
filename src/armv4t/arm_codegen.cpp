@@ -146,12 +146,28 @@ std::string cyc_var_for(const Instr& ins) {
     return "_cyc" + uniq_suffix(ins);
 }
 
-Op2Code emit_op2(const Instr& ins, const char* indent) {
+Op2Code emit_op2(const Instr& ins, const CodegenCtx& ctx,
+                 const char* indent) {
     Op2Code out;
     if (ins.op2.kind == Op2::Kind::Imm) {
         // Immediate. The decoder already pre-rotated imm_value;
         // imm_carry_out is 0/1, or 2 meaning "carry unchanged".
-        out.value_expr = fmt_hex32(ins.op2.imm_value);
+        if (ins.thumb && ctx.thumb_alu_immediate_override_pcs &&
+            ctx.thumb_alu_immediate_override_pcs->count(ins.pc) != 0) {
+            // Opt-in, exact-PC enhancement hook. Only THUMB ALU immediates
+            // route through this chokepoint; memory offsets, branch
+            // displacements, and ARM rotated immediates remain constants.
+            std::string imm_var = "_imm" + uniq_suffix(ins);
+            std::ostringstream setup;
+            setup << indent << "uint32_t " << imm_var
+                  << " = runtime_thumb_alu_immediate("
+                  << fmt_hex32(ins.pc) << ", "
+                  << fmt_hex32(ins.op2.imm_value) << ");\n";
+            out.setup = setup.str();
+            out.value_expr = imm_var;
+        } else {
+            out.value_expr = fmt_hex32(ins.op2.imm_value);
+        }
         if (ins.op2.imm_carry_out == 2u) {
             out.carry_expr = "cpsr_c()";
         } else {
@@ -488,8 +504,8 @@ void emit_mem_offset(std::ostringstream& s, const MemAddress& mem,
 // ─────────────────────────────────────────────────────────────────────
 
 bool emit_data_processing(std::ostringstream& body, const Instr& ins,
-                          const char* indent) {
-    Op2Code o2 = emit_op2(ins, indent);
+                          const CodegenCtx& ctx, const char* indent) {
+    Op2Code o2 = emit_op2(ins, ctx, indent);
     if (!o2.setup.empty()) body << o2.setup;
 
     bool is_test = (ins.op == IrOp::TST || ins.op == IrOp::TEQ ||
@@ -1338,7 +1354,7 @@ std::string ArmCodegen::emit_instr(const Instr& ins, const CodegenCtx& ctx,
         case IrOp::ADD: case IrOp::ADC: case IrOp::SBC: case IrOp::RSC:
         case IrOp::TST: case IrOp::TEQ: case IrOp::CMP: case IrOp::CMN:
         case IrOp::ORR: case IrOp::MOV: case IrOp::BIC: case IrOp::MVN:
-            ok = emit_data_processing(os, ins, indent);
+            ok = emit_data_processing(os, ins, ctx, indent);
             break;
         case IrOp::B: case IrOp::BL: case IrOp::BX:
         case IrOp::BL_prefix: case IrOp::BL_suffix:

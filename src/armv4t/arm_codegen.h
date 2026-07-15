@@ -64,6 +64,12 @@ struct CodegenCtx {
     // scheduler to the next event boundary. nullptr → no elision.
     // Populated per-function by emit_function.cpp's pre-scan.
     const std::unordered_set<uint32_t>* idle_backedge_pcs = nullptr;
+
+    // Exact instruction PCs whose decoded THUMB data-processing immediate is
+    // allowed to consult runtime_thumb_alu_immediate(). nullptr/empty keeps
+    // the original compile-time literal, so games that do not explicitly opt
+    // in pay no generated-code branch or callback cost.
+    const std::unordered_set<uint32_t>* thumb_alu_immediate_override_pcs = nullptr;
 };
 
 class ArmCodegen {

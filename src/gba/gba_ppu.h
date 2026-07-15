@@ -103,9 +103,11 @@ public:
     // the API still accepts top/bottom (clamped to 0) so callers stay generic.
     // These margins are present-time host state and are NEVER serialized into
     // the snapshot (the save format is unchanged).
-    static constexpr uint32_t kMaxExtraX = 64;   // ~2.3:1 max; 16:9 needs ~24/side
+    // Experimental horizontal envelope: 120 pixels per side gives an exact
+    // 480x160 maximum while the default remains the literal 240x160 path.
+    static constexpr uint32_t kMaxExtraX = 120;
     static constexpr uint32_t kMaxExtraY = 0;    // vertical deferred; bump when invented-scanline path lands
-    static constexpr uint32_t kMaxRenderWidth  = kScreenWidth  + 2u * kMaxExtraX;  // 368
+    static constexpr uint32_t kMaxRenderWidth  = kScreenWidth  + 2u * kMaxExtraX;  // 480
     static constexpr uint32_t kMaxRenderHeight = kScreenHeight + 2u * kMaxExtraY;  // 160
     static constexpr std::size_t kMaxFramebufferBytes =
         static_cast<std::size_t>(kMaxRenderWidth) * kMaxRenderHeight * 3;
@@ -175,6 +177,12 @@ private:
 // runtime-side sidecar; nullptr = vanilla wide behavior.
 extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
                                         uint16_t* out_entry);
+// Optional per-game presentation remap for regular BG samples in the expanded
+// renderer. The callback receives the physical output X and may suppress the
+// sample (-1), leave the hardware X unchanged (0), or provide an authentic
+// hardware X through out_hw_x (1). The native 240x160 renderer never calls it.
+extern "C" int (*g_ws_bg_x_provider)(int bg, int output_x, int screen_y,
+                                     int* out_hw_x);
 extern "C" int g_ws_pillarbox;  // Step C policy: black margins on non-field screens
 extern "C" int g_ws_pillarbox_left;
 extern "C" int g_ws_pillarbox_right;
