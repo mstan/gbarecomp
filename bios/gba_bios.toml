@@ -553,6 +553,27 @@ name = "bios_resume_0B68"
 note = "LLE-observed IRQ return during Mega Man Zero 2 attract; CpuSet loop interior of 0x00000B66"
 
 [[extra_func]]
+addr = 0x00000B82
+mode = "thumb"
+resume = true
+name = "bios_resume_0B82"
+note = "LLE-observed IRQ return during Pokemon Emerald attract; interior of generated host 0x00000B80..0x00000B8A"
+
+[[extra_func]]
+addr = 0x00000B86
+mode = "thumb"
+resume = true
+name = "bios_resume_0B86"
+note = "LLE-observed IRQ return during Pokemon Emerald attract; interior of generated host 0x00000B80..0x00000B8A"
+
+[[extra_func]]
+addr = 0x00000B88
+mode = "thumb"
+resume = true
+name = "bios_resume_0B88"
+note = "LLE-observed IRQ return during Pokemon Emerald attract; interior of generated host 0x00000B80..0x00000B8A"
+
+[[extra_func]]
 addr = 0x00000B6C
 mode = "thumb"
 resume = true
@@ -572,6 +593,27 @@ mode = "arm"
 resume = true
 name = "bios_resume_1170"
 note = "LLE-observed IRQ return during Metroid Zero Mission attract; loop interior of 0x0000116C"
+
+[[extra_func]]
+addr = 0x00001174
+mode = "arm"
+resume = true
+name = "bios_resume_1174"
+note = "LLE-observed IRQ return during Pokemon Emerald attract; interior of generated host 0x0000116C..0x0000117C"
+
+[[extra_func]]
+addr = 0x00001178
+mode = "arm"
+resume = true
+name = "bios_resume_1178"
+note = "LLE-observed IRQ return during Pokemon Emerald attract; interior of generated host 0x0000116C..0x0000117C"
+
+[[extra_func]]
+addr = 0x00001184
+mode = "arm"
+resume = true
+name = "bios_resume_1184"
+note = "LLE-observed IRQ return during Pokemon Emerald attract; interior of generated host 0x0000117C..0x0000118C"
 
 [[extra_func]]
 addr = 0x000011E4
@@ -631,3 +673,27 @@ start = 0x000011B0
 end = 0x00001270
 mode = "arm"
 note = "LLE-observed IRQ returns during MMZ2/MMZ4 attract; cover the reviewed decompressor host extents"
+
+[[resume_range]]
+start = 0x00000B66
+end = 0x00000B6E
+mode = "thumb"
+note = "LLE-observed Emerald IRQ returns; cover the reviewed CpuSet loop host"
+
+[[resume_range]]
+start = 0x00000B80
+end = 0x00000B8A
+mode = "thumb"
+note = "LLE-observed Emerald IRQ returns; cover the reviewed CpuSet loop host"
+
+[[resume_range]]
+start = 0x00000B8A
+end = 0x00000B96
+mode = "thumb"
+note = "LLE-observed Emerald IRQ returns; cover the reviewed CpuSet loop host"
+
+[[resume_range]]
+start = 0x00001124
+end = 0x00001144
+mode = "arm"
+note = "LLE-observed Emerald IRQ returns; cover the reviewed CpuSet loop host"
