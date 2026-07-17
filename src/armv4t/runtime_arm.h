@@ -52,6 +52,13 @@ typedef int (*RuntimeThumbAluImmediateOverride)(uint32_t instruction_pc,
                                                 uint32_t* out_value);
 extern RuntimeThumbAluImmediateOverride g_runtime_thumb_alu_imm_override;
 
+// Optional game-owned canonicalizer for position-independent code copied to
+// transient RAM addresses (notably routines executed from a moving stack
+// frame). It runs before the fixed dispatch table and returns non-zero after
+// dispatching a byte-verified target. nullptr preserves normal dispatch.
+typedef int (*RuntimeRamDispatchHook)(uint32_t pc, int thumb);
+extern RuntimeRamDispatchHook g_runtime_ram_dispatch_hook;
+
 // Only exact PCs opted in by the recompiler config call this helper. The
 // universal/default generated path keeps the compile-time operand and emits no
 // call at all; a configured site's null/reject path still returns it unchanged.

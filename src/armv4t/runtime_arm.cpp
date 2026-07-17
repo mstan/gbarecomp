@@ -55,6 +55,7 @@ extern "C" int overlay_try_dispatch(uint32_t pc, int thumb);
 extern "C" ArmCpuState g_cpu = {};
 extern "C" RuntimeThumbAluImmediateOverride
     g_runtime_thumb_alu_imm_override = nullptr;
+extern "C" RuntimeRamDispatchHook g_runtime_ram_dispatch_hook = nullptr;
 
 // VBlank-start counter (defined in src/runtime/runtime_bus_bridge.cpp).
 // Used to frame-gate the mem-write watchpoint.
@@ -772,6 +773,11 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
     runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
 
     bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+    if (pc >= 0x02000000u && pc < 0x04000000u &&
+        g_runtime_ram_dispatch_hook &&
+        g_runtime_ram_dispatch_hook(pc, thumb ? 1 : 0)) {
+        return;
+    }
     void (*fn)(void) = nullptr;
     if (pc < kBiosRegionEnd) {
         fn = lookup_in(kBiosDispatchTable, kBiosDispatchTableLen, pc, thumb);

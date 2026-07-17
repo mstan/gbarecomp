@@ -317,8 +317,7 @@ void GbaBus::write8(uint32_t addr, uint8_t v) {
             return;
         case Region::Oam:   oam_[off] = v; return;
         case Region::Bios:
-            // BIOS is read-only. A write here is suspicious; trace it.
-            log_unmapped(addr, v, true, 1);
+            // BIOS is read-only; hardware ignores writes to this window.
             return;
         case Region::Rom:
             if (rtc_.active() && off >= 0xC4u && off <= 0xC9u) {
@@ -368,6 +367,8 @@ void GbaBus::write16(uint32_t addr, uint16_t v) {
             return;
         case Region::Oam:   store_u16(&oam_[off], v); return;
         case Region::Bios:
+            // BIOS is read-only; hardware ignores writes to this window.
+            return;
         case Region::Rom:
             if (region == Region::Rom && rtc_.active() && off >= 0xC4u && off <= 0xC8u) {
                 rtc_.write(static_cast<uint32_t>(off), static_cast<uint8_t>(v & 0xFF));
@@ -415,6 +416,8 @@ void GbaBus::write32(uint32_t addr, uint32_t v) {
             return;
         case Region::Oam:   store_u32(&oam_[off], v); return;
         case Region::Bios:
+            // BIOS is read-only; hardware ignores writes to this window.
+            return;
         case Region::Rom:
             if (region == Region::Rom && rtc_.active() && off >= 0xC4u && off <= 0xC6u) {
                 rtc_.write(static_cast<uint32_t>(off), static_cast<uint8_t>(v & 0xFF));

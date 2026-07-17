@@ -546,6 +546,13 @@ name = "bios_resume_0746"
 note = "exception-return resume; mid-function of 0x00000738"
 
 [[extra_func]]
+addr = 0x00000B68
+mode = "thumb"
+resume = true
+name = "bios_resume_0B68"
+note = "LLE-observed IRQ return during Mega Man Zero 2 attract; CpuSet loop interior of 0x00000B66"
+
+[[extra_func]]
 addr = 0x00000B6C
 mode = "thumb"
 resume = true
@@ -558,6 +565,34 @@ mode = "arm"
 resume = true
 name = "bios_resume_0FFC"
 note = "exception-return resume; ARM loop interior ending at 0x00001000"
+
+[[extra_func]]
+addr = 0x00001170
+mode = "arm"
+resume = true
+name = "bios_resume_1170"
+note = "LLE-observed IRQ return during Metroid Zero Mission attract; loop interior of 0x0000116C"
+
+[[extra_func]]
+addr = 0x000011E4
+mode = "arm"
+resume = true
+name = "bios_resume_11E4"
+note = "LLE-observed IRQ return during Mega Man Zero 4 attract; decompressor interior of 0x000011C4"
+
+[[extra_func]]
+addr = 0x000011D8
+mode = "arm"
+resume = true
+name = "bios_resume_11D8"
+note = "LLE-observed IRQ return during Mega Man Zero 4 attract; decompressor interior of 0x000011C4"
+
+[[extra_func]]
+addr = 0x0000125C
+mode = "arm"
+resume = true
+name = "bios_resume_125C"
+note = "LLE-observed IRQ return during Mega Man Zero 2 attract; decompressor loop interior of 0x00001224"
 
 [[extra_func]]
 addr = 0x00000B92
@@ -578,3 +613,21 @@ start = 0x00000C14
 end = 0x00000C24
 mode = "arm"
 note = "LLE-observed IRQ returns inside the CpuFastSet loop; cover the reviewed generated host extent"
+
+[[resume_range]]
+start = 0x00000164
+end = 0x00000170
+mode = "arm"
+note = "LLE-observed IRQ returns inside the generated SWI-vector host rooted at 0x00000140"
+
+[[resume_range]]
+start = 0x000001A0
+end = 0x000001B8
+mode = "arm"
+note = "LLE-observed IRQ returns inside the IntrWait/Halt loop during Metroid Fusion attract"
+
+[[resume_range]]
+start = 0x000011B0
+end = 0x00001270
+mode = "arm"
+note = "LLE-observed IRQ returns during MMZ2/MMZ4 attract; cover the reviewed decompressor host extents"

@@ -471,8 +471,11 @@ target_include_directories(bus_tests PRIVATE src/debug)
 target_link_gbarecomp_runtime_stack(bus_tests)
 add_test(NAME bus_tests COMMAND bus_tests)
 
-add_executable(dma_tests tests/dma/test_main.cpp)
-target_link_libraries(dma_tests PRIVATE gbarecomp_gba)
+add_executable(dma_tests
+    tests/dma/test_main.cpp
+    tools/bios_smoke/dispatch_stub.cpp)
+target_include_directories(dma_tests PRIVATE src/debug)
+target_link_gbarecomp_runtime_stack(dma_tests)
 add_test(NAME dma_tests COMMAND dma_tests)
 
 add_executable(timer_tests tests/timers/test_main.cpp)

@@ -225,6 +225,13 @@ void GbaIo::run_immediate_dma(int channel) {
     bool transfer_32 = (cnt_h & 0x0400u) != 0;
     uint32_t step = transfer_32 ? 4u : 2u;
 
+    // DMA hardware ignores the low address bits according to transfer width.
+    // Games commonly place a THUMB bit in a source pointer and rely on DMA's
+    // halfword/word alignment when copying executable code to IWRAM.
+    const uint32_t align_mask = transfer_32 ? ~3u : ~1u;
+    sad &= align_mask;
+    dad &= align_mask;
+
     // dest_ctrl: 0=inc, 1=dec, 2=fixed, 3=inc+reload
     uint32_t dest_ctrl = (cnt_h >> 5) & 0x3u;
     // src_ctrl:  0=inc, 1=dec, 2=fixed (3 prohibited)
@@ -315,8 +322,9 @@ void GbaIo::run_timed_dma(int start_mode) {
         uint32_t dest_ctrl = (cnt_h >> 5) & 0x3u;   // 0 inc,1 dec,2 fixed,3 inc+reload
         uint32_t src_ctrl  = (cnt_h >> 7) & 0x3u;   // 0 inc,1 dec,2 fixed
 
-        uint32_t s = dma_next_source_[channel];
-        uint32_t d = dma_next_dest_[channel];
+        const uint32_t align_mask = transfer_32 ? ~3u : ~1u;
+        uint32_t s = dma_next_source_[channel] & align_mask;
+        uint32_t d = dma_next_dest_[channel] & align_mask;
         dma_steal_cycles_ += dma_transfer_cost(s, d, transfer_32, word_count);
         for (uint32_t k = 0; k < word_count; ++k) {
             if (transfer_32) bus_->write32(d, bus_->read32(s));
@@ -364,6 +372,8 @@ void GbaIo::run_sound_fifo_dma(int channel) {
         dma_next_source_[channel] : (load_u32(&io_[base + 0]) & 0x0FFFFFFFu);
     uint32_t dad = dma_next_dest_[channel] ?
         dma_next_dest_[channel] : load_u32(&io_[base + 4]);
+    sad &= ~3u;
+    dad &= ~3u;
     uint32_t src_ctrl = (cnt_h >> 7) & 0x3u;
 
     ++dma_runs_[channel];

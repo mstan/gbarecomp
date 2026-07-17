@@ -811,6 +811,13 @@ extern "C" unsigned g_ws_extra_right = 0;
 extern "C" unsigned g_ws_view_width  = 240;
 
 int run_game(int argc, char** argv, const RunOptions& opts) {
+    // Game runners install this before entering run_game(). Clear it on every
+    // return path so a later game launched in the same process cannot call a
+    // stale game-specific copied-code dispatcher.
+    struct RamDispatchHookReset {
+        ~RamDispatchHookReset() { g_runtime_ram_dispatch_hook = nullptr; }
+    } ram_dispatch_hook_reset;
+
     // run_game is normally process-terminal, but tests and launchers may invoke
     // it more than once. Game-owned enhancement hooks never leak into a later
     // faithful run in the same process.

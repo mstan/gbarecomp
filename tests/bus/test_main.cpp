@@ -215,6 +215,17 @@ void test_bios_undocumented_io_write() {
              bus.io().unmapped_count(), static_cast<std::size_t>(1));
 }
 
+void test_bios_window_writes_are_ignored() {
+    gba::GbaBus bus;
+    check_eq("bios_write", "initial_unmapped", bus.unmapped_count(),
+             static_cast<std::size_t>(0));
+    bus.write8(0x00000001u, 0x12u);
+    bus.write16(0x00000002u, 0x3456u);
+    bus.write32(0x00000004u, 0x789ABCDEu);
+    check_eq("bios_write", "ignored_without_unmapped_diagnostic",
+             bus.unmapped_count(), static_cast<std::size_t>(0));
+}
+
 void test_flash1m_beats_flash() {
     // FLASH1M_V must win over the bare FLASH_V prefix detection.
     auto rom = build_synthetic_rom("GAME", "XXXX", "00", 0x00,
@@ -319,6 +330,7 @@ int main() {
     test_sram_controller_and_snapshot();
     test_sram_bus_width_and_region_mirroring();
     test_bios_undocumented_io_write();
+    test_bios_window_writes_are_ignored();
     test_flash1m_beats_flash();
     test_eeprom_8k_read_write();
     test_eeprom_persistence_bytes_and_dirty();
