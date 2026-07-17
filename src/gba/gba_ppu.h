@@ -175,6 +175,14 @@ private:
 
 // Widescreen margin tilemap provider (Step C; see gba_ppu.cpp). Set by the
 // runtime-side sidecar; nullptr = vanilla wide behavior.
+// Result 0 means no authored continuation, 1 replaces the wrapped hardware
+// entry through out_entry, and 2 explicitly accepts the wrapped entry for a
+// deliberately tiled effect rather than room geometry.
+enum WsTilemapProviderResult : int {
+    kWsTilemapUnavailable = 0,
+    kWsTilemapReplace = 1,
+    kWsTilemapKeepWrapped = 2,
+};
 extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
                                         uint16_t* out_entry);
 // Optional per-game presentation remap for regular BG samples in the expanded

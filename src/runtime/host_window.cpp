@@ -305,11 +305,22 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         delete b;
         return false;
     }
-    // No PRESENTVSYNC: emulation speed is governed by FramePacer at the
-    // GBA's 59.7275 Hz, not the host monitor's refresh rate. Coupling to
-    // vsync ran the game at monitor speed (MC-HP-004). present() must
-    // not block on the display.
-    b->renderer = SDL_CreateRenderer(b->window, -1, SDL_RENDERER_ACCELERATED);
+    // The independent FramePacer still governs emulation at 59.7275 Hz.
+    // Resize-driven views can take long enough to make an unsynchronized copy
+    // visibly tear, so synchronize only that opt-in presentation path. Fixed
+    // native and fixed-width extended views (including MMZ) remain unchanged.
+    const Uint32 renderer_flags = SDL_RENDERER_ACCELERATED |
+        (b->resize_driven_view
+             ? static_cast<Uint32>(SDL_RENDERER_PRESENTVSYNC) : Uint32{0});
+    b->renderer = SDL_CreateRenderer(b->window, -1, renderer_flags);
+    if (!b->renderer && b->resize_driven_view) {
+        std::fprintf(stderr,
+                     "host_window: synchronized renderer unavailable; "
+                     "falling back to unsynchronized presentation: %s\n",
+                     SDL_GetError());
+        b->renderer = SDL_CreateRenderer(
+            b->window, -1, SDL_RENDERER_ACCELERATED);
+    }
     if (!b->renderer) {
         // Fall back to software renderer if accelerated path is
         // unavailable (headless Windows, RDP, etc.).
@@ -321,6 +332,18 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         SDL_DestroyWindow(b->window);
         delete b;
         return false;
+    }
+    if (b->resize_driven_view) {
+        SDL_RendererInfo info{};
+        if (SDL_GetRendererInfo(b->renderer, &info) == 0) {
+            std::fprintf(stderr,
+                         "host_window: adaptive renderer=%s flags=0x%08x "
+                         "vsync=%s\n",
+                         info.name ? info.name : "unknown",
+                         static_cast<unsigned>(info.flags),
+                         (info.flags & SDL_RENDERER_PRESENTVSYNC) ? "yes" : "no");
+            std::fflush(stderr);
+        }
     }
     if (b->expanded_view || b->resize_driven_view) {
         // The destination viewport is computed explicitly in present() so

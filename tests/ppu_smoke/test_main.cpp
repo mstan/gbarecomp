@@ -57,10 +57,12 @@ int test_obj_attr_x(int index, uint16_t attr0, uint16_t attr1,
     return 1;
 }
 
+int g_margin_provider_action = gba::kWsTilemapReplace;
+
 int test_margin_tilemap(int bg, int, int, uint16_t* out_entry) {
     if (bg != 0 || !out_entry) return 0;
     *out_entry = 0;
-    return 1;
+    return g_margin_provider_action;
 }
 
 int g_bg_x_provider_calls = 0;
@@ -517,6 +519,19 @@ void test_extended_view_extends_nearest_window_edge() {
     expect_pixel(wide.data() + (287u * 3u), 255, 0, 0,
                  "right margin inherited visible window edge");
 
+    // A game can explicitly retain a wrapped entry for an intentionally
+    // tiled effect without weakening the default fail-closed margin policy.
+    std::fill_n(f.vram.begin() + 64, 64, static_cast<uint8_t>(2));
+    store16(&f.pal[4], 0x03E0);     // Green.
+    store16(&f.vram[0x800 + 29 * 2], 1);  // hx=-24 wraps to tile column 29.
+    g_margin_provider_action = gba::kWsTilemapKeepWrapped;
+    std::fill(wide.begin(), wide.end(), 0);
+    f.ppu.render(wide.data(), 0x2100, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(wide.data(), 0, 255, 0,
+                 "provider did not retain authored wrapped overlay");
+    g_margin_provider_action = gba::kWsTilemapReplace;
+
     // With both authentic edges outside a smaller iris, margins inherit the
     // masked edge instead of bypassing WINOUT.
     store16(&f.io[0x40], 0x32BE);   // WIN0 X=[50,190).
@@ -590,6 +605,7 @@ void test_extended_view_extends_nearest_window_edge() {
                  "authored margin policy changed native window center");
     gba::g_ws_authored_margin_layers = 0;
     gba::g_ws_tilemap_provider = nullptr;
+    g_margin_provider_action = gba::kWsTilemapReplace;
 }
 
 } // namespace

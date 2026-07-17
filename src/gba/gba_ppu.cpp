@@ -936,11 +936,18 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
         }
         return window_control_at_hx(hx);
     };
+    // Every later compositor stage asks the same window questions for the
+    // same output column. Resolve them once per scanline instead of repeating
+    // WIN0/WIN1/OBJ-window branches for the backdrop, every BG, and every OBJ
+    // pixel. The fixed-size stack array covers the renderer's clamped width.
+    uint8_t window_controls[GbaPpu::kMaxRenderWidth];
+    for (uint32_t x = 0; x < out_w; ++x)
+        window_controls[x] = static_cast<uint8_t>(window_control(x) & 0x3Fu);
     auto layer_enabled = [&](uint32_t x, uint32_t layer_bit) -> bool {
-        return (window_control(x) & (1u << layer_bit)) != 0;
+        return (window_controls[x] & (1u << layer_bit)) != 0;
     };
     auto blend_enabled = [&](uint32_t x) -> bool {
-        return (window_control(x) & (1u << 5)) != 0;
+        return (window_controls[x] & (1u << 5)) != 0;
     };
 
     uint16_t bldcnt = static_cast<uint16_t>(io[0x50] | (io[0x51] << 8));
@@ -1036,10 +1043,12 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             if (sample_hx < 0 || sample_hx >= 240) {
                 if (g_ws_tilemap_provider) {
                     uint16_t ext;
-                    if (g_ws_tilemap_provider(static_cast<int>(layer), sample_hx,
-                                              static_cast<int>(y), &ext)) {
+                    const int action = g_ws_tilemap_provider(
+                        static_cast<int>(layer), sample_hx,
+                        static_cast<int>(y), &ext);
+                    if (action == kWsTilemapReplace) {
                         entry = ext;
-                    } else {
+                    } else if (action != kWsTilemapKeepWrapped) {
                         continue;
                     }
                 }
