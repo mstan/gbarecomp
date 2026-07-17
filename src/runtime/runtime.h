@@ -35,6 +35,18 @@ struct RunOptions {
     // null at 240 preserves the generated function-entry fast path too.
     void (*extended_view_init)(std::uint32_t extra_left,
                                std::uint32_t extra_right) = nullptr;
+
+    // ---- pre-boot launcher identity (launcher_seam.h, RECOMP_LAUNCHER builds) --
+    // Consumed by the recomp-ui launcher seam a game's main() runs BEFORE
+    // run_game(); the runtime itself never reads these. All optional.
+    const char* launcher_region = nullptr;      // display region, e.g. "USA"
+    const char* launcher_save_path = nullptr;   // explicit save file (game.toml
+                                                // [save].path); null => <rom>.sav
+                                                // derived from the seeded ROM
+    // >240 offers the launcher's 16:9 widescreen toggle, mapped to
+    // --view-width <this> when enabled (e.g. Mega Man Zero's 480 extended
+    // view). 0/240 = no widescreen surface shown.
+    std::uint16_t widescreen_view_width = 0;
 };
 
 int run_game(int argc, char** argv, const RunOptions& opts = {});

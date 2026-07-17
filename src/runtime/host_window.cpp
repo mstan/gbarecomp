@@ -2,9 +2,12 @@
 
 #include "host_window.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "color_lut.h"
@@ -25,6 +28,22 @@ namespace gbarecomp {
 
 namespace {
 
+// System hotkey ids (config.ini [KeyMap] rows this host implements). Reset,
+// PauseDimmed and ToggleRenderer are intentionally absent — gbarecomp has no
+// in-process reset, no attract-dim, and one renderer; the launcher's GBA
+// hotkey catalog omits them to match.
+enum HostHotkey {
+    HK_FULLSCREEN = 0, HK_PAUSE, HK_TURBO,
+    HK_WINDOW_BIGGER, HK_WINDOW_SMALLER,
+    HK_VOLUME_UP, HK_VOLUME_DOWN, HK_DISPLAY_PERF,
+    HK_COUNT
+};
+
+struct HotkeyBind {
+    SDL_Keycode key = SDLK_UNKNOWN;   // SDLK_UNKNOWN = unbound
+    Uint16      mods = 0;             // required KMOD_CTRL/ALT/SHIFT bits
+};
+
 struct Backend {
     SDL_Window*   window   = nullptr;
     SDL_Renderer* renderer = nullptr;
@@ -42,7 +61,156 @@ struct Backend {
     int base_w = 240;   // logical surface width  (240 faithful, wider if expanded)
     int base_h = 160;   // logical surface height (160; vertical expansion deferred)
     bool expanded_view = false;  // native games retain the historical SDL path
+
+    // ---- rebindable input (see HostWindow::load_input_config) --------------
+    // GBA KEYINPUT bit (0..9) per bound SDL scancode; seeded from the
+    // built-in defaults, overridden by keybinds.ini [player1].
+    SDL_Scancode bind_sc[10] = {};      // indexed by GBA KEYINPUT bit
+    HotkeyBind   hotkeys[HK_COUNT];     // [KeyMap] bindings
+    int          scale = 3;             // current integer window scale
+    bool         fullscreen = false;
+    int          volume = 100;          // 0..100 gain on pushed samples
+    std::vector<int16_t> volume_buf;    // scratch for gain != 100
+    // FPS readout (DisplayPerf hotkey): presents/sec in the title bar.
+    bool         fps_readout = false;
+    std::string  title;                 // base window title (readout restores it)
+    Uint32       fps_window_start = 0;
+    int          fps_presents = 0;
 };
+
+// GBA KEYINPUT bit order: 0=A 1=B 2=Sel 3=Sta 4=Right 5=Left 6=Up 7=Down 8=R 9=L.
+// Defaults MATCH recomp-ui's generic keybinds defaults (keybinds.c) so the
+// launcher's rebind page and the game agree even before keybinds.ini exists:
+// A=X, B=Z, L=C, R=V, Start=Return, Select=RShift, D-pad=arrows.
+// (This supersedes the pre-launcher hardcoded Z/X/A/S layout — one defaults
+// source across the recomp ecosystem; rebind in the launcher to taste.)
+const SDL_Scancode kDefaultBinds[10] = {
+    SDL_SCANCODE_X,       // A
+    SDL_SCANCODE_Z,       // B
+    SDL_SCANCODE_RSHIFT,  // Select
+    SDL_SCANCODE_RETURN,  // Start
+    SDL_SCANCODE_RIGHT,   // Right
+    SDL_SCANCODE_LEFT,    // Left
+    SDL_SCANCODE_UP,      // Up
+    SDL_SCANCODE_DOWN,    // Down
+    SDL_SCANCODE_V,       // R
+    SDL_SCANCODE_C,       // L
+};
+
+// keybinds.ini [player1] key name -> GBA KEYINPUT bit. x/y/l2/r2/l3/r3 from
+// the generic 16-slot format are ignored (no GBA equivalent).
+const struct { const char* name; int bit; } kBindKeys[] = {
+    { "a", 0 }, { "b", 1 }, { "select", 2 }, { "start", 3 },
+    { "right", 4 }, { "left", 5 }, { "up", 6 }, { "down", 7 },
+    { "r", 8 }, { "l", 9 },
+};
+
+// config.ini [KeyMap] key names, in HostHotkey order, with the same defaults
+// recomp-ui's hotkey panel displays for the GBA catalog.
+const char* const kHotkeyNames[HK_COUNT] = {
+    "Fullscreen", "Pause", "Turbo",
+    "WindowBigger", "WindowSmaller",
+    "VolumeUp", "VolumeDown", "DisplayPerf",
+};
+const char* const kHotkeyDefaults[HK_COUNT] = {
+    "Alt+Return", "Shift+P", "Tab",
+    "", "",
+    "", "", "F",
+};
+
+// SDL_GetScancodeFromName plus the same lowercase aliases recomp-ui's
+// keybinds.c accepts, so a file either side writes round-trips identically.
+SDL_Scancode scancode_from_name(const char* name) {
+    if (!name || !*name) return SDL_SCANCODE_UNKNOWN;
+    SDL_Scancode sc = SDL_GetScancodeFromName(name);
+    if (sc != SDL_SCANCODE_UNKNOWN) return sc;
+    std::string b;
+    for (const char* p = name; *p; ++p) b += (char)std::tolower((unsigned char)*p);
+    if (b == "enter" || b == "return") return SDL_SCANCODE_RETURN;
+    if (b == "tab")       return SDL_SCANCODE_TAB;
+    if (b == "space")     return SDL_SCANCODE_SPACE;
+    if (b == "lshift")    return SDL_SCANCODE_LSHIFT;
+    if (b == "rshift")    return SDL_SCANCODE_RSHIFT;
+    if (b == "lctrl")     return SDL_SCANCODE_LCTRL;
+    if (b == "rctrl")     return SDL_SCANCODE_RCTRL;
+    if (b == "lalt")      return SDL_SCANCODE_LALT;
+    if (b == "ralt")      return SDL_SCANCODE_RALT;
+    if (b == "backslash") return SDL_SCANCODE_BACKSLASH;
+    if (b == "escape" || b == "esc") return SDL_SCANCODE_ESCAPE;
+    if (b == "backspace") return SDL_SCANCODE_BACKSPACE;
+    return SDL_SCANCODE_UNKNOWN;
+}
+
+// Parse a [KeyMap] value ("Ctrl+R", "Alt+Return", "F", "" = unbound) into a
+// HotkeyBind. Mirrors the format recomp-ui's hotkey editor writes
+// (SDL keycode name with Ctrl+/Alt+/Shift+ prefixes).
+HotkeyBind parse_hotkey(const char* value) {
+    HotkeyBind hb;
+    if (!value || !*value) return hb;
+    std::string v = value;
+    Uint16 mods = 0;
+    for (;;) {
+        if (v.rfind("Ctrl+", 0) == 0)       { mods |= KMOD_CTRL;  v.erase(0, 5); }
+        else if (v.rfind("Alt+", 0) == 0)   { mods |= KMOD_ALT;   v.erase(0, 4); }
+        else if (v.rfind("Shift+", 0) == 0) { mods |= KMOD_SHIFT; v.erase(0, 6); }
+        else break;
+    }
+    SDL_Keycode k = SDL_GetKeyFromName(v.c_str());
+    if (k == SDLK_UNKNOWN) return hb;   // unparseable = unbound
+    hb.key = k;
+    hb.mods = mods;
+    return hb;
+}
+
+// True when `hb` is bound and its required modifiers are (all) held. Ctrl/
+// Alt/Shift not required by the binding must NOT be held — so "P" and
+// "Shift+P" stay distinct bindings.
+bool hotkey_mods_ok(const HotkeyBind& hb, Uint16 state_mods) {
+    auto want = [&](Uint16 m) { return (hb.mods & m) != 0; };
+    auto held = [&](Uint16 m) { return (state_mods & m) != 0; };
+    return want(KMOD_CTRL) == held(KMOD_CTRL) &&
+           want(KMOD_ALT) == held(KMOD_ALT) &&
+           want(KMOD_SHIFT) == held(KMOD_SHIFT);
+}
+
+// Minimal INI section scan shared by keybinds.ini and config.ini [KeyMap]:
+// calls fn(key, value) for each assignment inside `section`.
+template <typename Fn>
+void ini_scan_section(const char* path, const char* section, Fn fn) {
+    std::FILE* f = std::fopen(path, "r");
+    if (!f) return;
+    char line[512];
+    bool in_section = false;
+    while (std::fgets(line, sizeof(line), f)) {
+        char* s = line;
+        while (*s == ' ' || *s == '\t') ++s;
+        size_t n = std::strlen(s);
+        while (n && (s[n-1] == '\n' || s[n-1] == '\r' || s[n-1] == ' ' || s[n-1] == '\t'))
+            s[--n] = '\0';
+        if (!*s || *s == '#' || *s == ';') continue;
+        if (*s == '[') {
+            char* close = std::strchr(s, ']');
+            if (close) *close = '\0';
+            in_section = SDL_strcasecmp(s + 1, section) == 0;
+            continue;
+        }
+        if (!in_section) continue;
+        char* eq = std::strchr(s, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        char* key = s;
+        char* val = eq + 1;
+        size_t kl = std::strlen(key);
+        while (kl && (key[kl-1] == ' ' || key[kl-1] == '\t')) key[--kl] = '\0';
+        while (*val == ' ' || *val == '\t') ++val;
+        char* hash = std::strchr(val, '#');
+        if (hash) *hash = '\0';
+        size_t vl = std::strlen(val);
+        while (vl && (val[vl-1] == ' ' || val[vl-1] == '\t')) val[--vl] = '\0';
+        fn(key, val);
+    }
+    std::fclose(f);
+}
 
 // Resolve the screen model: the per-game [video].screen from game.toml
 // (`toml_screen`) is the default; GBARECOMP_SCREEN overrides it at launch.
@@ -56,34 +224,6 @@ runtime::ColorSettings resolve_color_settings(const char* toml_screen) {
         if (runtime::screen_kind_from_name(env, k)) s.screen = k;
     }
     return s;
-}
-
-// Map an SDL_Scancode to a GBA KEYINPUT bit index, or -1 if unmapped.
-// Default GBA layout:
-//   bit 0 = A      mapped to Z
-//   bit 1 = B      mapped to X
-//   bit 2 = Select mapped to RShift
-//   bit 3 = Start  mapped to Return
-//   bit 4 = Right  Arrow
-//   bit 5 = Left   Arrow
-//   bit 6 = Up     Arrow
-//   bit 7 = Down   Arrow
-//   bit 8 = R btn  mapped to S
-//   bit 9 = L btn  mapped to A
-int scancode_to_gba_bit(SDL_Scancode sc) {
-    switch (sc) {
-        case SDL_SCANCODE_Z:      return 0;
-        case SDL_SCANCODE_X:      return 1;
-        case SDL_SCANCODE_RSHIFT: return 2;
-        case SDL_SCANCODE_RETURN: return 3;
-        case SDL_SCANCODE_RIGHT:  return 4;
-        case SDL_SCANCODE_LEFT:   return 5;
-        case SDL_SCANCODE_UP:     return 6;
-        case SDL_SCANCODE_DOWN:   return 7;
-        case SDL_SCANCODE_S:      return 8;
-        case SDL_SCANCODE_A:      return 9;
-        default:                  return -1;
-    }
 }
 
 // SDL audio pull callback: render exactly `len` bytes of device-rate mono S16
@@ -112,7 +252,7 @@ HostWindow::~HostWindow() {
 bool HostWindow::is_available() { return true; }
 
 bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
-                      const char* screen) {
+                      const char* screen, bool linear_filter) {
     if (open_) return true;
     if (scale < 1) scale = 1;
     if (base_w < 1) base_w = 240;
@@ -137,6 +277,13 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     b->base_w = base_w;
     b->base_h = base_h;
     b->expanded_view = base_w != 240 || base_h != 160;
+    b->scale = scale;
+    b->title = title ? title : "gbarecomp";
+    std::memcpy(b->bind_sc, kDefaultBinds, sizeof(kDefaultBinds));
+    for (int h = 0; h < HK_COUNT; ++h)
+        b->hotkeys[h] = parse_hotkey(kHotkeyDefaults[h]);
+    // Linear vs nearest scaling is a texture-creation-time hint.
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, linear_filter ? "linear" : "nearest");
     const int win_w = base_w * scale;
     const int win_h = base_h * scale;
     const Uint32 window_flags = SDL_WINDOW_SHOWN |
@@ -172,8 +319,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     if (b->expanded_view) {
         // The destination viewport is computed explicitly in present() so
         // resizing maximally fills the drawable at the selected widescreen
-        // aspect. Exact multiples retain integer scale and nearest filtering.
-        SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "nearest");
+        // aspect. Exact multiples retain integer scale; filtering follows the
+        // linear_filter choice set above (historical default: nearest).
         SDL_SetRenderDrawColor(b->renderer, 0, 0, 0, 255);
     } else {
         // Non-opting games retain the historical fixed 240x160 SDL logical
@@ -247,6 +394,17 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
     if (!open_ || !impl_ || !samples || count == 0) return;
     auto* b = static_cast<Backend*>(impl_);
     if (b->audio_dev == 0 || !b->bridge_ready) return;
+
+    // Volume (launcher setting + VolumeUp/Down hotkeys): scale into scratch
+    // before the bridge. 100 = passthrough, byte-identical to before.
+    if (b->volume != 100) {
+        b->volume_buf.resize(count);
+        const int v = b->volume;
+        for (std::size_t i = 0; i < count; ++i)
+            b->volume_buf[i] = static_cast<int16_t>(
+                (static_cast<int32_t>(samples[i]) * v) / 100);
+        samples = b->volume_buf.data();
+    }
 
     // Producer: append mono frames into the bridge ring. The SDL callback
     // (gba_audio_callback) drains it at the device rate with band-limited
@@ -333,11 +491,111 @@ void HostWindow::present(const uint8_t* rgb888) {
         }
     }
     SDL_RenderPresent(b->renderer);
+
+    // FPS readout (DisplayPerf hotkey): presents/sec, refreshed twice a
+    // second in the title bar; the base title is restored when toggled off.
+    if (b->fps_readout) {
+        ++b->fps_presents;
+        const Uint32 now = SDL_GetTicks();
+        if (b->fps_window_start == 0) b->fps_window_start = now;
+        const Uint32 span = now - b->fps_window_start;
+        if (span >= 500) {
+            char buf[192];
+            std::snprintf(buf, sizeof(buf), "%s — %.1f fps", b->title.c_str(),
+                          b->fps_presents * 1000.0 / span);
+            SDL_SetWindowTitle(b->window, buf);
+            b->fps_window_start = now;
+            b->fps_presents = 0;
+        }
+    }
+}
+
+void HostWindow::load_input_config(const char* dir) {
+    if (!open_ || !impl_ || !dir) return;
+    auto* b = static_cast<Backend*>(impl_);
+    const std::string base = std::string(dir) + "/";
+
+    // keybinds.ini [player1] (recomp-ui generic format, scancode names).
+    ini_scan_section((base + "keybinds.ini").c_str(), "player1",
+                     [b](const char* key, const char* val) {
+        for (const auto& bk : kBindKeys) {
+            if (SDL_strcasecmp(key, bk.name) != 0) continue;
+            SDL_Scancode sc = scancode_from_name(val);
+            b->bind_sc[bk.bit] = sc;   // "None"/unknown => unbound (UNKNOWN)
+            return;
+        }
+    });
+
+    // config.ini [KeyMap] (keycode names with Ctrl+/Alt+/Shift+ prefixes).
+    ini_scan_section((base + "config.ini").c_str(), "KeyMap",
+                     [b](const char* key, const char* val) {
+        for (int h = 0; h < HK_COUNT; ++h) {
+            if (SDL_strcasecmp(key, kHotkeyNames[h]) != 0) continue;
+            b->hotkeys[h] = parse_hotkey(val);
+            return;
+        }
+    });
+}
+
+void HostWindow::set_fullscreen(bool on) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    if (b->fullscreen == on) return;
+    if (SDL_SetWindowFullscreen(b->window,
+                                on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) == 0)
+        b->fullscreen = on;
+}
+
+bool HostWindow::fullscreen() const {
+    if (!open_ || !impl_) return false;
+    return static_cast<const Backend*>(impl_)->fullscreen;
+}
+
+void HostWindow::adjust_scale(int delta) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    if (b->fullscreen) return;   // meaningless while fullscreen
+    int s = b->scale + delta;
+    if (s < 1) s = 1;
+    if (s > 8) s = 8;
+    if (s == b->scale) return;
+    b->scale = s;
+    SDL_SetWindowSize(b->window, b->base_w * s, b->base_h * s);
+    SDL_SetWindowPosition(b->window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+}
+
+void HostWindow::set_volume(int pct) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    b->volume = pct;
+}
+
+int HostWindow::volume() const {
+    if (!open_ || !impl_) return 100;
+    return static_cast<const Backend*>(impl_)->volume;
+}
+
+void HostWindow::set_fps_readout(bool on) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    if (b->fps_readout == on) return;
+    b->fps_readout = on;
+    b->fps_window_start = 0;
+    b->fps_presents = 0;
+    if (!on) SDL_SetWindowTitle(b->window, b->title.c_str());
+}
+
+bool HostWindow::fps_readout() const {
+    if (!open_ || !impl_) return false;
+    return static_cast<const Backend*>(impl_)->fps_readout;
 }
 
 HostWindow::Events HostWindow::pump() {
     Events ev{};
     if (!open_) { ev.quit = true; return ev; }
+    auto* b = static_cast<Backend*>(impl_);
 
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -351,26 +609,57 @@ HostWindow::Events HostWindow::pump() {
             // save-state slots: plain = load, Shift = save. SDL's F1..F12
             // keycodes are contiguous, so slot = sym - F1 + 1.
             SDL_Keycode sym = e.key.keysym.sym;
+            Uint16 mods = e.key.keysym.mod;
             if (sym == SDLK_ESCAPE) {
                 ev.quit = true;
             } else if (sym >= SDLK_F1 && sym <= SDLK_F9) {
                 int slot = static_cast<int>(sym - SDLK_F1) + 1;
-                if (e.key.keysym.mod & KMOD_SHIFT) ev.save_slot = slot;
-                else                               ev.load_slot = slot;
+                if (mods & KMOD_SHIFT) ev.save_slot = slot;
+                else                   ev.load_slot = slot;
+            } else {
+                // Rebindable system hotkeys (config.ini [KeyMap]).
+                for (int h = 0; h < HK_COUNT; ++h) {
+                    const HotkeyBind& hb = b->hotkeys[h];
+                    if (hb.key == SDLK_UNKNOWN || hb.key != sym ||
+                        !hotkey_mods_ok(hb, mods))
+                        continue;
+                    switch (h) {
+                        case HK_FULLSCREEN:     ev.toggle_fullscreen = true; break;
+                        case HK_PAUSE:          ev.toggle_pause = true;      break;
+                        case HK_TURBO:          /* level-triggered below */  break;
+                        case HK_WINDOW_BIGGER:  ev.window_bigger = true;     break;
+                        case HK_WINDOW_SMALLER: ev.window_smaller = true;    break;
+                        case HK_VOLUME_UP:      ev.volume_up = true;         break;
+                        case HK_VOLUME_DOWN:    ev.volume_down = true;       break;
+                        case HK_DISPLAY_PERF:   ev.toggle_fps = true;        break;
+                    }
+                }
             }
         }
     }
 
-    // Build the GBA KEYINPUT value from current keyboard state.
+    // Build the GBA KEYINPUT value from current keyboard state via the
+    // rebindable table (keybinds.ini; defaults in kDefaultBinds).
     const Uint8* ks = SDL_GetKeyboardState(nullptr);
     uint16_t keys = 0x03FFu;  // all released
-    for (int sc = 0; sc < SDL_NUM_SCANCODES; ++sc) {
-        if (!ks[sc]) continue;
-        int bit = scancode_to_gba_bit(static_cast<SDL_Scancode>(sc));
-        if (bit >= 0) keys &= static_cast<uint16_t>(~(1u << bit));
+    for (int bit = 0; bit < 10; ++bit) {
+        SDL_Scancode sc = b->bind_sc[bit];
+        if (sc != SDL_SCANCODE_UNKNOWN && ks[sc])
+            keys &= static_cast<uint16_t>(~(1u << bit));
     }
     ev.keyinput = keys;
-    ev.fast_forward = ks[SDL_SCANCODE_TAB] != 0;  // hold Tab to uncap
+
+    // Turbo is level-triggered: held = uncap the frame limiter (default Tab).
+    ev.fast_forward = false;
+    {
+        const HotkeyBind& hb = b->hotkeys[HK_TURBO];
+        if (hb.key != SDLK_UNKNOWN) {
+            SDL_Scancode sc = SDL_GetScancodeFromKey(hb.key);
+            if (sc != SDL_SCANCODE_UNKNOWN && ks[sc] &&
+                hotkey_mods_ok(hb, SDL_GetModState()))
+                ev.fast_forward = true;
+        }
+    }
     return ev;
 }
 
@@ -386,7 +675,8 @@ HostWindow::~HostWindow() = default;
 bool HostWindow::is_available() { return false; }
 
 bool HostWindow::open(int /*scale*/, int /*base_w*/, int /*base_h*/,
-                      const char* /*title*/, const char* /*screen*/) {
+                      const char* /*title*/, const char* /*screen*/,
+                      bool /*linear_filter*/) {
     std::fprintf(stderr,
                  "host_window: built without SDL2; --window unavailable\n");
     return false;
@@ -395,6 +685,15 @@ bool HostWindow::open(int /*scale*/, int /*base_w*/, int /*base_h*/,
 void HostWindow::close() { open_ = false; }
 
 void HostWindow::present(const uint8_t* /*rgb888*/) {}
+
+void HostWindow::load_input_config(const char* /*dir*/) {}
+void HostWindow::set_fullscreen(bool /*on*/) {}
+bool HostWindow::fullscreen() const { return false; }
+void HostWindow::adjust_scale(int /*delta*/) {}
+void HostWindow::set_volume(int /*pct*/) {}
+int  HostWindow::volume() const { return 100; }
+void HostWindow::set_fps_readout(bool /*on*/) {}
+bool HostWindow::fps_readout() const { return false; }
 
 void HostWindow::push_audio_samples(const int16_t* /*samples*/,
                                     std::size_t /*count*/) {}

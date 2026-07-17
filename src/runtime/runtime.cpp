@@ -120,8 +120,14 @@ struct Args {
     std::string load_state;  // --load-state <path>: headless savestate load
     // [video] screen = raw|unlit|frontlit|backlit|classic — present-time
     // color simulation (see color_lut). Empty = raw (passthrough). The
-    // GBARECOMP_SCREEN env var overrides this at launch.
+    // GBARECOMP_SCREEN env var overrides this at launch; --screen overrides
+    // the TOML (launcher-driven).
     std::string screen;
+    // Launcher-driven presentation settings (CLI only; the pre-boot launcher
+    // persists them in its own config.ini and passes them per run).
+    bool fullscreen = false;      // --fullscreen: borderless desktop fullscreen
+    int  volume = 100;            // --volume 0..100: pushed-sample gain
+    bool linear_filter = false;   // --linear-filter 1: linear texture scaling
     // [audio] shadow = true|false — arm the MP2K verified-enhancement shadow
     // mixer (default off). GBARECOMP_AUDIO_SHADOW overrides at launch.
     bool audio_shadow = false;
@@ -686,6 +692,36 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             const char* v = need_value(s.c_str());
             if (!v) return false;
             args->save_path = v;
+            continue;
+        }
+        if (s == "--screen") {
+            const char* v = need_value("--screen");
+            if (!v) return false;
+            args->screen = v;   // CLI wins over TOML; GBARECOMP_SCREEN env still overrides
+            continue;
+        }
+        if (s == "--fullscreen") {
+            args->fullscreen = true;
+            continue;
+        }
+        if (s == "--volume") {
+            const char* v = need_value("--volume");
+            if (!v) return false;
+            if (!parse_int(v, &args->volume) || args->volume < 0 || args->volume > 100) {
+                if (err) *err = "invalid --volume value (expected 0..100)";
+                return false;
+            }
+            continue;
+        }
+        if (s == "--linear-filter") {
+            const char* v = need_value("--linear-filter");
+            if (!v) return false;
+            int lf = 0;
+            if (!parse_int(v, &lf)) {
+                if (err) *err = "invalid --linear-filter value (expected 0 or 1)";
+                return false;
+            }
+            args->linear_filter = lf != 0;
             continue;
         }
         if (s == "--quiet") {
@@ -1304,6 +1340,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     uint64_t swi_entries = 0;
     int frames_presented = 0;
     bool host_quit = false;
+    // Pause hotkey (config.ini [KeyMap] Pause, default Shift+P): while set,
+    // the run loop stops stepping the guest but keeps pumping input and
+    // re-presenting the last frame.
+    bool host_paused = false;
 
     auto pump_idle = [&](uint32_t max_cycles) -> uint32_t {
         uint32_t chunk = ppu.cycles_until_next_event();
@@ -1709,11 +1749,25 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
         if (!win.open(args.scale, ppu.render_width(), ppu.render_height(),
                       GBARECOMP_WINDOW_TITLE,
-                      args.screen.empty() ? nullptr : args.screen.c_str())) {
+                      args.screen.empty() ? nullptr : args.screen.c_str(),
+                      args.linear_filter)) {
             gbarecomp::overlay_loader_shutdown();
             runtime_shutdown();
             return 1;
         }
+        // Rebindable input: keybinds.ini (player buttons, recomp-ui generic
+        // format) + config.ini [KeyMap] (system hotkeys), both next to the
+        // exe. Missing files leave the built-in defaults.
+        {
+            std::string exe_dir = ".";
+            if (argc > 0 && argv[0] && argv[0][0]) {
+                std::filesystem::path p(argv[0]);
+                if (p.has_parent_path()) exe_dir = p.parent_path().string();
+            }
+            win.load_input_config(exe_dir.c_str());
+        }
+        if (args.fullscreen) win.set_fullscreen(true);
+        win.set_volume(args.volume);
         live_fb.assign(ppu.render_bytes(), 0);
         pacer.emplace();  // paces to the GBA's 59.7275 Hz
     }
@@ -1844,6 +1898,19 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
         if (ev.quit) host_quit = true;
         if (pacer) pacer->set_uncapped(ev.fast_forward);
+        // System hotkeys (config.ini [KeyMap], rebindable in the launcher).
+        if (ev.toggle_fullscreen) win.set_fullscreen(!win.fullscreen());
+        if (ev.window_bigger)  win.adjust_scale(+1);
+        if (ev.window_smaller) win.adjust_scale(-1);
+        if (ev.volume_up)   win.set_volume(win.volume() + 10);
+        if (ev.volume_down) win.set_volume(win.volume() - 10);
+        if (ev.toggle_fps)  win.set_fps_readout(!win.fps_readout());
+        if (ev.toggle_pause) {
+            host_paused = !host_paused;
+            // Realign the pacer on unpause so it doesn't burn the
+            // accumulated wall-clock lag catching up.
+            if (!host_paused && pacer) pacer->reset();
+        }
         if (ev.save_slot) {
             std::string path = slot_path(ev.save_slot);
             std::string e;
@@ -2157,6 +2224,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     if (args.window) pump_host_input();
 
     for (int i = 0; i < step_budget && !host_quit; ++i) {
+        // Paused: hold the guest still, keep the window alive (input pump,
+        // re-present, ~100 Hz idle). Applies to windowed play only.
+        while (host_paused && !host_quit && args.window) {
+            pump_host_input();
+            win.present(live_fb.data());
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (host_quit) break;
         if (!step_once()) break;
         if (input_replay_requested) {
             apply_input_replay();
