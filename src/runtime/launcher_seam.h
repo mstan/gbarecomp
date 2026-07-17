@@ -83,6 +83,55 @@ inline std::string read_single_line(const std::string& path) {
     return {};
 }
 
+inline void write_single_line(const std::string& path, const std::string& value) {
+    if (value.empty()) return;
+    std::ofstream f(path, std::ios::trunc);
+    if (f) f << value << "\n";
+}
+
+// Minimal reader for a single `key = "value"` under [section] in game.toml —
+// enough to prefill the launcher from [rom].path / [bios].path without
+// pulling in the full TOML parser. Returns the value resolved relative to the
+// toml's own directory (matching the runtime's resolve_config_path), or "".
+inline std::string toml_path_value(const std::string& toml_path,
+                                   const char* section, const char* key) {
+    std::ifstream f(toml_path);
+    if (!f) return {};
+    std::string line, cur;
+    std::string found;
+    while (std::getline(f, line)) {
+        size_t b = line.find_first_not_of(" \t");
+        if (b == std::string::npos) continue;
+        if (line[b] == '#' || line[b] == ';') continue;
+        if (line[b] == '[') {
+            size_t e = line.find(']', b);
+            if (e != std::string::npos) cur = line.substr(b + 1, e - b - 1);
+            continue;
+        }
+        if (cur != section) continue;
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = line.substr(b, eq - b);
+        size_t ke = k.find_last_not_of(" \t");
+        if (ke != std::string::npos) k = k.substr(0, ke + 1);
+        if (k != key) continue;
+        std::string v = line.substr(eq + 1);
+        size_t vb = v.find('"');
+        size_t ve = v.rfind('"');
+        if (vb == std::string::npos || ve == vb) continue;
+        found = v.substr(vb + 1, ve - vb - 1);
+        break;
+    }
+    if (found.empty()) return {};
+    // Resolve relative to the toml's directory.
+    std::filesystem::path p(found);
+    if (p.is_absolute()) return p.string();
+    std::filesystem::path base = std::filesystem::path(toml_path).parent_path();
+    std::error_code ec;
+    std::filesystem::path abs = std::filesystem::weakly_canonical(base / p, ec);
+    return (ec ? (base / p) : abs).string();
+}
+
 // Launcher-owned persisted settings (config.ini [Launcher]).
 struct SeamConfig {
     int  scale = 3;
@@ -92,6 +141,7 @@ struct SeamConfig {
     int  volume = 100;
     int  skip_launcher = 0;
     int  widescreen = 0;       // games with widescreen_view_width only
+    int  aspect_index = 0;     // games with a launcher_aspect vocabulary only
 };
 
 inline void seam_config_load(const std::string& path, SeamConfig* c) {
@@ -127,6 +177,7 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
         else if (key == "volume")        c->volume = std::atoi(val.c_str());
         else if (key == "skip_launcher") c->skip_launcher = std::atoi(val.c_str());
         else if (key == "widescreen")    c->widescreen = std::atoi(val.c_str());
+        else if (key == "aspect_index")  c->aspect_index = std::atoi(val.c_str());
     }
     if (c->scale < 1) c->scale = 1;
     if (c->scale > 8) c->scale = 8;
@@ -172,12 +223,13 @@ inline void seam_config_save(const std::string& path, const SeamConfig& c) {
     f << "volume = " << c.volume << "\n";
     f << "skip_launcher = " << c.skip_launcher << "\n";
     f << "widescreen = " << c.widescreen << "\n";
+    f << "aspect_index = " << c.aspect_index << "\n";
 }
 
 // Append the persisted/committed settings as ordinary run_game() CLI args.
 inline void seam_append_setting_args(std::vector<std::string>& args,
                                      const SeamConfig& c,
-                                     std::uint16_t widescreen_view_width) {
+                                     const gbarecomp::RunOptions& opts) {
     args.push_back("--scale");
     args.push_back(std::to_string(c.scale));
     args.push_back("--volume");
@@ -187,9 +239,18 @@ inline void seam_append_setting_args(std::vector<std::string>& args,
     args.push_back("--screen");
     args.push_back(kScreenTokens[c.screen_kind]);
     if (c.fullscreen) args.push_back("--fullscreen");
-    if (c.widescreen && widescreen_view_width > 240) {
+    if (opts.launcher_num_aspects > 0 && opts.launcher_aspect_view_widths) {
+        // Aspect vocabulary (multi-width games): committed index -> width.
+        int idx = c.aspect_index;
+        if (idx < 0 || idx >= opts.launcher_num_aspects) idx = 0;
+        const std::uint16_t w = opts.launcher_aspect_view_widths[idx];
+        if (w > 240) {
+            args.push_back("--view-width");
+            args.push_back(std::to_string(w));
+        }
+    } else if (c.widescreen && opts.widescreen_view_width > 240) {
         args.push_back("--view-width");
-        args.push_back(std::to_string(widescreen_view_width));
+        args.push_back(std::to_string(opts.widescreen_view_width));
     }
 }
 
@@ -234,13 +295,30 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     seam_config_load(config_path, &cfg);
     if (cfg.skip_launcher && !force_launcher) {
         // Boot straight in, but still honor the persisted settings.
-        seam_append_setting_args(args, cfg, opts.widescreen_view_width);
+        seam_append_setting_args(args, cfg, opts);
         return 0;
     }
 
-    // ---- seed the launcher from persisted state -----------------------------
-    const std::string seed_rom = read_single_line(dir + "/rom.cfg");
-    const std::string seed_bios = read_single_line(dir + "/bios.cfg");
+    // ---- seed the launcher: last pick (rom.cfg/bios.cfg) -> game.toml -------
+    // so a first run (no sidecar yet) still prefills from the paths the game
+    // already declares, instead of opening blank and forcing a re-browse.
+    const std::string rom_cfg  = dir + "/rom.cfg";
+    const std::string bios_cfg = dir + "/bios.cfg";
+    std::string seed_rom  = read_single_line(rom_cfg);
+    std::string seed_bios = read_single_line(bios_cfg);
+    if ((seed_rom.empty() || seed_bios.empty()) &&
+        opts.launcher_game_config && opts.launcher_game_config[0]) {
+        // game.toml path is relative to the exe/CWD; try both.
+        std::string toml = opts.launcher_game_config;
+        if (!std::filesystem::exists(toml)) {
+            std::string alt = dir + "/" + toml;
+            if (std::filesystem::exists(alt)) toml = alt;
+        }
+        if (std::filesystem::exists(toml)) {
+            if (seed_rom.empty())  seed_rom  = toml_path_value(toml, "rom", "path");
+            if (seed_bios.empty()) seed_bios = toml_path_value(toml, "bios", "path");
+        }
+    }
 
     RecompLauncherCSettings ls;
     std::memset(&ls, 0, sizeof(ls));
@@ -255,6 +333,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     ls.player_src[0] = 1;                 // keyboard (gbarecomp host input)
     ls.skip_launcher = cfg.skip_launcher;
     ls.screen_kind   = cfg.screen_kind;
+    ls.aspect_index  = cfg.aspect_index;
     std::snprintf(ls.bios_path, sizeof(ls.bios_path), "%s", seed_bios.c_str());
 
     RecompLauncherCGameInfo gi;
@@ -262,13 +341,28 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     launcher_profile_apply("gba", &gi);   // GBA identity + capability defaults
     gi.name = opts.builtin_game_name ? opts.builtin_game_name : "GBA cartridge";
     gi.region = opts.launcher_region;
-    if (opts.builtin_rom_crc32) {
-        gi.expected_crc = opts.builtin_rom_crc32;
-        gi.has_expected_crc = 1;
+    // SHA-1 is gbarecomp's real ROM identity gate — hand the launcher the
+    // SAME fingerprint so its "verified" check agrees with the runtime (a
+    // CRC32 is dump-specific and would reject other valid dumps). CRC32, when
+    // present, stays informational only.
+    const char* sha1_one[1];
+    if (opts.builtin_rom_sha1 && opts.builtin_rom_sha1[0]) {
+        sha1_one[0] = opts.builtin_rom_sha1;
+        gi.known_sha1_hex = sha1_one;
+        gi.num_known_sha1 = 1;
     }
     gi.widescreen_supported = opts.widescreen_view_width > 240 ? 1 : 0;
     gi.config_path = config_path.c_str();
     gi.keybinds_path = keybinds_path.c_str();
+    gi.boxart_path = opts.launcher_boxart;   // NULL => default assets/img/boxart.tga
+    if (opts.launcher_num_aspects > 0 && opts.launcher_aspect_labels) {
+        // Multi-width extended view: game-supplied aspect cycle, tagged
+        // EXPERIMENTAL (the snesrecomp/psxrecomp widescreen convention).
+        gi.aspect_labels       = opts.launcher_aspect_labels;
+        gi.num_aspect_labels   = opts.launcher_num_aspects;
+        gi.aspect_experimental = 1;
+        gi.widescreen_supported = 0;   // the cycle supersedes the bool toggle
+    }
     // Save row: the explicit per-game save path when the game declares one,
     // else the runtime's <rom>.sav convention derived from the seeded ROM.
     std::string save_display;
@@ -299,17 +393,26 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     cfg.volume        = ls.volume;
     cfg.skip_launcher = ls.skip_launcher ? 1 : 0;
     cfg.widescreen    = ls.widescreen ? 1 : 0;
+    cfg.aspect_index  = (opts.launcher_num_aspects > 0 &&
+                         ls.aspect_index >= 0 &&
+                         ls.aspect_index < opts.launcher_num_aspects)
+                          ? ls.aspect_index : 0;
     seam_config_save(config_path, cfg);
 
     if (picked_rom[0]) {
         args.push_back("--rom");
         args.push_back(picked_rom);
+        // Persist the pick NOW (not only after a successful boot) so the next
+        // launch prefills instead of re-prompting — the whole point of the
+        // launcher remembering. Mirrors the runtime asset picker's cache.
+        write_single_line(rom_cfg, picked_rom);
     }
     if (ls.bios_path[0]) {
         args.push_back("--bios");
         args.push_back(ls.bios_path);
+        write_single_line(bios_cfg, ls.bios_path);
     }
-    seam_append_setting_args(args, cfg, opts.widescreen_view_width);
+    seam_append_setting_args(args, cfg, opts);
     return 0;
 }
 

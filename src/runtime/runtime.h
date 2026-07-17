@@ -40,13 +40,31 @@ struct RunOptions {
     // Consumed by the recomp-ui launcher seam a game's main() runs BEFORE
     // run_game(); the runtime itself never reads these. All optional.
     const char* launcher_region = nullptr;      // display region, e.g. "USA"
+    // The game's default game.toml path (GBARECOMP_DEFAULT_GAME_CONFIG). The
+    // seam reads its [rom].path / [bios].path to PREFILL the launcher when no
+    // rom.cfg / bios.cfg sidecar exists yet, so a first run isn't blank.
+    const char* launcher_game_config = nullptr;
     const char* launcher_save_path = nullptr;   // explicit save file (game.toml
                                                 // [save].path); null => <rom>.sav
                                                 // derived from the seeded ROM
     // >240 offers the launcher's 16:9 widescreen toggle, mapped to
-    // --view-width <this> when enabled (e.g. Mega Man Zero's 480 extended
-    // view). 0/240 = no widescreen surface shown.
+    // --view-width <this> when enabled. 0/240 = no widescreen surface shown.
+    // Games with MULTIPLE extended widths use the aspect vocabulary below
+    // instead (takes precedence when set).
     std::uint16_t widescreen_view_width = 0;
+    // Game-supplied aspect vocabulary for the launcher's aspect cycle
+    // (EXPERIMENTAL-tagged). labels/view_widths are parallel arrays of
+    // num_aspects entries; index 0 must be the native 240 view. The
+    // committed index maps to --view-width <view_widths[index]>.
+    // e.g. Mega Man Zero: {"3:2 (Native)","9:5 (288 px)","12:5 (384 px)",
+    // "6:2 (480 px)"} / {240, 288, 384, 480}.
+    const char* const*   launcher_aspect_labels = nullptr;
+    const std::uint16_t* launcher_aspect_view_widths = nullptr;
+    int                  launcher_num_aspects = 0;
+    // Box-art image path relative to the assets dir staged next to the exe;
+    // null => the launcher's default "assets/img/boxart.tga". Multi-variant
+    // repos stage one file per variant (e.g. "assets/img/boxart_firered.tga").
+    const char* launcher_boxart = nullptr;
 };
 
 int run_game(int argc, char** argv, const RunOptions& opts = {});
