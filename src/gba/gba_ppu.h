@@ -193,5 +193,13 @@ extern "C" int g_ws_pillarbox_right;
 // Optional per-game interpretation of the 9-bit OBJ X field in expanded-view
 // rendering. Hardware-faithful signed decoding remains the default.
 extern "C" int (*g_ws_obj_x_provider)(int raw_x, int* out_x);
+// Richer per-game OBJ placement hook for screen-space UI. Called only by the
+// expanded renderer and before g_ws_obj_x_provider; receives the OAM index and
+// raw attributes so a game can distinguish HUD sprites from world objects.
+extern "C" int (*g_ws_obj_attr_x_provider)(int oam_index,
+                                            std::uint16_t attr0,
+                                            std::uint16_t attr1,
+                                            std::uint16_t attr2,
+                                            int* out_x);
 
 }  // namespace gba

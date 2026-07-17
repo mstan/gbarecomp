@@ -357,13 +357,14 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         gi.known_sha1_hex = sha1_one;
         gi.num_known_sha1 = 1;
     }
-    gi.widescreen_supported =
+    gi.widescreen_supported = opts.launcher_expose_widescreen &&
         (opts.widescreen_view_width > 240 ||
          (opts.resize_driven_view && opts.max_resize_view_width > 240)) ? 1 : 0;
     gi.config_path = config_path.c_str();
     gi.keybinds_path = keybinds_path.c_str();
     gi.boxart_path = opts.launcher_boxart;   // NULL => default assets/img/boxart.tga
-    if (opts.launcher_num_aspects > 0 && opts.launcher_aspect_labels) {
+    if (opts.launcher_expose_widescreen && opts.launcher_num_aspects > 0 &&
+        opts.launcher_aspect_labels) {
         // Multi-width extended view: game-supplied aspect cycle, tagged
         // EXPERIMENTAL (the snesrecomp/psxrecomp widescreen convention).
         gi.aspect_labels       = opts.launcher_aspect_labels;

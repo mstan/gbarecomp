@@ -31,6 +31,9 @@ extern "C" int g_ws_pillarbox = 0;
 extern "C" int g_ws_pillarbox_left = 0;
 extern "C" int g_ws_pillarbox_right = 0;
 extern "C" int (*g_ws_obj_x_provider)(int, int*) = nullptr;
+extern "C" int (*g_ws_obj_attr_x_provider)(int, std::uint16_t,
+                                            std::uint16_t, std::uint16_t,
+                                            int*) = nullptr;
 
 GbaPpu::GbaPpu()  = default;
 GbaPpu::~GbaPpu() = default;
@@ -1157,7 +1160,11 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             int sx = raw_sx;
             if (sy >= 160) sy -= 256;
             int provided_sx = sx;
-            if (g_ws_obj_x_provider &&
+            if (g_ws_obj_attr_x_provider &&
+                g_ws_obj_attr_x_provider(idx, attr0, attr1, attr2,
+                                         &provided_sx)) {
+                sx = provided_sx;
+            } else if (g_ws_obj_x_provider &&
                 g_ws_obj_x_provider(raw_sx, &provided_sx)) {
                 sx = provided_sx;
             } else if (sx & 0x100) {

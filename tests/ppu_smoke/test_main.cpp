@@ -47,6 +47,16 @@ int test_positive_obj_x(int raw_x, int* out_x) {
     return 0;
 }
 
+int g_obj_attr_provider_calls = 0;
+int test_obj_attr_x(int index, uint16_t attr0, uint16_t attr1,
+                    uint16_t attr2, int* out_x) {
+    ++g_obj_attr_provider_calls;
+    if (index != 0 || attr0 != 0 || attr1 != 10 || attr2 != 0 || !out_x)
+        return 0;
+    *out_x = 260;
+    return 1;
+}
+
 int test_margin_tilemap(int bg, int, int, uint16_t* out_entry) {
     if (bg != 0 || !out_entry) return 0;
     *out_entry = 0;
@@ -442,6 +452,40 @@ void test_extended_view_obj_x_is_explicitly_opt_in() {
     gba::g_ws_obj_x_provider = nullptr;
 }
 
+void test_extended_view_obj_attr_x_is_explicitly_opt_in() {
+    Fixture f;
+    for (std::size_t i = 0; i < 128; ++i)
+        store16(&f.oam[i * 8], 0x0200);
+    store16(&f.oam[0], 0x0000);
+    store16(&f.oam[2], 10);
+    store16(&f.oam[4], 0);
+    f.vram[0x10000] = 0x11;
+    store16(&f.pal[0x202], 0x001F);
+
+    g_obj_attr_provider_calls = 0;
+    gba::g_ws_obj_attr_x_provider = test_obj_attr_x;
+    f.ppu.render(f.rgb.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    if (g_obj_attr_provider_calls != 0) {
+        std::fprintf(stderr, "native renderer called OBJ attribute provider\n");
+        std::exit(1);
+    }
+    expect_pixel(f.rgb.data() + 10u * 3u, 255, 0, 0,
+                 "native OBJ moved by attribute provider");
+
+    f.ppu.set_view_margins(24, 24, 0, 0);
+    std::vector<uint8_t> wide(gba::GbaPpu::kMaxFramebufferBytes, 0);
+    f.ppu.render(wide.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    if (g_obj_attr_provider_calls == 0) {
+        std::fprintf(stderr, "wide renderer skipped OBJ attribute provider\n");
+        std::exit(1);
+    }
+    expect_pixel(wide.data() + (24u + 260u) * 3u, 255, 0, 0,
+                 "attribute-aware HUD OBJ placement");
+    gba::g_ws_obj_attr_x_provider = nullptr;
+}
+
 void test_extended_view_extends_nearest_window_edge() {
     Fixture f;
     store16(&f.io[0x08], 0x0180);  // BG0 256-color, screen block 1.
@@ -549,6 +593,7 @@ int main() {
     test_extended_bg_sample_remap_is_opt_in_and_native_inert();
     test_extended_view_snapshot_latch_policy();
     test_extended_view_obj_x_is_explicitly_opt_in();
+    test_extended_view_obj_attr_x_is_explicitly_opt_in();
     test_extended_view_extends_nearest_window_edge();
     std::puts("ppu_smoke_tests: PASS");
     return 0;

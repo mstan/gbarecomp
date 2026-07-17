@@ -833,6 +833,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gba::g_rom_read32_override = nullptr;
     gba::g_ws_tilemap_provider = nullptr;
     gba::g_ws_obj_x_provider = nullptr;
+    gba::g_ws_obj_attr_x_provider = nullptr;
     gba::g_ws_bg_x_provider = nullptr;
     gba::g_ws_authored_margin_layers = 0;
     gba::g_ws_pillarbox = 0;

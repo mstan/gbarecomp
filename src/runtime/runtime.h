@@ -57,6 +57,10 @@ struct RunOptions {
     const char* launcher_save_path = nullptr;   // explicit save file (game.toml
                                                 // [save].path); null => <rom>.sav
                                                 // derived from the seeded ROM
+    // Keep an implemented extended-view mode out of the public launcher while
+    // it is still being profiled. Explicit CLI/TOML opt-ins remain available.
+    // Defaults true so existing games (including MMZ) retain today's UI.
+    bool launcher_expose_widescreen = true;
     // >240 offers the launcher's 16:9 widescreen toggle, mapped to
     // --view-width <this> when enabled. 0/240 = no widescreen surface shown.
     // Games with MULTIPLE extended widths use the aspect vocabulary below
