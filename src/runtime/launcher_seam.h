@@ -140,7 +140,7 @@ struct SeamConfig {
     int  screen_kind = 0;      // kScreenTokens index
     int  volume = 100;
     int  skip_launcher = 0;
-    int  widescreen = 0;       // games with widescreen_view_width only
+    int  widescreen = 0;       // fixed-width or resize-driven opt-in
     int  aspect_index = 0;     // games with a launcher_aspect vocabulary only
 };
 
@@ -248,6 +248,12 @@ inline void seam_append_setting_args(std::vector<std::string>& args,
             args.push_back("--view-width");
             args.push_back(std::to_string(w));
         }
+    } else if (c.widescreen && opts.resize_driven_view &&
+               opts.max_resize_view_width > 240) {
+        // Resize-driven games start faithful and reveal more world as the
+        // drawable becomes wider. This is deliberately distinct from the
+        // fixed --view-width contract used by Mega Man Zero and others.
+        args.push_back("--resize-view");
     } else if (c.widescreen && opts.widescreen_view_width > 240) {
         args.push_back("--view-width");
         args.push_back(std::to_string(opts.widescreen_view_width));
@@ -351,11 +357,14 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         gi.known_sha1_hex = sha1_one;
         gi.num_known_sha1 = 1;
     }
-    gi.widescreen_supported = opts.widescreen_view_width > 240 ? 1 : 0;
+    gi.widescreen_supported = opts.launcher_expose_widescreen &&
+        (opts.widescreen_view_width > 240 ||
+         (opts.resize_driven_view && opts.max_resize_view_width > 240)) ? 1 : 0;
     gi.config_path = config_path.c_str();
     gi.keybinds_path = keybinds_path.c_str();
     gi.boxart_path = opts.launcher_boxart;   // NULL => default assets/img/boxart.tga
-    if (opts.launcher_num_aspects > 0 && opts.launcher_aspect_labels) {
+    if (opts.launcher_expose_widescreen && opts.launcher_num_aspects > 0 &&
+        opts.launcher_aspect_labels) {
         // Multi-width extended view: game-supplied aspect cycle, tagged
         // EXPERIMENTAL (the snesrecomp/psxrecomp widescreen convention).
         gi.aspect_labels       = opts.launcher_aspect_labels;

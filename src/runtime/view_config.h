@@ -41,4 +41,29 @@ inline ViewGeometry resolve_view_geometry(int requested_width,
     return {width, extra / 2u, extra - extra / 2u};
 }
 
+// Convert a host drawable aspect ratio into a logical GBA view width while
+// keeping the authentic 160-line height. Narrower-than-native windows never
+// crop the game; wider windows reveal more horizontal content up to game_max.
+inline std::uint32_t resize_driven_view_width(int drawable_width,
+                                              int drawable_height,
+                                              std::uint32_t game_max_width,
+                                              std::uint32_t engine_max_width) {
+    constexpr std::uint32_t kNativeWidth = 240;
+    constexpr std::uint32_t kNativeHeight = 160;
+    const std::uint32_t maximum = std::clamp(
+        game_max_width, kNativeWidth,
+        std::max(kNativeWidth, engine_max_width));
+    if (drawable_width <= 0 || drawable_height <= 0) return kNativeWidth;
+
+    // Round to the nearest logical pixel. Use 64-bit arithmetic so very large
+    // desktop dimensions cannot overflow before the clamp.
+    const std::uint64_t scaled =
+        static_cast<std::uint64_t>(drawable_width) * kNativeHeight;
+    const std::uint64_t rounded =
+        (scaled + static_cast<std::uint64_t>(drawable_height) / 2u) /
+        static_cast<std::uint64_t>(drawable_height);
+    return static_cast<std::uint32_t>(
+        std::clamp<std::uint64_t>(rounded, kNativeWidth, maximum));
+}
+
 }  // namespace gbarecomp

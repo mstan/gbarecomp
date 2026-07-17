@@ -47,6 +47,16 @@ int test_positive_obj_x(int raw_x, int* out_x) {
     return 0;
 }
 
+int g_obj_attr_provider_calls = 0;
+int test_obj_attr_x(int index, uint16_t attr0, uint16_t attr1,
+                    uint16_t attr2, int* out_x) {
+    ++g_obj_attr_provider_calls;
+    if (index != 0 || attr0 != 0 || attr1 != 10 || attr2 != 0 || !out_x)
+        return 0;
+    *out_x = 260;
+    return 1;
+}
+
 int test_margin_tilemap(int bg, int, int, uint16_t* out_entry) {
     if (bg != 0 || !out_entry) return 0;
     *out_entry = 0;
@@ -201,6 +211,23 @@ void test_extended_view_capability_policy() {
             std::numeric_limits<int>::max(), &ignored)) {
         std::fprintf(stderr, "legacy widescreen overflow was accepted\n");
         std::exit(1);
+    }
+}
+
+void test_resize_driven_view_policy() {
+    using gbarecomp::resize_driven_view_width;
+    struct Case { int w; int h; uint32_t max; uint32_t expected; };
+    const Case cases[] = {
+        {720, 480, 480, 240}, {3440, 1440, 480, 382},
+        {2560, 1080, 480, 379}, {1920, 1080, 320, 284},
+        {800, 1200, 480, 240}, {10000, 1000, 480, 480},
+        {0, 0, 480, 240},
+    };
+    for (const Case& c : cases) {
+        if (resize_driven_view_width(c.w, c.h, c.max, 480) != c.expected) {
+            std::fprintf(stderr, "resize-driven view policy mismatch\n");
+            std::exit(1);
+        }
     }
 }
 
@@ -365,6 +392,7 @@ void test_extended_view_snapshot_latch_policy() {
 
     gba::GbaPpu wide_loaded;
     wide_loaded.set_view_margins(120, 120, 0, 0);
+    gba::g_ws_authored_margin_layers = 0;
     gba::g_ws_pillarbox = 0;
     gba::g_ws_pillarbox_left = 1;
     gba::g_ws_pillarbox_right = 1;
@@ -378,6 +406,24 @@ void test_extended_view_snapshot_latch_policy() {
         std::exit(1);
     }
     gba::g_ws_pillarbox = 0;
+
+    // A self-sufficient game provider can explicitly authorize immediate
+    // margin reconstruction from restored guest state. This must not weaken
+    // the established default used by MMZ and the generic sidecar above.
+    gba::GbaPpu authored_loaded;
+    authored_loaded.set_view_margins(120, 120, 0, 0);
+    gba::g_ws_authored_margin_layers = 1;
+    gba::g_ws_pillarbox = 0;
+    gbarecomp::debug::SnapshotReader authored_reader(
+        wide_writer.buffer().data(), wide_writer.size());
+    authored_loaded.deserialize(authored_reader);
+    if (!authored_reader.ok() || authored_reader.remaining() != 0 ||
+        authored_loaded.has_latched_framebuffer() || gba::g_ws_pillarbox != 0) {
+        std::fprintf(stderr,
+                     "authored margin provider was pillarboxed after restore\n");
+        std::exit(1);
+    }
+    gba::g_ws_authored_margin_layers = 0;
 }
 
 void test_extended_view_obj_x_is_explicitly_opt_in() {
@@ -404,6 +450,40 @@ void test_extended_view_obj_x_is_explicitly_opt_in() {
     expect_pixel(wide.data() + extended_x, 255, 0, 0,
                  "opted-in extended OBJ X");
     gba::g_ws_obj_x_provider = nullptr;
+}
+
+void test_extended_view_obj_attr_x_is_explicitly_opt_in() {
+    Fixture f;
+    for (std::size_t i = 0; i < 128; ++i)
+        store16(&f.oam[i * 8], 0x0200);
+    store16(&f.oam[0], 0x0000);
+    store16(&f.oam[2], 10);
+    store16(&f.oam[4], 0);
+    f.vram[0x10000] = 0x11;
+    store16(&f.pal[0x202], 0x001F);
+
+    g_obj_attr_provider_calls = 0;
+    gba::g_ws_obj_attr_x_provider = test_obj_attr_x;
+    f.ppu.render(f.rgb.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    if (g_obj_attr_provider_calls != 0) {
+        std::fprintf(stderr, "native renderer called OBJ attribute provider\n");
+        std::exit(1);
+    }
+    expect_pixel(f.rgb.data() + 10u * 3u, 255, 0, 0,
+                 "native OBJ moved by attribute provider");
+
+    f.ppu.set_view_margins(24, 24, 0, 0);
+    std::vector<uint8_t> wide(gba::GbaPpu::kMaxFramebufferBytes, 0);
+    f.ppu.render(wide.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    if (g_obj_attr_provider_calls == 0) {
+        std::fprintf(stderr, "wide renderer skipped OBJ attribute provider\n");
+        std::exit(1);
+    }
+    expect_pixel(wide.data() + (24u + 260u) * 3u, 255, 0, 0,
+                 "attribute-aware HUD OBJ placement");
+    gba::g_ws_obj_attr_x_provider = nullptr;
 }
 
 void test_extended_view_extends_nearest_window_edge() {
@@ -480,6 +560,24 @@ void test_extended_view_extends_nearest_window_edge() {
             std::exit(1);
         }
     }
+
+    // Minish's full-room buffers are independent of native 240px HUD/dialog
+    // windows. Its separate opt-in may reconstruct only the regular-BG
+    // margins while leaving the authentic center masked exactly as authored.
+    store16(&f.io[0x40], 0x32BE);   // Non-uniform native window.
+    store16(&f.io[0x48], 0x0000);   // Disable BG0 inside WIN0.
+    store16(&f.io[0x4A], 0x0000);   // Disable BG0 in WINOUT too.
+    gba::g_ws_authored_margin_layers = 1;
+    std::fill(wide.begin(), wide.end(), 0);
+    f.ppu.render(wide.data(), 0x2100, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(wide.data(), 255, 0, 0,
+                 "authored provider did not reconstruct left margin");
+    expect_pixel(wide.data() + (287u * 3u), 255, 0, 0,
+                 "authored provider did not reconstruct right margin");
+    expect_pixel(wide.data() + ((24u + 100u) * 3u), 0, 255, 0,
+                 "authored margin policy changed native window center");
+    gba::g_ws_authored_margin_layers = 0;
     gba::g_ws_tilemap_provider = nullptr;
 }
 
@@ -490,10 +588,12 @@ int main() {
     test_brightness_native_domain_and_green_precision();
     test_extended_view_geometry_and_clamp();
     test_extended_view_capability_policy();
+    test_resize_driven_view_policy();
     test_extended_view_preserves_authentic_center();
     test_extended_bg_sample_remap_is_opt_in_and_native_inert();
     test_extended_view_snapshot_latch_policy();
     test_extended_view_obj_x_is_explicitly_opt_in();
+    test_extended_view_obj_attr_x_is_explicitly_opt_in();
     test_extended_view_extends_nearest_window_edge();
     std::puts("ppu_smoke_tests: PASS");
     return 0;

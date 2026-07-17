@@ -30,9 +30,19 @@ struct RunOptions {
     // the default therefore makes stale config/environment settings inert.
     std::uint16_t max_view_width = 240;
 
-    // Optional game-owned content initializer. Called exactly once, and only
-    // after a non-native view has been authorized and applied. Keeping this
-    // null at 240 preserves the generated function-entry fast path too.
+    // A separate extended-view policy for games whose logical width follows
+    // the live host-window aspect ratio. This ceiling is deliberately not
+    // max_view_width: opting into resize-driven view does not also authorize
+    // fixed --view-width modes. The game starts at faithful 240x160, and the
+    // launcher/CLI must explicitly opt in with --resize-view.
+    std::uint16_t max_resize_view_width = 240;
+    bool resize_driven_view = false;
+
+    // Optional game-owned content initializer. Called exactly once, after the
+    // first non-native view has been authorized and applied. For a fixed view
+    // that is during startup; for resize-driven view it is deferred until the
+    // host aspect first expands past 240. Keeping this null at 240 preserves
+    // the generated function-entry fast path too.
     void (*extended_view_init)(std::uint32_t extra_left,
                                std::uint32_t extra_right) = nullptr;
 
@@ -47,6 +57,10 @@ struct RunOptions {
     const char* launcher_save_path = nullptr;   // explicit save file (game.toml
                                                 // [save].path); null => <rom>.sav
                                                 // derived from the seeded ROM
+    // Keep an implemented extended-view mode out of the public launcher while
+    // it is still being profiled. Explicit CLI/TOML opt-ins remain available.
+    // Defaults true so existing games (including MMZ) retain today's UI.
+    bool launcher_expose_widescreen = true;
     // >240 offers the launcher's 16:9 widescreen toggle, mapped to
     // --view-width <this> when enabled. 0/240 = no widescreen surface shown.
     // Games with MULTIPLE extended widths use the aspect vocabulary below

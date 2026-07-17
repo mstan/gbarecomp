@@ -61,6 +61,8 @@ struct Backend {
     int base_w = 240;   // logical surface width  (240 faithful, wider if expanded)
     int base_h = 160;   // logical surface height (160; vertical expansion deferred)
     bool expanded_view = false;  // native games retain the historical SDL path
+    bool resize_driven_view = false;
+    bool linear_filter = false;
 
     // ---- rebindable input (see HostWindow::load_input_config) --------------
     // GBA KEYINPUT bit (0..9) per bound SDL scancode; seeded from the
@@ -252,7 +254,8 @@ HostWindow::~HostWindow() {
 bool HostWindow::is_available() { return true; }
 
 bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
-                      const char* screen, bool linear_filter) {
+                      const char* screen, bool linear_filter,
+                      bool resize_driven_view) {
     if (open_) return true;
     if (scale < 1) scale = 1;
     if (base_w < 1) base_w = 240;
@@ -277,6 +280,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     b->base_w = base_w;
     b->base_h = base_h;
     b->expanded_view = base_w != 240 || base_h != 160;
+    b->resize_driven_view = resize_driven_view;
+    b->linear_filter = linear_filter;
     b->scale = scale;
     b->title = title ? title : "gbarecomp";
     std::memcpy(b->bind_sc, kDefaultBinds, sizeof(kDefaultBinds));
@@ -287,7 +292,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     const int win_w = base_w * scale;
     const int win_h = base_h * scale;
     const Uint32 window_flags = SDL_WINDOW_SHOWN |
-        (b->expanded_view ? SDL_WINDOW_RESIZABLE : 0u);
+        ((b->expanded_view || b->resize_driven_view)
+             ? static_cast<Uint32>(SDL_WINDOW_RESIZABLE) : Uint32{0});
     b->window = SDL_CreateWindow(title ? title : "gbarecomp",
                                  SDL_WINDOWPOS_CENTERED,
                                  SDL_WINDOWPOS_CENTERED,
@@ -316,7 +322,7 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         delete b;
         return false;
     }
-    if (b->expanded_view) {
+    if (b->expanded_view || b->resize_driven_view) {
         // The destination viewport is computed explicitly in present() so
         // resizing maximally fills the drawable at the selected widescreen
         // aspect. Exact multiples retain integer scale; filtering follows the
@@ -462,6 +468,46 @@ void HostWindow::close() {
     open_ = false;
 }
 
+bool HostWindow::set_surface_size(int base_w, int base_h) {
+    if (!open_ || !impl_ || base_w < 1 || base_h < 1) return false;
+    auto* b = static_cast<Backend*>(impl_);
+    if (base_w == b->base_w && base_h == b->base_h) return true;
+
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY,
+                b->linear_filter ? "linear" : "nearest");
+    SDL_Texture* replacement = SDL_CreateTexture(
+        b->renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING,
+        base_w, base_h);
+    if (!replacement) {
+        std::fprintf(stderr,
+                     "host_window: dynamic SDL_CreateTexture failed: %s\n",
+                     SDL_GetError());
+        return false;
+    }
+    SDL_DestroyTexture(b->texture);
+    b->texture = replacement;
+    b->base_w = base_w;
+    b->base_h = base_h;
+    b->expanded_view = base_w != 240 || base_h != 160;
+    if (b->color_lut && !b->color_lut->is_passthrough())
+        b->graded_fb.resize(static_cast<std::size_t>(base_w) * base_h * 3u);
+    return true;
+}
+
+bool HostWindow::drawable_size(int* width, int* height) const {
+    if (!open_ || !impl_ || !width || !height) return false;
+    const auto* b = static_cast<const Backend*>(impl_);
+    // The feature follows window aspect, not texture/renderer target size.
+    // Some SDL backends keep RendererOutputSize pinned to the streaming
+    // target while the client window is resized, so use the authoritative
+    // live client extent first. HiDPI scaling is uniform and does not alter
+    // the aspect ratio used by the policy.
+    SDL_GetWindowSize(b->window, width, height);
+    if (*width > 0 && *height > 0) return true;
+    return SDL_GetRendererOutputSize(b->renderer, width, height) == 0 &&
+           *width > 0 && *height > 0;
+}
+
 void HostWindow::present(const uint8_t* rgb888) {
     if (!open_ || !impl_ || !rgb888) return;
     auto* b = static_cast<Backend*>(impl_);
@@ -474,12 +520,20 @@ void HostWindow::present(const uint8_t* rgb888) {
     }
     SDL_UpdateTexture(b->texture, nullptr, rgb888, b->base_w * 3);
     SDL_RenderClear(b->renderer);
-    if (!b->expanded_view) {
+    if (!b->expanded_view && !b->resize_driven_view) {
         SDL_RenderCopy(b->renderer, b->texture, nullptr, nullptr);
     } else {
         int drawable_w = 0;
         int drawable_h = 0;
-        if (SDL_GetRendererOutputSize(b->renderer, &drawable_w, &drawable_h) != 0) {
+        // Preserve the established renderer-output path for fixed-width
+        // extended views (including MMZ). Resize-driven view uses the same
+        // live client dimensions that selected its logical width, so the
+        // texture and destination cannot disagree on backends whose renderer
+        // output stays pinned to the original streaming target.
+        if (b->resize_driven_view) {
+            SDL_GetWindowSize(b->window, &drawable_w, &drawable_h);
+        } else if (SDL_GetRendererOutputSize(
+                       b->renderer, &drawable_w, &drawable_h) != 0) {
             SDL_GetWindowSize(b->window, &drawable_w, &drawable_h);
         }
         const PresentationLayout layout = compute_presentation_layout(
@@ -676,13 +730,21 @@ bool HostWindow::is_available() { return false; }
 
 bool HostWindow::open(int /*scale*/, int /*base_w*/, int /*base_h*/,
                       const char* /*title*/, const char* /*screen*/,
-                      bool /*linear_filter*/) {
+                      bool /*linear_filter*/, bool /*resize_driven_view*/) {
     std::fprintf(stderr,
                  "host_window: built without SDL2; --window unavailable\n");
     return false;
 }
 
 void HostWindow::close() { open_ = false; }
+
+bool HostWindow::set_surface_size(int /*base_w*/, int /*base_h*/) {
+    return false;
+}
+
+bool HostWindow::drawable_size(int* /*width*/, int* /*height*/) const {
+    return false;
+}
 
 void HostWindow::present(const uint8_t* /*rgb888*/) {}
 

@@ -147,6 +147,9 @@ struct Args {
     // legacy `widescreen=N` inputs are converted immediately to 240 + 2*N so
     // there is never a second source of truth downstream.
     int view_width = 240;
+    // Opt-in policy where the window drawable aspect selects view_width live.
+    // Authorization remains game-owned through RunOptions::resize_driven_view.
+    bool resize_view = false;
 };
 
 std::string trim(std::string_view in) {
@@ -491,6 +494,8 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
         } else if (section == "video" && key == "view_width") {
             int n = 0;
             if (parse_int(val.c_str(), &n) && n >= 240) args->view_width = n;
+        } else if (section == "video" && key == "resize_view") {
+            args->resize_view = (val == "true" || val == "1");
         } else if (section == "video" && key == "widescreen") {
             int n = 0;
             int width = 240;
@@ -677,6 +682,10 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             }
             continue;
         }
+        if (s == "--resize-view") {
+            args->resize_view = true;
+            continue;
+        }
         if (s == "--widescreen") {
             const char* v = need_value("--widescreen");
             if (!v) return false;
@@ -824,7 +833,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gba::g_rom_read32_override = nullptr;
     gba::g_ws_tilemap_provider = nullptr;
     gba::g_ws_obj_x_provider = nullptr;
+    gba::g_ws_obj_attr_x_provider = nullptr;
     gba::g_ws_bg_x_provider = nullptr;
+    gba::g_ws_authored_margin_layers = 0;
     gba::g_ws_pillarbox = 0;
     gba::g_ws_pillarbox_left = 0;
     gba::g_ws_pillarbox_right = 0;
@@ -1045,12 +1056,43 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     const bool ws_wip_enabled =
         ws_wip_env && ws_wip_env[0] && ws_wip_env[0] != '0';
 
+    if (const char* e = std::getenv("GBARECOMP_RESIZE_VIEW"))
+        args.resize_view = e[0] && e[0] != '0';
+    const bool resize_view_enabled =
+        args.resize_view && opts.resize_driven_view &&
+        opts.max_resize_view_width > 240 && args.window;
+    if (args.resize_view && !args.quiet) {
+        std::fprintf(stderr,
+            "[gbarecomp:runtime] resize-driven request: capability=%s "
+            "window=%s max=%u enabled=%s\n",
+            opts.resize_driven_view ? "yes" : "no",
+            args.window ? "yes" : "no",
+            static_cast<unsigned>(opts.max_resize_view_width),
+            resize_view_enabled ? "yes" : "no");
+    }
+    if (args.resize_view && !resize_view_enabled && !args.quiet) {
+        if (!opts.resize_driven_view || opts.max_resize_view_width <= 240) {
+            std::fprintf(stderr,
+                "[gbarecomp:runtime] resize-driven view requested, but this "
+                "game has not opted in; rendering faithful/fixed view\n");
+        } else if (!args.window) {
+            std::fprintf(stderr,
+                "[gbarecomp:runtime] resize-driven view requires a host "
+                "window; rendering the configured fixed view\n");
+        }
+    }
+
+    bool extended_view_initialized = false;
+
     // View-area expansion (opt-in enhancement). The canonical setting is a
     // total logical width. GBARECOMP_VIEW_WIDTH overrides --view-width /
     // [video].view_width. The old GBARECOMP_WIDESCREEN=N form remains a
     // compatibility alias for 240 + 2*N. Only opted-in games can expand.
     {
-        int requested_width = args.view_width;
+        // A resize-driven session deliberately boots at the exact native
+        // width. Once the host drawable exists, its aspect selects the first
+        // expanded width without changing the window's dimensions.
+        int requested_width = resize_view_enabled ? 240 : args.view_width;
         bool modern_env_valid = false;
         if (const char* e = std::getenv("GBARECOMP_VIEW_WIDTH")) {
             int n = 0;
@@ -1101,6 +1143,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (ppu.view_expanded() && opts.extended_view_init) {
             opts.extended_view_init(ppu.view_extra_left(),
                                     ppu.view_extra_right());
+            extended_view_initialized = true;
         }
         if (ppu.view_expanded() && !args.quiet) {
             std::fprintf(stderr,
@@ -1741,6 +1784,47 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     HostWindow win;
     std::vector<uint8_t> live_fb;
+    auto sync_resize_driven_view = [&]() -> bool {
+        if (!resize_view_enabled || !win.is_open()) return false;
+        int drawable_w = 0;
+        int drawable_h = 0;
+        if (!win.drawable_size(&drawable_w, &drawable_h)) return false;
+        const std::uint32_t target = resize_driven_view_width(
+            drawable_w, drawable_h, opts.max_resize_view_width,
+            gba::GbaPpu::kMaxRenderWidth);
+        if (target == ppu.render_width()) return false;
+
+        const ViewGeometry geometry = resolve_view_geometry(
+            static_cast<int>(target), opts.max_resize_view_width, false,
+            gba::GbaPpu::kMaxRenderWidth);
+        if (!win.set_surface_size(static_cast<int>(geometry.width),
+                                  static_cast<int>(ppu.render_height()))) {
+            return false;
+        }
+        ppu.set_view_margins(geometry.extra_left, geometry.extra_right, 0, 0);
+        args.view_width = static_cast<int>(ppu.render_width());
+        g_ws_extra_left = static_cast<unsigned>(ppu.view_extra_left());
+        g_ws_extra_right = static_cast<unsigned>(ppu.view_extra_right());
+        g_ws_extra = std::max(g_ws_extra_left, g_ws_extra_right);
+        g_ws_view_width = ppu.render_width();
+        g_ws_active = ppu.view_expanded() ? 1u : 0u;
+        if (ppu.view_expanded() && opts.extended_view_init &&
+            !extended_view_initialized) {
+            opts.extended_view_init(ppu.view_extra_left(),
+                                    ppu.view_extra_right());
+            extended_view_initialized = true;
+        }
+        live_fb.assign(ppu.render_bytes(), 0);
+        if (!args.quiet) {
+            std::fprintf(stderr,
+                "[gbarecomp:runtime] resize-driven view: drawable=%dx%d "
+                "logical=%ux%u margins=%u/%u\n",
+                drawable_w, drawable_h, ppu.render_width(), ppu.render_height(),
+                static_cast<unsigned>(ppu.view_extra_left()),
+                static_cast<unsigned>(ppu.view_extra_right()));
+        }
+        return true;
+    };
     // Wall-clock frame limiter — constructed only for windowed runs so
     // the Windows timer-resolution bump doesn't apply to headless/TCP
     // batch runs (which intentionally run uncapped).
@@ -1757,7 +1841,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (!win.open(args.scale, ppu.render_width(), ppu.render_height(),
                       GBARECOMP_WINDOW_TITLE,
                       args.screen.empty() ? nullptr : args.screen.c_str(),
-                      args.linear_filter)) {
+                      args.linear_filter, resize_view_enabled)) {
             gbarecomp::overlay_loader_shutdown();
             runtime_shutdown();
             return 1;
@@ -1775,7 +1859,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
         if (args.fullscreen) win.set_fullscreen(true);
         win.set_volume(args.volume);
-        live_fb.assign(ppu.render_bytes(), 0);
+        sync_resize_driven_view();
+        if (live_fb.empty()) live_fb.assign(ppu.render_bytes(), 0);
         pacer.emplace();  // paces to the GBA's 59.7275 Hz
     }
 
@@ -1975,7 +2060,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         runtime_set_frame_present_hook([&]() -> bool {
             uint64_t frame = ppu.frame_count();
             if (frame != last_presented_frame) {
-                if (ppu.has_latched_framebuffer()) {
+                const bool view_changed = sync_resize_driven_view();
+                if (ppu.has_latched_framebuffer() && !view_changed) {
                     std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
                                 ppu.render_bytes());
                 } else {
@@ -2298,7 +2384,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             }
             uint64_t frame = ppu.frame_count();
             if (frame != last_presented_frame) {
-                if (ppu.has_latched_framebuffer()) {
+                const bool view_changed = sync_resize_driven_view();
+                if (ppu.has_latched_framebuffer() && !view_changed) {
                     std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
                                 ppu.render_bytes());
                 } else {
