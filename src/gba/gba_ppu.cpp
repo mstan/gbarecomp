@@ -21,6 +21,7 @@ extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
                                         uint16_t* out_entry) = nullptr;
 extern "C" int (*g_ws_bg_x_provider)(int bg, int output_x, int screen_y,
                                      int* out_hw_x) = nullptr;
+extern "C" int g_ws_authored_margin_layers = 0;
 
 // Widescreen pillarbox (Step C policy): when nonzero, the wide path renders the
 // margin columns (outside the central 240) as solid black instead of extended
@@ -85,7 +86,7 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
         // state-epoch hook has invalidated/rebuilt its margin caches. Fail those
         // unauthored margins closed for that interim render; the game's normal
         // publish policy reauthorizes them once restored-state data is ready.
-        g_ws_pillarbox = 1;
+        g_ws_pillarbox = g_ws_authored_margin_layers ? 0 : 1;
         g_ws_pillarbox_left = 0;
         g_ws_pillarbox_right = 0;
     }
@@ -106,10 +107,21 @@ void GbaPpu::set_view_margins(uint32_t left, uint32_t right,
     // Clamp each side to its compile-time max. kMaxExtraY is 0 for now, so
     // top/bottom are forced to 0 (vertical expansion deferred) — the params
     // stay in the API so callers remain generic.
-    extra_left_   = left   > kMaxExtraX ? kMaxExtraX : left;
-    extra_right_  = right  > kMaxExtraX ? kMaxExtraX : right;
-    extra_top_    = top    > kMaxExtraY ? kMaxExtraY : top;
-    extra_bottom_ = bottom > kMaxExtraY ? kMaxExtraY : bottom;
+    const uint32_t next_left = left > kMaxExtraX ? kMaxExtraX : left;
+    const uint32_t next_right = right > kMaxExtraX ? kMaxExtraX : right;
+    const uint32_t next_top = top > kMaxExtraY ? kMaxExtraY : top;
+    const uint32_t next_bottom = bottom > kMaxExtraY ? kMaxExtraY : bottom;
+    if (next_left != extra_left_ || next_right != extra_right_ ||
+        next_top != extra_top_ || next_bottom != extra_bottom_) {
+        // A latched frame is laid out at the old stride. Force one fresh
+        // render after a live resize rather than interpreting it at the new
+        // dimensions. Timing state and guest memory remain untouched.
+        has_latched_fb_ = false;
+    }
+    extra_left_ = next_left;
+    extra_right_ = next_right;
+    extra_top_ = next_top;
+    extra_bottom_ = next_bottom;
 }
 
 GbaPpu::TickEvents GbaPpu::tick(uint32_t cycles, uint16_t vcount_compare) {
@@ -905,14 +917,17 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
         }
     }
     const bool black_nonuniform_window_margins =
-        g_ws_tilemap_provider && any_window && !window_control_is_uniform;
+        g_ws_tilemap_provider && any_window && !window_control_is_uniform &&
+        !g_ws_authored_margin_layers;
     auto window_control = [&](uint32_t x) -> uint16_t {
         int hx = static_cast<int>(x) - static_cast<int>(ox);
         if (g_ws_tilemap_provider &&
             (hx < 0 || hx >= static_cast<int>(kVanW))) {
-            // A non-uniform guest window (iris, wipe, HUD aperture) has no
-            // authored meaning outside 240px. Only extend a uniform scanline;
-            // otherwise fail the margin closed instead of leaking around it.
+            // Minish's room provider treats expanded columns as lying outside
+            // every native WIN0/WIN1 rectangle, so WINOUT controls the world
+            // there. Other providers retain the established fail-closed rule.
+            if (g_ws_authored_margin_layers)
+                return window_control_at_hx(hx);
             return window_control_is_uniform ? uniform_window_control : 0u;
         }
         return window_control_at_hx(hx);
@@ -981,7 +996,13 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
         uint32_t block_cols = width_tiles / 32u;
         for (uint32_t x = 0; x < out_w; ++x) {
             int hx = static_cast<int>(x) - static_cast<int>(ox);
-            if (!layer_enabled(x, layer)) continue;
+            const bool authored_margin = g_ws_authored_margin_layers &&
+                (hx < 0 || hx >= static_cast<int>(kVanW));
+            // Minish supplies room-map entries for margins independently of
+            // the native 240px WIN0/WIN1 HUD/dialog masks. Ignore only their
+            // regular-BG layer gate there; unsupported UI BGs still fail in
+            // the provider below, so they cannot repeat.
+            if (!layer_enabled(x, layer) && !authored_margin) continue;
             int sample_hx = hx;
             if (g_ws_bg_x_provider) {
                 int provided_hx = hx;

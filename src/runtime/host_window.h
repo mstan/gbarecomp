@@ -41,9 +41,16 @@ public:
     // nearest look.
     bool open(int scale = 3, int base_w = 240, int base_h = 160,
               const char* title = "gbarecomp", const char* screen = nullptr,
-              bool linear_filter = false);
+              bool linear_filter = false, bool resize_driven_view = false);
     void close();
     bool is_open() const { return open_; }
+
+    // Resize the logical streaming surface without changing the host window.
+    // Used only by the explicit resize-driven view policy; fixed-width callers
+    // never invoke it. drawable_size() reports the live client-window extent
+    // (and therefore follows drag-resize and borderless desktop fullscreen).
+    bool set_surface_size(int base_w, int base_h);
+    bool drawable_size(int* width, int* height) const;
 
     // Load player keybinds + system hotkeys from `dir` (the exe directory):
     //   * keybinds.ini — recomp-ui's generic keybinds format ([player1],

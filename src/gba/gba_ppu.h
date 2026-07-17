@@ -183,6 +183,10 @@ extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
 // hardware X through out_hw_x (1). The native 240x160 renderer never calls it.
 extern "C" int (*g_ws_bg_x_provider)(int bg, int output_x, int screen_y,
                                      int* out_hw_x);
+// Per-game policy for self-sufficient authored margin providers. Off keeps the
+// established fail-closed window/savestate behavior. On lets provider-sourced
+// regular BG margins continue independently beside native HUD/dialog windows.
+extern "C" int g_ws_authored_margin_layers;
 extern "C" int g_ws_pillarbox;  // Step C policy: black margins on non-field screens
 extern "C" int g_ws_pillarbox_left;
 extern "C" int g_ws_pillarbox_right;
