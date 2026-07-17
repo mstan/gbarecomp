@@ -287,6 +287,7 @@ void test_extended_bg_sample_remap_is_opt_in_and_native_inert() {
     store16(&f.pal[4], 0x7C00);       // Blue tile 1.
 
     gba::g_ws_bg_x_provider = test_bg_x_provider;
+    gba::g_ws_bg_x_provider_layers = 0xFu;
     g_bg_x_provider_calls = 0;
     f.ppu.render(f.rgb.data(), dispcnt, f.io.data(), f.vram.data(),
                  f.oam.data(), f.pal.data());
@@ -309,6 +310,16 @@ void test_extended_bg_sample_remap_is_opt_in_and_native_inert() {
                  "wide BG remap did not sample authentic X");
     expect_pixel(wide.data() + 24u * 3u, 0, 255, 0,
                  "wide BG suppress did not expose backdrop");
+
+    g_bg_x_provider_calls = 0;
+    gba::g_ws_bg_x_provider_layers = 0;
+    f.ppu.render(wide.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    if (g_bg_x_provider_calls != 0) {
+        std::fprintf(stderr, "wide renderer ignored BG provider layer mask\n");
+        std::exit(1);
+    }
+    gba::g_ws_bg_x_provider_layers = 0xFu;
     gba::g_ws_bg_x_provider = nullptr;
 }
 

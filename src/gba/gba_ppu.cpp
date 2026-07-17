@@ -21,6 +21,7 @@ extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
                                         uint16_t* out_entry) = nullptr;
 extern "C" int (*g_ws_bg_x_provider)(int bg, int output_x, int screen_y,
                                      int* out_hw_x) = nullptr;
+extern "C" unsigned g_ws_bg_x_provider_layers = 0xFu;
 extern "C" int g_ws_authored_margin_layers = 0;
 
 // Widescreen pillarbox (Step C policy): when nonzero, the wide path renders the
@@ -1007,7 +1008,8 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             // the provider below, so they cannot repeat.
             if (!layer_enabled(x, layer) && !authored_margin) continue;
             int sample_hx = hx;
-            if (g_ws_bg_x_provider) {
+            if (g_ws_bg_x_provider &&
+                (g_ws_bg_x_provider_layers & (1u << layer))) {
                 int provided_hx = hx;
                 const int action = g_ws_bg_x_provider(
                     static_cast<int>(layer), static_cast<int>(x),
@@ -1159,17 +1161,19 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             const int raw_sx = static_cast<int>(attr1 & 0x1FFu);
             int sx = raw_sx;
             if (sy >= 160) sy -= 256;
-            int provided_sx = sx;
-            if (g_ws_obj_attr_x_provider &&
-                g_ws_obj_attr_x_provider(idx, attr0, attr1, attr2,
-                                         &provided_sx)) {
-                sx = provided_sx;
-            } else if (g_ws_obj_x_provider &&
-                g_ws_obj_x_provider(raw_sx, &provided_sx)) {
-                sx = provided_sx;
-            } else if (sx & 0x100) {
-                sx -= 0x200;
-            }
+            auto resolve_sx = [&] {
+                int provided_sx = sx;
+                if (g_ws_obj_attr_x_provider &&
+                    g_ws_obj_attr_x_provider(idx, attr0, attr1, attr2,
+                                             &provided_sx)) {
+                    sx = provided_sx;
+                } else if (g_ws_obj_x_provider &&
+                    g_ws_obj_x_provider(raw_sx, &provided_sx)) {
+                    sx = provided_sx;
+                } else if (sx & 0x100) {
+                    sx -= 0x200;
+                }
+            };
             bool color256 = (attr0 & 0x2000u) != 0;
             uint32_t tile_num = attr2 & 0x3FFu;
             uint32_t palette_bank = (attr2 >> 12) & 0xFu;
@@ -1226,6 +1230,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                 int bh = disable_or_double ? sh * 2 : sh;
                 int j = static_cast<int>(y) - sy;
                 if (j < 0 || j >= bh) continue;
+                resolve_sx();
                 int affine_group = (attr1 >> 9) & 0x1Fu;
                 const uint8_t* ag = oam + affine_group * 0x20u;
                 int32_t pa = read_s16(ag, 0x06);
@@ -1249,6 +1254,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             }
             int line = static_cast<int>(y) - sy;
             if (line < 0 || line >= sh) continue;
+            resolve_sx();
             bool hflip = (attr1 & 0x1000u) != 0;
             bool vflip = (attr1 & 0x2000u) != 0;
             int ty = line >> 3;

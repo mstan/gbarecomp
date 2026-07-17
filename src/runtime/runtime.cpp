@@ -835,6 +835,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gba::g_ws_obj_x_provider = nullptr;
     gba::g_ws_obj_attr_x_provider = nullptr;
     gba::g_ws_bg_x_provider = nullptr;
+    gba::g_ws_bg_x_provider_layers = 0xFu;
     gba::g_ws_authored_margin_layers = 0;
     gba::g_ws_pillarbox = 0;
     gba::g_ws_pillarbox_left = 0;
