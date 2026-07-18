@@ -69,7 +69,7 @@ struct CodegenCtx {
     // allowed to consult runtime_thumb_alu_immediate(). nullptr/empty keeps
     // the original compile-time literal, so games that do not explicitly opt
     // in pay no generated-code branch or callback cost.
-    const std::unordered_set<uint32_t>* thumb_alu_immediate_override_pcs = nullptr;
+    const std::unordered_set<uint32_t>* alu_immediate_override_pcs = nullptr;
 };
 
 class ArmCodegen {

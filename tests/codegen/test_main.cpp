@@ -333,9 +333,15 @@ bool run_call_return_stack_cases() {
 
 int thumb_alu_imm_test_override(uint32_t pc, uint32_t original,
                                 uint32_t* out) {
-    if (pc != 0x0800E2D2u || original != 12u) return 0;
-    *out = 15u;
-    return 1;
+    if (pc == 0x0800E2D2u && original == 12u) {
+        *out = 15u;
+        return 1;
+    }
+    if (pc == 0x080B291Cu && original == 240u) {
+        *out = 360u;
+        return 1;
+    }
+    return 0;
 }
 
 int thumb_alu_imm_accept_everything(uint32_t, uint32_t, uint32_t* out) {
@@ -347,6 +353,7 @@ bool run_thumb_alu_immediate_override_cases() {
     std::size_t sub_idx = kTestCasesCount;
     std::size_t add_idx = kTestCasesCount;
     std::size_t unconfigured_idx = kTestCasesCount;
+    std::size_t arm_cmp_idx = kTestCasesCount;
     for (std::size_t i = 0; i < kTestCasesCount; ++i) {
         if (std::strcmp(kTestCases[i].name,
                         "thumb_sub_imm_override_fixture") == 0) {
@@ -356,11 +363,30 @@ bool run_thumb_alu_immediate_override_cases() {
             add_idx = i;
         } else if (std::strcmp(kTestCases[i].name, "thumb_mov_imm") == 0) {
             unconfigured_idx = i;
+        } else if (std::strcmp(kTestCases[i].name,
+                               "arm_cmp_imm_override_fixture") == 0) {
+            arm_cmp_idx = i;
         }
     }
     if (sub_idx == kTestCasesCount || add_idx == kTestCasesCount ||
-        unconfigured_idx == kTestCasesCount) {
+        unconfigured_idx == kTestCasesCount ||
+        arm_cmp_idx == kTestCasesCount) {
         std::printf("FAIL thumb_alu_immediate_override: fixture missing\n");
+        return false;
+    }
+
+    // The same exact-PC chokepoint supports ARM rotated immediates. This is
+    // the form used by Minish Cap's IWRAM sprite renderer.
+    std::memset(&g_cpu, 0, sizeof(g_cpu));
+    g_cpu.R[2] = 300u;
+    g_cpu.cpsr = 0x1Fu;
+    g_runtime_thumb_alu_imm_override = thumb_alu_imm_test_override;
+    kTestFns[arm_cmp_idx]();
+    if (cpsr_n() != 1u || cpsr_z() != 0u || cpsr_c() != 0u ||
+        cpsr_v() != 0u) {
+        std::printf("FAIL alu_immediate_override: ARM accepted flags "
+                    "cpsr=0x%08X\n", g_cpu.cpsr);
+        g_runtime_thumb_alu_imm_override = nullptr;
         return false;
     }
 

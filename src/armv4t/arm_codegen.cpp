@@ -152,11 +152,11 @@ Op2Code emit_op2(const Instr& ins, const CodegenCtx& ctx,
     if (ins.op2.kind == Op2::Kind::Imm) {
         // Immediate. The decoder already pre-rotated imm_value;
         // imm_carry_out is 0/1, or 2 meaning "carry unchanged".
-        if (ins.thumb && ctx.thumb_alu_immediate_override_pcs &&
-            ctx.thumb_alu_immediate_override_pcs->count(ins.pc) != 0) {
-            // Opt-in, exact-PC enhancement hook. Only THUMB ALU immediates
-            // route through this chokepoint; memory offsets, branch
-            // displacements, and ARM rotated immediates remain constants.
+        if (ctx.alu_immediate_override_pcs &&
+            ctx.alu_immediate_override_pcs->count(ins.pc) != 0) {
+            // Opt-in, exact-PC enhancement hook. Only configured ARM/THUMB
+            // ALU immediates route through this chokepoint; memory offsets
+            // and branch displacements remain constants.
             std::string imm_var = "_imm" + uniq_suffix(ins);
             std::ostringstream setup;
             setup << indent << "uint32_t " << imm_var

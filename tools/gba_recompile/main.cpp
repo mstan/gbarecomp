@@ -588,7 +588,7 @@ void write_body(const std::string& dir,
                 const OutputNames& names,
                 uint32_t shard_count,
                 const std::unordered_set<uint32_t>*
-                    thumb_alu_immediate_override_pcs) {
+                    alu_immediate_override_pcs) {
     std::unordered_map<uint64_t, std::string> name_by_key;
     for (const auto& fn : funcs) {
         uint64_t key = (static_cast<uint64_t>(fn.addr) << 1u) |
@@ -651,7 +651,7 @@ void write_body(const std::string& dir,
             fn.has_indirect_transfer ? "  indirect" : "",
             fn.name.c_str());
         emit_function_body(f, fn, rom, rom_size, rom_base, name_by_key,
-                           thumb_alu_immediate_override_pcs);
+                           alu_immediate_override_pcs);
         std::fprintf(f, "}\n\n");
         // Thin per-alias dispatch wrappers: set the resume PC and tail-call
         // the host. Each is a separate dispatch-table entry so an interior
@@ -745,6 +745,80 @@ bool validate_thumb_alu_immediate_override_sites(
             std::fprintf(stderr,
                 "ERROR: [[thumb_alu_immediate_override]] 0x%08X does not "
                 "decode as a THUMB ALU-immediate instruction (%s)\n",
+                entry.addr, armv4t::format_ir(ins).c_str());
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validate_alu_immediate_override_sites(
+        const Config& cfg, const std::vector<Function>& funcs,
+        const uint8_t* rom, std::size_t rom_size, uint32_t rom_base) {
+    auto is_data_processing = [](armv4t::IrOp op) {
+        switch (op) {
+            case armv4t::IrOp::AND: case armv4t::IrOp::EOR:
+            case armv4t::IrOp::SUB: case armv4t::IrOp::RSB:
+            case armv4t::IrOp::ADD: case armv4t::IrOp::ADC:
+            case armv4t::IrOp::SBC: case armv4t::IrOp::RSC:
+            case armv4t::IrOp::TST: case armv4t::IrOp::TEQ:
+            case armv4t::IrOp::CMP: case armv4t::IrOp::CMN:
+            case armv4t::IrOp::ORR: case armv4t::IrOp::MOV:
+            case armv4t::IrOp::BIC: case armv4t::IrOp::MVN:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    for (const auto& entry : cfg.alu_immediate_overrides) {
+        const Function* owner = nullptr;
+        for (const auto& fn : funcs) {
+            const uint32_t step = fn.mode == CpuMode::Thumb ? 2u : 4u;
+            if (entry.addr >= fn.addr && entry.addr < fn.end_addr &&
+                (entry.addr % step) == 0) {
+                owner = &fn;
+                break;
+            }
+        }
+        if (!owner) {
+            std::fprintf(stderr,
+                "ERROR: [[alu_immediate_override]] 0x%08X is not present "
+                "in a statically emitted function\n", entry.addr);
+            return false;
+        }
+
+        const uint32_t source_start = owner->source_addr
+            ? owner->source_addr : owner->addr;
+        const int64_t source_pc = static_cast<int64_t>(source_start) +
+            (static_cast<int64_t>(entry.addr) - owner->addr);
+        const uint32_t width = owner->mode == CpuMode::Thumb ? 2u : 4u;
+        if (source_pc < static_cast<int64_t>(rom_base) ||
+            static_cast<uint64_t>(source_pc - rom_base) + width > rom_size) {
+            std::fprintf(stderr,
+                "ERROR: [[alu_immediate_override]] 0x%08X has no immutable "
+                "source bytes in its static host function\n", entry.addr);
+            return false;
+        }
+        const std::size_t off =
+            static_cast<std::size_t>(source_pc - rom_base);
+        armv4t::Instr ins;
+        if (owner->mode == CpuMode::Thumb) {
+            const uint16_t hw = static_cast<uint16_t>(rom[off]) |
+                (static_cast<uint16_t>(rom[off + 1]) << 8);
+            ins = armv4t::ThumbDecoder::decode(hw, entry.addr);
+        } else {
+            const uint32_t word = static_cast<uint32_t>(rom[off]) |
+                (static_cast<uint32_t>(rom[off + 1]) << 8) |
+                (static_cast<uint32_t>(rom[off + 2]) << 16) |
+                (static_cast<uint32_t>(rom[off + 3]) << 24);
+            ins = armv4t::ArmDecoder::decode(word, entry.addr);
+        }
+        if (ins.is_undefined || !is_data_processing(ins.op) ||
+            ins.op2.kind != armv4t::Op2::Kind::Imm) {
+            std::fprintf(stderr,
+                "ERROR: [[alu_immediate_override]] 0x%08X does not decode "
+                "as an ALU-immediate instruction (%s)\n",
                 entry.addr, armv4t::format_ir(ins).c_str());
             return false;
         }
@@ -1020,6 +1094,10 @@ int main(int argc, char** argv) {
             cfg, funcs, rom.data(), rom.size(), effective_rom_base)) {
         return 1;
     }
+    if (have_cfg && !validate_alu_immediate_override_sites(
+            cfg, funcs, rom.data(), rom.size(), effective_rom_base)) {
+        return 1;
+    }
     std::printf("==> discovered %zu functions "
                 "(arm=%zu thumb=%zu indirect=%zu undefined=%zu "
                 "branch_targets=%zu)\n",
@@ -1110,16 +1188,19 @@ int main(int argc, char** argv) {
             "warn: BIOS output currently requires codegen_shards=1; using 1\n");
         codegen_shards = 1u;
     }
-    std::unordered_set<uint32_t> thumb_alu_immediate_override_pcs;
+    std::unordered_set<uint32_t> alu_immediate_override_pcs;
     if (have_cfg) {
         for (const auto& entry : cfg.thumb_alu_immediate_overrides) {
-            thumb_alu_immediate_override_pcs.insert(entry.addr);
+            alu_immediate_override_pcs.insert(entry.addr);
+        }
+        for (const auto& entry : cfg.alu_immediate_overrides) {
+            alu_immediate_override_pcs.insert(entry.addr);
         }
     }
     write_body(cli.out_dir, emit_funcs, rom.data(), rom.size(), effective_rom_base,
                names, codegen_shards,
-               thumb_alu_immediate_override_pcs.empty()
-                   ? nullptr : &thumb_alu_immediate_override_pcs);
+               alu_immediate_override_pcs.empty()
+                   ? nullptr : &alu_immediate_override_pcs);
     write_dispatch_table(cli.out_dir, emit_funcs, names);
     std::printf("==> wrote %s/{%s, %s%s, %s}\n",
                 cli.out_dir.c_str(),

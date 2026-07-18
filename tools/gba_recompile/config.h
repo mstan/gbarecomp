@@ -87,6 +87,11 @@ struct ConfigThumbAluImmediateOverride {
     std::string note;
 };
 
+struct ConfigAluImmediateOverride {
+    uint32_t    addr = 0;
+    std::string note;
+};
+
 struct ConfigDataRange {
     uint32_t    start = 0;
     uint32_t    end = 0;    // [start, end)
@@ -124,6 +129,7 @@ struct Config {
     std::vector<ConfigResumeRange>  resume_ranges;
     std::vector<ConfigThumbAluImmediateOverride>
         thumb_alu_immediate_overrides;
+    std::vector<ConfigAluImmediateOverride> alu_immediate_overrides;
     std::vector<ConfigDataRange>    data_ranges;
     std::vector<ConfigCodeCopy>     code_copies;
     std::vector<ConfigJumpTable>    jump_tables;

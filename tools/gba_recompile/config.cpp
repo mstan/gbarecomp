@@ -220,6 +220,41 @@ bool parse_thumb_alu_immediate_overrides(
     return true;
 }
 
+bool parse_alu_immediate_overrides(
+        const toml::array& arr,
+        std::vector<ConfigAluImmediateOverride>& out) {
+    for (std::size_t i = 0; i < arr.size(); ++i) {
+        const auto* t = arr[i].as_table();
+        if (!t) {
+            std::fprintf(stderr,
+                "%s[[alu_immediate_override]] entry %zu is not a table\n",
+                kAbortHeader, i);
+            return false;
+        }
+        ConfigAluImmediateOverride entry;
+        bool ok = true;
+        std::string err;
+        entry.addr = get_u32_field(*t, "addr", true, ok, err);
+        entry.note = get_string_field(*t, "note", false, ok, err);
+        if (!ok || (entry.addr & 1u) != 0) {
+            std::fprintf(stderr,
+                "%s[[alu_immediate_override]] entry %zu: addr is required "
+                "and must be halfword-aligned\n", kAbortHeader, i);
+            return false;
+        }
+        for (const auto& prior : out) {
+            if (prior.addr == entry.addr) {
+                std::fprintf(stderr,
+                    "%sduplicate [[alu_immediate_override]] at 0x%08X\n",
+                    kAbortHeader, entry.addr);
+                return false;
+            }
+        }
+        out.push_back(std::move(entry));
+    }
+    return true;
+}
+
 bool parse_data_ranges(const toml::array& arr,
                        std::vector<ConfigDataRange>& out) {
     for (std::size_t i = 0; i < arr.size(); ++i) {
@@ -497,6 +532,45 @@ bool validate_cross_section(const Config& cfg) {
             }
         }
     }
+    for (const auto& imm : cfg.alu_immediate_overrides) {
+        const std::uint64_t program_start = cfg.program.load_address;
+        const std::uint64_t program_end =
+            program_start + static_cast<std::uint64_t>(cfg.program.size);
+        bool in_code_image = imm.addr >= program_start &&
+            static_cast<std::uint64_t>(imm.addr) + 2u <= program_end;
+        for (const auto& cc : cfg.code_copies) {
+            const std::uint64_t copy_start = cc.runtime_start;
+            const std::uint64_t copy_end =
+                copy_start + static_cast<std::uint64_t>(cc.size);
+            in_code_image = in_code_image ||
+                (imm.addr >= copy_start &&
+                 static_cast<std::uint64_t>(imm.addr) + 2u <= copy_end);
+        }
+        if (!in_code_image) {
+            std::fprintf(stderr,
+                "%s[[alu_immediate_override]] 0x%08X is outside the program "
+                "image and declared [[code_copy]] spans\n",
+                kAbortHeader, imm.addr);
+            return false;
+        }
+        for (const auto& dr : cfg.data_ranges) {
+            if (imm.addr >= dr.start && imm.addr < dr.end) {
+                std::fprintf(stderr,
+                    "%s[[alu_immediate_override]] 0x%08X falls inside "
+                    "[[data_range]] [0x%08X,0x%08X)\n",
+                    kAbortHeader, imm.addr, dr.start, dr.end);
+                return false;
+            }
+        }
+        for (const auto& ex : cfg.exclude_funcs) {
+            if (ex.addr == imm.addr) {
+                std::fprintf(stderr,
+                    "%s[[alu_immediate_override]] 0x%08X is also an "
+                    "[[exclude_func]] address\n", kAbortHeader, imm.addr);
+                return false;
+            }
+        }
+    }
     // jump_table table bytes overlapping a data_range is also wrong
     // (the table bytes are AUTO-excluded, declaring them as data
     // is harmless but suggests confusion — accept silently for now).
@@ -598,6 +672,12 @@ bool load_config(const std::string& path, Config& out) {
                 *imm, out.thumb_alu_immediate_overrides)) return false;
     }
 
+    // [[alu_immediate_override]] (ARM or THUMB)
+    if (auto imm = tbl["alu_immediate_override"].as_array()) {
+        if (!parse_alu_immediate_overrides(
+                *imm, out.alu_immediate_overrides)) return false;
+    }
+
     // [[data_range]]
     if (auto dr = tbl["data_range"].as_array()) {
         if (!parse_data_ranges(*dr, out.data_ranges)) return false;
@@ -671,6 +751,8 @@ void print_config_summary(const Config& cfg) {
     std::printf("  resume_range entries:  %zu\n", cfg.resume_ranges.size());
     std::printf("  thumb immediate hooks: %zu\n",
                 cfg.thumb_alu_immediate_overrides.size());
+    std::printf("  ALU immediate hooks:   %zu\n",
+                cfg.alu_immediate_overrides.size());
     std::printf("  data_range entries:    %zu\n", cfg.data_ranges.size());
     std::printf("  code_copy entries:     %zu\n", cfg.code_copies.size());
     std::printf("  jump_table entries:    %zu\n", cfg.jump_tables.size());

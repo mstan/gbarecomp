@@ -819,6 +819,14 @@ const TestCase kTestCases[] = {
         nullptr, 0,
         false, 0, 0,
     },
+    {
+        "arm_cmp_imm_override_fixture",
+        false, 0x080B291Cu, 0xE35200F0u,  // CMP r2, #240
+        {0, 0, 300, 0, 0,0,0,0, 0,0,0,0, 0,0,0, 0x080B291Cu},
+        MODE_SYSTEM,
+        nullptr, 0,
+        false, 0, 0,
+    },
 
     // ── THUMB fmt9 STR r1, [r0, #0]  (0x6001) ───────────────────────
     {
