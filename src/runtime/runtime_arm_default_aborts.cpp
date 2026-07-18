@@ -17,8 +17,9 @@
 //     generated function: the finder didn't reach it, or it was
 //     deliberately excluded). As of Stage 1 this SELF-HEALS: it bridges
 //     the missed call through the reference interpreter and returns
-//     control to recompiled code, while loudly logging the miss and
-//     recording it for a reviewed TOML proposal. See PRINCIPLES.md
+//     control to recompiled code, while recording the miss for a reviewed
+//     TOML proposal. Routine per-PC logging is opt-in so console I/O cannot
+//     stall gameplay. See PRINCIPLES.md
 //     "Honest self-healing" and src/runtime/self_heal.h.
 //
 // Test consumers (tests/codegen/stubs.cpp) link only gbarecomp_armv4t
@@ -64,6 +65,12 @@ struct MissRec {
 
 std::map<std::uint32_t, MissRec> g_misses;        // keyed by PC & ~1
 std::uint64_t                    g_interp_insns = 0;
+bool                             g_miss_notice_logged = false;
+
+bool self_heal_verbose() {
+    const char* value = std::getenv("GBARECOMP_SELFHEAL_VERBOSE");
+    return value && value[0] != '\0' && value[0] != '0';
+}
 
 // Program identity, set once at startup, stamped into the persisted miss/
 // coverage logs so they are never ambiguous about which game produced them
@@ -315,9 +322,9 @@ bool self_heal_write_coverage_json(const char* path) {
 
 namespace {
 
-// Record a bridged miss + loudly log the FIRST occurrence of each PC
-// (subsequent occurrences only bump the counter, to avoid log spam on a
-// hot bridged routine — the count is surfaced in the exit report).
+// Record a bridged miss. Detailed first-occurrence logging is opt-in; the
+// default emits one session notice and leaves per-PC detail to the persisted
+// proposal/coverage reports and live debug surface.
 void record_and_log_miss(std::uint32_t pc, bool thumb) {
     MissRec& r = g_misses[pc];
     bool first = (r.count == 0);
@@ -329,16 +336,24 @@ void record_and_log_miss(std::uint32_t pc, bool thumb) {
         std::uint32_t off = 0;
         const char* sym = gba_symbol_lookup(pc, &off);
         if (sym) std::snprintf(symbuf, sizeof(symbuf), " <near %s+0x%X>", sym, off);
-        std::fprintf(stderr,
-            "runtime_arm: SELF-HEAL dispatch miss for pc=0x%08X%s (%s) — no "
-            "generated function; bridging through the interpreter and "
-            "recording for a TOML proposal (Stage-1 self-healing; NOT fully "
-            "static). %s\n",
-            pc, symbuf, thumb ? "thumb" : "arm",
-            pc < 0x00004000u
-                ? "Re-run `gba_recompile --bios bios/gba_bios.bin "
-                  "--config bios/gba_bios.toml` after merging the proposal."
-                : "Merge the proposal into game.toml and regenerate.");
+        if (self_heal_verbose()) {
+            std::fprintf(stderr,
+                "runtime_arm: SELF-HEAL dispatch miss for pc=0x%08X%s (%s) - "
+                "no generated function; bridging through the interpreter and "
+                "recording for a TOML proposal (Stage-1 self-healing; NOT fully "
+                "static). %s\n",
+                pc, symbuf, thumb ? "thumb" : "arm",
+                pc < 0x00004000u
+                    ? "Re-run `gba_recompile --bios bios/gba_bios.bin "
+                      "--config bios/gba_bios.toml` after merging the proposal."
+                    : "Merge the proposal into game.toml and regenerate.");
+        } else if (!g_miss_notice_logged) {
+            g_miss_notice_logged = true;
+            std::fprintf(stderr,
+                "self_heal: missing static coverage detected; healing in the "
+                "background and recording a TOML proposal. Set "
+                "GBARECOMP_SELFHEAL_VERBOSE=1 for per-PC diagnostics.\n");
+        }
 
         const char* trace_on_miss = std::getenv("GBARECOMP_TRACE_ON_DISPATCH_MISS");
         if (trace_on_miss && trace_on_miss[0] != '\0') {
@@ -456,15 +471,15 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
         // heals-to-static: it hands control back the instant execution
         // re-enters a statically-recompiled function. Stay loud + capped.
         stop_pc = g_cpu.R[14] & ~1u;
-        // Loud ONCE per PC, then silent (counts surfaced in the exit miss
-        // report) — see MissRec::toplevel_logged. Mirrors record_and_log_miss.
+        // Detailed once-per-PC diagnostics are opt-in; counts remain available
+        // in the exit miss report. Mirrors record_and_log_miss.
         MissRec& mr = g_misses[entry_pc & ~1u];
         if (!mr.toplevel_logged) {
             mr.toplevel_logged = true;
-            std::fprintf(stderr,
+            if (self_heal_verbose()) std::fprintf(stderr,
                          "runtime_arm: SELF-HEAL bridge entered at top level "
                          "(empty call-return stack) for pc=0x%08X; LR=0x%08X "
-                         "(fallback stop) — will heal to the next static entry. "
+                         "(fallback stop) - will heal to the next static entry. "
                          "[logged once/PC; see exit miss-report for counts]\n",
                          entry_pc, stop_pc);
         }

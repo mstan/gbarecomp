@@ -78,6 +78,11 @@ HealBackend              s_backend = HealBackend::Gcc;  // resolved producer
 std::vector<uint8_t>     s_bios_bytes;            // 16 KB BIOS snapshot (base 0)
 GbaOverlayCallbacks      g_callbacks{};
 
+bool self_heal_verbose() {
+    const char* value = std::getenv("GBARECOMP_SELFHEAL_VERBOSE");
+    return value && value[0] != '\0' && value[0] != '0';
+}
+
 // Game-thread-only:
 std::unordered_map<uint64_t, HealedEntry> g_healed;
 std::unordered_set<uint64_t>              s_inflight;
@@ -258,15 +263,15 @@ void worker_main() {
         r.ok = overlay_compile_one(w, s_active_cache_dir, &g_callbacks,
                                    /*compile_if_missing=*/true, s_backend,
                                    &r.c, &err);
-        if (r.ok) {
+        if (r.ok && self_heal_verbose()) {
             std::fprintf(stderr,
                 "self_heal: HEALED 0x%08X (%s) -> native via %s (crc=%08X, "
                 "[0x%08X,0x%08X)); the interpreter bridge stops for this PC.\n",
                 w.pc, w.thumb ? "thumb" : "arm", heal_backend_name(s_backend),
                 r.c.crc, w.pc, r.c.end);
-        } else {
+        } else if (!r.ok) {
             std::fprintf(stderr,
-                "self_heal: compile FAILED for 0x%08X (%s): %s — staying on the "
+                "self_heal: compile FAILED for 0x%08X (%s): %s - staying on the "
                 "interpreter bridge this session.\n",
                 w.pc, w.thumb ? "thumb" : "arm", err.c_str());
         }

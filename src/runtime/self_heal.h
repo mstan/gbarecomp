@@ -9,10 +9,12 @@
 // proposal.
 //
 // Doctrine (PRINCIPLES.md "Honest self-healing" / "Coverage honesty is
-// load-bearing"): a bridged miss MUST be (1) loudly logged, (2) healed toward
-// static, and (3) fed back to the TOML via a *separate* proposal file that a
-// human reviews and merges (never an auto-write to game.toml). Stage 1 does
-// (1) + (3); the on-the-fly recompile of (2) is Stage 2.
+// load-bearing"): a bridged miss MUST be (1) visibly reported and recorded,
+// (2) healed toward static, and (3) fed back to the TOML via a *separate*
+// proposal file that a human reviews and merges (never an auto-write to
+// game.toml). The default console emits one session notice; per-PC lines are
+// opt-in with GBARECOMP_SELFHEAL_VERBOSE=1, while coverage/proposal detail is
+// always retained. Stage 1 does (1) + (3); on-the-fly recompile is Stage 2.
 
 #pragma once
 

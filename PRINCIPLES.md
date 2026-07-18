@@ -57,7 +57,7 @@ load a cart.
 The GBA BIOS is **recompiled and executed via the dispatch table**,
 not stubbed, not HLE'd, not "fast-forwarded." A missed BIOS PC
 self-heals like any other code (see "Honest self-healing" below) —
-bridged by the interpreter, recompiled on the fly, and logged loudly —
+bridged by the interpreter, recompiled on the fly, and reported loudly —
 never silently HLE'd or stubbed, with 100% recompiled BIOS coverage
 the goal by construction. Every game boot path on real hardware
 enters the BIOS at power-on, runs the Nintendo logo intro, then
@@ -124,8 +124,11 @@ hot path — for BIOS, ROM, or RAM code — but ONLY under all three of
 these conditions, **together**:
 
 1. **Loudly documented — never silent.** Every fallback is observable
-   and honestly reported: logged on first occurrence, counted, dumped
-   in a coverage report at exit, and queryable live. We must never be
+   and honestly reported: a session notice appears on the first miss,
+   every PC is counted and dumped in a coverage report at exit, and
+   detail is queryable live. Per-PC console lines are available with
+   `GBARECOMP_SELFHEAL_VERBOSE=1`, not emitted by default, because
+   synchronous console I/O must not stall gameplay. We must never be
    able to call a half-interpreted run "statically recompiled / done"
    without that fact being visible.
 2. **Self-healing to static.** On the first miss we interpret to keep
