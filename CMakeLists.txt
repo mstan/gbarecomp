@@ -6,6 +6,53 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Large generated corpora are expensive to rebuild in fresh build trees.
+# Reuse identical objects automatically when ccache/sccache is available, while
+# preserving an explicit launcher selected by the parent project or user.
+set(GBARECOMP_COMPILER_CACHE "AUTO" CACHE STRING
+    "Compiler cache: AUTO, OFF, or a ccache/sccache executable")
+if(GBARECOMP_COMPILER_CACHE STREQUAL "OFF")
+    if(GBARECOMP_MANAGED_COMPILER_CACHE_PROGRAM AND
+       "${CMAKE_C_COMPILER_LAUNCHER}" STREQUAL
+           "${GBARECOMP_MANAGED_COMPILER_CACHE_PROGRAM}")
+        unset(CMAKE_C_COMPILER_LAUNCHER CACHE)
+    endif()
+    if(GBARECOMP_MANAGED_COMPILER_CACHE_PROGRAM AND
+       "${CMAKE_CXX_COMPILER_LAUNCHER}" STREQUAL
+           "${GBARECOMP_MANAGED_COMPILER_CACHE_PROGRAM}")
+        unset(CMAKE_CXX_COMPILER_LAUNCHER CACHE)
+    endif()
+    unset(GBARECOMP_MANAGED_COMPILER_CACHE_PROGRAM CACHE)
+elseif(NOT CMAKE_CXX_COMPILER_LAUNCHER)
+    unset(GBARECOMP_COMPILER_CACHE_PROGRAM CACHE)
+    if(GBARECOMP_COMPILER_CACHE STREQUAL "AUTO")
+        find_program(GBARECOMP_COMPILER_CACHE_PROGRAM
+            NAMES sccache ccache
+            HINTS C:/msys64/mingw64/bin)
+    elseif(EXISTS "${GBARECOMP_COMPILER_CACHE}")
+        set(GBARECOMP_COMPILER_CACHE_PROGRAM
+            "${GBARECOMP_COMPILER_CACHE}")
+    else()
+        find_program(GBARECOMP_COMPILER_CACHE_PROGRAM
+            NAMES "${GBARECOMP_COMPILER_CACHE}")
+    endif()
+    if(GBARECOMP_COMPILER_CACHE_PROGRAM)
+        set(CMAKE_C_COMPILER_LAUNCHER
+            "${GBARECOMP_COMPILER_CACHE_PROGRAM}" CACHE STRING
+            "Launcher for C compilation")
+        set(CMAKE_CXX_COMPILER_LAUNCHER
+            "${GBARECOMP_COMPILER_CACHE_PROGRAM}" CACHE STRING
+            "Launcher for C++ compilation")
+        set(GBARECOMP_MANAGED_COMPILER_CACHE_PROGRAM
+            "${GBARECOMP_COMPILER_CACHE_PROGRAM}" CACHE INTERNAL
+            "Compiler launcher selected by gbarecomp" FORCE)
+        message(STATUS "gbarecomp: compiler cache enabled: "
+            "${GBARECOMP_COMPILER_CACHE_PROGRAM}")
+    else()
+        message(STATUS "gbarecomp: compiler cache not found")
+    endif()
+endif()
+
 if(MSVC)
     add_compile_options(/W3 /permissive- /Zc:__cplusplus)
 else()
@@ -140,6 +187,7 @@ set_property(TARGET gbarecomp_armv4t PROPERTY POSITION_INDEPENDENT_CODE ON)
 add_library(gbarecomp_recompile_core STATIC
     src/recompile/function_finder.cpp
     src/recompile/emit_function.cpp
+    src/recompile/codegen_shards.cpp
 )
 target_include_directories(gbarecomp_recompile_core PUBLIC src/recompile)
 target_link_libraries(gbarecomp_recompile_core PUBLIC gbarecomp_armv4t)
@@ -209,10 +257,8 @@ add_library(gbarecomp_runtime STATIC
     # gbarecomp_armv4t (not gbarecomp_runtime) supply their own.
     src/runtime/runtime_arm_default_aborts.cpp
     src/runtime/self_heal_cluster.cpp
-    # BIOS dispatch table — placeholder until `gba_recompile --bios`
-    # is run, real bios_recompiled.cpp is gitignored and linked
-    # opt-in via GBARECOMP_HAVE_BIOS_RECOMP below.
-    src/runtime/generated_bios/bios_dispatch_table.cpp
+    # BIOS dispatch/body selection is handled below. Clean checkouts use a
+    # tracked empty stub; locally generated BIOS output is selected as a unit.
 )
 
 # When the user has run `gba_recompile --bios`, the recompiled BIOS
@@ -221,11 +267,14 @@ add_library(gbarecomp_runtime STATIC
 # doesn't have it. Pull it in if present.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/generated_bios/bios_recompiled.cpp")
     target_sources(gbarecomp_runtime PRIVATE
+        src/runtime/generated_bios/bios_dispatch_table.cpp
         src/runtime/generated_bios/bios_recompiled.cpp)
     target_compile_definitions(gbarecomp_runtime PUBLIC
         GBARECOMP_HAVE_BIOS_RECOMP=1)
     message(STATUS "gbarecomp: BIOS recompiled output present — linking")
 else()
+    target_sources(gbarecomp_runtime PRIVATE
+        src/runtime/generated_bios/bios_dispatch_stub.cpp)
     message(STATUS "gbarecomp: BIOS recompiled output absent — placeholder dispatch only. "
                    "Run `build/gba_recompile.exe --bios bios/gba_bios.bin` "
                    "to populate.")
@@ -351,17 +400,20 @@ set(GBA_SUITE_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/gba_suite)
 # Recompile arm.gba at build time.
 set(TEST_ROM_ARM_OUTDIR ${CMAKE_CURRENT_BINARY_DIR}/test_rom_arm_gen)
 set(TEST_ROM_ARM_DISPATCH ${TEST_ROM_ARM_OUTDIR}/dispatch_table.cpp)
-set(TEST_ROM_ARM_BODY     ${TEST_ROM_ARM_OUTDIR}/recompiled.cpp)
+set(TEST_ROM_ARM_BODIES
+    ${TEST_ROM_ARM_OUTDIR}/recompiled_000.cpp
+    ${TEST_ROM_ARM_OUTDIR}/recompiled_001.cpp)
 set(TEST_ROM_ARM_HEADER   ${TEST_ROM_ARM_OUTDIR}/recompiled.h)
 file(MAKE_DIRECTORY ${TEST_ROM_ARM_OUTDIR})
 
 if(EXISTS ${GBA_SUITE_ROOT}/arm/arm.gba)
     add_custom_command(
-        OUTPUT  ${TEST_ROM_ARM_DISPATCH} ${TEST_ROM_ARM_BODY}
+        OUTPUT  ${TEST_ROM_ARM_DISPATCH} ${TEST_ROM_ARM_BODIES}
                 ${TEST_ROM_ARM_HEADER}
         COMMAND $<TARGET_FILE:gba_recompile>
                 --rom ${GBA_SUITE_ROOT}/arm/arm.gba
                 --entry 0x080000C0
+                --codegen-shards 2
                 --out ${TEST_ROM_ARM_OUTDIR}
         DEPENDS gba_recompile
                 ${GBA_SUITE_ROOT}/arm/arm.gba
@@ -372,7 +424,7 @@ if(EXISTS ${GBA_SUITE_ROOT}/arm/arm.gba)
     add_executable(test_rom_arm
         tools/test_rom_runner/main.cpp
         ${TEST_ROM_ARM_DISPATCH}
-        ${TEST_ROM_ARM_BODY}
+        ${TEST_ROM_ARM_BODIES}
     )
     target_include_directories(test_rom_arm PRIVATE
         ${TEST_ROM_ARM_OUTDIR}
@@ -388,17 +440,20 @@ endif()
 # Recompile thumb.gba at build time.
 set(TEST_ROM_THUMB_OUTDIR ${CMAKE_CURRENT_BINARY_DIR}/test_rom_thumb_gen)
 set(TEST_ROM_THUMB_DISPATCH ${TEST_ROM_THUMB_OUTDIR}/dispatch_table.cpp)
-set(TEST_ROM_THUMB_BODY     ${TEST_ROM_THUMB_OUTDIR}/recompiled.cpp)
+set(TEST_ROM_THUMB_BODIES
+    ${TEST_ROM_THUMB_OUTDIR}/recompiled_000.cpp
+    ${TEST_ROM_THUMB_OUTDIR}/recompiled_001.cpp)
 set(TEST_ROM_THUMB_HEADER   ${TEST_ROM_THUMB_OUTDIR}/recompiled.h)
 file(MAKE_DIRECTORY ${TEST_ROM_THUMB_OUTDIR})
 
 if(EXISTS ${GBA_SUITE_ROOT}/thumb/thumb.gba)
     add_custom_command(
-        OUTPUT  ${TEST_ROM_THUMB_DISPATCH} ${TEST_ROM_THUMB_BODY}
+        OUTPUT  ${TEST_ROM_THUMB_DISPATCH} ${TEST_ROM_THUMB_BODIES}
                 ${TEST_ROM_THUMB_HEADER}
         COMMAND $<TARGET_FILE:gba_recompile>
                 --rom ${GBA_SUITE_ROOT}/thumb/thumb.gba
                 --entry 0x080000C0
+                --codegen-shards 2
                 --out ${TEST_ROM_THUMB_OUTDIR}
         DEPENDS gba_recompile
                 ${GBA_SUITE_ROOT}/thumb/thumb.gba
@@ -409,7 +464,7 @@ if(EXISTS ${GBA_SUITE_ROOT}/thumb/thumb.gba)
     add_executable(test_rom_thumb
         tools/test_rom_runner/main.cpp
         ${TEST_ROM_THUMB_DISPATCH}
-        ${TEST_ROM_THUMB_BODY}
+        ${TEST_ROM_THUMB_BODIES}
     )
     target_include_directories(test_rom_thumb PRIVATE
         ${TEST_ROM_THUMB_OUTDIR}
@@ -436,6 +491,14 @@ endif()
 # ─────────────────────────────────────────────────────────────────────────────
 enable_testing()
 
+add_test(NAME runtime_monolith_guard
+    COMMAND ${CMAKE_COMMAND}
+        -DGBARECOMP_RUNTIME_CMAKE=${CMAKE_CURRENT_BINARY_DIR}/runtime.cmake
+        -DGBARECOMP_TEST_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/runtime_monolith_guard
+        -DGBARECOMP_TEST_BINARY=${CMAKE_CURRENT_BINARY_DIR}/runtime_monolith_guard_test
+        -DGBARECOMP_TEST_GENERATOR=${CMAKE_GENERATOR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/assert_runtime_monolith_guard.cmake)
+
 add_executable(decoder_smoke tests/armv4t/decoder_smoke.cpp)
 target_link_libraries(decoder_smoke PRIVATE gbarecomp_armv4t)
 add_test(NAME decoder_smoke COMMAND decoder_smoke)
@@ -443,6 +506,10 @@ add_test(NAME decoder_smoke COMMAND decoder_smoke)
 add_executable(function_finder_tests tests/recompile/function_finder_test.cpp)
 target_link_libraries(function_finder_tests PRIVATE gbarecomp_recompile_core)
 add_test(NAME function_finder_tests COMMAND function_finder_tests)
+
+add_executable(codegen_shards_tests tests/recompile/codegen_shards_test.cpp)
+target_link_libraries(codegen_shards_tests PRIVATE gbarecomp_recompile_core)
+add_test(NAME codegen_shards_tests COMMAND codegen_shards_tests)
 
 # Self-heal proposal clustering — pure logic, links only the standalone
 # clustering TU (no runtime/bus/overlay dependencies).
@@ -489,6 +556,11 @@ add_test(NAME irq_tests COMMAND irq_tests)
 add_executable(ppu_smoke_tests tests/ppu_smoke/test_main.cpp)
 target_include_directories(ppu_smoke_tests PRIVATE src/runtime src/debug)
 target_link_libraries(ppu_smoke_tests PRIVATE gbarecomp_gba)
+if(MSVC)
+    target_link_options(ppu_smoke_tests PRIVATE /STACK:16777216)
+elseif(MINGW OR WIN32)
+    target_link_options(ppu_smoke_tests PRIVATE -Wl,--stack,16777216)
+endif()
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
 
 add_executable(presentation_layout_tests tests/presentation_layout/test_main.cpp)

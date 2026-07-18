@@ -44,7 +44,7 @@ load_address = 0x00000000
 size         = 0x00004000
 entry_pc     = 0x00000000
 speculative_literal_harvest = false # optional; default true
-codegen_shards = 16                 # optional; default 1
+# codegen_shards = 16               # optional cartridge override; default auto
 
 [identity]
 sha1 = "300c20df6731a33952ded8c436f7f186d25d3492"   # required, abort on mismatch
@@ -110,7 +110,7 @@ reason = "literal pool walked as code by finder pre-vX.Y"
 | `size`         | int hex | Byte size of the binary (must match the file on disk). |
 | `entry_pc`     | int hex | Initial PC. Seeded as `[[extra_func]]` automatically; declaring it again is a redundant no-op. |
 | `speculative_literal_harvest` | bool | Optional, default `true`. Harvest plausible callback pointers from PC-relative literal loads. Set `false` for evidence-driven strict-static corpora where runtime-observed `[[extra_func]]` roots are preferred over speculative reachability. Direct branch discovery is unchanged. |
-| `codegen_shards` | int | Optional, default `1`, range 1..256. Deterministically partitions emitted guest functions into `recompiled_NNN.cpp` translation units. Stable address hashing and write-if-changed output keep unrelated shards untouched when a reviewed seed is added. |
+| `codegen_shards` | int | Optional cartridge override, range 2..256. When omitted or `0`, the recompiler chooses an adaptive power-of-two count from 2..64. Cartridge output is never monolithic. `1` is accepted only as legacy input and upgraded to the adaptive count with a warning. Stable address hashing and write-if-changed output keep unrelated shards untouched when a reviewed seed is added. BIOS output remains one small translation unit. |
 
 ### `[identity]` (required)
 

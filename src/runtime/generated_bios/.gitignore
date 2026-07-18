@@ -8,5 +8,6 @@ bios_recompiled.h
 # `gba_recompile --bios` alongside bios_recompiled.cpp. Regenerate locally.
 bios_symbol_map.cpp
 
-# bios_dispatch_table.cpp IS committed as a placeholder so the build
-# works without BIOS regen. gba_recompile --bios overwrites it.
+# bios_dispatch_table.cpp is committed for provenance and overwritten by BIOS
+# regeneration. Clean builds use bios_dispatch_stub.cpp until the matching
+# ignored bios_recompiled.cpp is present.

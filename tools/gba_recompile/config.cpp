@@ -614,15 +614,17 @@ bool load_config(const std::string& path, Config& out) {
         out.program.entry_pc     = get_u32_field   (t, "entry_pc",     true,  ok, err);
         out.program.speculative_literal_harvest =
             t["speculative_literal_harvest"].value_or(true);
-        out.program.codegen_shards = static_cast<uint32_t>(
-            t["codegen_shards"].value_or<int64_t>(1));
-        if (out.program.codegen_shards == 0 ||
-            out.program.codegen_shards > 256) {
+        const int64_t configured_shards =
+            t["codegen_shards"].value_or<int64_t>(0);
+        if (configured_shards < 0 || configured_shards > 256) {
             std::fprintf(stderr,
-                "%s[program]: codegen_shards must be in [1, 256]\n",
+                "%s[program]: codegen_shards must be in [0, 256] "
+                "(0 means auto)\n",
                 kAbortHeader);
             return false;
         }
+        out.program.codegen_shards =
+            static_cast<uint32_t>(configured_shards);
         if (!ok) {
             std::fprintf(stderr, "%s[program]: %s\n",
                          kAbortHeader, err.c_str());
@@ -744,7 +746,12 @@ void print_config_summary(const Config& cfg) {
     std::printf("  speculative literals:  %s\n",
                 cfg.program.speculative_literal_harvest
                     ? "enabled" : "disabled");
-    std::printf("  codegen shards:         %u\n", cfg.program.codegen_shards);
+    if (cfg.program.codegen_shards == 0) {
+        std::printf("  codegen shards:         auto\n");
+    } else {
+        std::printf("  codegen shards:         %u\n",
+                    cfg.program.codegen_shards);
+    }
     std::printf("  identity sha1:         %s (verified)\n",
                 hex_lower(cfg.identity.sha1).c_str());
     std::printf("  extra_func entries:    %zu\n", cfg.extra_funcs.size());

@@ -16,13 +16,14 @@
 //                 [--out <out_dir>]
 //                 [--rom-base 0x08000000]
 //                 [--max-functions 4096]
+//                 [--codegen-shards N]
 //
 //   gba_recompile --bios <bios.bin>
 //                 [--out <out_dir>]
 //                 [--max-functions 256]
 //
 // Cart output (default --out = "generated"):
-//   <out_dir>/recompiled.cpp        function bodies
+//   <out_dir>/recompiled_NNN.cpp    sharded function bodies (2+ files)
 //   <out_dir>/recompiled.h          forward declarations
 //   <out_dir>/dispatch_table.cpp    kDispatchTable / kDispatchTableLen
 //
@@ -47,6 +48,7 @@
 #include <vector>
 
 #include "config.h"
+#include "codegen_shards.h"
 #include "function_finder.h"
 #include "arm_decode.h"    // armv4t::ArmDecoder
 #include "thumb_decode.h"  // armv4t::ThumbDecoder
@@ -74,6 +76,7 @@ struct Cli {
     uint32_t entry = 0x080000C0u;
     uint32_t rom_base = 0x08000000u;
     std::size_t max_functions = 4096;
+    uint32_t codegen_shards = 0; // 0 = config value or adaptive default
     bool ok = true;
     bool bios_mode = false;     // set when --bios is parsed
     bool emit_symbol_map = true; // --no-symbol-map opts out (debug aid)
@@ -83,11 +86,12 @@ void print_usage() {
     std::printf(
         "gba_recompile --rom <path> [--entry HEX] [--symbols TSV]\n"
         "              [--config TOML] [--out DIR] [--rom-base HEX]\n"
-        "              [--max-functions N]\n"
+        "              [--max-functions N] [--codegen-shards N]\n"
         "\n"
         "  Cart-recompile mode. Discovers functions reachable from\n"
-        "  --entry + --symbols seeds and writes <out>/recompiled.{cpp,h}\n"
-        "  + dispatch_table.cpp.\n"
+        "  --entry + --symbols seeds and writes two or more deterministic\n"
+        "  <out>/recompiled_NNN.cpp shards + recompiled.h +\n"
+        "  dispatch_table.cpp. Monolithic cart output is prohibited.\n"
         "\n"
         "gba_recompile --bios <path>\n"
         "              [--config TOML] [--out DIR] [--max-functions N]\n"
@@ -131,6 +135,19 @@ Cli parse_cli(int argc, char** argv) {
         else if (a == "--rom-base")     parse_hex(next(), c.rom_base);
         else if (a == "--no-symbol-map") c.emit_symbol_map = false;
         else if (a == "--symbol-map")    c.emit_symbol_map = true;
+        else if (a == "--codegen-shards") {
+            const char* v = next();
+            char* end = nullptr;
+            const unsigned long parsed = v ? std::strtoul(v, &end, 10) : 0;
+            if (!v || end == v || *end != '\0' || parsed < 2 ||
+                parsed > 256) {
+                std::fprintf(stderr,
+                    "--codegen-shards requires an integer in [2, 256]\n");
+                c.ok = false;
+                return c;
+            }
+            c.codegen_shards = static_cast<uint32_t>(parsed);
+        }
         else if (a == "--max-functions") {
             const char* v = next();
             if (v) c.max_functions =
@@ -230,8 +247,8 @@ std::vector<FunctionSeed> load_symbols(const std::string& path) {
 // below calls it via the FILE* wrapper.
 // ─────────────────────────────────────────────────────────────────────
 
-// Output naming: cart mode uses recompiled.{cpp,h} + dispatch_table.cpp
-// with kDispatchTable. BIOS mode uses bios_recompiled.{cpp,h} +
+// Output naming: cart mode uses recompiled_NNN.cpp shards + recompiled.h +
+// dispatch_table.cpp with kDispatchTable. BIOS mode uses bios_recompiled.{cpp,h} +
 // bios_dispatch_table.cpp with kBiosDispatchTable. The runtime
 // consults kBiosDispatchTable first for PC < 0x4000 and falls
 // through to kDispatchTable otherwise.
@@ -676,9 +693,16 @@ void write_body(const std::string& dir,
         if (!entry.is_regular_file()) continue;
         const std::string filename = entry.path().filename().string();
         const bool legacy = filename == body_name;
-        const bool shard = filename.size() > stem.size() + 5 &&
-            filename.compare(0, stem.size() + 1, stem + "_") == 0 &&
-            entry.path().extension() == ".cpp";
+        const std::string shard_prefix = stem + "_";
+        const std::size_t digits_begin = shard_prefix.size();
+        const bool shard =
+            filename.size() == shard_prefix.size() + 3 + suffix.size() &&
+            filename.compare(0, shard_prefix.size(), shard_prefix) == 0 &&
+            filename.compare(filename.size() - suffix.size(), suffix.size(),
+                             suffix) == 0 &&
+            std::all_of(filename.begin() + digits_begin,
+                        filename.begin() + digits_begin + 3,
+                        [](char c) { return c >= '0' && c <= '9'; });
         if ((legacy || shard) && expected.count(filename) == 0) {
             std::filesystem::remove(entry.path(), ec);
             ec.clear();
@@ -1182,11 +1206,30 @@ int main(int argc, char** argv) {
     OutputNames names = names_for_mode(cli.bios_mode);
     if (cli.emit_symbol_map) write_symbol_map(cli.out_dir, emit_funcs, cli.bios_mode);
     write_header(cli.out_dir, emit_funcs, names);
-    uint32_t codegen_shards = have_cfg ? cfg.program.codegen_shards : 1u;
-    if (cli.bios_mode && codegen_shards != 1u) {
-        std::fprintf(stderr,
-            "warn: BIOS output currently requires codegen_shards=1; using 1\n");
+    uint32_t codegen_shards = cli.codegen_shards != 0
+        ? cli.codegen_shards
+        : (have_cfg ? cfg.program.codegen_shards : 0u);
+    if (cli.bios_mode) {
+        if (codegen_shards > 1u) {
+            std::fprintf(stderr,
+                "warn: BIOS output is small and requires one translation "
+                "unit; ignoring codegen_shards=%u\n", codegen_shards);
+        }
         codegen_shards = 1u;
+    } else if (codegen_shards < gbarecomp::kMinCartCodegenShards) {
+        if (codegen_shards == 1u) {
+            std::fprintf(stderr,
+                "warn: codegen_shards=1 is no longer supported for "
+                "cartridges; selecting adaptive shards\n");
+        }
+        codegen_shards = gbarecomp::choose_auto_codegen_shards(
+            emit_funcs.size());
+    }
+    if (!cli.bios_mode) {
+        std::printf("==> codegen shards: %u%s\n", codegen_shards,
+                    (cli.codegen_shards == 0 &&
+                     (!have_cfg || cfg.program.codegen_shards < 2u))
+                        ? " (adaptive)" : "");
     }
     std::unordered_set<uint32_t> alu_immediate_override_pcs;
     if (have_cfg) {

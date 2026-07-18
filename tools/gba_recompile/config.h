@@ -45,8 +45,9 @@ struct ConfigProgram {
     // strict static corpus can disable it and add only observed callbacks.
     bool        speculative_literal_harvest = true;
     // Number of deterministic C++ translation units used for emitted guest
-    // bodies. One preserves the legacy recompiled.cpp output.
-    uint32_t    codegen_shards = 1;
+    // bodies. Zero selects the adaptive cartridge default. Cartridge output
+    // is never monolithic; BIOS output remains one small translation unit.
+    uint32_t    codegen_shards = 0;
 };
 
 struct ConfigIdentity {

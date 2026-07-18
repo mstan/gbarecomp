@@ -22,14 +22,49 @@ set(GBARECOMP_CORE_BIN_DIR "@CMAKE_CURRENT_BINARY_DIR@" CACHE PATH "")
 function(gbarecomp_add_runtime_target target_name)
     cmake_parse_arguments(GR
         ""
-        "DEBUG_PORT;WINDOW_TITLE;DEFAULT_GAME_CONFIG_PATH"
+        "DEBUG_PORT;WINDOW_TITLE;DEFAULT_GAME_CONFIG_PATH;GAME_GENERATED_DIR"
         "GAME_GENERATED_C"
         ${ARGN}
     )
 
+    if(GR_GAME_GENERATED_DIR)
+        if(EXISTS "${GR_GAME_GENERATED_DIR}/recompiled.cpp")
+            message(FATAL_ERROR
+                "gbarecomp_add_runtime_target(${target_name}): stale "
+                "monolithic ${GR_GAME_GENERATED_DIR}/recompiled.cpp found. "
+                "Regenerate with the current gba_recompile; cartridge "
+                "monoliths are no longer supported.")
+        endif()
+        file(GLOB _gbarecomp_shards CONFIGURE_DEPENDS
+            "${GR_GAME_GENERATED_DIR}/recompiled_[0-9][0-9][0-9].cpp")
+        list(LENGTH _gbarecomp_shards _gbarecomp_shard_count)
+        if(_gbarecomp_shard_count LESS 2)
+            message(FATAL_ERROR
+                "gbarecomp_add_runtime_target(${target_name}): expected at "
+                "least two recompiled_NNN.cpp files in "
+                "${GR_GAME_GENERATED_DIR}; regenerate the cartridge.")
+        endif()
+        list(APPEND GR_GAME_GENERATED_C
+            ${_gbarecomp_shards}
+            "${GR_GAME_GENERATED_DIR}/dispatch_table.cpp")
+        if(EXISTS "${GR_GAME_GENERATED_DIR}/symbol_map.cpp")
+            list(APPEND GR_GAME_GENERATED_C
+                "${GR_GAME_GENERATED_DIR}/symbol_map.cpp")
+        endif()
+    endif()
+
+    foreach(_gbarecomp_source IN LISTS GR_GAME_GENERATED_C)
+        get_filename_component(_gbarecomp_name "${_gbarecomp_source}" NAME)
+        if(_gbarecomp_name STREQUAL "recompiled.cpp")
+            message(FATAL_ERROR
+                "gbarecomp_add_runtime_target(${target_name}): monolithic "
+                "recompiled.cpp is prohibited; regenerate as shards.")
+        endif()
+    endforeach()
+
     if(NOT GR_GAME_GENERATED_C)
         message(FATAL_ERROR "gbarecomp_add_runtime_target(${target_name}): "
-            "missing GAME_GENERATED_C")
+            "missing GAME_GENERATED_DIR or GAME_GENERATED_C")
     endif()
 
     add_executable(${target_name}

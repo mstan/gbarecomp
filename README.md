@@ -74,6 +74,12 @@ cmake -B build -S .
 cmake --build build
 ```
 
+Cartridge recompilation always emits parallel `recompiled_NNN.cpp` shards; the
+old giant `recompiled.cpp` form is no longer supported. On Windows, the supplied
+Clang-MinGW toolchain and automatic ccache/sccache integration can reduce a
+large clean game build from 10+ minutes to low single-digit minutes. See
+[`docs/BUILD_PERFORMANCE.md`](docs/BUILD_PERFORMANCE.md).
+
 Targets:
 
 - `gba_scan` — walk a ROM and report header, entry, code regions.
