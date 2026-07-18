@@ -35,7 +35,18 @@ reproduced, and we chose not to fix immediately. Not a TODO list.
   Phase 2.7 re-pass via recompiled execution. See `docs/ROADMAP.md`
   Phase 2.8.A–E.
 
-### HP-002: Native-res "warble"/tear-like line, bottom-ish, high-action scenes — all games
+### HP-002: [RESOLVED 2026-07-17 — "good enough", user-accepted] Native-res "warble"/tear-like line, bottom-ish, high-action scenes — all games
+- **Resolved:** 2026-07-17. Two measured causes fixed and merged (pacer
+  234 ms sleep-quantization beat → high-resolution waitable timer,
+  `75bbcfa`; unsynchronized present → vsync on every path + D3D11
+  flip-model default, `d343959`). User verdict after both: artifact
+  reduced twice, remainder "good enough" — declared done. Content-side
+  timing fully exonerated by the MMIO ring in BOTH walking and combat
+  scenes (10264+2264 scroll writes, 0 on visible scanlines; blend/
+  window/mosaic also 0). Any residual is display-physical
+  (59.73-on-165 Hz pulldown when VRR is not engaged); the
+  discriminating VRR test and the emulation/presentation thread split
+  remain documented below as future polish, not open defects.
 - **Observed:** 2026-07-17 (user, during MC-WS-002 work). At the
   standard 3:2 resolution, high-action areas show a subtle warble
   described as "like a screen tear towards the bottom-ish" of the
