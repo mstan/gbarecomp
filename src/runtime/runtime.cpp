@@ -2560,6 +2560,40 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // pacer, live_fb, …) go out of scope at function return.
     runtime_set_frame_present_hook(nullptr);
     frame_phase.dump();  // HP-002: flush the phase ring (env-gated CSV)
+    // HP-002: flush the always-on MMIO write ring (gba_io.cpp) to CSV.
+    // GBARECOMP_MMIO_DUMP=<path>. Offline analysis derives the scanline of
+    // each write as (cycle % 280896) / 1232 — e.g. histogramming BG scroll
+    // writes by VCOUNT to find mid-frame updates that shear the display.
+    if (const char* mmio_dump = std::getenv("GBARECOMP_MMIO_DUMP")) {
+        if (*mmio_dump) {
+            std::FILE* f = std::fopen(mmio_dump, "w");
+            if (f) {
+                std::fprintf(f, "idx,cycle,pc,addr,value,size\n");
+                const uint64_t oldest = gba::gba_mmio_cap_oldest();
+                const uint64_t total = gba::gba_mmio_cap_total();
+                gba::MmioCapEntry buf[1024];
+                for (uint64_t at = oldest; at < total;) {
+                    uint64_t first = 0;
+                    const std::size_t got = gba::gba_mmio_cap_query(
+                        at, 1024, buf, first);
+                    if (!got) break;
+                    for (std::size_t i = 0; i < got; ++i) {
+                        std::fprintf(f, "%llu,%llu,0x%08x,0x%08x,0x%x,%u\n",
+                            static_cast<unsigned long long>(first + i),
+                            static_cast<unsigned long long>(buf[i].cycle),
+                            buf[i].pc, buf[i].addr, buf[i].value,
+                            buf[i].size);
+                    }
+                    at = first + got;
+                }
+                std::fclose(f);
+                std::fprintf(stderr,
+                    "[mmio-dump] wrote %llu..%llu -> %s\n",
+                    static_cast<unsigned long long>(oldest),
+                    static_cast<unsigned long long>(total), mmio_dump);
+            }
+        }
+    }
     if (args.window) win.close();
 
     bool save_ok = flush_save();

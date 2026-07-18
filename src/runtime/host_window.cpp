@@ -518,15 +518,30 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         delete b;
         return false;
     }
-    // The independent FramePacer still governs emulation at 59.7275 Hz.
-    // Resize-driven views can take long enough to make an unsynchronized copy
-    // visibly tear, so synchronize only that opt-in presentation path. Fixed
-    // native and fixed-width extended views (including MMZ) remain unchanged.
+    // The independent FramePacer still governs emulation at 59.7275 Hz
+    // (MC-HP-004) — vsync below only aligns scanout, in series after the
+    // pacer, and can never become the game clock.
+    // HP-002: EVERY path now requests a synchronized present. The cadence
+    // probe measured the legacy D3D9 blit returning in <1 ms despite
+    // vsync=yes (presents never sync to scanout → the tear band users see
+    // toward the bottom at native res). SDL2's D3D11 backend is a DXGI
+    // flip-model swapchain whose vsync genuinely blocks, and windowed VRR
+    // (G-Sync "windowed and full screen") can engage through it — so prefer
+    // it by default on Windows; SDL_RENDER_DRIVER in the environment still
+    // overrides. GBARECOMP_NO_VSYNC=1 restores the historical
+    // unsynchronized present for A/B.
+#if defined(_WIN32)
+    SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER, "direct3d11",
+                            SDL_HINT_DEFAULT);
+#endif
+    const char* no_vsync_env = std::getenv("GBARECOMP_NO_VSYNC");
+    const bool want_vsync =
+        !(no_vsync_env && *no_vsync_env && *no_vsync_env != '0');
     const Uint32 renderer_flags = SDL_RENDERER_ACCELERATED |
-        (b->resize_driven_view
-             ? static_cast<Uint32>(SDL_RENDERER_PRESENTVSYNC) : Uint32{0});
+        (want_vsync ? static_cast<Uint32>(SDL_RENDERER_PRESENTVSYNC)
+                    : Uint32{0});
     b->renderer = SDL_CreateRenderer(b->window, -1, renderer_flags);
-    if (!b->renderer && b->resize_driven_view) {
+    if (!b->renderer && want_vsync) {
         std::fprintf(stderr,
                      "host_window: synchronized renderer unavailable; "
                      "falling back to unsynchronized presentation: %s\n",
@@ -546,15 +561,15 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         delete b;
         return false;
     }
-    if (b->resize_driven_view) {
+    {
         SDL_RendererInfo info{};
         if (SDL_GetRendererInfo(b->renderer, &info) == 0) {
             std::fprintf(stderr,
-                         "host_window: adaptive renderer=%s flags=0x%08x "
-                         "vsync=%s\n",
+                         "host_window: renderer=%s flags=0x%08x vsync=%s%s\n",
                          info.name ? info.name : "unknown",
                          static_cast<unsigned>(info.flags),
-                         (info.flags & SDL_RENDERER_PRESENTVSYNC) ? "yes" : "no");
+                         (info.flags & SDL_RENDERER_PRESENTVSYNC) ? "yes" : "no",
+                         b->resize_driven_view ? " (adaptive)" : "");
             std::fflush(stderr);
         }
         log_display_mode(b->window, "open");
@@ -857,9 +872,8 @@ void HostWindow::set_fullscreen(bool on) {
     if (SDL_SetWindowFullscreen(b->window,
                                 on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) == 0) {
         b->fullscreen = on;
-        // MC-WS-002: record which panel/mode the cadence data now runs on.
-        if (b->resize_driven_view)
-            log_display_mode(b->window, on ? "fullscreen" : "windowed");
+        // Record which panel/mode the cadence data now runs on.
+        log_display_mode(b->window, on ? "fullscreen" : "windowed");
     }
 }
 
