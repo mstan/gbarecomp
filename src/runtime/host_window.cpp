@@ -520,6 +520,22 @@ bool HostWindow::set_surface_size(int base_w, int base_h) {
 bool HostWindow::drawable_size(int* width, int* height) const {
     if (!open_ || !impl_ || !width || !height) return false;
     const auto* b = static_cast<const Backend*>(impl_);
+    // Capture/debug override: GBARECOMP_FORCE_DRAWABLE="WxH" makes the
+    // resize-driven view resolve as if the client window were WxH, so the
+    // adaptive wide path can be exercised faithfully under the SDL dummy
+    // video driver (headless, session-independent) for the MC-WS-002
+    // frame-capture investigation. No effect unless set.
+    static int s_fd_w = -1, s_fd_h = -1;
+    if (s_fd_w == -1) {
+        s_fd_w = 0;
+        if (const char* e = std::getenv("GBARECOMP_FORCE_DRAWABLE")) {
+            int w = 0, h = 0;
+            if (std::sscanf(e, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+                s_fd_w = w; s_fd_h = h;
+            }
+        }
+    }
+    if (s_fd_w > 0) { *width = s_fd_w; *height = s_fd_h; return true; }
     // The feature follows window aspect, not texture/renderer target size.
     // Some SDL backends keep RendererOutputSize pinned to the streaming
     // target while the client window is resized, so use the authoritative

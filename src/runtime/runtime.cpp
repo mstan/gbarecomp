@@ -1785,6 +1785,19 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     HostWindow win;
     std::vector<uint8_t> live_fb;
+    // MC-WS-002 capture: per-present dump of the exact composed bytes handed to
+    // SDL (`live_fb`). Gated by GBARECOMP_FRAMEDUMP_DIR; START = first guest
+    // frame to capture, COUNT = how many; quits after COUNT are written. This
+    // is the authoritative delivered-content record (any content-level split
+    // shows here; a scanout-only tear would not).
+    const char* framedump_dir = std::getenv("GBARECOMP_FRAMEDUMP_DIR");
+    uint64_t framedump_start = 0;
+    int framedump_max = 200;
+    int framedump_written = 0;
+    if (const char* e = std::getenv("GBARECOMP_FRAMEDUMP_START"))
+        framedump_start = std::strtoull(e, nullptr, 0);
+    if (const char* e = std::getenv("GBARECOMP_FRAMEDUMP_COUNT"))
+        framedump_max = std::atoi(e);
     auto sync_resize_driven_view = [&]() -> bool {
         if (!resize_view_enabled || !win.is_open()) return false;
         int drawable_w = 0;
@@ -2395,6 +2408,15 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                bus.pal_ptr());
                 }
                 win.present(live_fb.data());
+                if (framedump_dir && frame >= framedump_start &&
+                    framedump_written < framedump_max) {
+                    char p[512];
+                    std::snprintf(p, sizeof(p), "%s/f_%06llu.png", framedump_dir,
+                                  static_cast<unsigned long long>(frame));
+                    write_png(p, live_fb.data(), ppu.render_width(),
+                              ppu.render_height());
+                    if (++framedump_written >= framedump_max) host_quit = true;
+                }
                 int16_t audio_buf[2048];
                 std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
                 if (n > 0) win.push_audio_samples(audio_buf, n);
