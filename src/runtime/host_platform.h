@@ -58,6 +58,14 @@ private:
     clock::time_point next_{};
     bool uncapped_ = false;
     bool raised_timer_res_ = false;
+    // HP-002: Windows high-resolution waitable timer (HANDLE, void* here to
+    // keep windows.h out of this header). sleep_until quantizes to the 64 Hz
+    // system tick under load; the phase drift between that grid and the
+    // 16.742 ms frame period produced a measured 234 ms beat of 20-24 ms
+    // oversleeps (52/75 late frames in the frame-phase ring). The hi-res
+    // timer waits on the exact deadline instead; null = pre-1803 fallback
+    // to the old hybrid sleep.
+    void* wait_timer_ = nullptr;
 };
 
 }  // namespace gbarecomp
