@@ -33,8 +33,9 @@ struct RunOptions {
     // A separate extended-view policy for games whose logical width follows
     // the live host-window aspect ratio. This ceiling is deliberately not
     // max_view_width: opting into resize-driven view does not also authorize
-    // fixed --view-width modes. The game starts at faithful 240x160, and the
-    // launcher/CLI must explicitly opt in with --resize-view.
+    // fixed --view-width modes. The launcher/CLI must explicitly opt in with
+    // --resize-view; an accompanying --view-width may seed the initial
+    // windowed aspect, while adaptive fullscreen follows the host display.
     std::uint16_t max_resize_view_width = 240;
     bool resize_driven_view = false;
 
@@ -61,6 +62,11 @@ struct RunOptions {
     // it is still being profiled. Explicit CLI/TOML opt-ins remain available.
     // Defaults true so existing games (including MMZ) retain today's UI.
     bool launcher_expose_widescreen = true;
+    // Show recomp-ui's Adaptive view toggle for this game. Runtime support
+    // (resize_driven_view + max_resize_view_width) is necessary but not
+    // sufficient: every title must explicitly opt into the launcher surface
+    // after its live-resize presentation has been validated.
+    bool launcher_expose_adaptive_view = false;
     // >240 offers the launcher's 16:9 widescreen toggle, mapped to
     // --view-width <this> when enabled. 0/240 = no widescreen surface shown.
     // Games with MULTIPLE extended widths use the aspect vocabulary below

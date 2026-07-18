@@ -140,8 +140,9 @@ struct SeamConfig {
     int  screen_kind = 0;      // kScreenTokens index
     int  volume = 100;
     int  skip_launcher = 0;
-    int  widescreen = 0;       // fixed-width or resize-driven opt-in
+    int  widescreen = 0;       // legacy fixed-width toggle
     int  aspect_index = 0;     // games with a launcher_aspect vocabulary only
+    int  adaptive_view = 0;    // live drawable aspect; fixed aspect is retained
 };
 
 inline void seam_config_load(const std::string& path, SeamConfig* c) {
@@ -178,6 +179,7 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
         else if (key == "skip_launcher") c->skip_launcher = std::atoi(val.c_str());
         else if (key == "widescreen")    c->widescreen = std::atoi(val.c_str());
         else if (key == "aspect_index")  c->aspect_index = std::atoi(val.c_str());
+        else if (key == "adaptive_view") c->adaptive_view = std::atoi(val.c_str());
     }
     if (c->scale < 1) c->scale = 1;
     if (c->scale > 8) c->scale = 8;
@@ -224,6 +226,7 @@ inline void seam_config_save(const std::string& path, const SeamConfig& c) {
     f << "skip_launcher = " << c.skip_launcher << "\n";
     f << "widescreen = " << c.widescreen << "\n";
     f << "aspect_index = " << c.aspect_index << "\n";
+    f << "adaptive_view = " << c.adaptive_view << "\n";
 }
 
 // Append the persisted/committed settings as ordinary run_game() CLI args.
@@ -239,7 +242,20 @@ inline void seam_append_setting_args(std::vector<std::string>& args,
     args.push_back("--screen");
     args.push_back(kScreenTokens[c.screen_kind]);
     if (c.fullscreen) args.push_back("--fullscreen");
-    if (opts.launcher_num_aspects > 0 && opts.launcher_aspect_view_widths) {
+    const bool adaptive_view =
+        c.adaptive_view && opts.launcher_expose_adaptive_view &&
+        opts.resize_driven_view && opts.max_resize_view_width > 240;
+    if (adaptive_view) {
+        args.push_back("--resize-view");
+    }
+
+    // Windowed adaptive sessions use the selected fixed aspect as their
+    // initial window size, then follow live resizes. In fullscreen, the host
+    // display supplies the aspect, so adaptive mode deliberately ignores the
+    // stored fixed selection.
+    const bool fixed_view_honored = !adaptive_view || !c.fullscreen;
+    if (fixed_view_honored && opts.launcher_num_aspects > 0 &&
+        opts.launcher_aspect_view_widths) {
         // Aspect vocabulary (multi-width games): committed index -> width.
         int idx = c.aspect_index;
         if (idx < 0 || idx >= opts.launcher_num_aspects) idx = 0;
@@ -248,13 +264,15 @@ inline void seam_append_setting_args(std::vector<std::string>& args,
             args.push_back("--view-width");
             args.push_back(std::to_string(w));
         }
-    } else if (c.widescreen && opts.resize_driven_view &&
+    } else if (fixed_view_honored && c.widescreen && !adaptive_view &&
+               opts.resize_driven_view &&
                opts.max_resize_view_width > 240) {
         // Resize-driven games start faithful and reveal more world as the
         // drawable becomes wider. This is deliberately distinct from the
         // fixed --view-width contract used by Mega Man Zero and others.
         args.push_back("--resize-view");
-    } else if (c.widescreen && opts.widescreen_view_width > 240) {
+    } else if (fixed_view_honored && c.widescreen &&
+               opts.widescreen_view_width > 240) {
         args.push_back("--view-width");
         args.push_back(std::to_string(opts.widescreen_view_width));
     }
@@ -333,6 +351,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     ls.fullscreen    = cfg.fullscreen;
     ls.linear_filter = cfg.linear_filter;
     ls.widescreen    = cfg.widescreen;
+    ls.adaptive_view = cfg.adaptive_view;
     ls.enable_audio  = 1;
     ls.audio_freq    = 32768;             // GBA mixer base rate (display only)
     ls.volume        = cfg.volume;
@@ -358,8 +377,9 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         gi.num_known_sha1 = 1;
     }
     gi.widescreen_supported = opts.launcher_expose_widescreen &&
-        (opts.widescreen_view_width > 240 ||
-         (opts.resize_driven_view && opts.max_resize_view_width > 240)) ? 1 : 0;
+        opts.widescreen_view_width > 240 ? 1 : 0;
+    gi.adaptive_view_supported = opts.launcher_expose_adaptive_view &&
+        opts.resize_driven_view && opts.max_resize_view_width > 240 ? 1 : 0;
     gi.config_path = config_path.c_str();
     gi.keybinds_path = keybinds_path.c_str();
     gi.boxart_path = opts.launcher_boxart;   // NULL => default assets/img/boxart.tga
@@ -402,6 +422,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     cfg.volume        = ls.volume;
     cfg.skip_launcher = ls.skip_launcher ? 1 : 0;
     cfg.widescreen    = ls.widescreen ? 1 : 0;
+    cfg.adaptive_view = ls.adaptive_view ? 1 : 0;
     cfg.aspect_index  = (opts.launcher_num_aspects > 0 &&
                          ls.aspect_index >= 0 &&
                          ls.aspect_index < opts.launcher_num_aspects)

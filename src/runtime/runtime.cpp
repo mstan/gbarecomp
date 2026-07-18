@@ -1090,10 +1090,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // [video].view_width. The old GBARECOMP_WIDESCREEN=N form remains a
     // compatibility alias for 240 + 2*N. Only opted-in games can expand.
     {
-        // A resize-driven session deliberately boots at the exact native
-        // width. Once the host drawable exists, its aspect selects the first
-        // expanded width without changing the window's dimensions.
-        int requested_width = resize_view_enabled ? 240 : args.view_width;
+        // Windowed resize-driven sessions may use --view-width to choose their
+        // initial shape before live resizing takes over. Fullscreen adaptive
+        // sessions start native and let the host display select the first
+        // expanded width, so a saved fixed aspect cannot influence them.
+        int requested_width =
+            (resize_view_enabled && args.fullscreen) ? 240 : args.view_width;
         bool modern_env_valid = false;
         if (const char* e = std::getenv("GBARECOMP_VIEW_WIDTH")) {
             int n = 0;
