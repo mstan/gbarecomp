@@ -465,6 +465,36 @@ void test_extended_view_obj_x_is_explicitly_opt_in() {
     gba::g_ws_obj_x_provider = nullptr;
 }
 
+void test_obj_only_palette_backdrop_is_not_policy_black() {
+    Fixture f;
+    for (std::size_t i = 0; i < 128; ++i)
+        store16(&f.oam[i * 8], 0x0200);  // Disable every OBJ.
+    store16(&f.pal[0], 0x03E0);          // Backdrop = green.
+    f.ppu.set_view_margins(24, 24, 0, 0);
+    std::vector<uint8_t> wide(gba::GbaPpu::kMaxFramebufferBytes, 0);
+
+    gba::g_ws_pillarbox = 1;
+    gba::g_ws_pillarbox_left = 1;
+    gba::g_ws_pillarbox_right = 1;
+    f.ppu.render(wide.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(wide.data(), 0, 255, 0,
+                 "OBJ-only left palette backdrop");
+    expect_pixel(wide.data() + (287u * 3u), 0, 255, 0,
+                 "OBJ-only right palette backdrop");
+
+    // The exception is deliberately narrow: once a regular BG is enabled,
+    // the normal fail-closed policy still protects unauthored margin samples.
+    std::fill(wide.begin(), wide.end(), 0);
+    f.ppu.render(wide.data(), 0x1100, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(wide.data(), 0, 0, 0,
+                 "regular-BG margin remained policy black");
+    gba::g_ws_pillarbox = 0;
+    gba::g_ws_pillarbox_left = 0;
+    gba::g_ws_pillarbox_right = 0;
+}
+
 void test_extended_view_obj_attr_x_is_explicitly_opt_in() {
     Fixture f;
     for (std::size_t i = 0; i < 128; ++i)
@@ -619,6 +649,7 @@ int main() {
     test_extended_view_preserves_authentic_center();
     test_extended_bg_sample_remap_is_opt_in_and_native_inert();
     test_extended_view_snapshot_latch_policy();
+    test_obj_only_palette_backdrop_is_not_policy_black();
     test_extended_view_obj_x_is_explicitly_opt_in();
     test_extended_view_obj_attr_x_is_explicitly_opt_in();
     test_extended_view_extends_nearest_window_edge();

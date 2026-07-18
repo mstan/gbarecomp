@@ -1285,15 +1285,21 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
     if (bldy > 16u) bldy = 16u;
     for (uint32_t x = 0; x < out_w; ++x) {
         uint8_t* dst = row + x * 3;
+        // OBJ-only presentations (notably the real GBA BIOS logo) author the
+        // whole backdrop through palette entry 0. There is no regular-BG
+        // alias to protect in the margins, so preserve that authentic color
+        // instead of replacing it with policy black; OBJ remains centered.
+        const bool palette_backdrop_only = (dispcnt & 0x0F00u) == 0u;
         // Pillarbox policy: black out the margin columns on non-overworld
         // screens so menus/battles are letterboxed, not garbled.
         const bool left_margin = x < ox;
         const bool right_margin = x >= ox + 240u;
         if ((black_nonuniform_window_margins &&
              (left_margin || right_margin)) ||
-            (g_ws_pillarbox && (left_margin || right_margin)) ||
-            (g_ws_pillarbox_left && left_margin) ||
-            (g_ws_pillarbox_right && right_margin)) {
+            (!palette_backdrop_only &&
+             ((g_ws_pillarbox && (left_margin || right_margin)) ||
+              (g_ws_pillarbox_left && left_margin) ||
+              (g_ws_pillarbox_right && right_margin)))) {
             dst[0] = dst[1] = dst[2] = 0;
             continue;
         }
