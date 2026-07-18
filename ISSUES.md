@@ -35,6 +35,41 @@ reproduced, and we chose not to fix immediately. Not a TODO list.
   Phase 2.7 re-pass via recompiled execution. See `docs/ROADMAP.md`
   Phase 2.8.A–E.
 
+### HP-002: Native-res "warble"/tear-like line, bottom-ish, high-action scenes — all games
+- **Observed:** 2026-07-17 (user, during MC-WS-002 work). At the
+  standard 3:2 resolution, high-action areas show a subtle warble
+  described as "like a screen tear towards the bottom-ish" of the
+  screen. More subtle than the (now fixed) MC-WS-002 margin seam;
+  general graphics complaint across games. NOT the margin-camera
+  seam (that was margin-only and is fixed in 9a63c6c/MinishCap).
+- **Measured evidence so far (present-cadence probe, 257f599):**
+  (a) The native/fixed-width present path requests NO vsync at all
+  (`host_window.cpp` sets `SDL_RENDERER_PRESENTVSYNC` only for
+  `resize_driven_view`) — unsynchronized D3D9 blit presents CAN tear
+  at a semi-consistent scan phase because the FramePacer is periodic,
+  which fits a "consistent bottom-ish tear line".
+  (b) Runtime pacing hitch: ~7% of presents arrive >25 ms late,
+  quasi-periodically every ~13–14 frames (~230 ms), 92% immediately
+  followed by a ~8 ms catch-up present — a 4–5 Hz delivery
+  oscillation measured in `_present_cadence.csv` (6180-present real
+  run). Root cause unidentified (suspects: sidecar/provider fill,
+  audio-bridge mutex, pacer sleep overshoot, game-thread codegen).
+  (c) 59.7275-on-165 Hz pulldown (2/3-refresh dwell) exists whenever
+  VRR is not pacing; secondary on the 60 Hz monitor (1 dup/~4.7 s).
+- **Tools ready:** always-on per-present ring + summaries + CSV
+  (`GBARECOMP_PRESENT_CADENCE=1`), `tools/analyze_present_cadence.py`;
+  ChatGPT-consulted present architecture (SDL3/custom-D3D11 flip
+  model + G-Sync windowed; emulation/presentation thread split; DWM
+  `cRefresh` is NOT a scanout ruler — use flip-model
+  `GetFrameStatistics`).
+- **Next steps:** (1) verify the tear line's screen position
+  consistency (user observation + probe run at native res);
+  (2) root-cause the 230 ms hitch (instrument the game loop phases
+  around a late present); (3) present-path architecture per the
+  consult — flip-model vsync/VRR for every path (native included),
+  FramePacer stays the emulation clock (MC-HP-004 rule).
+- **Priority:** high — user-visible in normal play across all games.
+
 ---
 
 ## Low priority
