@@ -69,6 +69,37 @@ reproduced, and we chose not to fix immediately. Not a TODO list.
   consult — flip-model vsync/VRR for every path (native included),
   FramePacer stays the emulation clock (MC-HP-004 rule).
 - **Priority:** high — user-visible in normal play across all games.
+- **▶ PROGRESS 2026-07-17 (Fable, branch fix/hp002-native-present) — two
+  causes measured + fixed, artifact "reduced" twice by user, residual
+  remains:**
+  1. **Pacer 234 ms beat FIXED (`75bbcfa`).** New always-on frame-phase ring
+     (`GBARECOMP_FRAME_PHASE` CSV + `tools/analyze_frame_phase.py`) attributed
+     52/75 late frames (>25 ms) to the pacer's own sleep: `sleep_until`
+     quantizes to the 64 Hz system tick; its drift against the 16.742 ms
+     frame period beats at exactly 1/(1/15.625−1/16.742)=234 ms — the
+     measured late-frame spacing. Guest spikes owned 15, `SDL_PollEvent`
+     stalls 6 (one 496 ms), overlay compile 0. Fix: high-resolution waitable
+     timer (Win10 1803+). After: late frames 4.2%→0.2% (all PollEvent),
+     frame-total p95 = 16.755 ms.
+  2. **Unsynchronized present FIXED (`d343959`).** Every path now requests
+     vsync and Windows defaults to SDL's D3D11 flip-model backend (whole-frame
+     flips, tearing structurally impossible; windowed VRR can engage).
+     Verified: native path renderer=direct3d11 vsync=yes, fps 59.72 (pacer
+     still the clock). Escape hatches: `GBARECOMP_NO_VSYNC=1`,
+     `SDL_RENDER_DRIVER`.
+  3. **Mid-frame scroll writes EXONERATED for walking** (new
+     `GBARECOMP_MMIO_DUMP` flush of the always-on MMIO ring): 2264/2264 BG
+     scroll writes in the walk replay land in VBlank — no content shear from
+     scroll timing in that scenario. High-action scenes not yet traced.
+  - **Residual after both fixes (user): "still there but reduced."** Prime
+    remaining suspect: 59.7275-on-165 Hz pulldown (2.76 refreshes/frame dwell
+    unevenness) whenever VRR is not actually engaged. Discriminating test:
+    NVCP "Show indicator for G-SYNC" during windowed/fullscreen play, and/or
+    temporarily set the panel to 60 Hz (59.73-on-59.94 ≈ one dup frame per
+    ~4.7 s — near-perfect); if the artifact vanishes at 60 Hz, the fix is
+    VRR engagement (or a refresh-matched present mode). Also still open:
+    high-action MMIO trace (repeat item 3 in combat/effects scenes), and the
+    emulation/presentation thread split for the PollEvent stall class.
 
 ---
 
