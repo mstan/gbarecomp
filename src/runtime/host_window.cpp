@@ -2,7 +2,9 @@
 
 #include "host_window.h"
 
+#include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -24,6 +26,17 @@
 #define RECOMP_AUDIO_DRC_IMPL
 #include "recomp_audio_drc.h"
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <dwmapi.h>
+#endif
+
 namespace gbarecomp {
 
 namespace {
@@ -43,6 +56,204 @@ struct HotkeyBind {
     SDL_Keycode key = SDLK_UNKNOWN;   // SDLK_UNKNOWN = unbound
     Uint16      mods = 0;             // required KMOD_CTRL/ALT/SHIFT bits
 };
+
+// ── MC-WS-002 present-cadence ring ───────────────────────────────────────
+// Always-on (Release too) ring recording EVERY SDL_RenderPresent from window
+// open: wall time blocked inside the call, entry-to-entry gap, and the DWM
+// composition refresh counter (cRefresh) at exit — the scanout-side ruler
+// that delivered-content framedumps cannot see. The ring records
+// unconditionally (~24 B/present); GBARECOMP_PRESENT_CADENCE=1 adds a
+// periodic stderr summary and a full CSV dump at close
+// (GBARECOMP_PRESENT_CADENCE_DUMP=path overrides ./_present_cadence.csv).
+// Interpretation (tools/analyze_present_cadence.py automates this):
+//   block_us ≈ 0 on every present → vsync is NOT blocking (tear-prone);
+//   rdelta 1,1,1… at ~16.74 ms gaps on a high-Hz VRR panel → VRR engaged;
+//   rdelta 2/3 alternation on 164 Hz → 59.73→164 pulldown (cadence judder);
+//   rdelta 0 rows → two presents inside one refresh (frame replaced).
+struct PresentSample {
+    uint64_t qpc = 0;          // SDL performance counter at present entry
+    uint64_t dwm_refresh = 0;  // DWM cRefresh after present (0 = unavailable)
+    uint32_t block_us = 0;     // wall time inside SDL_RenderPresent
+    uint32_t gap_us = 0;       // entry-to-entry gap from the previous present
+    uint8_t  fullscreen = 0;   // window was fullscreen for this present
+};
+
+constexpr int kCadenceRingSize     = 16384;  // ~4.5 min at 60 presents/s
+constexpr int kCadenceSummaryEvery = 360;    // ~6 s between stderr summaries
+
+struct PresentCadence {
+    std::vector<PresentSample> ring;
+    uint64_t total = 0;        // lifetime presents (ring keeps the last N)
+    uint64_t qpc_freq = 0;
+    uint64_t last_qpc = 0;     // previous present entry (0 = none yet)
+    bool verbose = false;
+    std::string dump_path;
+#if defined(_WIN32)
+    HRESULT (WINAPI* dwm_gcti)(HWND, DWM_TIMING_INFO*) = nullptr;
+#endif
+
+    void init() {
+        ring.resize(kCadenceRingSize);
+        qpc_freq = SDL_GetPerformanceFrequency();
+        const char* e = std::getenv("GBARECOMP_PRESENT_CADENCE");
+        verbose = e && *e && *e != '0';
+        const char* d = std::getenv("GBARECOMP_PRESENT_CADENCE_DUMP");
+        dump_path = (d && *d) ? d : "_present_cadence.csv";
+#if defined(_WIN32)
+        if (HMODULE m = LoadLibraryA("dwmapi.dll")) {
+            dwm_gcti = reinterpret_cast<HRESULT (WINAPI*)(HWND, DWM_TIMING_INFO*)>(
+                reinterpret_cast<void*>(
+                    GetProcAddress(m, "DwmGetCompositionTimingInfo")));
+        }
+#endif
+    }
+
+    // Query the always-on DWM composition clock: refresh counter now, and
+    // (optionally) the compositor's nominal refresh rate in Hz.
+    uint64_t dwm_refresh_now(double* rate_hz) {
+#if defined(_WIN32)
+        if (dwm_gcti) {
+            DWM_TIMING_INFO ti{};
+            ti.cbSize = sizeof(ti);
+            if (SUCCEEDED(dwm_gcti(nullptr, &ti))) {
+                if (rate_hz)
+                    *rate_hz = ti.rateRefresh.uiDenominator
+                        ? static_cast<double>(ti.rateRefresh.uiNumerator) /
+                              static_cast<double>(ti.rateRefresh.uiDenominator)
+                        : 0.0;
+                return ti.cRefresh;
+            }
+        }
+#endif
+        if (rate_hz) *rate_hz = 0.0;
+        return 0;
+    }
+
+    uint32_t to_us(uint64_t qpc_delta) const {
+        if (!qpc_freq) return 0;
+        const uint64_t us = qpc_delta * 1000000ull / qpc_freq;
+        return us > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<uint32_t>(us);
+    }
+
+    void record(uint64_t qpc0, uint64_t qpc1, bool fullscreen) {
+        PresentSample s;
+        s.qpc = qpc0;
+        s.block_us = to_us(qpc1 - qpc0);
+        s.gap_us = last_qpc ? to_us(qpc0 - last_qpc) : 0;
+        last_qpc = qpc0;
+        s.dwm_refresh = dwm_refresh_now(nullptr);
+        s.fullscreen = fullscreen ? 1 : 0;
+        ring[total % kCadenceRingSize] = s;
+        ++total;
+        if (verbose && (total % kCadenceSummaryEvery) == 0) summarize();
+    }
+
+    void summarize() {
+        const int n = static_cast<int>(
+            std::min<uint64_t>(total, kCadenceSummaryEvery));
+        if (n < 2) return;
+        std::vector<uint32_t> gaps, blocks;
+        gaps.reserve(n);
+        blocks.reserve(n);
+        int hist[7] = {};  // rdelta 0..4, [5]=5+, [6]=n/a
+        uint64_t prev_refresh = 0;
+        bool have_prev = false;
+        uint64_t gap_sum = 0;
+        int fs = 0;
+        for (int i = n; i >= 1; --i) {
+            const PresentSample& s = ring[(total - i) % kCadenceRingSize];
+            blocks.push_back(s.block_us);
+            if (s.gap_us) { gaps.push_back(s.gap_us); gap_sum += s.gap_us; }
+            fs += s.fullscreen;
+            if (s.dwm_refresh == 0) {
+                ++hist[6];
+                have_prev = false;
+            } else {
+                if (have_prev) {
+                    const uint64_t d = s.dwm_refresh - prev_refresh;
+                    ++hist[d >= 5 ? 5 : static_cast<int>(d)];
+                }
+                prev_refresh = s.dwm_refresh;
+                have_prev = true;
+            }
+        }
+        auto pct = [](std::vector<uint32_t>& v, double p) -> uint32_t {
+            if (v.empty()) return 0;
+            const size_t k = static_cast<size_t>(p * (v.size() - 1));
+            std::nth_element(v.begin(), v.begin() + k, v.end());
+            return v[k];
+        };
+        const uint32_t bmax = blocks.empty()
+            ? 0 : *std::max_element(blocks.begin(), blocks.end());
+        const uint32_t b95 = pct(blocks, 0.95);
+        const uint32_t b50 = pct(blocks, 0.50);
+        const uint32_t g50 = pct(gaps, 0.50);
+        double rate_hz = 0.0;
+        dwm_refresh_now(&rate_hz);
+        const double fps = gap_sum
+            ? static_cast<double>(gaps.size()) * 1e6 / static_cast<double>(gap_sum)
+            : 0.0;
+        std::fprintf(stderr,
+            "[present-cadence] n=%llu fps=%.2f block_us p50=%u p95=%u max=%u "
+            "gap_us p50=%u rdel{0:%d 1:%d 2:%d 3:%d 4:%d 5+:%d na:%d} "
+            "dwm_hz=%.2f fs=%d/%d\n",
+            static_cast<unsigned long long>(total), fps, b50, b95, bmax, g50,
+            hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], hist[6],
+            rate_hz, fs, n);
+        std::fflush(stderr);
+    }
+
+    // Full-ring CSV dump (verbose only) — the queryable record of the run.
+    void dump() {
+        if (!verbose || total == 0) return;
+        std::FILE* f = std::fopen(dump_path.c_str(), "w");
+        if (!f) {
+            std::fprintf(stderr, "[present-cadence] cannot write %s\n",
+                         dump_path.c_str());
+            return;
+        }
+        std::fprintf(f, "idx,t_ms,gap_us,block_us,dwm_refresh,rdelta,fullscreen\n");
+        const uint64_t n = std::min<uint64_t>(total, kCadenceRingSize);
+        const uint64_t first_qpc = ring[(total - n) % kCadenceRingSize].qpc;
+        uint64_t prev_refresh = 0;
+        bool have_prev = false;
+        for (uint64_t i = 0; i < n; ++i) {
+            const PresentSample& s = ring[(total - n + i) % kCadenceRingSize];
+            long long rdelta = -1;
+            if (s.dwm_refresh) {
+                if (have_prev)
+                    rdelta = static_cast<long long>(s.dwm_refresh - prev_refresh);
+                prev_refresh = s.dwm_refresh;
+                have_prev = true;
+            }
+            std::fprintf(f, "%llu,%.3f,%u,%u,%llu,%lld,%u\n",
+                static_cast<unsigned long long>(total - n + i),
+                qpc_freq ? static_cast<double>(s.qpc - first_qpc) * 1000.0 /
+                               static_cast<double>(qpc_freq)
+                         : 0.0,
+                s.gap_us, s.block_us,
+                static_cast<unsigned long long>(s.dwm_refresh), rdelta,
+                static_cast<unsigned>(s.fullscreen));
+        }
+        std::fclose(f);
+        std::fprintf(stderr, "[present-cadence] dumped %llu presents -> %s\n",
+                     static_cast<unsigned long long>(n), dump_path.c_str());
+        std::fflush(stderr);
+    }
+};
+
+// One-line display-mode report (index, geometry, nominal Hz) so cadence data
+// can be interpreted against the panel the window actually sits on.
+void log_display_mode(SDL_Window* win, const char* tag) {
+    if (!win) return;
+    const int di = SDL_GetWindowDisplayIndex(win);
+    SDL_DisplayMode dm{};
+    if (di >= 0 && SDL_GetCurrentDisplayMode(di, &dm) == 0) {
+        std::fprintf(stderr, "host_window: %s display=%d mode=%dx%d@%dHz\n",
+                     tag, di, dm.w, dm.h, dm.refresh_rate);
+        std::fflush(stderr);
+    }
+}
 
 struct Backend {
     SDL_Window*   window   = nullptr;
@@ -78,6 +289,8 @@ struct Backend {
     std::string  title;                 // base window title (readout restores it)
     Uint32       fps_window_start = 0;
     int          fps_presents = 0;
+    // MC-WS-002: always-on per-present timing/scanout ring (see above).
+    PresentCadence cadence;
 };
 
 // GBA KEYINPUT bit order: 0=A 1=B 2=Sel 3=Sta 4=Right 5=Left 6=Up 7=Down 8=R 9=L.
@@ -344,7 +557,9 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
                          (info.flags & SDL_RENDERER_PRESENTVSYNC) ? "yes" : "no");
             std::fflush(stderr);
         }
+        log_display_mode(b->window, "open");
     }
+    b->cadence.init();
     if (b->expanded_view || b->resize_driven_view) {
         // The destination viewport is computed explicitly in present() so
         // resizing maximally fills the drawable at the selected widescreen
@@ -480,6 +695,7 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
 void HostWindow::close() {
     if (!impl_) { open_ = false; return; }
     auto* b = static_cast<Backend*>(impl_);
+    b->cadence.dump();  // MC-WS-002: flush the cadence ring (verbose only)
     if (b->audio_dev) SDL_CloseAudioDevice(b->audio_dev);  // stops the callback first
     if (b->bridge_ready) rab_free(&b->bridge);
     if (b->audio_mtx) SDL_DestroyMutex(b->audio_mtx);
@@ -583,7 +799,11 @@ void HostWindow::present(const uint8_t* rgb888) {
             SDL_RenderCopy(b->renderer, b->texture, nullptr, &destination);
         }
     }
+    // MC-WS-002: time the present itself (vsync blocks here — or doesn't)
+    // and stamp the DWM refresh counter into the always-on cadence ring.
+    const uint64_t cad_qpc0 = SDL_GetPerformanceCounter();
     SDL_RenderPresent(b->renderer);
+    b->cadence.record(cad_qpc0, SDL_GetPerformanceCounter(), b->fullscreen);
 
     // FPS readout (DisplayPerf hotkey): presents/sec, refreshed twice a
     // second in the title bar; the base title is restored when toggled off.
@@ -635,8 +855,12 @@ void HostWindow::set_fullscreen(bool on) {
     auto* b = static_cast<Backend*>(impl_);
     if (b->fullscreen == on) return;
     if (SDL_SetWindowFullscreen(b->window,
-                                on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) == 0)
+                                on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) == 0) {
         b->fullscreen = on;
+        // MC-WS-002: record which panel/mode the cadence data now runs on.
+        if (b->resize_driven_view)
+            log_display_mode(b->window, on ? "fullscreen" : "windowed");
+    }
 }
 
 bool HostWindow::fullscreen() const {
