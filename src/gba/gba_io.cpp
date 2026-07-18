@@ -163,11 +163,27 @@ void store_u32(uint8_t* p, uint32_t v) {
     p[2] = static_cast<uint8_t>((v >> 16) & 0xFF);
     p[3] = static_cast<uint8_t>((v >> 24) & 0xFF);
 }
-// Once-per-key warning set so the BIOS setup phase doesn't drown
-// stderr in identical messages.
+constexpr std::size_t kUnhandledIoWarningLimit = 64;
+
+bool verbose_unhandled_io() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GBARECOMP_VERBOSE_IO_WARNINGS");
+        return value && *value && *value != '0';
+    }();
+    return enabled;
+}
+
+// Opt-in, bounded diagnostic state. Normal play records only the aggregate
+// counter exposed by the runtime summary/debug surfaces; it does not allocate
+// a growing key set or write per-access messages to stderr.
 std::unordered_set<uint64_t>& warned_set() {
     static std::unordered_set<uint64_t> s;
     return s;
+}
+
+bool& warned_limit_reported() {
+    static bool reported = false;
+    return reported;
 }
 
 }  // namespace
@@ -507,10 +523,23 @@ uint16_t GbaIo::dispstat() const { return load_u16(&io_[IoReg::DISPSTAT]); }
 
 void GbaIo::warn_unhandled(uint32_t off, uint32_t value, bool is_write, uint8_t width) {
     ++unmapped_count_;
+    if (!verbose_unhandled_io()) return;
+
     uint64_t key = (static_cast<uint64_t>(off) << 16) |
                    (static_cast<uint64_t>(width) << 8) |
                    (is_write ? 1u : 0u);
-    if (warned_set().insert(key).second) {
+    auto& warned = warned_set();
+    if (warned.find(key) != warned.end()) return;
+    if (warned.size() >= kUnhandledIoWarningLimit) {
+        if (!warned_limit_reported()) {
+            warned_limit_reported() = true;
+            std::fprintf(stderr,
+                "[gba:io] further unhandled-I/O warnings suppressed; "
+                "the aggregate io_unhandled counter remains available\n");
+        }
+        return;
+    }
+    if (warned.insert(key).second) {
         std::fprintf(stderr,
                      "[gba:io] unhandled %s%u @ 0x%08x = 0x%x "
                      "pc=0x%08x cycles=%llu\n",

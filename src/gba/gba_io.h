@@ -257,9 +257,8 @@ private:
     uint32_t dma_transfer_cost(uint32_t src, uint32_t dst, bool transfer_32,
                                uint32_t units) const;
 
-    // Log an unknown / unhandled IO access. Logs once per (offset,
-    // direction, width) tuple to keep the output bounded under the
-    // BIOS's setup phase (which touches hundreds of registers).
+    // Count an unknown / unhandled IO access. Per-access diagnostics are
+    // quiet by default and bounded when GBARECOMP_VERBOSE_IO_WARNINGS is set.
     void warn_unhandled(uint32_t off, uint32_t value, bool is_write, uint8_t width);
     void run_sound_fifo_dma(int channel);
 };
