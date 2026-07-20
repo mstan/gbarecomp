@@ -14,6 +14,44 @@ recompile *The Legend of Zelda: The Minish Cap*.
 
 ---
 
+## How to use GBARecomp
+
+### Use the Windows CLI
+
+1. Open the [Releases](https://github.com/mstan/gbarecomp/releases) page.
+2. Download `gbarecomp-cli-windows-x86_64.zip`. Do not download GitHub's
+   "Source code" archives.
+3. Extract the zip to its own folder.
+4. Open PowerShell in that folder.
+5. Run:
+
+```powershell
+.\gbarecomp.exe build `
+  --rom "C:\Games\MyGame.gba" `
+  --output "C:\Projects\MyGameRecomp"
+```
+
+No BIOS file is needed to generate source. The output folder contains sharded
+C++ source, runtime-facing headers, CMake files, and build scripts.
+
+To check that the generated source compiles:
+
+```powershell
+cd "C:\Projects\MyGameRecomp"
+.\build.ps1
+```
+
+This builds a static library. It does not create a playable game by itself.
+Each game still needs game-specific configuration and runtime integration. Use
+one of the [Game targets](#game-targets) as a starting point for a full port.
+
+If you already have a game TOML or imported symbol file, add `--config` or
+`--symbols` to the build command.
+
+GBARecomp does not include a GBA BIOS or game ROMs.
+
+---
+
 ## Game targets
 
 Each target is its own repo that consumes this core. The three
@@ -73,6 +111,16 @@ Pokémon repos cover **five games** between them:
 cmake -B build -S .
 cmake --build build
 ```
+
+To build the self-contained Windows CLI zip, install Python 3.12 and
+PyInstaller, then run:
+
+```powershell
+py -3.12 -m pip install pyinstaller
+py -3.12 tools/build_cli.py
+```
+
+The zip is written to `build/cli-release/`.
 
 Cartridge recompilation always emits parallel `recompiled_NNN.cpp` shards; the
 old giant `recompiled.cpp` form is no longer supported. On Windows, the supplied

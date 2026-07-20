@@ -2,6 +2,7 @@
 
 #include "interpreter.h"
 
+#include <bit>
 #include <cstdint>
 
 #include "pipeline_semantics.h"
@@ -764,7 +765,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
         case IrOp::LDM: case IrOp::STM: {
             uint32_t base = cpu.R[i.block.rn];
             uint16_t list = i.block.reg_list;
-            int n = __builtin_popcount(list);
+            int n = static_cast<int>(std::popcount(static_cast<uint32_t>(list)));
             if (n == 0) {
                 uint32_t addr;
                 if (i.block.add) {
