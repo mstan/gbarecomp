@@ -103,6 +103,10 @@ extern "C" unsigned long long g_runtime_state_epoch = 0;
 static unsigned long long g_idle_skipped_cycles = 0;
 static unsigned long long g_idle_skipped_iters  = 0;
 static unsigned long long g_idle_confirmed_sites = 0;
+static uint32_t g_last_mmio_read_addr = 0;
+static uint32_t g_last_mmio_read_width = 0;
+static uint32_t g_last_mmio_read_pc = 0;
+static unsigned long long g_vcount_spin_progress = 0;
 
 // P6 sljit differential gate — shadow-tick mode. While g_runtime_shadow_tick is
 // set (during a throwaway validation or transactional guest re-run), runtime_tick
@@ -349,6 +353,19 @@ static inline bool is_io_addr(uint32_t addr) {
     return (addr & 0xFF000000u) == 0x04000000u;
 }
 
+static inline void note_mmio_read(uint32_t addr, uint32_t width) {
+    if (!is_io_addr(addr)) return;
+    g_last_mmio_read_addr = addr;
+    g_last_mmio_read_width = width;
+    g_last_mmio_read_pc = g_cpu.R[15];
+}
+
+static inline bool read_touched_vcount(uint32_t addr, uint32_t width) {
+    const uint32_t vcount_addr = 0x04000006u;
+    return addr <= vcount_addr && width != 0u &&
+           (addr + width) > vcount_addr;
+}
+
 // Stage 2: is a load from `addr` safe to treat as side-effect-free and stable
 // inside an idle-candidate loop? Only writable RAM whose every mutation bumps
 // g_idle_disturb_epoch (EWRAM/IWRAM) and immutable memory (ROM, BIOS) qualify.
@@ -376,6 +393,7 @@ static inline bool is_idle_safe_read(uint32_t addr) {
 extern "C" uint32_t bus_read_u32(uint32_t addr) {
     if (is_io_addr(addr)) runtime_mmio_catch_up();
     if (!is_idle_safe_read(addr)) ++g_idle_disturb_epoch;
+    note_mmio_read(addr, 4u);
     gbarecomp::sync_bios_access();
     uint32_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read32(addr)
@@ -387,6 +405,7 @@ extern "C" uint32_t bus_read_u32(uint32_t addr) {
 extern "C" uint16_t bus_read_u16(uint32_t addr) {
     if (is_io_addr(addr)) runtime_mmio_catch_up();
     if (!is_idle_safe_read(addr)) ++g_idle_disturb_epoch;
+    note_mmio_read(addr, 2u);
     gbarecomp::sync_bios_access();
     uint16_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read16(addr)
@@ -398,6 +417,7 @@ extern "C" uint16_t bus_read_u16(uint32_t addr) {
 extern "C" uint8_t bus_read_u8(uint32_t addr) {
     if (is_io_addr(addr)) runtime_mmio_catch_up();
     if (!is_idle_safe_read(addr)) ++g_idle_disturb_epoch;
+    note_mmio_read(addr, 1u);
     gbarecomp::sync_bios_access();
     uint8_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read8(addr)
@@ -753,13 +773,24 @@ extern "C" void runtime_idle_backedge(uint32_t header_pc) {
 
     IdleSite& s = g_idle_sites[header_pc];
 
+    static const bool vcount_spin_elision_on = [] {
+        const char* e = std::getenv("GBARECOMP_VCOUNT_SPIN_ELISION");
+        return !(e && e[0] == '0' && e[1] == '\0');
+    }();
+    const bool vcount_poll =
+        vcount_spin_elision_on && g_last_mmio_read_pc == header_pc &&
+        read_touched_vcount(g_last_mmio_read_addr, g_last_mmio_read_width);
+    const bool vcount_only_disturbance =
+        vcount_poll && s.valid && epoch == (s.last_epoch + 1ull);
+
     bool regs_match = s.valid && s.cpsr == g_cpu.cpsr;
     if (regs_match) {
         for (int i = 0; i < 15; ++i) {
             if (s.regs[i] != g_cpu.R[i]) { regs_match = false; break; }
         }
     }
-    const bool undisturbed = s.valid && (epoch == s.last_epoch);
+    const bool undisturbed =
+        s.valid && (epoch == s.last_epoch || vcount_only_disturbance);
     const unsigned long long delta = s.valid ? (now - s.last_cycles) : 0ull;
 
     // Rolling fixed point: the prior iteration left identical {R0-R14, CPSR},
@@ -797,6 +828,7 @@ extern "C" void runtime_idle_backedge(uint32_t header_pc) {
             g_idle_skipped_cycles += skipped;
             g_idle_skipped_iters  += periods;
             ++g_idle_confirmed_sites;
+            if (vcount_poll) ++g_vcount_spin_progress;
         }
     }
 
@@ -903,8 +935,15 @@ extern "C" bool runtime_should_yield(void) {
         static bool tripped = false;
         static std::chrono::steady_clock::time_point last_halt =
             std::chrono::steady_clock::now();
+        static unsigned long long last_vcount_spin_progress = 0;
+        static unsigned long long last_vcount_spin_vblank = g_runtime_vblank_starts;
         static unsigned long long calls = 0;
         if (halted) {
+            last_halt = std::chrono::steady_clock::now();
+        } else if (g_vcount_spin_progress != last_vcount_spin_progress &&
+                   g_runtime_vblank_starts != last_vcount_spin_vblank) {
+            last_vcount_spin_progress = g_vcount_spin_progress;
+            last_vcount_spin_vblank = g_runtime_vblank_starts;
             last_halt = std::chrono::steady_clock::now();
         } else if (!tripped && (++calls & 0xFFFFFull) == 0) {
             auto idle = std::chrono::steady_clock::now() - last_halt;

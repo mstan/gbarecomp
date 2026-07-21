@@ -60,8 +60,8 @@ void overlay_loader_shutdown();
 // Enqueue a background compile for the function at (pc, thumb), unless it is
 // already healed, in flight, or known-failed. No-op when disabled. Called from
 // the Stage-1 miss path (runtime_arm_default_aborts.cpp) right after the miss
-// is logged; the first hit still bridges this session.
-void overlay_request_compile(uint32_t pc, bool thumb);
+// is logged. Returns true only when the PC is dispatchable immediately.
+bool overlay_request_compile(uint32_t pc, bool thumb);
 
 // Game-thread: move any worker-finished entries into g_healed (and remember
 // failures so they aren't retried). Cheap when idle (one atomic load). Call

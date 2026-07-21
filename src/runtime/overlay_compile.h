@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "overlay_abi.h"  // GbaOverlayCallbacks
 
@@ -42,6 +43,7 @@ struct OverlayWorkItem {
     const uint8_t* bytes = nullptr;
     std::size_t    size  = 0;
     uint32_t       base  = 0;
+    std::vector<uint8_t> owned_bytes;
 };
 
 // The result of a successful compile-or-load.

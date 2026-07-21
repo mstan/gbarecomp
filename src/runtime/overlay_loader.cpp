@@ -83,6 +83,16 @@ bool self_heal_verbose() {
     return value && value[0] != '\0' && value[0] != '0';
 }
 
+bool ram_overlay_heal_enabled() {
+    const char* value = std::getenv("GBARECOMP_RAM_OVERLAY_HEAL");
+    return value && value[0] != '\0' && value[0] != '0';
+}
+
+bool sync_overlay_heal_enabled() {
+    const char* value = std::getenv("GBARECOMP_SYNC_OVERLAY_HEAL");
+    return value && value[0] != '\0' && value[0] != '0';
+}
+
 // Game-thread-only:
 std::unordered_map<uint64_t, HealedEntry> g_healed;
 std::unordered_set<uint64_t>              s_inflight;
@@ -103,7 +113,11 @@ std::atomic<int>            s_ready_pending{0};
 // The cache subdir a given backend writes to / is scanned from:
 //   recomp_cache/<image_sha1>/<gcc|tcc>/<os-arch>/<pc>_<crc>_<a|t>.dll
 std::string cache_dir_for(HealBackend b) {
-    return (fs::path(s_cache_base) / heal_backend_name(b) / overlay_arch_abi())
+    const std::string abi_dir =
+        "abi" + std::to_string(static_cast<unsigned>(GBA_OVERLAY_ABI_VERSION)) +
+        "-ram3";
+    return (fs::path(s_cache_base) / heal_backend_name(b) / overlay_arch_abi() /
+            abi_dir)
         .string();
 }
 
@@ -175,10 +189,52 @@ bool region_bytes(uint32_t pc, const uint8_t** bytes, std::size_t* size,
     }
     gba::GbaBus* bus = active_bus();
     if (!bus || !bus->rom_ptr() || bus->rom_size() == 0) return false;
+    const uint32_t rom_base = 0x08000000u;
+    const uint64_t rom_end =
+        static_cast<uint64_t>(rom_base) + static_cast<uint64_t>(bus->rom_size());
+    if (pc < rom_base || static_cast<uint64_t>(pc) >= rom_end) return false;
     *bytes = bus->rom_ptr();
     *size  = bus->rom_size();
-    *base  = 0x08000000u;
+    *base  = rom_base;
     return true;
+}
+
+bool snapshot_ram_region(uint32_t pc, OverlayWorkItem* w) {
+    if (!ram_overlay_heal_enabled() || !w) return false;
+    gba::GbaBus* bus = active_bus();
+    if (!bus) return false;
+
+    const uint8_t* src = nullptr;
+    std::size_t size = 0;
+    uint32_t base = 0;
+    if (pc >= 0x02000000u && pc < 0x02040000u) {
+        src = bus->ewram_ptr();
+        size = 256u * 1024u;
+        base = 0x02000000u;
+    } else if (pc >= 0x03000000u && pc < 0x03008000u) {
+        src = bus->iwram_ptr();
+        size = 32u * 1024u;
+        base = 0x03000000u;
+    } else {
+        return false;
+    }
+
+    w->bytes = nullptr;
+    w->size = size;
+    w->base = base;
+    w->owned_bytes.assign(src, src + size);
+    return true;
+}
+
+void install_healed(uint64_t key, const OverlayCompiled& c) {
+    HealedEntry h;
+    h.addr = c.pc;
+    h.thumb = c.thumb;
+    h.fn = c.fn;
+    h.module = c.module;
+    h.crc = c.crc;
+    h.end = c.end;
+    g_healed[key] = h;
 }
 
 // ── DLL callback table ─────────────────────────────────────────────
@@ -222,6 +278,7 @@ void fill_callbacks() {
 
     g_callbacks.runtime_tick       = runtime_tick;
     g_callbacks.runtime_should_yield = ovl_should_yield;
+    g_callbacks.runtime_idle_backedge = runtime_idle_backedge;
     g_callbacks.runtime_mem_cycles = runtime_mem_cycles;
     g_callbacks.runtime_mul_cycles = runtime_mul_cycles;
 
@@ -318,10 +375,7 @@ int warm_load_cache_dir(const std::string& dir, HealBackend backend,
         std::string err;
         if (overlay_compile_one(w, dir, &g_callbacks,
                                 /*compile_if_missing=*/false, backend, &c, &err)) {
-            HealedEntry h;
-            h.addr = pc; h.thumb = thumb; h.fn = c.fn; h.module = c.module;
-            h.crc = c.crc; h.end = c.end;
-            g_healed[key] = h;
+            install_healed(key, c);
             ++loaded;
         }
     }
@@ -420,36 +474,70 @@ void overlay_loader_shutdown() {
     s_active = false;
 }
 
-void overlay_request_compile(uint32_t pc, bool thumb) {
-    if (!s_active) return;
+bool overlay_request_compile(uint32_t pc, bool thumb) {
+    if (!s_active) return false;
     pc &= ~1u;
     const uint64_t key = heal_key(pc, thumb);
-    if (g_healed.count(key) || s_inflight.count(key) || s_failed.count(key)) {
-        return;
+    if (g_healed.count(key)) return true;
+    if (s_inflight.count(key) || s_failed.count(key)) {
+        return false;
     }
 
     const uint8_t* bytes = nullptr;
     std::size_t size = 0;
     uint32_t base = 0;
+    OverlayWorkItem w;
+    w.pc = pc;
+    w.thumb = thumb;
     if (!region_bytes(pc, &bytes, &size, &base)) {
         // No immutable image (e.g. a RAM PC) — Stage 4 territory. Don't retry.
+        if (!snapshot_ram_region(pc, &w)) {
+            s_failed.insert(key);
+            return false;
+        }
+    } else {
+        w.bytes = bytes;
+        w.size = size;
+        w.base = base;
+    }
+
+    if (sync_overlay_heal_enabled() || !w.owned_bytes.empty()) {
+        OverlayCompiled c;
+        std::string err;
+        const bool ok = overlay_compile_one(w, s_active_cache_dir, &g_callbacks,
+                                            /*compile_if_missing=*/true, s_backend,
+                                            &c, &err);
+        if (ok) {
+            install_healed(key, c);
+            if (self_heal_verbose()) {
+                std::fprintf(stderr,
+                    "self_heal: HEALED %s0x%08X (%s) -> native via %s "
+                    "(crc=%08X, [0x%08X,0x%08X)); dispatching immediately.\n",
+                    !w.owned_bytes.empty() ? "RAM " : "",
+                    pc, thumb ? "thumb" : "arm", heal_backend_name(s_backend),
+                    c.crc, pc, c.end);
+            }
+            return true;
+        }
         s_failed.insert(key);
-        return;
+        std::fprintf(stderr,
+            "self_heal: sync compile FAILED for 0x%08X (%s): %s - staying on "
+            "the interpreter bridge this session.\n",
+            pc, thumb ? "thumb" : "arm", err.c_str());
+        return false;
     }
 
     // Production rule: the game thread NEVER compiles. Hand the region to the
     // worker thread; the game thread keeps interpreting this PC until the shard
     // is installed at a frame boundary (overlay_drain_ready). First hit
     // enqueues — it does not compile.
-    OverlayWorkItem w;
-    w.pc = pc; w.thumb = thumb;
-    w.bytes = bytes; w.size = size; w.base = base;
     s_inflight.insert(key);
     {
         std::lock_guard<std::mutex> lk(s_work_mtx);
         s_work.push_back(w);
     }
     s_work_cv.notify_one();
+    return false;
 }
 
 void overlay_drain_ready() {
@@ -465,10 +553,7 @@ void overlay_drain_ready() {
         if (r.ok) {
             // Game-thread install: publish the worker-produced code into the
             // dispatch map. This validates + installs only — it never compiles.
-            HealedEntry h;
-            h.addr = r.c.pc; h.thumb = r.c.thumb; h.fn = r.c.fn;
-            h.module = r.c.module; h.crc = r.c.crc; h.end = r.c.end;
-            g_healed[r.key] = h;
+            install_healed(r.key, r.c);
         } else {
             s_failed.insert(r.key);
         }

@@ -216,8 +216,17 @@ bool overlay_compile_one(const OverlayWorkItem& w,
                          HealBackend backend,
                          OverlayCompiled* out,
                          std::string* err) {
-    if (!w.bytes || w.size == 0) {
+    const uint8_t* image = !w.owned_bytes.empty() ? w.owned_bytes.data()
+                                                  : w.bytes;
+    const std::size_t image_size = !w.owned_bytes.empty() ? w.owned_bytes.size()
+                                                          : w.size;
+    if (!image || image_size == 0) {
         if (err) *err = "no code image for the overlay function";
+        return false;
+    }
+    if (w.pc < w.base ||
+        static_cast<std::size_t>(w.pc - w.base) >= image_size) {
+        if (err) *err = "overlay PC is outside the supplied code image";
         return false;
     }
 
@@ -227,16 +236,20 @@ bool overlay_compile_one(const OverlayWorkItem& w,
     // byte-identical to the static build.
     uint32_t end = 0;
     std::string c_text =
-        emit_overlay_c(w.pc, w.thumb, w.bytes, w.size, w.base, &end);
+        emit_overlay_c(w.pc, w.thumb, image, image_size, w.base, &end);
     if (c_text.empty() || end <= w.pc) {
         if (err) *err = "function finder found no entry at the miss PC";
+        return false;
+    }
+    if (static_cast<std::size_t>(end - w.base) > image_size) {
+        if (err) *err = "overlay function extends past the supplied code image";
         return false;
     }
 
     // CRC32 of the compiled-from bytes [pc, end) — keys the cache filename so a
     // changed image produces a distinct file (a stale DLL is simply orphaned).
     const uint32_t crc =
-        gba::crc32(w.bytes + (w.pc - w.base), end - w.pc);
+        gba::crc32(image + (w.pc - w.base), end - w.pc);
 
     char stem[40];
     std::snprintf(stem, sizeof(stem), "%08X_%08X_%c",
