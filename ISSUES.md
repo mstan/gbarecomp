@@ -12,7 +12,10 @@ reproduced, and we chose not to fix immediately. Not a TODO list.
 
 ## High priority
 
-### HP-001: Phase 2.7 pass invalidated by interpreter-not-load-bearing rule
+### HP-001: [RESOLVED 2026-05-28] Phase 2.7 pass invalidated by interpreter-not-load-bearing rule
+- **Resolved:** The recompiled BIOS and `runtime_dispatch` execution path
+  landed, closing the gate on 2026-05-28. The historical details below record
+  why the gate was reopened; Phase 5 work is no longer blocked by this issue.
 - **Observed:** 2026-05-23. The Phase 2.7 acceptance pass earlier in
   the day relied on `armv4t::Interpreter::step` driving execution.
   Subsequently the user clarified that the interpreter is forbidden
