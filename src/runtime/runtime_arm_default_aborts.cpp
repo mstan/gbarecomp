@@ -820,7 +820,23 @@ extern "C" void runtime_force_interp_step(void) {
 extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     const std::uint32_t entry_pc = target_pc & ~1u;
     const bool entry_thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+    static bool miss_ewram_captured = false;
     static bool miss_iwram_captured = false;
+    if (!miss_ewram_captured &&
+        entry_pc >= 0x02000000u && entry_pc < 0x02040000u) {
+        if (const char* path = std::getenv("GBARECOMP_MISS_EWRAM_DUMP")) {
+            if (gba::GbaBus* bus = gbarecomp::active_bus()) {
+                if (std::FILE* f = std::fopen(path, "wb")) {
+                    std::fwrite(bus->ewram_ptr(), 1, 256 * 1024, f);
+                    std::fclose(f);
+                    miss_ewram_captured = true;
+                    std::fprintf(stderr,
+                        "runtime_arm: captured live EWRAM at RAM dispatch miss "
+                        "pc=0x%08X path=\"%s\"\n", entry_pc, path);
+                }
+            }
+        }
+    }
     if (!miss_iwram_captured &&
         entry_pc >= 0x03000000u && entry_pc < 0x03008000u) {
         if (const char* path = std::getenv("GBARECOMP_MISS_IWRAM_DUMP")) {
