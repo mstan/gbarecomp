@@ -31,6 +31,9 @@ Thumbs.db
 # Python bytecode caches.
 **/__pycache__/
 
+# Download cache populated by tools/fetch_tcc.ps1.
+tools/_toolchain_cache/
+
 # Local Ghidra project artifacts. The real Ghidra project for
 # the BIOS + Minish Cap lives at MinishCapRecomp/ghidra/ (outside
 # this inner repo). Anything that lands here is incidental.

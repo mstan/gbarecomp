@@ -349,6 +349,15 @@ function(target_link_gbarecomp_runtime_stack target_name)
     endif()
 endfunction()
 
+function(add_gbarecomp_runtime_stack_test target_name source_file)
+    add_executable(${target_name}
+        ${source_file}
+        tools/bios_smoke/dispatch_stub.cpp)
+    target_include_directories(${target_name} PRIVATE src/debug)
+    target_link_gbarecomp_runtime_stack(${target_name})
+    add_test(NAME ${target_name} COMMAND ${target_name})
+endfunction()
+
 add_executable(gba_scan tools/gba_scan/main.cpp)
 target_link_libraries(gba_scan PRIVATE gbarecomp_armv4t gbarecomp_gba)
 
@@ -531,19 +540,8 @@ add_executable(thumb_tests tests/thumb/test_main.cpp)
 target_link_libraries(thumb_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME thumb_tests COMMAND thumb_tests)
 
-add_executable(bus_tests
-    tests/bus/test_main.cpp
-    tools/bios_smoke/dispatch_stub.cpp)
-target_include_directories(bus_tests PRIVATE src/debug)
-target_link_gbarecomp_runtime_stack(bus_tests)
-add_test(NAME bus_tests COMMAND bus_tests)
-
-add_executable(dma_tests
-    tests/dma/test_main.cpp
-    tools/bios_smoke/dispatch_stub.cpp)
-target_include_directories(dma_tests PRIVATE src/debug)
-target_link_gbarecomp_runtime_stack(dma_tests)
-add_test(NAME dma_tests COMMAND dma_tests)
+add_gbarecomp_runtime_stack_test(bus_tests tests/bus/test_main.cpp)
+add_gbarecomp_runtime_stack_test(dma_tests tests/dma/test_main.cpp)
 
 add_executable(timer_tests tests/timers/test_main.cpp)
 target_link_libraries(timer_tests PRIVATE gbarecomp_gba)
