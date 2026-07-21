@@ -125,7 +125,10 @@ struct Args {
     std::string screen;
     // Launcher-driven presentation settings (CLI only; the pre-boot launcher
     // persists them in its own config.ini and passes them per run).
-    bool fullscreen = false;      // --fullscreen: borderless desktop fullscreen
+    // Tri-state: 0 off, 1 borderless (SDL_WINDOW_FULLSCREEN_DESKTOP),
+    // 2 exclusive (SDL_WINDOW_FULLSCREEN). --fullscreen (bare) = 1;
+    // --fullscreen=<0|1|2> selects explicitly.
+    int fullscreen = 0;
     int  volume = 100;            // --volume 0..100: pushed-sample gain
     bool linear_filter = false;   // --linear-filter 1: linear texture scaling
     // [audio] shadow = true|false — arm the MP2K verified-enhancement shadow
@@ -710,7 +713,18 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             continue;
         }
         if (s == "--fullscreen") {
-            args->fullscreen = true;
+            args->fullscreen = 1;  // bare flag: borderless (back-compat)
+            continue;
+        }
+        if (s.rfind("--fullscreen=", 0) == 0) {
+            int v = 0;
+            if (!parse_int(s.c_str() + 13, &v)) {
+                if (err) *err = "invalid --fullscreen value (expected 0..2)";
+                return false;
+            }
+            if (v < 0) v = 0;
+            if (v > 2) v = 2;
+            args->fullscreen = v;
             continue;
         }
         if (s == "--volume") {
@@ -1949,7 +1963,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             }
             win.load_input_config(exe_dir.c_str());
         }
-        if (args.fullscreen) win.set_fullscreen(true);
+        if (args.fullscreen) win.set_fullscreen(args.fullscreen);
         win.set_volume(args.volume);
         sync_resize_driven_view();
         if (live_fb.empty()) live_fb.assign(ppu.render_bytes(), 0);
@@ -2083,7 +2097,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (ev.quit) host_quit = true;
         if (pacer) pacer->set_uncapped(ev.fast_forward);
         // System hotkeys (config.ini [KeyMap], rebindable in the launcher).
-        if (ev.toggle_fullscreen) win.set_fullscreen(!win.fullscreen());
+        if (ev.toggle_fullscreen) {
+            // Toggle between windowed and the configured mode. A session
+            // launched windowed (args.fullscreen == 0) defaults its on-mode
+            // to borderless (1); a session launched into a specific mode
+            // toggles back into that same mode.
+            const int on_mode = args.fullscreen ? args.fullscreen : 1;
+            win.set_fullscreen(win.fullscreen() ? 0 : on_mode);
+        }
         if (ev.window_bigger)  win.adjust_scale(+1);
         if (ev.window_smaller) win.adjust_scale(-1);
         if (ev.volume_up)   win.set_volume(win.volume() + 10);

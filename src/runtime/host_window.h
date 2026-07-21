@@ -67,8 +67,11 @@ public:
 
     // Live window/audio controls (hotkey + launcher-driven). All no-ops when
     // the window isn't open or this build has no SDL2.
-    void set_fullscreen(bool on);
-    bool fullscreen() const;
+    // Tri-state fullscreen mode: 0 windowed, 1 borderless
+    // (SDL_WINDOW_FULLSCREEN_DESKTOP), 2 exclusive (SDL_WINDOW_FULLSCREEN).
+    // Out-of-range values clamp to 0..2. fullscreen() reports the current mode.
+    void set_fullscreen(int mode);
+    int  fullscreen() const;
     void adjust_scale(int delta);       // integer window scale, clamped 1..8
     void set_volume(int pct);           // 0..100, applied to pushed samples
     int  volume() const;

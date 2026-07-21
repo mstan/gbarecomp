@@ -186,6 +186,9 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
     if (c->volume < 0) c->volume = 0;
     if (c->volume > 100) c->volume = 100;
     if (c->screen_kind < 0 || c->screen_kind > 4) c->screen_kind = 0;
+    // Tri-state: 0 off, 1 borderless, 2 exclusive. Guard against a hand-
+    // edited/garbage config.ini value; do NOT collapse to a bool here.
+    if (c->fullscreen < 0 || c->fullscreen > 2) c->fullscreen = 0;
 }
 
 // Rewrite ONLY the [Launcher] section of config.ini, preserving every other
@@ -241,7 +244,12 @@ inline void seam_append_setting_args(std::vector<std::string>& args,
     args.push_back(c.linear_filter ? "1" : "0");
     args.push_back("--screen");
     args.push_back(kScreenTokens[c.screen_kind]);
-    if (c.fullscreen) args.push_back("--fullscreen");
+    // Tri-state: 0 off, 1 borderless, 2 exclusive. Pass the value explicitly
+    // so run_game() gets the exact mode; bare `--fullscreen` (no `=N`) still
+    // parses as mode 1 for back-compat with older seam/CLI invocations.
+    if (c.fullscreen) {
+        args.push_back("--fullscreen=" + std::to_string(c.fullscreen));
+    }
     const bool adaptive_view =
         c.adaptive_view && opts.launcher_expose_adaptive_view &&
         opts.resize_driven_view && opts.max_resize_view_width > 240;
@@ -415,7 +423,11 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
 
     // ---- persist + translate the committed settings -------------------------
     cfg.scale         = ls.window_scale > 0 ? ls.window_scale : cfg.scale;
-    cfg.fullscreen    = ls.fullscreen ? 1 : 0;
+    // ls.fullscreen is already tri-state (0 off / 1 borderless / 2 exclusive)
+    // per recomp_launcher.h. Persist it as-is — collapsing to a bool here
+    // would silently downgrade an exclusive-fullscreen commit to borderless
+    // on every subsequent launch.
+    cfg.fullscreen    = (ls.fullscreen >= 0 && ls.fullscreen <= 2) ? ls.fullscreen : 0;
     cfg.linear_filter = ls.linear_filter ? 1 : 0;
     cfg.screen_kind   = (ls.screen_kind >= 0 && ls.screen_kind <= 4)
                           ? ls.screen_kind : 0;

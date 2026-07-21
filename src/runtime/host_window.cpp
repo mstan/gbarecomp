@@ -281,7 +281,7 @@ struct Backend {
     SDL_Scancode bind_sc[10] = {};      // indexed by GBA KEYINPUT bit
     HotkeyBind   hotkeys[HK_COUNT];     // [KeyMap] bindings
     int          scale = 3;             // current integer window scale
-    bool         fullscreen = false;
+    int          fullscreen = 0;        // 0 windowed, 1 borderless, 2 exclusive
     int          volume = 100;          // 0..100 gain on pushed samples
     std::vector<int16_t> volume_buf;    // scratch for gain != 100
     // FPS readout (DisplayPerf hotkey): presents/sec in the title bar.
@@ -865,20 +865,28 @@ void HostWindow::load_input_config(const char* dir) {
     });
 }
 
-void HostWindow::set_fullscreen(bool on) {
+void HostWindow::set_fullscreen(int mode) {
     if (!open_ || !impl_) return;
     auto* b = static_cast<Backend*>(impl_);
-    if (b->fullscreen == on) return;
-    if (SDL_SetWindowFullscreen(b->window,
-                                on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) == 0) {
-        b->fullscreen = on;
+    if (mode < 0) mode = 0;
+    if (mode > 2) mode = 2;
+    if (b->fullscreen == mode) return;
+    // 0 windowed, 1 borderless desktop, 2 exclusive fullscreen.
+    Uint32 flag = mode == 2 ? SDL_WINDOW_FULLSCREEN
+                : mode == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP
+                            : 0;
+    if (SDL_SetWindowFullscreen(b->window, flag) == 0) {
+        b->fullscreen = mode;
         // Record which panel/mode the cadence data now runs on.
-        log_display_mode(b->window, on ? "fullscreen" : "windowed");
+        log_display_mode(b->window,
+                         mode == 2 ? "fullscreen-exclusive"
+                         : mode == 1 ? "fullscreen-borderless"
+                                     : "windowed");
     }
 }
 
-bool HostWindow::fullscreen() const {
-    if (!open_ || !impl_) return false;
+int HostWindow::fullscreen() const {
+    if (!open_ || !impl_) return 0;
     return static_cast<const Backend*>(impl_)->fullscreen;
 }
 
@@ -1026,8 +1034,8 @@ bool HostWindow::drawable_size(int* /*width*/, int* /*height*/) const {
 void HostWindow::present(const uint8_t* /*rgb888*/) {}
 
 void HostWindow::load_input_config(const char* /*dir*/) {}
-void HostWindow::set_fullscreen(bool /*on*/) {}
-bool HostWindow::fullscreen() const { return false; }
+void HostWindow::set_fullscreen(int /*mode*/) {}
+int  HostWindow::fullscreen() const { return 0; }
 void HostWindow::adjust_scale(int /*delta*/) {}
 void HostWindow::set_volume(int /*pct*/) {}
 int  HostWindow::volume() const { return 100; }
