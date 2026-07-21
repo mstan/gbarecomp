@@ -865,7 +865,10 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
         std::abort();
     }
     record_and_log_miss(entry_pc, entry_thumb);
-    gbarecomp::overlay_request_compile(entry_pc, entry_thumb);
+    if (gbarecomp::overlay_request_compile(entry_pc, entry_thumb) &&
+        overlay_try_dispatch(entry_pc, entry_thumb ? 1 : 0)) {
+        return;
+    }
     runtime_bridge_interpret(entry_pc, entry_thumb, /*forced_stop_pc=*/0u,
                              /*max_instrs=*/0u);
 }

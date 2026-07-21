@@ -66,6 +66,7 @@ static inline void runtime_call_cancel_return(uint32_t pc) { g_ovl->runtime_call
 // ── Timing / scheduling ──
 static inline void runtime_tick(uint32_t c) { g_ovl->runtime_tick(c); }
 static inline int  runtime_should_yield(void) { return g_ovl->runtime_should_yield(); }
+static inline void runtime_idle_backedge(uint32_t pc) { g_ovl->runtime_idle_backedge(pc); }
 static inline uint32_t runtime_mem_cycles(uint32_t a, uint32_t w, uint32_t s) { return g_ovl->runtime_mem_cycles(a, w, s); }
 static inline uint32_t runtime_mul_cycles(uint32_t rs, uint32_t sv, uint32_t ex) { return g_ovl->runtime_mul_cycles(rs, sv, ex); }
 

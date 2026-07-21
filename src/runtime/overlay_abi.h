@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-#define GBA_OVERLAY_ABI_VERSION 2u
+#define GBA_OVERLAY_ABI_VERSION 3u
 
 typedef struct GbaOverlayCallbacks {
     uint32_t abi_version;  // must equal GBA_OVERLAY_ABI_VERSION
@@ -93,6 +93,7 @@ typedef struct GbaOverlayCallbacks {
     // generated prologue (emit_function.cpp); the overlay body references the
     // host's g_runtime_fn_entry_hook through this pointer (NULL hook = skipped).
     void (**runtime_fn_entry_hook)(uint32_t entry_pc);  // &g_runtime_fn_entry_hook
+    void (*runtime_idle_backedge)(uint32_t header_pc);
 } GbaOverlayCallbacks;
 
 // Exported by every overlay DLL:
