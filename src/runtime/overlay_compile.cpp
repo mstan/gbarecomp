@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "overlay_emit.h"   // emit_overlay_c
-#include "crc32.h"          // gba::crc32
+#include "../gba/crc32.h"   // gba::crc32
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN

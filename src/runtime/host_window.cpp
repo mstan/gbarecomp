@@ -14,6 +14,9 @@
 
 #include "color_lut.h"
 #include "presentation_layout.h"
+#if defined(GBARECOMP_RUNTIME_UI)
+#include "recomp_runtime_ui.h"
+#endif
 
 #if defined(GBARECOMP_HAVE_SDL2)
 
@@ -269,6 +272,11 @@ struct Backend {
     // grading), so default behavior is byte-identical to upstream.
     std::unique_ptr<runtime::ColorLut> color_lut;
     std::vector<uint8_t> graded_fb;  // scratch RGB888 (base_w*base_h*3)
+#if defined(GBARECOMP_RUNTIME_UI)
+    RecompRuntimeUi* runtime_ui = nullptr;
+    std::vector<uint32_t> runtime_ui_argb;
+    std::vector<uint8_t> runtime_ui_rgb;
+#endif
     int base_w = 240;   // logical surface width  (240 faithful, wider if expanded)
     int base_h = 160;   // logical surface height (160; vertical expansion deferred)
     bool expanded_view = false;  // native games retain the historical SDL path
@@ -455,6 +463,55 @@ void gba_audio_callback(void* userdata, Uint8* stream, int len) {
         SDL_memset(stream, 0, len);
     }
 }
+
+#if defined(GBARECOMP_RUNTIME_UI)
+bool runtime_ui_event(RecompRuntimeUi* ui, const SDL_Event& e) {
+    if (!ui) return false;
+    if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE &&
+        !recomp_runtime_ui_is_open(ui)) {
+        recomp_runtime_ui_open(ui);
+        return true;
+    }
+    if (e.type != SDL_KEYDOWN && e.type != SDL_KEYUP &&
+        e.type != SDL_CONTROLLERBUTTONDOWN && e.type != SDL_CONTROLLERBUTTONUP)
+        return false;
+    RecompRuntimeUiInput input;
+    bool mapped = true;
+    const int pressed = e.type == SDL_KEYDOWN || e.type == SDL_CONTROLLERBUTTONDOWN;
+    const int repeat = e.type == SDL_KEYDOWN ? e.key.repeat : 0;
+    if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
+        switch (e.key.keysym.scancode) {
+            case SDL_SCANCODE_ESCAPE: input = RECOMP_RUNTIME_UI_INPUT_BACK; break;
+            case SDL_SCANCODE_UP: input = RECOMP_RUNTIME_UI_INPUT_UP; break;
+            case SDL_SCANCODE_DOWN: input = RECOMP_RUNTIME_UI_INPUT_DOWN; break;
+            case SDL_SCANCODE_LEFT: input = RECOMP_RUNTIME_UI_INPUT_LEFT; break;
+            case SDL_SCANCODE_RIGHT: input = RECOMP_RUNTIME_UI_INPUT_RIGHT; break;
+            case SDL_SCANCODE_RETURN:
+            case SDL_SCANCODE_SPACE: input = RECOMP_RUNTIME_UI_INPUT_ACCEPT; break;
+            default: mapped = false; break;
+        }
+    } else {
+        switch (e.cbutton.button) {
+            case SDL_CONTROLLER_BUTTON_GUIDE:
+                if (pressed) {
+                    if (recomp_runtime_ui_is_open(ui)) recomp_runtime_ui_close(ui);
+                    else recomp_runtime_ui_open(ui);
+                }
+                return true;
+            case SDL_CONTROLLER_BUTTON_DPAD_UP: input = RECOMP_RUNTIME_UI_INPUT_UP; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_DOWN: input = RECOMP_RUNTIME_UI_INPUT_DOWN; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_LEFT: input = RECOMP_RUNTIME_UI_INPUT_LEFT; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: input = RECOMP_RUNTIME_UI_INPUT_RIGHT; break;
+            case SDL_CONTROLLER_BUTTON_A: input = RECOMP_RUNTIME_UI_INPUT_ACCEPT; break;
+            case SDL_CONTROLLER_BUTTON_B: input = RECOMP_RUNTIME_UI_INPUT_BACK; break;
+            default: mapped = false; break;
+        }
+    }
+    if (mapped && recomp_runtime_ui_is_open(ui))
+        recomp_runtime_ui_handle_input(ui, input, pressed, repeat);
+    return recomp_runtime_ui_is_open(ui) || mapped;
+}
+#endif
 
 }  // namespace
 
@@ -788,6 +845,28 @@ void HostWindow::present(const uint8_t* rgb888) {
         b->color_lut->map_rgb888(rgb888, b->graded_fb.data(), b->base_w, b->base_h);
         rgb888 = b->graded_fb.data();
     }
+#if defined(GBARECOMP_RUNTIME_UI)
+    if (b->runtime_ui && recomp_runtime_ui_is_open(b->runtime_ui)) {
+        const std::size_t pixels = static_cast<std::size_t>(b->base_w) * b->base_h;
+        b->runtime_ui_argb.resize(pixels);
+        b->runtime_ui_rgb.resize(pixels * 3u);
+        for (std::size_t i = 0; i < pixels; ++i) {
+            b->runtime_ui_argb[i] = 0xFF000000u |
+                (static_cast<uint32_t>(rgb888[i * 3 + 0]) << 16) |
+                (static_cast<uint32_t>(rgb888[i * 3 + 1]) << 8) |
+                static_cast<uint32_t>(rgb888[i * 3 + 2]);
+        }
+        recomp_runtime_ui_render_argb8888(b->runtime_ui,
+            b->runtime_ui_argb.data(), b->base_w, b->base_h, b->base_w * 4);
+        for (std::size_t i = 0; i < pixels; ++i) {
+            const uint32_t p = b->runtime_ui_argb[i];
+            b->runtime_ui_rgb[i * 3 + 0] = static_cast<uint8_t>(p >> 16);
+            b->runtime_ui_rgb[i * 3 + 1] = static_cast<uint8_t>(p >> 8);
+            b->runtime_ui_rgb[i * 3 + 2] = static_cast<uint8_t>(p);
+        }
+        rgb888 = b->runtime_ui_rgb.data();
+    }
+#endif
     SDL_UpdateTexture(b->texture, nullptr, rgb888, b->base_w * 3);
     SDL_RenderClear(b->renderer);
     if (!b->expanded_view && !b->resize_driven_view) {
@@ -916,6 +995,51 @@ int HostWindow::volume() const {
     return static_cast<const Backend*>(impl_)->volume;
 }
 
+int HostWindow::window_scale() const {
+    if (!open_ || !impl_) return 1;
+    return static_cast<const Backend*>(impl_)->scale;
+}
+
+void HostWindow::set_linear_filter(bool enabled) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    b->linear_filter = enabled;
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_SetTextureScaleMode(b->texture,
+        enabled ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
+}
+
+bool HostWindow::linear_filter() const {
+    return open_ && impl_ && static_cast<const Backend*>(impl_)->linear_filter;
+}
+
+void HostWindow::set_audio_enabled(bool enabled) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    if (b->audio_dev) SDL_PauseAudioDevice(b->audio_dev, enabled ? 0 : 1);
+}
+
+bool HostWindow::audio_enabled() const {
+    if (!open_ || !impl_) return false;
+    auto* b = static_cast<const Backend*>(impl_);
+    return b->audio_dev && SDL_GetAudioDeviceStatus(b->audio_dev) == SDL_AUDIO_PLAYING;
+}
+
+void HostWindow::set_resize_driven_view(bool enabled) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    b->resize_driven_view = enabled;
+    SDL_SetWindowResizable(b->window, enabled || b->expanded_view ? SDL_TRUE : SDL_FALSE);
+}
+
+#if defined(GBARECOMP_RUNTIME_UI)
+void HostWindow::set_runtime_ui(RecompRuntimeUi* ui) {
+    if (!open_ || !impl_) return;
+    static_cast<Backend*>(impl_)->runtime_ui = ui;
+}
+#endif
+
 void HostWindow::set_fps_readout(bool on) {
     if (!open_ || !impl_) return;
     auto* b = static_cast<Backend*>(impl_);
@@ -938,6 +1062,9 @@ HostWindow::Events HostWindow::pump() {
 
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
+#if defined(GBARECOMP_RUNTIME_UI)
+        if (runtime_ui_event(b->runtime_ui, e)) continue;
+#endif
         if (e.type == SDL_QUIT) {
             ev.quit = true;
         } else if (e.type == SDL_WINDOWEVENT &&
@@ -987,6 +1114,10 @@ HostWindow::Events HostWindow::pump() {
             keys &= static_cast<uint16_t>(~(1u << bit));
     }
     ev.keyinput = keys;
+#if defined(GBARECOMP_RUNTIME_UI)
+    if (b->runtime_ui && recomp_runtime_ui_is_open(b->runtime_ui))
+        ev.keyinput = 0x03FFu;
+#endif
 
     // Turbo is level-triggered: held = uncap the frame limiter (default Tab).
     ev.fast_forward = false;
@@ -1039,6 +1170,15 @@ int  HostWindow::fullscreen() const { return 0; }
 void HostWindow::adjust_scale(int /*delta*/) {}
 void HostWindow::set_volume(int /*pct*/) {}
 int  HostWindow::volume() const { return 100; }
+int  HostWindow::window_scale() const { return 1; }
+void HostWindow::set_linear_filter(bool /*enabled*/) {}
+bool HostWindow::linear_filter() const { return false; }
+void HostWindow::set_audio_enabled(bool /*enabled*/) {}
+bool HostWindow::audio_enabled() const { return false; }
+void HostWindow::set_resize_driven_view(bool /*enabled*/) {}
+#if defined(GBARECOMP_RUNTIME_UI)
+void HostWindow::set_runtime_ui(RecompRuntimeUi* /*ui*/) {}
+#endif
 void HostWindow::set_fps_readout(bool /*on*/) {}
 bool HostWindow::fps_readout() const { return false; }
 

@@ -34,7 +34,7 @@
 #include "runtime_bus_bridge.h"
 #include "self_heal.h"
 #include "overlay_loader.h"
-#include "sha1.h"
+#include "../gba/sha1.h"
 #include "snapshot.h"
 #include "tcp_debug_server.h"
 #ifdef GBA_COSIM
@@ -42,6 +42,9 @@
 #endif
 #include "ws_provenance.h"
 #include "ws_sidecar.h"
+#if defined(GBARECOMP_RUNTIME_UI)
+#include "recomp_runtime_ui.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -154,6 +157,63 @@ struct Args {
     // Authorization remains game-owned through RunOptions::resize_driven_view.
     bool resize_view = false;
 };
+
+#if defined(GBARECOMP_RUNTIME_UI)
+struct RuntimeUiContext {
+    HostWindow* window = nullptr;
+    RecompRuntimeUi* ui = nullptr;
+    int view_mode = RECOMP_RUNTIME_UI_VIEW_NATIVE;
+    bool view_mode_dirty = false;
+};
+
+int runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int* out) {
+    auto* c = static_cast<RuntimeUiContext*>(opaque);
+    if (!c || !c->window || !item || !out) return 0;
+    if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_FULLSCREEN) == 0) *out = c->window->fullscreen();
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE) == 0) *out = c->window->window_scale();
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VIEW_MODE) == 0) *out = c->view_mode;
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER) == 0) *out = c->window->linear_filter();
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0) *out = c->window->audio_enabled();
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) *out = c->window->volume();
+    else return 0;
+    return 1;
+}
+
+int runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int value) {
+    auto* c = static_cast<RuntimeUiContext*>(opaque);
+    if (!c || !c->window || !item) return 0;
+    if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_FULLSCREEN) == 0) c->window->set_fullscreen(value);
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE) == 0)
+        c->window->adjust_scale(value - c->window->window_scale());
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VIEW_MODE) == 0) {
+        c->view_mode = value;
+        c->view_mode_dirty = true;
+    } else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER) == 0)
+        c->window->set_linear_filter(value != 0);
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0)
+        c->window->set_audio_enabled(value != 0);
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0)
+        c->window->set_volume(value);
+    else return 0;
+    return 1;
+}
+
+int runtime_ui_action(void* opaque, const RecompRuntimeUiItem* item) {
+    auto* c = static_cast<RuntimeUiContext*>(opaque);
+    if (c && item && std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_RESUME) == 0) {
+        recomp_runtime_ui_close(c->ui);
+        return 1;
+    }
+    return 0;
+}
+
+int runtime_ui_enabled(void* opaque, const RecompRuntimeUiItem* item) {
+    auto* c = static_cast<RuntimeUiContext*>(opaque);
+    if (c && item && std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE) == 0)
+        return c->window->fullscreen() == 0;
+    return 1;
+}
+#endif
 
 std::string trim(std::string_view in) {
     std::size_t first = 0;
@@ -1073,9 +1133,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     if (const char* e = std::getenv("GBARECOMP_RESIZE_VIEW"))
         args.resize_view = e[0] && e[0] != '0';
-    const bool resize_view_enabled =
+    bool resize_view_enabled =
         args.resize_view && opts.resize_driven_view &&
         opts.max_resize_view_width > 240 && args.window;
+#if defined(GBARECOMP_RUNTIME_UI)
+    RuntimeUiContext runtime_ui_context;
+    runtime_ui_context.view_mode = resize_view_enabled
+        ? RECOMP_RUNTIME_UI_VIEW_ADAPTIVE
+        : args.view_width > 240 ? RECOMP_RUNTIME_UI_VIEW_FIXED_16_9
+                                : RECOMP_RUNTIME_UI_VIEW_NATIVE;
+#endif
     if (args.resize_view && !args.quiet) {
         std::fprintf(stderr,
             "[gbarecomp:runtime] resize-driven request: capability=%s "
@@ -1890,23 +1957,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     };
     FramePhaseRing frame_phase;
-    auto sync_resize_driven_view = [&]() -> bool {
-        if (!resize_view_enabled || !win.is_open()) return false;
-        int drawable_w = 0;
-        int drawable_h = 0;
-        if (!win.drawable_size(&drawable_w, &drawable_h)) return false;
-        const std::uint32_t target = resize_driven_view_width(
-            drawable_w, drawable_h, opts.max_resize_view_width,
-            gba::GbaPpu::kMaxRenderWidth);
-        if (target == ppu.render_width()) return false;
-
+    auto apply_runtime_view_width = [&](std::uint32_t target) -> bool {
         const ViewGeometry geometry = resolve_view_geometry(
-            static_cast<int>(target), opts.max_resize_view_width, false,
-            gba::GbaPpu::kMaxRenderWidth);
+            static_cast<int>(target),
+            resize_view_enabled ? opts.max_resize_view_width : opts.max_view_width,
+            false, gba::GbaPpu::kMaxRenderWidth);
+        if (geometry.width == ppu.render_width()) return false;
         if (!win.set_surface_size(static_cast<int>(geometry.width),
-                                  static_cast<int>(ppu.render_height()))) {
-            return false;
-        }
+                                  static_cast<int>(ppu.render_height()))) return false;
         ppu.set_view_margins(geometry.extra_left, geometry.extra_right, 0, 0);
         args.view_width = static_cast<int>(ppu.render_width());
         g_ws_extra_left = static_cast<unsigned>(ppu.view_extra_left());
@@ -1916,11 +1974,39 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         g_ws_active = ppu.view_expanded() ? 1u : 0u;
         if (ppu.view_expanded() && opts.extended_view_init &&
             !extended_view_initialized) {
-            opts.extended_view_init(ppu.view_extra_left(),
-                                    ppu.view_extra_right());
+            opts.extended_view_init(ppu.view_extra_left(), ppu.view_extra_right());
             extended_view_initialized = true;
         }
         live_fb.assign(ppu.render_bytes(), 0);
+        return true;
+    };
+    auto sync_resize_driven_view = [&]() -> bool {
+#if defined(GBARECOMP_RUNTIME_UI)
+        if (runtime_ui_context.view_mode_dirty && win.is_open()) {
+            runtime_ui_context.view_mode_dirty = false;
+            resize_view_enabled = runtime_ui_context.view_mode ==
+                RECOMP_RUNTIME_UI_VIEW_ADAPTIVE;
+            win.set_resize_driven_view(resize_view_enabled);
+            if (!resize_view_enabled) {
+                const std::uint32_t requested = runtime_ui_context.view_mode ==
+                    RECOMP_RUNTIME_UI_VIEW_FIXED_16_9
+                        ? static_cast<std::uint32_t>(std::min<int>(
+                              opts.max_view_width, (160 * 16 + 8) / 9))
+                        : 240u;
+                return apply_runtime_view_width(requested);
+            }
+        }
+#endif
+        if (!resize_view_enabled || !win.is_open()) return false;
+        int drawable_w = 0;
+        int drawable_h = 0;
+        if (!win.drawable_size(&drawable_w, &drawable_h)) return false;
+        const std::uint32_t target = resize_driven_view_width(
+            drawable_w, drawable_h, opts.max_resize_view_width,
+            gba::GbaPpu::kMaxRenderWidth);
+        if (target == ppu.render_width()) return false;
+
+        if (!apply_runtime_view_width(target)) return false;
         if (!args.quiet) {
             std::fprintf(stderr,
                 "[gbarecomp:runtime] resize-driven view: drawable=%dx%d "
@@ -1965,6 +2051,36 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
         if (args.fullscreen) win.set_fullscreen(args.fullscreen);
         win.set_volume(args.volume);
+#if defined(GBARECOMP_RUNTIME_UI)
+        runtime_ui_context.window = &win;
+        RecompRuntimeUiStandardConfig runtime_ui_config{};
+        runtime_ui_config.menu.title = GBARECOMP_WINDOW_TITLE;
+        runtime_ui_config.menu.subtitle = "Game Boy Advance runtime settings";
+        runtime_ui_config.menu.theme = "gba";
+        runtime_ui_config.menu.callbacks.context = &runtime_ui_context;
+        runtime_ui_config.menu.callbacks.get_value = runtime_ui_get;
+        runtime_ui_config.menu.callbacks.set_value = runtime_ui_set;
+        runtime_ui_config.menu.callbacks.run_action = runtime_ui_action;
+        runtime_ui_config.menu.callbacks.is_enabled = runtime_ui_enabled;
+        runtime_ui_config.features =
+            RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |
+            RECOMP_RUNTIME_UI_STANDARD_WINDOW_SCALE |
+            RECOMP_RUNTIME_UI_STANDARD_VIEW_MODE |
+            RECOMP_RUNTIME_UI_STANDARD_LINEAR_FILTER |
+            RECOMP_RUNTIME_UI_STANDARD_AUDIO |
+            RECOMP_RUNTIME_UI_STANDARD_VOLUME |
+            RECOMP_RUNTIME_UI_STANDARD_RESUME;
+        runtime_ui_config.view_modes = RECOMP_RUNTIME_UI_VIEW_MODE_NATIVE;
+        if (opts.max_view_width > 240)
+            runtime_ui_config.view_modes |=
+                RECOMP_RUNTIME_UI_VIEW_MODE_FIXED_16_9;
+        if (opts.resize_driven_view && opts.max_resize_view_width > 240)
+            runtime_ui_config.view_modes |=
+                RECOMP_RUNTIME_UI_VIEW_MODE_ADAPTIVE;
+        runtime_ui_context.ui =
+            recomp_runtime_ui_create_standard(&runtime_ui_config);
+        win.set_runtime_ui(runtime_ui_context.ui);
+#endif
         sync_resize_driven_view();
         if (live_fb.empty()) live_fb.assign(ppu.render_bytes(), 0);
         pacer.emplace();  // paces to the GBA's 59.7275 Hz
@@ -2615,7 +2731,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             }
         }
     }
-    if (args.window) win.close();
+    if (args.window) {
+#if defined(GBARECOMP_RUNTIME_UI)
+        win.set_runtime_ui(nullptr);
+        recomp_runtime_ui_destroy(runtime_ui_context.ui);
+        runtime_ui_context.ui = nullptr;
+#endif
+        win.close();
+    }
 
     bool save_ok = flush_save();
 

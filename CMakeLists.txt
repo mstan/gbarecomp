@@ -280,6 +280,13 @@ else()
                    "to populate.")
 endif()
 target_include_directories(gbarecomp_runtime PUBLIC src/runtime)
+if(GBARECOMP_RUNTIME_UI_ROOT AND
+   EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/recomp_runtime_ui.h")
+    target_compile_definitions(gbarecomp_runtime PUBLIC GBARECOMP_RUNTIME_UI=1)
+    target_include_directories(gbarecomp_runtime PUBLIC
+        "${GBARECOMP_RUNTIME_UI_ROOT}/src"
+        "${GBARECOMP_RUNTIME_UI_ROOT}/src/common")
+endif()
 # Bake the gbarecomp source root so the Stage-2 runtime compiler can find the
 # overlay shim headers (src/runtime + src/armv4t) when it invokes g++ or the
 # bundled tcc on a healed function. CMAKE_CURRENT_SOURCE_DIR is the gbarecomp

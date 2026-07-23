@@ -15,6 +15,8 @@
 #include <cstddef>
 #include <cstdint>
 
+struct RecompRuntimeUi;
+
 namespace gbarecomp {
 
 class HostWindow {
@@ -75,6 +77,15 @@ public:
     void adjust_scale(int delta);       // integer window scale, clamped 1..8
     void set_volume(int pct);           // 0..100, applied to pushed samples
     int  volume() const;
+    int  window_scale() const;
+    void set_linear_filter(bool enabled);
+    bool linear_filter() const;
+    void set_audio_enabled(bool enabled);
+    bool audio_enabled() const;
+    void set_resize_driven_view(bool enabled);
+#if defined(GBARECOMP_RUNTIME_UI)
+    void set_runtime_ui(RecompRuntimeUi* ui);
+#endif
     void set_fps_readout(bool on);      // presents-per-second in the title bar
     bool fps_readout() const;
 
