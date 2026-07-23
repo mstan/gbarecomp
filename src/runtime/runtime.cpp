@@ -2030,8 +2030,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             runtime_shutdown();
             return 1;
         }
+        const char* runtime_title =
+            opts.builtin_game_name && *opts.builtin_game_name
+                ? opts.builtin_game_name : GBARECOMP_WINDOW_TITLE;
         if (!win.open(args.scale, ppu.render_width(), ppu.render_height(),
-                      GBARECOMP_WINDOW_TITLE,
+                      runtime_title,
                       args.screen.empty() ? nullptr : args.screen.c_str(),
                       args.linear_filter, resize_view_enabled)) {
             gbarecomp::overlay_loader_shutdown();
@@ -2054,7 +2057,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 #if defined(GBARECOMP_RUNTIME_UI)
         runtime_ui_context.window = &win;
         RecompRuntimeUiStandardConfig runtime_ui_config{};
-        runtime_ui_config.menu.title = GBARECOMP_WINDOW_TITLE;
+        runtime_ui_config.menu.title = runtime_title;
         runtime_ui_config.menu.subtitle = "Game Boy Advance runtime settings";
         runtime_ui_config.menu.theme = "gba";
         runtime_ui_config.menu.callbacks.context = &runtime_ui_context;
@@ -2065,18 +2068,21 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         runtime_ui_config.features =
             RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |
             RECOMP_RUNTIME_UI_STANDARD_WINDOW_SCALE |
-            RECOMP_RUNTIME_UI_STANDARD_VIEW_MODE |
             RECOMP_RUNTIME_UI_STANDARD_LINEAR_FILTER |
             RECOMP_RUNTIME_UI_STANDARD_AUDIO |
             RECOMP_RUNTIME_UI_STANDARD_VOLUME |
             RECOMP_RUNTIME_UI_STANDARD_RESUME;
         runtime_ui_config.view_modes = RECOMP_RUNTIME_UI_VIEW_MODE_NATIVE;
-        if (opts.max_view_width > 240)
+        if (opts.launcher_expose_widescreen && opts.max_view_width > 240)
             runtime_ui_config.view_modes |=
                 RECOMP_RUNTIME_UI_VIEW_MODE_FIXED_16_9;
-        if (opts.resize_driven_view && opts.max_resize_view_width > 240)
+        if (opts.launcher_expose_adaptive_view &&
+            opts.resize_driven_view && opts.max_resize_view_width > 240)
             runtime_ui_config.view_modes |=
                 RECOMP_RUNTIME_UI_VIEW_MODE_ADAPTIVE;
+        if (runtime_ui_config.view_modes != RECOMP_RUNTIME_UI_VIEW_MODE_NATIVE)
+            runtime_ui_config.features |=
+                RECOMP_RUNTIME_UI_STANDARD_VIEW_MODE;
         runtime_ui_context.ui =
             recomp_runtime_ui_create_standard(&runtime_ui_config);
         win.set_runtime_ui(runtime_ui_context.ui);
