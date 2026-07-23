@@ -285,7 +285,18 @@ if(GBARECOMP_RUNTIME_UI_ROOT AND
     target_compile_definitions(gbarecomp_runtime PUBLIC GBARECOMP_RUNTIME_UI=1)
     target_include_directories(gbarecomp_runtime PUBLIC
         "${GBARECOMP_RUNTIME_UI_ROOT}/src"
-        "${GBARECOMP_RUNTIME_UI_ROOT}/src/common")
+        "${GBARECOMP_RUNTIME_UI_ROOT}/src/common"
+        "${GBARECOMP_RUNTIME_UI_ROOT}/src/third_party/imgui"
+        "${GBARECOMP_RUNTIME_UI_ROOT}/src/third_party/imgui/backends")
+    if(GBARECOMP_SDL2_OK)
+        # The runtime owns the SDL_Renderer2 adapter; the game's existing
+        # game_launcher_ui target supplies the one shared ImGui core and SDL2
+        # platform backend. The central helper is idempotent, preventing
+        # duplicate renderer-backend symbols.
+        set(RECOMP_UI_ROOT "${GBARECOMP_RUNTIME_UI_ROOT}")
+        include("${GBARECOMP_RUNTIME_UI_ROOT}/recomp_ui.cmake")
+        recomp_target_runtime_ui_sdlrenderer2(gbarecomp_runtime)
+    endif()
 endif()
 # Bake the gbarecomp source root so the Stage-2 runtime compiler can find the
 # overlay shim headers (src/runtime + src/armv4t) when it invokes g++ or the

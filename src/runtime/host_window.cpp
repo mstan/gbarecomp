@@ -22,6 +22,16 @@
 
 #include <SDL.h>
 
+#if defined(GBARECOMP_RUNTIME_UI)
+#include "imgui.h"
+#include "imgui_impl_sdl2.h"
+#include "imgui_impl_sdlrenderer2.h"
+
+#if !SDL_VERSION_ATLEAST(2, 0, 17)
+#error "The recomp-ui SDL_Renderer2 runtime adapter requires SDL 2.0.17 or newer"
+#endif
+#endif
+
 // Shared ecosystem clock-domain bridge (callback-driven DRC). Replaces the
 // SDL_QueueAudio push path, which silence-filled on queue underrun (~3.4/s
 // measured on Minish Cap) and hard-flushed on overflow — the same output-side
@@ -274,8 +284,8 @@ struct Backend {
     std::vector<uint8_t> graded_fb;  // scratch RGB888 (base_w*base_h*3)
 #if defined(GBARECOMP_RUNTIME_UI)
     RecompRuntimeUi* runtime_ui = nullptr;
-    std::vector<uint32_t> runtime_ui_argb;
-    std::vector<uint8_t> runtime_ui_rgb;
+    ImGuiContext* runtime_imgui_context = nullptr;
+    bool runtime_imgui_ready = false;
 #endif
     int base_w = 240;   // logical surface width  (240 faithful, wider if expanded)
     int base_h = 160;   // logical surface height (160; vertical expansion deferred)
@@ -465,6 +475,72 @@ void gba_audio_callback(void* userdata, Uint8* stream, int len) {
 }
 
 #if defined(GBARECOMP_RUNTIME_UI)
+bool runtime_imgui_init(Backend* b) {
+    IMGUI_CHECKVERSION();
+    b->runtime_imgui_context = ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.LogFilename = nullptr;
+    ImGui::StyleColorsDark();
+
+    if (!ImGui_ImplSDL2_InitForSDLRenderer(b->window, b->renderer)) {
+        std::fprintf(stderr,
+                     "host_window: ImGui SDL2 platform initialization failed\n");
+        ImGui::DestroyContext();
+        b->runtime_imgui_context = nullptr;
+        return false;
+    }
+    if (!ImGui_ImplSDLRenderer2_Init(b->renderer)) {
+        std::fprintf(stderr,
+                     "host_window: ImGui SDL_Renderer2 initialization failed\n");
+        ImGui_ImplSDL2_Shutdown();
+        ImGui::DestroyContext();
+        b->runtime_imgui_context = nullptr;
+        return false;
+    }
+    b->runtime_imgui_ready = true;
+    return true;
+}
+
+void runtime_imgui_shutdown(Backend* b) {
+    if (!b->runtime_imgui_ready) return;
+    ImGui::SetCurrentContext(b->runtime_imgui_context);
+    ImGui_ImplSDLRenderer2_Shutdown();
+    ImGui_ImplSDL2_Shutdown();
+    ImGui::DestroyContext();
+    b->runtime_imgui_context = nullptr;
+    b->runtime_imgui_ready = false;
+}
+
+void runtime_imgui_render(Backend* b) {
+    if (!b->runtime_imgui_ready || !b->runtime_ui ||
+        !recomp_runtime_ui_is_open(b->runtime_ui)) {
+        return;
+    }
+    ImGui::SetCurrentContext(b->runtime_imgui_context);
+
+    // Native GBA presentation uses a 240x160 SDL logical size. ImGui must see
+    // and render into the full drawable, then the exact game state must be
+    // restored before the next frame.
+    int logical_w = 0;
+    int logical_h = 0;
+    SDL_Rect viewport{};
+    SDL_RenderGetLogicalSize(b->renderer, &logical_w, &logical_h);
+    SDL_RenderGetViewport(b->renderer, &viewport);
+    SDL_RenderSetLogicalSize(b->renderer, 0, 0);
+    SDL_RenderSetViewport(b->renderer, nullptr);
+
+    ImGui_ImplSDLRenderer2_NewFrame();
+    ImGui_ImplSDL2_NewFrame();
+    ImGui::NewFrame();
+    recomp_runtime_ui_render_imgui(b->runtime_ui);
+    ImGui::Render();
+    ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), b->renderer);
+
+    SDL_RenderSetLogicalSize(b->renderer, logical_w, logical_h);
+    SDL_RenderSetViewport(b->renderer, &viewport);
+}
+
 bool runtime_ui_event(RecompRuntimeUi* ui, const SDL_Event& e) {
     if (!ui) return false;
     if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE &&
@@ -657,6 +733,16 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         return false;
     }
 
+#if defined(GBARECOMP_RUNTIME_UI)
+    if (!runtime_imgui_init(b)) {
+        SDL_DestroyTexture(b->texture);
+        SDL_DestroyRenderer(b->renderer);
+        SDL_DestroyWindow(b->window);
+        delete b;
+        return false;
+    }
+#endif
+
     // Open the audio device at 65536 Hz mono 16-bit signed. The
     // running BIOS sets SOUNDBIAS resolution=1 which raises the
     // mixer's effective sample rate from 32768 to 65536; opening
@@ -771,6 +857,9 @@ void HostWindow::close() {
     if (b->audio_dev) SDL_CloseAudioDevice(b->audio_dev);  // stops the callback first
     if (b->bridge_ready) rab_free(&b->bridge);
     if (b->audio_mtx) SDL_DestroyMutex(b->audio_mtx);
+#if defined(GBARECOMP_RUNTIME_UI)
+    runtime_imgui_shutdown(b);
+#endif
     if (b->texture)   SDL_DestroyTexture(b->texture);
     if (b->renderer)  SDL_DestroyRenderer(b->renderer);
     if (b->window)    SDL_DestroyWindow(b->window);
@@ -845,28 +934,6 @@ void HostWindow::present(const uint8_t* rgb888) {
         b->color_lut->map_rgb888(rgb888, b->graded_fb.data(), b->base_w, b->base_h);
         rgb888 = b->graded_fb.data();
     }
-#if defined(GBARECOMP_RUNTIME_UI)
-    if (b->runtime_ui && recomp_runtime_ui_is_open(b->runtime_ui)) {
-        const std::size_t pixels = static_cast<std::size_t>(b->base_w) * b->base_h;
-        b->runtime_ui_argb.resize(pixels);
-        b->runtime_ui_rgb.resize(pixels * 3u);
-        for (std::size_t i = 0; i < pixels; ++i) {
-            b->runtime_ui_argb[i] = 0xFF000000u |
-                (static_cast<uint32_t>(rgb888[i * 3 + 0]) << 16) |
-                (static_cast<uint32_t>(rgb888[i * 3 + 1]) << 8) |
-                static_cast<uint32_t>(rgb888[i * 3 + 2]);
-        }
-        recomp_runtime_ui_render_argb8888(b->runtime_ui,
-            b->runtime_ui_argb.data(), b->base_w, b->base_h, b->base_w * 4);
-        for (std::size_t i = 0; i < pixels; ++i) {
-            const uint32_t p = b->runtime_ui_argb[i];
-            b->runtime_ui_rgb[i * 3 + 0] = static_cast<uint8_t>(p >> 16);
-            b->runtime_ui_rgb[i * 3 + 1] = static_cast<uint8_t>(p >> 8);
-            b->runtime_ui_rgb[i * 3 + 2] = static_cast<uint8_t>(p);
-        }
-        rgb888 = b->runtime_ui_rgb.data();
-    }
-#endif
     SDL_UpdateTexture(b->texture, nullptr, rgb888, b->base_w * 3);
     SDL_RenderClear(b->renderer);
     if (!b->expanded_view && !b->resize_driven_view) {
@@ -893,6 +960,9 @@ void HostWindow::present(const uint8_t* rgb888) {
             SDL_RenderCopy(b->renderer, b->texture, nullptr, &destination);
         }
     }
+#if defined(GBARECOMP_RUNTIME_UI)
+    runtime_imgui_render(b);
+#endif
     // MC-WS-002: time the present itself (vsync blocks here — or doesn't)
     // and stamp the DWM refresh counter into the always-on cadence ring.
     const uint64_t cad_qpc0 = SDL_GetPerformanceCounter();
@@ -1063,6 +1133,10 @@ HostWindow::Events HostWindow::pump() {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
 #if defined(GBARECOMP_RUNTIME_UI)
+        if (b->runtime_imgui_ready) {
+            ImGui::SetCurrentContext(b->runtime_imgui_context);
+            ImGui_ImplSDL2_ProcessEvent(&e);
+        }
         if (runtime_ui_event(b->runtime_ui, e)) continue;
 #endif
         if (e.type == SDL_QUIT) {

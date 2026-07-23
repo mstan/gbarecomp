@@ -84,6 +84,8 @@ public:
     bool audio_enabled() const;
     void set_resize_driven_view(bool enabled);
 #if defined(GBARECOMP_RUNTIME_UI)
+    // Attach the capability-only shared model. HostWindow presents it through
+    // Dear ImGui's SDL_Renderer2 backend over the existing game renderer.
     void set_runtime_ui(RecompRuntimeUi* ui);
 #endif
     void set_fps_readout(bool on);      // presents-per-second in the title bar
