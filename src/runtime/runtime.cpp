@@ -47,7 +47,6 @@
 #endif
 
 #include <algorithm>
-#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <condition_variable>
@@ -1241,6 +1240,40 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     }
     bus.set_rom(rom.data(), rom.size());
+
+    // ── Save-type override ───────────────────────────────────────────────
+    // detect_save_type() picks the chip from the Nintendo SDK signature
+    // string in the ROM, which is right for most carts but not all: a ROM can
+    // carry a signature for a save library it links but never drives. Boktai 1
+    // (USA) is one — it contains "EEPROM_V122" yet its save code drives the
+    // 0x0E window (SRAM/FLASH) and never touches the 0x0D EEPROM window, so
+    // signature-based detection configures the wrong chip and every save fails.
+    // There is no way to tell from the image alone which driver is live, so
+    // allow an explicit override for those carts.
+    if (const char* st = std::getenv("GBARECOMP_SAVE_TYPE")) {
+        gba::SaveType forced = header.save_type;
+        if      (std::strcmp(st, "sram")     == 0) forced = gba::SaveType::SRAM;
+        else if (std::strcmp(st, "eeprom")   == 0) forced = gba::SaveType::EEPROM;
+        else if (std::strcmp(st, "flash512") == 0) forced = gba::SaveType::Flash512;
+        else if (std::strcmp(st, "flash1m")  == 0) forced = gba::SaveType::Flash1M;
+        else {
+            std::fprintf(stderr,
+                "[gbarecomp:runtime] unknown GBARECOMP_SAVE_TYPE=\"%s\" "
+                "(sram|eeprom|flash512|flash1m)\n", st);
+            runtime_shutdown();
+            return 1;
+        }
+        if (forced != header.save_type) {
+            std::printf("save_type_override %s -> %s (detected signature "
+                        "\"%s\" @ 0x%06X)\n",
+                        gba::save_type_name(header.save_type),
+                        gba::save_type_name(forced),
+                        header.save_signature.c_str(),
+                        header.save_signature_offset);
+            header.save_type = forced;
+        }
+    }
+
     if (header.save_type == gba::SaveType::SRAM) {
         std::size_t sram_bytes = args.save_size ? args.save_size : (32 * 1024);
         bus.save().configure_sram(sram_bytes);
