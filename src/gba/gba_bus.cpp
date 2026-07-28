@@ -123,8 +123,8 @@ uint8_t GbaBus::read8(uint32_t addr) {
         case Region::Rom: {
             // Cartridge GPIO (RTC) at 0x080000C4..0xC9 when readable; else
             // the bus returns ordinary ROM (write-only GPIO mode).
-            if (rtc_.active() && rtc_.read_enabled() && off >= 0xC4u && off <= 0xC9u)
-                return rtc_.read(static_cast<uint32_t>(off));
+            if (gpio_.active() && gpio_.read_enabled() && off >= 0xC4u && off <= 0xC9u)
+                return gpio_.read(static_cast<uint32_t>(off));
             if (is_eeprom_addr(addr, save_)) {
                 return static_cast<uint8_t>(save_.eeprom_read_bit());
             }
@@ -175,9 +175,9 @@ uint16_t GbaBus::read16(uint32_t addr) {
             break;
         case Region::Oam:   return load_u16(&oam_[off]);
         case Region::Rom: {
-            if (rtc_.active() && rtc_.read_enabled() && off >= 0xC4u && off <= 0xC8u) {
+            if (gpio_.active() && gpio_.read_enabled() && off >= 0xC4u && off <= 0xC8u) {
                 uint32_t o = static_cast<uint32_t>(off);
-                return static_cast<uint16_t>(rtc_.read(o) | (rtc_.read(o + 1) << 8));
+                return static_cast<uint16_t>(gpio_.read(o) | (gpio_.read(o + 1) << 8));
             }
             if (is_eeprom_addr(addr, save_)) {
                 return save_.eeprom_read_bit();
@@ -230,10 +230,10 @@ uint32_t GbaBus::read32(uint32_t addr) {
             break;
         case Region::Oam:   return load_u32(&oam_[off]);
         case Region::Rom: {
-            if (rtc_.active() && rtc_.read_enabled() && off >= 0xC4u && off <= 0xC6u) {
+            if (gpio_.active() && gpio_.read_enabled() && off >= 0xC4u && off <= 0xC6u) {
                 uint32_t o = static_cast<uint32_t>(off);
-                return rtc_.read(o) | (rtc_.read(o + 1) << 8) |
-                       (rtc_.read(o + 2) << 16) | (rtc_.read(o + 3) << 24);
+                return gpio_.read(o) | (gpio_.read(o + 1) << 8) |
+                       (gpio_.read(o + 2) << 16) | (gpio_.read(o + 3) << 24);
             }
             if (is_eeprom_addr(addr, save_)) {
                 return save_.eeprom_read_bit();
@@ -320,8 +320,8 @@ void GbaBus::write8(uint32_t addr, uint8_t v) {
             // BIOS is read-only; hardware ignores writes to this window.
             return;
         case Region::Rom:
-            if (rtc_.active() && off >= 0xC4u && off <= 0xC9u) {
-                rtc_.write(static_cast<uint32_t>(off), v);
+            if (gpio_.active() && off >= 0xC4u && off <= 0xC9u) {
+                gpio_.write(static_cast<uint32_t>(off), v);
                 return;
             }
             if (is_eeprom_addr(addr, save_)) {
@@ -370,8 +370,8 @@ void GbaBus::write16(uint32_t addr, uint16_t v) {
             // BIOS is read-only; hardware ignores writes to this window.
             return;
         case Region::Rom:
-            if (region == Region::Rom && rtc_.active() && off >= 0xC4u && off <= 0xC8u) {
-                rtc_.write(static_cast<uint32_t>(off), static_cast<uint8_t>(v & 0xFF));
+            if (region == Region::Rom && gpio_.active() && off >= 0xC4u && off <= 0xC8u) {
+                gpio_.write(static_cast<uint32_t>(off), static_cast<uint8_t>(v & 0xFF));
                 return;
             }
             if (region == Region::Rom && is_eeprom_addr(addr, save_)) {
@@ -419,8 +419,8 @@ void GbaBus::write32(uint32_t addr, uint32_t v) {
             // BIOS is read-only; hardware ignores writes to this window.
             return;
         case Region::Rom:
-            if (region == Region::Rom && rtc_.active() && off >= 0xC4u && off <= 0xC6u) {
-                rtc_.write(static_cast<uint32_t>(off), static_cast<uint8_t>(v & 0xFF));
+            if (region == Region::Rom && gpio_.active() && off >= 0xC4u && off <= 0xC6u) {
+                gpio_.write(static_cast<uint32_t>(off), static_cast<uint8_t>(v & 0xFF));
                 return;
             }
             if (region == Region::Rom && is_eeprom_addr(addr, save_)) {

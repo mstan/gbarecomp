@@ -22,9 +22,11 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "gba_gpio.h"
+
 namespace gba {
 
-class GbaRtc {
+class GbaRtc final : public GpioDevice {
 public:
     GbaRtc();
 
@@ -34,12 +36,13 @@ public:
     void configure(const uint8_t* rom, std::size_t len);
 
     bool active() const { return active_; }
-    bool read_enabled() const { return read_enable_; }
 
-    // GPIO register access. `off` is the ROM-relative offset (0xC4..0xC9);
-    // the bus routes those addresses here while the clock is active.
-    uint8_t read(uint32_t off) const;
-    void    write(uint32_t off, uint8_t value);
+    // ── GpioDevice ───────────────────────────────────────────────────
+    // The port owns the data/direction/control registers now; the clock only
+    // models the chip on the wires. Pins: 0 = SCK, 1 = SIO, 2 = CS, 3 unused.
+    bool gpio_active() const override { return active_; }
+    void gpio_write(uint8_t pins) override;
+    int  gpio_drive(uint8_t bit) const override;
 
 private:
     enum class Phase { Idle, Command, Read, Write };
@@ -50,8 +53,6 @@ private:
         uint8_t month, day, dow, hour, min, sec;
     };
 
-    uint8_t read_data() const;
-    void    write_data(uint8_t value);
     void    clock_bit(bool sio_in);
     uint8_t bit_pos() const;
     void    advance_byte(bool committing);
@@ -65,11 +66,6 @@ private:
     void    set_offset_from(const Civil& target);
 
     bool active_ = false;
-
-    // GPIO port registers (low nibble significant).
-    uint8_t data_ = 0;
-    uint8_t direction_ = 0;
-    bool    read_enable_ = false;
 
     // Serial line state.
     bool sck_ = false;

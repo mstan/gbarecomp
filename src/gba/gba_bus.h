@@ -20,6 +20,7 @@
 #include "gba_bios.h"
 #include "gba_io.h"
 #include "gba_memory.h"
+#include "gba_gpio.h"
 #include "gba_rtc.h"
 #include "gba_save.h"
 
@@ -110,6 +111,7 @@ public:
         // Detect the cartridge RTC (Seiko S-3511A) by SDK signature and
         // arm the GPIO clock if present. No-op for non-clock carts.
         rtc_.configure(rom_bytes, rom_size);
+        gpio_.attach(&rtc_);   // idempotent; further devices attach here
         // Arm the MP2K audio shadow mixer (QoL; off unless the ROM links
         // MP2K and it's requested via [audio].shadow / GBARECOMP_AUDIO_SHADOW).
         // The region pointers back its side-effect-free MemView.
@@ -137,6 +139,10 @@ public:
 
     GbaRtc&       rtc()       { return rtc_; }
     const GbaRtc& rtc() const { return rtc_; }
+
+    GpioPort&       gpio()       { return gpio_; }
+    const GpioPort& gpio() const { return gpio_; }
+
 
     // Region accessors — useful for tests, debug snapshots, and the
     // PPU (which reads VRAM/OAM/PAL directly to render).
@@ -238,6 +244,7 @@ private:
     GbaAudio    audio_;
     GbaSave     save_;
     GbaRtc      rtc_;
+    GpioPort    gpio_;
 
     uint32_t    last_fetched_   = 0;
     std::size_t unmapped_count_ = 0;
