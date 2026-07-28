@@ -327,7 +327,7 @@ void mark_obj_window_scanline(bool* mask,
     if ((dispcnt & 0x8000u) == 0) return;
 
     uint32_t bg_mode = dispcnt & 0x07u;
-    uint32_t obj_tile_base = (bg_mode >= 3) ? 0x14000u : 0x10000u;
+    constexpr uint32_t obj_tile_base = 0x10000u;
     bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
 
     for (int idx = 127; idx >= 0; --idx) {
@@ -355,6 +355,10 @@ void mark_obj_window_scanline(bool* mask,
 
         bool color256 = (attr0 & 0x2000u) != 0;
         uint32_t tile_num = attr2 & 0x3FFu;
+        // Bitmap BGs consume the lower half of OBJ VRAM. Hardware preserves
+        // the normal tile-number origin and ignores tiles 0..511 rather than
+        // rebasing tile 0 to 0x14000.
+        if (bg_mode >= 3 && tile_num < 512u) continue;
         int tiles_w = sw / 8;
         int tiles_h = sh / 8;
 
@@ -749,7 +753,7 @@ void render_scanline_internal(uint8_t* rgb,
     }
 
     if (dispcnt & 0x1000u) {
-        uint32_t obj_tile_base = (bg_mode >= 3) ? 0x14000u : 0x10000u;
+        constexpr uint32_t obj_tile_base = 0x10000u;
         bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
         const uint8_t* obj_pal = pal + 0x200;
         for (int idx = 127; idx >= 0; --idx) {
@@ -773,6 +777,7 @@ void render_scanline_internal(uint8_t* rgb,
             if (sx & 0x100) sx -= 0x200;
             bool color256 = (attr0 & 0x2000u) != 0;
             uint32_t tile_num = attr2 & 0x3FFu;
+            if (bg_mode >= 3 && tile_num < 512u) continue;
             uint32_t palette_bank = (attr2 >> 12) & 0xFu;
             int tiles_w = sw / 8;
             int tiles_h = sh / 8;
@@ -1274,7 +1279,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
     }
 
     if (dispcnt & 0x1000u) {
-        uint32_t obj_tile_base = (bg_mode >= 3) ? 0x14000u : 0x10000u;
+        constexpr uint32_t obj_tile_base = 0x10000u;
         bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
         const uint8_t* obj_pal = pal + 0x200;
         for (int idx = 127; idx >= 0; --idx) {
@@ -1313,6 +1318,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             };
             bool color256 = (attr0 & 0x2000u) != 0;
             uint32_t tile_num = attr2 & 0x3FFu;
+            if (bg_mode >= 3 && tile_num < 512u) continue;
             uint32_t palette_bank = (attr2 >> 12) & 0xFu;
             int tiles_w = sw / 8;
             int tiles_h = sh / 8;

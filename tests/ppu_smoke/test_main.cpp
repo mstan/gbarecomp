@@ -18,6 +18,13 @@ void store16(uint8_t* dst, uint16_t value) {
     dst[1] = static_cast<uint8_t>(value >> 8);
 }
 
+void store32(uint8_t* dst, uint32_t value) {
+    dst[0] = static_cast<uint8_t>(value);
+    dst[1] = static_cast<uint8_t>(value >> 8);
+    dst[2] = static_cast<uint8_t>(value >> 16);
+    dst[3] = static_cast<uint8_t>(value >> 24);
+}
+
 void expect_pixel(const uint8_t* actual,
                   uint8_t r,
                   uint8_t g,
@@ -38,6 +45,21 @@ struct Fixture {
     std::array<uint8_t, gba::GbaPpu::kFramebufferBytes> rgb{};
     gba::GbaPpu ppu;
 };
+
+void set_bg2_identity(Fixture& f) {
+    store16(&f.io[0x20], 0x0100);  // PA = 1.0
+    store16(&f.io[0x22], 0x0000);  // PB = 0.0
+    store16(&f.io[0x24], 0x0000);  // PC = 0.0
+    store16(&f.io[0x26], 0x0100);  // PD = 1.0
+    store32(&f.io[0x28], 0);       // BG2X = 0.0
+    store32(&f.io[0x2C], 0);       // BG2Y = 0.0
+}
+
+void disable_all_objects(Fixture& f) {
+    for (std::size_t i = 0; i < 128; ++i) {
+        store16(&f.oam[i * 8], 0x0200);
+    }
+}
 
 int test_positive_obj_x(int raw_x, int* out_x) {
     if (raw_x >= 0x100 && raw_x < 288 && out_x) {
@@ -638,6 +660,154 @@ void test_extended_view_extends_nearest_window_edge() {
     g_margin_provider_action = gba::kWsTilemapReplace;
 }
 
+void test_bitmap_mode3_direct_color_and_affine_origin() {
+    Fixture f;
+    set_bg2_identity(f);
+    store16(&f.pal[0], 0x7C00);  // Blue backdrop.
+
+    store16(&f.vram[(0 * 240 + 0) * 2], 0x001F);      // Red.
+    store16(&f.vram[(9 * 240 + 17) * 2], 0x03E0);     // Green.
+    store16(&f.vram[(159 * 240 + 239) * 2], 0x7C00);  // Blue.
+
+    f.ppu.render(f.rgb.data(), 0x0403, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(0 * 240 + 0) * 3], 255, 0, 0,
+                 "mode 3 first direct-color pixel");
+    expect_pixel(&f.rgb[(9 * 240 + 17) * 3], 0, 255, 0,
+                 "mode 3 interior direct-color pixel");
+    expect_pixel(&f.rgb[(159 * 240 + 239) * 3], 0, 0, 255,
+                 "mode 3 last direct-color pixel");
+
+    // Shift the affine origin by (17,9): screen pixel (0,0) must sample the
+    // green texel above.
+    store32(&f.io[0x28], 17u << 8);
+    store32(&f.io[0x2C], 9u << 8);
+    f.ppu.render(f.rgb.data(), 0x0403, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 0, 255, 0,
+                 "mode 3 affine origin");
+}
+
+void test_bitmap_mode4_palette_transparency_and_page_flip() {
+    Fixture f;
+    set_bg2_identity(f);
+    store16(&f.pal[0], 0x7C00);  // Blue backdrop / transparent index 0.
+    store16(&f.pal[2], 0x001F);  // Index 1 red.
+    store16(&f.pal[4], 0x03E0);  // Index 2 green.
+
+    f.vram[0] = 0;
+    f.vram[1] = 1;
+    f.vram[0xA000] = 0;
+    f.vram[0xA001] = 2;
+
+    f.ppu.render(f.rgb.data(), 0x0404, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[0], 0, 0, 255,
+                 "mode 4 palette index 0 transparency");
+    expect_pixel(&f.rgb[3], 255, 0, 0,
+                 "mode 4 frame 0 palette lookup");
+
+    f.ppu.render(f.rgb.data(), 0x0414, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[0], 0, 0, 255,
+                 "mode 4 frame 1 index 0 transparency");
+    expect_pixel(&f.rgb[3], 0, 255, 0,
+                 "mode 4 frame 1 page selection");
+}
+
+void test_bitmap_mode5_bounds_and_page_flip() {
+    Fixture f;
+    set_bg2_identity(f);
+    store16(&f.pal[0], 0x7FFF);  // White backdrop.
+
+    store16(&f.vram[(0 * 160 + 0) * 2], 0x001F);
+    store16(&f.vram[(127 * 160 + 159) * 2], 0x03E0);
+    store16(&f.vram[0xA000], 0x7C00);
+
+    f.ppu.render(f.rgb.data(), 0x0405, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(0 * 240 + 0) * 3], 255, 0, 0,
+                 "mode 5 frame 0 first pixel");
+    expect_pixel(&f.rgb[(127 * 240 + 159) * 3], 0, 255, 0,
+                 "mode 5 frame 0 last pixel");
+    expect_pixel(&f.rgb[(0 * 240 + 160) * 3], 255, 255, 255,
+                 "mode 5 right letterbox");
+    expect_pixel(&f.rgb[(128 * 240 + 0) * 3], 255, 255, 255,
+                 "mode 5 bottom letterbox");
+
+    f.ppu.render(f.rgb.data(), 0x0415, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 0, 0, 255,
+                 "mode 5 frame 1 page selection");
+}
+
+void test_bitmap_mode_obj_compositing_and_obj_window() {
+    Fixture f;
+    set_bg2_identity(f);
+    disable_all_objects(f);
+    store16(&f.io[0x0C], 1);      // BG2 priority 1.
+    store16(&f.pal[0], 0x7C00);   // Blue backdrop.
+    store16(&f.pal[2], 0x03E0);   // BG index 1 green.
+    store16(&f.pal[0x202], 0x001F);  // OBJ index 1 red.
+    std::fill_n(f.vram.begin(), 240 * 160, static_cast<uint8_t>(1));
+    std::fill_n(f.vram.begin() + 0x14000, 32, static_cast<uint8_t>(0x11));
+
+    // Normal 8x8, 4bpp OBJ at (0,0), hardware tile 512, priority 0.
+    // Bitmap modes do not rebase tile 0 to 0x14000; tiles 0..511 are ignored.
+    store16(&f.oam[0], 0x0000);
+    store16(&f.oam[2], 0x0000);
+    store16(&f.oam[4], 0x0200);
+    f.ppu.render(f.rgb.data(), 0x1404, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 255, 0, 0,
+                 "mode 4 OBJ over bitmap BG");
+    expect_pixel(&f.rgb[8 * 3], 0, 255, 0,
+                 "mode 4 bitmap BG outside OBJ");
+
+    // A populated lower OBJ tile remains unavailable in bitmap modes.
+    std::fill_n(f.vram.begin() + 0x10000, 32, static_cast<uint8_t>(0x11));
+    store16(&f.oam[4], 0x0000);
+    f.ppu.render(f.rgb.data(), 0x1404, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 0, 255, 0,
+                 "mode 4 illegal lower OBJ tile was not ignored");
+
+    // Turn that OBJ into an OBJ-window stencil. Outside enables BG2; inside
+    // disables every layer, revealing the backdrop.
+    store16(&f.oam[0], 0x0800);
+    store16(&f.oam[4], 0x0200);
+    store16(&f.io[0x4A], 0x0004);
+    f.ppu.render(f.rgb.data(), 0x8404, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 0, 0, 255,
+                 "mode 4 OBJ-window mask");
+    expect_pixel(&f.rgb[8 * 3], 0, 255, 0,
+                 "mode 4 outside OBJ-window");
+}
+
+void test_bitmap_mode_wide_center_and_margins() {
+    Fixture f;
+    set_bg2_identity(f);
+    store16(&f.pal[0], 0x7C00);  // Blue backdrop.
+    store16(&f.pal[2], 0x001F);  // Red.
+    store16(&f.pal[4], 0x03E0);  // Green.
+    f.vram[0] = 1;
+    f.vram[239] = 2;
+    f.ppu.set_view_margins(24, 24, 0, 0);
+    std::vector<uint8_t> wide(gba::GbaPpu::kMaxFramebufferBytes, 0);
+
+    f.ppu.render(wide.data(), 0x0404, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(wide.data(), 0, 0, 255,
+                 "mode 4 wide left margin");
+    expect_pixel(&wide[24 * 3], 255, 0, 0,
+                 "mode 4 wide authentic first pixel");
+    expect_pixel(&wide[(24 + 239) * 3], 0, 255, 0,
+                 "mode 4 wide authentic last pixel");
+    expect_pixel(&wide[(24 + 240) * 3], 0, 0, 255,
+                 "mode 4 wide right margin");
+}
+
 } // namespace
 
 int main() {
@@ -653,6 +823,11 @@ int main() {
     test_extended_view_obj_x_is_explicitly_opt_in();
     test_extended_view_obj_attr_x_is_explicitly_opt_in();
     test_extended_view_extends_nearest_window_edge();
+    test_bitmap_mode3_direct_color_and_affine_origin();
+    test_bitmap_mode4_palette_transparency_and_page_flip();
+    test_bitmap_mode5_bounds_and_page_flip();
+    test_bitmap_mode_obj_compositing_and_obj_window();
+    test_bitmap_mode_wide_center_and_margins();
     std::puts("ppu_smoke_tests: PASS");
     return 0;
 }
