@@ -413,6 +413,26 @@ void test_thumb_blt_loop_terminates() {
     }
 }
 
+void test_irq_exception_return_result() {
+    auto cpu = make_cpu();
+    FlatBus bus(64 * 1024);
+    cpu.R[15] = 0x100;
+    armv4t::Interpreter::enter_irq(cpu, cpu.R[15]);
+
+    // MOVS pc, lr restores CPSR from SPSR_irq. The runtime needs to
+    // distinguish this from an ordinary branch so its IRQ driver can unwind.
+    bus.write32(0x18, 0xE1B0F00E);
+    auto insn = armv4t::ArmDecoder::decode(bus.read32(0x18), 0x18);
+    auto result = armv4t::Interpreter::step(cpu, bus, insn);
+    if (result != armv4t::Interpreter::Result::ExceptionReturn) {
+        std::printf("FAIL irq_exception_return_result: wrong result\n");
+        ++failures;
+    }
+    check_eq_u32("irq_exception_return_result", "mode", cpu.cpsr.mode,
+                 static_cast<uint8_t>(armv4t::Mode::System));
+    check_eq_u32("irq_exception_return_result", "pc", cpu.R[15], 0x104);
+}
+
 }  // namespace
 
 int main() {
@@ -427,6 +447,7 @@ int main() {
     test_thumb_ldr_str();
     test_thumb_bx_to_arm();
     test_thumb_blt_loop_terminates();
+    test_irq_exception_return_result();
 
     if (failures) {
         std::printf("\n%d failure(s)\n", failures);

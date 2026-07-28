@@ -49,6 +49,7 @@ public:
     enum class Result : uint8_t {
         Normal,         // ran; PC advanced by instruction width
         Branched,       // ran; PC was set explicitly (don't auto-advance)
+        ExceptionReturn,// ran an SPSR -> CPSR exception return
         Swi,            // SWI executed; caller handles BIOS entry
         Undefined,      // architecturally-undefined; trap
         NotImplemented, // op shape not yet handled

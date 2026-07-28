@@ -1057,6 +1057,13 @@ extern "C" void runtime_exception_return(uint32_t new_pc) {
     if (old_mode == 0x12u) g_irq_iret_depth = g_irq_nest_depth;
 }
 
+extern "C" void runtime_note_interpreted_exception_return(uint32_t old_mode) {
+    // The reference interpreter performs the SPSR restore internally instead
+    // of calling runtime_exception_return(). Preserve the runtime IRQ driver's
+    // completion signal when an interpreted instruction returns from IRQ mode.
+    if (old_mode == 0x12u) g_irq_iret_depth = g_irq_nest_depth;
+}
+
 extern "C" void runtime_restore_cpsr_from_spsr(void) {
     uint32_t old_cpsr = g_cpu.cpsr;
     uint32_t old_mode = old_cpsr & 0x1Fu;
@@ -1247,7 +1254,19 @@ extern "C" void runtime_irq(uint32_t return_address) {
     // enclosing IRQ's) frames — see g_call_return_floor. Restored below.
     uint32_t saved_floor   = g_call_return_floor;
     g_call_return_floor    = g_call_return_depth;
-    runtime_dispatch(0x00000018u);
+    // Whole-program interpreter mode must cover exception handlers too.
+    // Previously only the main run loop honored GBARECOMP_FORCE_INTERP, while
+    // IRQs always entered the generated dispatch table. Besides making the
+    // diagnostic backend non-uniform, that let static call-stack defects in a
+    // new game's IRQ corpus leak into an otherwise interpreter-only run.
+    auto drive_irq_instruction = []() {
+        if (g_force_interp) {
+            runtime_force_interp_step();
+        } else {
+            runtime_dispatch(g_cpu.R[15]);
+        }
+    };
+    drive_irq_instruction();
     constexpr uint32_t kMaxIrqDispatches = 4'000'000u;
     uint32_t irq_guard = 0u;
     while (g_irq_iret_depth != my_depth) {
@@ -1259,7 +1278,7 @@ extern "C" void runtime_irq(uint32_t return_address) {
             runtime_trace_dump_recent(160);
             break;
         }
-        runtime_dispatch(g_cpu.R[15]);
+        drive_irq_instruction();
     }
     g_irq_iret_depth = saved_iret;  // restore an enclosing IRQ's expectation
     g_call_return_floor = saved_floor;

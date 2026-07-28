@@ -502,6 +502,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
     }
 
     bool wrote_pc = false;
+    bool exception_returned = false;
     // Memory-access cycles accumulated by LDR/STR/LDM/STM/SWP during
     // execute. Final cycles_out = cycle_cost_base + mem_cycles + any
     // pipeline-refill surcharge for PC-writing non-branch ops.
@@ -551,6 +552,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
                 if (excpt_return) {
                     exception_return(cpu, r);
                     wrote_pc = true;
+                    exception_returned = true;
                 } else {
                     wrote_pc = write_dest(cpu, i.rd, r, i);
                 }
@@ -602,6 +604,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
                 if (excpt_return_arith) {
                     exception_return(cpu, f.result);
                     wrote_pc = true;
+                    exception_returned = true;
                 } else {
                     wrote_pc = write_dest(cpu, i.rd, f.result, i);
                 }
@@ -783,6 +786,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
                     if (i.block.writeback) cpu.R[i.block.rn] = final_base;
                     if (i.block.s_bit && is_priv_non_system(cpu.cpsr.mode)) {
                         exception_return(cpu, v & ~1u);
+                        exception_returned = true;
                     } else {
                         cpu.R[15] = v & ~1u;
                     }
@@ -833,6 +837,7 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
                         // clear (no interworking).
                         if (i.block.s_bit && is_priv_non_system(cpu.cpsr.mode)) {
                             exception_return(cpu, v & ~1u);
+                            exception_returned = true;
                         } else {
                             cpu.R[15] = v & ~1u;
                         }
@@ -1146,6 +1151,9 @@ Interpreter::Result Interpreter::step(CPUState& cpu, Bus& bus, const Instr& i,
         *cycles_out = c;
     }
 
+    if (exception_returned) {
+        return Result::ExceptionReturn;
+    }
     if (!wrote_pc) {
         cpu.R[15] += i.thumb ? kThumbInsnBytes : kArmInsnBytes;
         return Result::Normal;

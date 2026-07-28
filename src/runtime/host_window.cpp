@@ -1193,6 +1193,11 @@ HostWindow::Events HostWindow::pump() {
         ev.keyinput = 0x03FFu;
 #endif
 
+    int mouse_x = 0;
+    int mouse_y = 0;
+    const Uint32 mouse_buttons = SDL_GetRelativeMouseState(&mouse_x, &mouse_y);
+    ev.gyro_delta_x = (mouse_buttons & SDL_BUTTON_LMASK) ? mouse_x : 0;
+
     // Turbo is level-triggered: held = uncap the frame limiter (default Tab).
     ev.fast_forward = false;
     {

@@ -127,6 +127,9 @@ public:
         bool     volume_up = false;
         bool     volume_down = false;
         bool     toggle_fps = false;
+        // Horizontal mouse velocity while the left button is held. The runtime
+        // maps this host-neutral delta onto cartridge gyroscope sample units.
+        int      gyro_delta_x = 0;
     };
     Events pump();
 

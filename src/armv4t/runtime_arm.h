@@ -396,6 +396,7 @@ void runtime_write_user_reg(uint32_t reg, uint32_t value);
 // PC in list + S bit.
 
 void runtime_exception_return(uint32_t new_pc);
+void runtime_note_interpreted_exception_return(uint32_t old_mode);
 void runtime_restore_cpsr_from_spsr(void);
 
 // ── Codegen gap (NOT a dispatch miss) ──────────────────────────────

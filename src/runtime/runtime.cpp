@@ -2292,6 +2292,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (!args.window) return;
         auto ev = win.pump();
         if (!input_replay_requested) bus.io().set_keyinput(ev.keyinput);
+        if (bus.gyro().active()) {
+            // Mouse-drag is angular velocity, not absolute angle: moving while
+            // held produces rotation and holding still returns to center.
+            bus.gyro().set_sample_offset(
+                std::clamp(ev.gyro_delta_x * 64, -0x600, 0x600));
+        }
         if (input_record_requested &&
             (!input_record_have_value || ev.keyinput != input_record_last_value)) {
             char row[64];

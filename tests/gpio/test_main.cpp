@@ -6,8 +6,10 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 #include "gba_gpio.h"
+#include "gba_gyro.h"
 
 namespace {
 
@@ -215,6 +217,44 @@ void test_in_range() {
     check_true(T, "0xCA out of range", !gba::GpioPort::in_range(0xCA));
 }
 
+void test_warioware_gyro() {
+    const char* T = "warioware_gyro";
+    uint8_t rom[0xC0] = {};
+    std::memcpy(rom + 0xAC, "RZWE", 4);
+
+    gba::GbaGyro gyro;
+    gyro.configure(rom, sizeof(rom));
+    check_true(T, "RZWE activates the cartridge gyro", gyro.active());
+
+    gba::GpioPort port;
+    port.attach(&gyro);
+    port.write(gba::GpioPort::kControl, 1);
+    // Pins 0, 1, and 3 are guest outputs; gyro data pin 2 is an input.
+    port.write(gba::GpioPort::kDirection, 0x0B);
+
+    gyro.set_sample_offset(0);  // calibrated center serializes as 0x0700
+    port.write(gba::GpioPort::kData, 0x01);  // sample strobe + first bit
+    unsigned sample = 0;
+    for (int bit = 0; bit < 16; ++bit) {
+        sample = (sample << 1) |
+                 ((port.read(gba::GpioPort::kData) >> 2) & 1u);
+        if (bit != 15) {
+            port.write(gba::GpioPort::kData, 0x02);  // clock high
+            port.write(gba::GpioPort::kData, 0x00);  // falling edge
+        }
+    }
+    check_eq(T, "center sample shifts MSB-first", sample, 0x0700);
+
+    port.write(gba::GpioPort::kData, 0x08);
+    check_true(T, "pin 3 enables rumble", gyro.rumble_on());
+    port.write(gba::GpioPort::kData, 0x00);
+    check_true(T, "clearing pin 3 disables rumble", !gyro.rumble_on());
+
+    std::memcpy(rom + 0xAC, "BPEE", 4);
+    gyro.configure(rom, sizeof(rom));
+    check_true(T, "unrelated cartridge leaves gyro inactive", !gyro.active());
+}
+
 }  // namespace
 
 int main() {
@@ -225,6 +265,7 @@ int main() {
     test_driven_levels_are_latched();
     test_attach_is_idempotent();
     test_in_range();
+    test_warioware_gyro();
 
     if (failures) {
         std::printf("gpio_tests: %d failure(s)\n", failures);

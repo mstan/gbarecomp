@@ -525,6 +525,7 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
         gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
         const std::uint32_t pc = cpu.R[15];
         const bool was_thumb = cpu.thumb;
+        const std::uint32_t old_mode = cpu.cpsr.mode;
         g_cpu.R[15] = pc;  // store_interp already set this; explicit for clarity
         bus->set_bios_access_enabled(pc < 0x00004000u);
         if (g_runtime_insn_trace) runtime_insn_fp();
@@ -574,10 +575,14 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
             runtime_swi(insn.swi_imm);
             gbarecomp::load_arm_cpu_into_interp(g_cpu, cpu);
         } else {
-            // Normal / Branched: tick the instruction's cost. runtime_tick
+            // Normal / Branched / ExceptionReturn: tick the instruction's
+            // cost. runtime_tick
             // self-delivers any pending IRQ via runtime_irq into the
             // recompiled BIOS (mutating g_cpu), so sync around it.
             gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
+            if (r == armv4t::Interpreter::Result::ExceptionReturn) {
+                runtime_note_interpreted_exception_return(old_mode);
+            }
             g_tick_ctx = "bridge"; runtime_tick(cyc); g_tick_ctx = "gen";
             gbarecomp::load_arm_cpu_into_interp(g_cpu, cpu);
         }
@@ -744,6 +749,7 @@ extern "C" void runtime_force_interp_step(void) {
     armv4t::CPUState cpu{};
     gbarecomp::load_arm_cpu_into_interp(g_cpu, cpu);
     const std::uint32_t pc = cpu.R[15];
+    const std::uint32_t old_mode = cpu.cpsr.mode;
     bus->set_bios_access_enabled(pc < 0x00004000u);
     if (g_runtime_insn_trace) runtime_insn_fp();
 
@@ -789,9 +795,13 @@ extern "C" void runtime_force_interp_step(void) {
         g_cpu.R[15] = next_pc;
         runtime_swi(insn.swi_imm);
     } else {
-        // Normal / Branched: tick the instruction's cost. runtime_tick
+        // Normal / Branched / ExceptionReturn: tick the instruction's cost.
+        // runtime_tick
         // self-delivers any pending IRQ via runtime_irq into the recompiled BIOS.
         gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
+        if (r == armv4t::Interpreter::Result::ExceptionReturn) {
+            runtime_note_interpreted_exception_return(old_mode);
+        }
         g_tick_ctx = "finterp"; runtime_tick(cyc); g_tick_ctx = "gen";
     }
     bus->set_bios_access_enabled(g_cpu.R[15] < 0x00004000u);
