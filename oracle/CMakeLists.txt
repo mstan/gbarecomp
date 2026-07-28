@@ -34,6 +34,13 @@ if(WIN32 OR MSYS)
     # basic socket libs.
     target_link_libraries(gbarecomp_oracle PRIVATE
         ws2_32 shlwapi winmm ole32 uuid)
+elseif(APPLE)
+    # Same function, other platform: mCoreConfigPortablePath uses
+    # CFBundleGetMainBundle / CFURL* / kCFAllocatorDefault on macOS, so
+    # libmgba needs CoreFoundation. Without it the oracle fails to link
+    # with undefined _CFBundle*/_CFURL*/_kCFAllocatorDefault.
+    target_link_libraries(gbarecomp_oracle PRIVATE
+        "-framework CoreFoundation")
 endif()
 target_compile_definitions(gbarecomp_oracle PRIVATE
     M_CORE_GBA=1
