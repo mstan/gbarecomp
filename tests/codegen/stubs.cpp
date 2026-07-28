@@ -135,6 +135,9 @@ extern "C" unsigned long long g_runtime_vblank_starts = 0;
 // symbol. The stub runtime_tick below doesn't touch it (no cycle-aligned diffing
 // in unit tests), so it simply stays 0.
 extern "C" unsigned long long g_runtime_cycles = 0;
+extern "C" int g_force_interp = 0;
+
+extern "C" void runtime_force_interp_step(void) {}
 
 // ── Bus accessors used by generated test functions ─────────────────
 

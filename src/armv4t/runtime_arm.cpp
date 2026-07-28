@@ -1200,6 +1200,17 @@ extern "C" void runtime_irq(uint32_t return_address) {
         std::abort();
     }
     uint32_t saved_cpsr = g_cpu.cpsr;
+    // The official GBA BIOS IRQ wrapper at 0x128 saves r0-r3 and r12 before
+    // calling the cartridge's RAM handler, then restores them before its
+    // exception return. Keep that architectural boundary explicit here too:
+    // a self-heal bridge may have to unwind a RAM/static/RAM call chain in
+    // several host dispatches, but the interrupted mainline must still observe
+    // the BIOS-preserved volatile registers bit-for-bit.
+    const uint32_t saved_r0  = g_cpu.R[0];
+    const uint32_t saved_r1  = g_cpu.R[1];
+    const uint32_t saved_r2  = g_cpu.R[2];
+    const uint32_t saved_r3  = g_cpu.R[3];
+    const uint32_t saved_r12 = g_cpu.R[12];
     // Record the active IRQ source(s) (IE & IF) in the trace addr field and the
     // nesting depth in aux so a ring dump names which interrupt is being
     // vectored and how deep — used to pin the MC-HP-002 IRQ storm. Reading
@@ -1280,6 +1291,11 @@ extern "C" void runtime_irq(uint32_t return_address) {
         }
         drive_irq_instruction();
     }
+    g_cpu.R[0]  = saved_r0;
+    g_cpu.R[1]  = saved_r1;
+    g_cpu.R[2]  = saved_r2;
+    g_cpu.R[3]  = saved_r3;
+    g_cpu.R[12] = saved_r12;
     g_irq_iret_depth = saved_iret;  // restore an enclosing IRQ's expectation
     g_call_return_floor = saved_floor;
     --g_irq_nest_depth;
