@@ -626,7 +626,7 @@ add_test(NAME heal_gate_tests COMMAND heal_gate_tests)
 #   1. tests/codegen/test_cases.cpp lists per-IrOp test cases.
 #   2. gen_codegen_tests.exe reads that list, invokes the same
 #      ArmCodegen used by tools/gba_recompile, and emits one C
-#      function per case into ${CMAKE_BINARY_DIR}/codegen_tests/
+#      function per case into ${CMAKE_BINARY_DIR}/codegen_tests_generated/
 #      test_funcs.cpp.
 #   3. codegen_tests.exe links test_main.cpp + test_cases.cpp +
 #      stubs.cpp + the generated test_funcs.cpp against
@@ -646,8 +646,12 @@ target_include_directories(gen_codegen_tests PRIVATE
     src/armv4t)
 target_link_libraries(gen_codegen_tests PRIVATE gbarecomp_armv4t)
 
+# NOTE: must not collide with the codegen_tests TARGET name. On Windows the
+# executable gains a .exe suffix so a same-named directory is harmless, but on
+# macOS/Linux the linker output path and this directory are the same string and
+# the link fails with "Is a directory" (errno 21).
 set(CODEGEN_TESTS_OUTDIR
-    ${CMAKE_CURRENT_BINARY_DIR}/codegen_tests)
+    ${CMAKE_CURRENT_BINARY_DIR}/codegen_tests_generated)
 set(CODEGEN_TESTS_GENFILE
     ${CODEGEN_TESTS_OUTDIR}/test_funcs.cpp)
 
