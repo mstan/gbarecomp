@@ -37,6 +37,9 @@
 #if defined(RECOMP_LAUNCHER)
 
 #include "runtime.h"
+#if defined(GBARECOMP_ENABLE_MODS)
+#include "mod_runtime.h"
+#endif
 
 #include "recomp_launcher.h"    // recomp-ui C ABI (include dir via recomp_ui.cmake)
 #include "launcher_profile.h"   // launcher_profile_apply("gba", ...)
@@ -323,6 +326,22 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     const std::string config_path = dir + "/config.ini";
     const std::string keybinds_path = dir + "/keybinds.ini";
 
+#if defined(GBARECOMP_ENABLE_MODS)
+    const RecompLauncherCModProvider* mod_provider = nullptr;
+    if (opts.mod_game_id && *opts.mod_game_id &&
+        opts.builtin_rom_sha1 && *opts.builtin_rom_sha1) {
+        std::string mod_error;
+        if (gbarecomp::mod_runtime_initialize(
+                std::filesystem::path(dir) / "mods",
+                opts.mod_game_id, opts.builtin_rom_sha1, &mod_error)) {
+            mod_provider = gbarecomp::mod_runtime_launcher_provider();
+        } else {
+            std::fprintf(stderr, "[gbarecomp:launcher] mods unavailable: %s\n",
+                         mod_error.c_str());
+        }
+    }
+#endif
+
     SeamConfig cfg;
     seam_config_load(config_path, &cfg);
     if (cfg.skip_launcher && !force_launcher) {
@@ -391,6 +410,9 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     gi.config_path = config_path.c_str();
     gi.keybinds_path = keybinds_path.c_str();
     gi.boxart_path = opts.launcher_boxart;   // NULL => default assets/img/boxart.tga
+#if defined(GBARECOMP_ENABLE_MODS)
+    gi.mods = mod_provider;
+#endif
     if (opts.launcher_expose_widescreen && opts.launcher_num_aspects > 0 &&
         opts.launcher_aspect_labels) {
         // Multi-width extended view: game-supplied aspect cycle, tagged

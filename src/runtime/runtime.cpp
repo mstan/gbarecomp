@@ -34,6 +34,9 @@
 #include "runtime_bus_bridge.h"
 #include "self_heal.h"
 #include "overlay_loader.h"
+#if defined(GBARECOMP_ENABLE_MODS)
+#include "mod_runtime.h"
+#endif
 #include "../gba/sha1.h"
 #include "snapshot.h"
 #include "tcp_debug_server.h"
@@ -948,6 +951,32 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         return 1;
     }
 
+#if defined(GBARECOMP_ENABLE_MODS)
+    bool mods_ready = false;
+    const bool mods_requested =
+        opts.mod_game_id && *opts.mod_game_id;
+    if (opts.mod_owns_adaptive_view) {
+        // Fail closed to native view if the catalog cannot be loaded. A stale
+        // display setting must never bypass the mod feature's validation.
+        args.resize_view = false;
+    }
+    if (mods_requested) {
+        std::filesystem::path executable =
+            argc > 0 && argv && argv[0] ? argv[0] : "";
+        const std::filesystem::path executable_dir =
+            executable.has_parent_path() ? executable.parent_path()
+                                         : std::filesystem::path(".");
+        if (!mod_runtime_initialize(executable_dir / "mods",
+                                    opts.mod_game_id, args.rom_sha1, &err)) {
+            std::fprintf(stderr,
+                         "[gbarecomp:runtime] mods unavailable: %s\n",
+                         err.c_str());
+        } else {
+            mods_ready = true;
+        }
+    }
+#endif
+
     // Resolve BIOS via the picker chain (argv path -> sidecar cache ->
     // Win32 file dialog). Released binaries don't ship a default path
     // that exists, so the picker is what makes a fresh install work
@@ -1071,6 +1100,22 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     header.save_signature.c_str());
     }
 
+#if defined(GBARECOMP_ENABLE_MODS)
+    if (mods_ready) {
+        if (!mod_runtime_commit(args.rom, &err)) {
+            std::fprintf(stderr,
+                         "[gbarecomp:runtime] cannot launch with selected "
+                         "mods: %s\n", err.c_str());
+            return 1;
+        }
+        mod_runtime_activate_plugins();
+        // Once a game moves adaptive view into its package catalog, that
+        // feature is authoritative over stale TOML/CLI launcher settings.
+        if (opts.mod_owns_adaptive_view)
+            args.resize_view = gba_mod_adaptive_view_enabled() != 0;
+    }
+#endif
+
     gba::GbaBus bus;
     gba::GbaPpu ppu;
     bus.set_bios(&bios);
@@ -1131,8 +1176,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     const bool ws_wip_enabled =
         ws_wip_env && ws_wip_env[0] && ws_wip_env[0] != '0';
 
-    if (const char* e = std::getenv("GBARECOMP_RESIZE_VIEW"))
-        args.resize_view = e[0] && e[0] != '0';
+#if defined(GBARECOMP_ENABLE_MODS)
+    if (!opts.mod_owns_adaptive_view)
+#endif
+    {
+        if (const char* e = std::getenv("GBARECOMP_RESIZE_VIEW"))
+            args.resize_view = e[0] && e[0] != '0';
+    }
     bool resize_view_enabled =
         args.resize_view && opts.resize_driven_view &&
         opts.max_resize_view_width > 240 && args.window;

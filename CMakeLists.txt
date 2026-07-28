@@ -239,6 +239,10 @@ set_property(TARGET gbarecomp_heal_gate PROPERTY POSITION_INDEPENDENT_CODE ON)
 # ─────────────────────────────────────────────────────────────────────────────
 # runtime — what game binaries link against. Dispatch, host glue.
 # ─────────────────────────────────────────────────────────────────────────────
+option(GBARECOMP_ENABLE_MODS
+    "Build the GBA mod package loader and trusted-plugin runtime"
+    OFF)
+
 add_library(gbarecomp_runtime STATIC
     src/runtime/runtime.cpp
     src/runtime/bios_hle.cpp
@@ -260,6 +264,15 @@ add_library(gbarecomp_runtime STATIC
     # BIOS dispatch/body selection is handled below. Clean checkouts use a
     # tracked empty stub; locally generated BIOS output is selected as a unit.
 )
+if(GBARECOMP_ENABLE_MODS)
+    target_sources(gbarecomp_runtime PRIVATE src/runtime/mod_runtime.cpp)
+    target_compile_definitions(gbarecomp_runtime PUBLIC
+        GBARECOMP_ENABLE_MODS=1)
+    # recomp-ui retains its own compile-time gate in addition to requiring a
+    # non-null provider. Only an explicitly opted-in game opens that gate.
+    set(RECOMP_UI_ENABLE_MODS ON CACHE BOOL
+        "Enable recomp-ui Mods view for this GBA mod-enabled game" FORCE)
+endif()
 
 # When the user has run `gba_recompile --bios`, the recompiled BIOS
 # functions live in src/runtime/generated_bios/bios_recompiled.cpp.
@@ -288,6 +301,11 @@ if(GBARECOMP_RUNTIME_UI_ROOT AND
         "${GBARECOMP_RUNTIME_UI_ROOT}/src/common"
         "${GBARECOMP_RUNTIME_UI_ROOT}/src/third_party/imgui"
         "${GBARECOMP_RUNTIME_UI_ROOT}/src/third_party/imgui/backends")
+    if(GBARECOMP_ENABLE_MODS AND
+       EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/recomp_launcher.h")
+        target_compile_definitions(gbarecomp_runtime PRIVATE
+            GBARECOMP_MOD_UI=1)
+    endif()
     if(GBARECOMP_SDL2_OK)
         # The runtime owns the SDL_Renderer2 adapter; the game's existing
         # game_launcher_ui target supplies the one shared ImGui core and SDL2
@@ -517,6 +535,17 @@ endif()
 # tests — per-subsystem. Run with ctest.
 # ─────────────────────────────────────────────────────────────────────────────
 enable_testing()
+
+if(GBARECOMP_ENABLE_MODS)
+    add_executable(mod_runtime_tests
+        tests/mod_runtime/test_main.cpp
+        src/runtime/mod_runtime.cpp
+        src/gba/crc32.cpp
+        src/gba/sha1.cpp)
+    target_include_directories(mod_runtime_tests PRIVATE
+        src/runtime src/gba)
+    add_test(NAME mod_runtime_tests COMMAND mod_runtime_tests)
+endif()
 
 add_test(NAME runtime_monolith_guard
     COMMAND ${CMAKE_COMMAND}
