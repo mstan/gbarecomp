@@ -241,6 +241,7 @@ set_property(TARGET gbarecomp_heal_gate PROPERTY POSITION_INDEPENDENT_CODE ON)
 # ─────────────────────────────────────────────────────────────────────────────
 add_library(gbarecomp_runtime STATIC
     src/runtime/runtime.cpp
+    src/runtime/save_config.cpp
     src/runtime/bios_hle.cpp
     src/runtime/generated_dispatch.cpp
     src/runtime/runtime_bus_bridge.cpp
@@ -578,6 +579,13 @@ elseif(MINGW OR WIN32)
     target_link_options(ppu_smoke_tests PRIVATE -Wl,--stack,16777216)
 endif()
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
+
+add_executable(save_config_tests
+    tests/runtime/save_config_test.cpp
+    src/runtime/save_config.cpp)
+target_include_directories(save_config_tests PRIVATE src/runtime)
+target_link_libraries(save_config_tests PRIVATE gbarecomp_gba)
+add_test(NAME save_config_tests COMMAND save_config_tests)
 
 add_executable(presentation_layout_tests tests/presentation_layout/test_main.cpp)
 target_include_directories(presentation_layout_tests PRIVATE src/runtime)

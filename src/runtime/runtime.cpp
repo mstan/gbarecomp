@@ -32,6 +32,7 @@
 #include "host_window.h"
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
+#include "save_config.h"
 #include "self_heal.h"
 #include "overlay_loader.h"
 #include "../gba/sha1.h"
@@ -107,6 +108,7 @@ struct Args {
     std::string rom_sha1;
     std::uint32_t rom_crc32 = 0;  // 0 = no CRC check (per-game TOML fills)
     std::string save_path;
+    std::optional<gba::SaveType> save_type;
     std::size_t save_size = 0;
     int steps = 16;
     int frames = -1;
@@ -543,6 +545,17 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
             args->rom_crc32 = parse_hex_u32(val);
         } else if (section == "save" && key == "path" && !val.empty()) {
             args->save_path = resolve_config_path(base, val);
+        } else if (section == "save" && key == "type" && !val.empty()) {
+            gba::SaveType configured = gba::SaveType::Unknown;
+            if (!parse_save_type(val, &configured)) {
+                if (err) {
+                    *err = "invalid [save].type value \"" + val +
+                           "\" in " + path.string() +
+                           " (expected sram|eeprom|flash512|flash1m)";
+                }
+                return false;
+            }
+            args->save_type = configured;
         } else if (section == "save" && key == "size" && !val.empty()) {
             uint64_t n = 0;
             if (!parse_u64(val, &n) ||
@@ -1241,38 +1254,29 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     }
     bus.set_rom(rom.data(), rom.size());
 
-    // ── Save-type override ───────────────────────────────────────────────
-    // detect_save_type() picks the chip from the Nintendo SDK signature
-    // string in the ROM, which is right for most carts but not all: a ROM can
-    // carry a signature for a save library it links but never drives. Boktai 1
-    // (USA) is one — it contains "EEPROM_V122" yet its save code drives the
-    // 0x0E window (SRAM/FLASH) and never touches the 0x0D EEPROM window, so
-    // signature-based detection configures the wrong chip and every save fails.
-    // There is no way to tell from the image alone which driver is live, so
-    // allow an explicit override for those carts.
-    if (const char* st = std::getenv("GBARECOMP_SAVE_TYPE")) {
-        gba::SaveType forced = header.save_type;
-        if      (std::strcmp(st, "sram")     == 0) forced = gba::SaveType::SRAM;
-        else if (std::strcmp(st, "eeprom")   == 0) forced = gba::SaveType::EEPROM;
-        else if (std::strcmp(st, "flash512") == 0) forced = gba::SaveType::Flash512;
-        else if (std::strcmp(st, "flash1m")  == 0) forced = gba::SaveType::Flash1M;
-        else {
-            std::fprintf(stderr,
-                "[gbarecomp:runtime] unknown GBARECOMP_SAVE_TYPE=\"%s\" "
-                "(sram|eeprom|flash512|flash1m)\n", st);
-            runtime_shutdown();
-            return 1;
-        }
-        if (forced != header.save_type) {
-            std::printf("save_type_override %s -> %s (detected signature "
-                        "\"%s\" @ 0x%06X)\n",
-                        gba::save_type_name(header.save_type),
-                        gba::save_type_name(forced),
-                        header.save_signature.c_str(),
-                        header.save_signature_offset);
-            header.save_type = forced;
-        }
+    // Resolve the save chip once, with explicit and testable precedence:
+    // ROM signature -> game config -> process environment. Keep type and
+    // capacity paired so an override cannot silently create a malformed save.
+    SaveConfiguration save_config;
+    if (!resolve_save_configuration(
+            header.save_type, args.save_type, args.save_size,
+            std::getenv("GBARECOMP_SAVE_TYPE"), &save_config, &err)) {
+        std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
+        runtime_shutdown();
+        return 1;
     }
+    if (save_config.source != SaveTypeSource::Detected) {
+        std::printf("save_config source=%s type=%s size=%zu "
+                    "(detected=%s signature=\"%s\" @ 0x%06X)\n",
+                    save_type_source_name(save_config.source),
+                    gba::save_type_name(save_config.type),
+                    save_config.size,
+                    gba::save_type_name(header.save_type),
+                    header.save_signature.c_str(),
+                    header.save_signature_offset);
+    }
+    header.save_type = save_config.type;
+    args.save_size = save_config.size;
 
     if (header.save_type == gba::SaveType::SRAM) {
         std::size_t sram_bytes = args.save_size ? args.save_size : (32 * 1024);
