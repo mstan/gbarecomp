@@ -211,6 +211,7 @@ add_library(gbarecomp_gba STATIC
     src/gba/mp2k_shadow.cpp
     src/gba/gba_input.cpp
     src/gba/gba_save.cpp
+    src/gba/gba_gpio.cpp
     src/gba/gba_rtc.cpp
     src/gba/gba_bios.cpp
     src/gba/gba_scheduler.cpp
@@ -593,6 +594,10 @@ add_gbarecomp_runtime_stack_test(dma_tests tests/dma/test_main.cpp)
 add_executable(timer_tests tests/timers/test_main.cpp)
 target_link_libraries(timer_tests PRIVATE gbarecomp_gba)
 add_test(NAME timer_tests COMMAND timer_tests)
+
+add_executable(gpio_tests tests/gpio/test_main.cpp)
+target_link_libraries(gpio_tests PRIVATE gbarecomp_gba)
+add_test(NAME gpio_tests COMMAND gpio_tests)
 
 add_executable(irq_tests tests/irq/test_main.cpp)
 target_link_libraries(irq_tests PRIVATE gbarecomp_gba)

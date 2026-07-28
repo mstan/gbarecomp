@@ -108,46 +108,19 @@ void GbaRtc::configure(const uint8_t* rom, std::size_t len) {
     }
 }
 
-uint8_t GbaRtc::read(uint32_t off) const {
-    if (!read_enable_) return 0;
-    switch (off) {
-        case 0xC4: return read_data();
-        case 0xC6: return direction_;
-        case 0xC8: return 1;
-        default:   return 0;  // high bytes of each halfword register read 0
-    }
+
+
+
+// Pin 1 (SIO) is the only line the clock drives; everything else on the port
+// is either guest-driven or another device's business.
+int GbaRtc::gpio_drive(uint8_t bit) const {
+    return (bit == 1) ? (sio_out_ ? 1 : 0) : -1;
 }
 
-void GbaRtc::write(uint32_t off, uint8_t value) {
-    switch (off) {
-        case 0xC4: write_data(value); break;
-        case 0xC6: direction_ = value & 0x0F; break;
-        case 0xC8: read_enable_ = (value & 1) != 0; break;
-        default:   break;
-    }
-}
-
-uint8_t GbaRtc::read_data() const {
-    uint8_t v = 0;
-    for (uint8_t bit = 0; bit < 4; ++bit) {
-        uint8_t level;
-        if (direction_ & (1 << bit)) {
-            level = (data_ >> bit) & 1;
-        } else if (bit == 1) {
-            level = sio_out_ ? 1 : 0;
-        } else {
-            level = 0;
-        }
-        v |= static_cast<uint8_t>(level << bit);
-    }
-    return v;
-}
-
-void GbaRtc::write_data(uint8_t value) {
-    data_ = value & 0x0F;
-    bool new_sck = (data_ & 0b001) != 0;
-    bool new_cs  = (data_ & 0b100) != 0;
-    bool sio_in  = (data_ & 0b010) != 0;
+void GbaRtc::gpio_write(uint8_t pins) {
+    bool new_sck = (pins & 0b001) != 0;
+    bool new_cs  = (pins & 0b100) != 0;
+    bool sio_in  = (pins & 0b010) != 0;
 
     if (!cs_ && new_cs) {
         phase_ = Phase::Command;
