@@ -665,6 +665,72 @@ void render_scanline_internal(uint8_t* rgb,
         }
     };
 
+    // ── Bitmap BG modes 3/4/5 (GBATEK "LCD VRAM Bitmap BG Modes") ───────
+    // All three present a single framebuffer through BG2's affine transform,
+    // so the sampling loop mirrors render_affine_bg above:
+    //   Mode 3  240x160, 16bpp BGR555 direct colour, one frame at 0x00000.
+    //   Mode 4  240x160, 8bpp palette indices; frame 0 at 0x00000 and
+    //           frame 1 at 0x0A000, selected by DISPCNT bit 4.
+    //   Mode 5  160x128, 16bpp direct colour, same two frame bases.
+    //
+    // Transparency: mode 4 is palette-indexed, so index 0 is transparent
+    // exactly like the tiled layers. Modes 3/5 are direct colour and have no
+    // transparent index, so every in-bounds texel is opaque. Texels outside
+    // the bitmap stay transparent and show the backdrop — that is what
+    // letterboxes mode 5's 160x128 image inside the 240x160 screen.
+    //
+    // BG2CNT bit13 (display-area overflow / wraparound) is defined for the
+    // TILED affine BGs; a bitmap is not a power-of-two tile map, so an
+    // out-of-range texel here is transparent rather than wrapped.
+    auto render_bitmap_bg = [&]() {
+        if ((dispcnt & 0x0400u) == 0) return;   // DISPCNT bit10 = BG2 enable
+        constexpr uint32_t layer = 2;
+        uint16_t bgcnt = static_cast<uint16_t>(io[0x0C] | (io[0x0D] << 8));
+        int bg_priority = static_cast<int>(bgcnt & 0x3u);
+
+        const bool     direct = (bg_mode != 4);
+        const int      bmp_w  = (bg_mode == 5) ? 160 : 240;
+        const int      bmp_h  = (bg_mode == 5) ? 128 : 160;
+        const uint32_t bpp    = direct ? 2u : 1u;
+        const uint32_t frame_base =
+            (bg_mode != 3 && (dispcnt & 0x0010u) != 0) ? 0xA000u : 0x0000u;
+
+        int32_t pa   = read_s16(io, 0x20);
+        int32_t pb   = read_s16(io, 0x22);
+        int32_t pc   = read_s16(io, 0x24);
+        int32_t pd   = read_s16(io, 0x26);
+        int32_t refx = read_s28_ref(io, 0x28);
+        int32_t refy = read_s28_ref(io, 0x2C);
+        int32_t xt = refx + static_cast<int32_t>(y) * pb;
+        int32_t yt = refy + static_cast<int32_t>(y) * pd;
+        for (uint32_t x = 0; x < kScreenWidth; ++x) {
+            int32_t tex_x = xt >> 8;
+            int32_t tex_y = yt >> 8;
+            xt += pa;
+            yt += pc;
+            if (!layer_enabled(x, layer)) continue;
+            if (tex_x < 0 || tex_x >= bmp_w || tex_y < 0 || tex_y >= bmp_h)
+                continue;
+            const uint32_t off = frame_base +
+                (static_cast<uint32_t>(tex_y) * static_cast<uint32_t>(bmp_w) +
+                 static_cast<uint32_t>(tex_x)) * bpp;
+            if (off + bpp > 96u * 1024u) continue;
+            uint16_t color;
+            if (direct) {
+                color = load_u16_le(&vram[off]);
+            } else {
+                uint8_t pal_idx = vram[off];
+                if (pal_idx == 0) continue;
+                color = load_u16_le(&pal[pal_idx * 2]);
+            }
+            submit(x, color,
+                   static_cast<int>(bg_priority * 256 + 128 + layer),
+                   static_cast<uint8_t>(layer),
+                   blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
+                   (second_targets & (1u << layer)) != 0);
+        }
+    };
+
     if (bg_mode == 0) {
         render_regular_bg(3, 0x0E, 0x1C);
         render_regular_bg(2, 0x0C, 0x18);
@@ -677,6 +743,9 @@ void render_scanline_internal(uint8_t* rgb,
     } else if (bg_mode == 2) {
         render_affine_bg(3, 0x0E, 0x30);
         render_affine_bg(2, 0x0C, 0x20);
+    } else if (bg_mode <= 5) {
+        // Modes 6/7 are prohibited (GBATEK); leave them backdrop-only.
+        render_bitmap_bg();
     }
 
     if (dispcnt & 0x1000u) {
@@ -1131,6 +1200,62 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                    (second_targets & (1u << layer)) != 0);
         }
     };
+    // Bitmap BG modes 3/4/5 — see the commentary on render_bitmap_bg in
+    // render_scanline_internal above for the format/transparency rules.
+    // A bitmap has a fixed width (240, or 160 in mode 5), so there is no
+    // extra image data to reveal in the expanded margins: the affine
+    // pre-advance by -ox places the bitmap exactly where it belongs and the
+    // margins fall outside its bounds, staying backdrop.
+    auto render_bitmap_bg = [&]() {
+        if ((dispcnt & 0x0400u) == 0) return;   // DISPCNT bit10 = BG2 enable
+        constexpr uint32_t layer = 2;
+        uint16_t bgcnt = static_cast<uint16_t>(io[0x0C] | (io[0x0D] << 8));
+        int bg_priority = static_cast<int>(bgcnt & 0x3u);
+
+        const bool     direct = (bg_mode != 4);
+        const int      bmp_w  = (bg_mode == 5) ? 160 : 240;
+        const int      bmp_h  = (bg_mode == 5) ? 128 : 160;
+        const uint32_t bpp    = direct ? 2u : 1u;
+        const uint32_t frame_base =
+            (bg_mode != 3 && (dispcnt & 0x0010u) != 0) ? 0xA000u : 0x0000u;
+
+        int32_t pa   = read_s16(io, 0x20);
+        int32_t pb   = read_s16(io, 0x22);
+        int32_t pc   = read_s16(io, 0x24);
+        int32_t pd   = read_s16(io, 0x26);
+        int32_t refx = read_s28_ref(io, 0x28);
+        int32_t refy = read_s28_ref(io, 0x2C);
+        int32_t xt = refx + static_cast<int32_t>(y) * pb +
+                     static_cast<int32_t>(-static_cast<int>(ox)) * pa;
+        int32_t yt = refy + static_cast<int32_t>(y) * pd +
+                     static_cast<int32_t>(-static_cast<int>(ox)) * pc;
+        for (uint32_t x = 0; x < out_w; ++x) {
+            int32_t tex_x = xt >> 8;
+            int32_t tex_y = yt >> 8;
+            xt += pa;
+            yt += pc;
+            if (!layer_enabled(x, layer)) continue;
+            if (tex_x < 0 || tex_x >= bmp_w || tex_y < 0 || tex_y >= bmp_h)
+                continue;
+            const uint32_t off = frame_base +
+                (static_cast<uint32_t>(tex_y) * static_cast<uint32_t>(bmp_w) +
+                 static_cast<uint32_t>(tex_x)) * bpp;
+            if (off + bpp > 96u * 1024u) continue;
+            uint16_t color;
+            if (direct) {
+                color = load_u16_le(&vram[off]);
+            } else {
+                uint8_t pal_idx = vram[off];
+                if (pal_idx == 0) continue;
+                color = load_u16_le(&pal[pal_idx * 2]);
+            }
+            submit(x, color,
+                   static_cast<int>(bg_priority * 256 + 128 + layer),
+                   static_cast<uint8_t>(layer),
+                   blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
+                   (second_targets & (1u << layer)) != 0);
+        }
+    };
     if (bg_mode == 0) {
         render_regular_bg(3, 0x0E, 0x1C);
         render_regular_bg(2, 0x0C, 0x18);
@@ -1143,6 +1268,9 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
     } else if (bg_mode == 2) {
         render_affine_bg(3, 0x0E, 0x30);
         render_affine_bg(2, 0x0C, 0x20);
+    } else if (bg_mode <= 5) {
+        // Modes 6/7 are prohibited (GBATEK); leave them backdrop-only.
+        render_bitmap_bg();
     }
 
     if (dispcnt & 0x1000u) {
