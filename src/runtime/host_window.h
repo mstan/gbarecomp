@@ -111,6 +111,9 @@ public:
         // dispatch boundary), never mid-frame.
         int      save_slot = 0;
         int      load_slot = 0;
+        // Debug light level for the Boktai solar sensor: number keys 1..9 pick
+        // a brightness step (1 = darkest, 9 = full sun). 0 = unchanged.
+        int      solar_step = 0;
         // Level-triggered: true while the fast-forward (Turbo) binding is
         // held (default Tab). Uncaps the frame limiter for as long as it's
         // down.

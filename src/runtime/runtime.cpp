@@ -57,6 +57,7 @@
 #include <condition_variable>
 #include <functional>
 #include <cstdint>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -92,6 +93,16 @@ void runtime_set_frame_present_hook(std::function<bool()>);
 #ifndef GBARECOMP_DEFAULT_DEBUG_PORT
 #define GBARECOMP_DEFAULT_DEBUG_PORT 0
 #endif
+
+namespace {
+// Debug light level for the solar sensor, set by the number-row keys and read
+// once per conversion. 0 = darkest, 255 = full sun; gba_solar.h owns the
+// inversion to the comparator threshold so the polarity lives in one place.
+std::atomic<unsigned> g_solar_brightness{0};
+uint8_t solar_debug_brightness() {
+    return static_cast<uint8_t>(g_solar_brightness.load(std::memory_order_relaxed));
+}
+}  // namespace
 
 namespace gbarecomp {
 namespace {
@@ -1356,7 +1367,15 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 static_cast<unsigned>(ppu.view_extra_right()));
         }
     }
+    // Boktai's solar sensor: opt-in per game (no ROM signature exists for it).
+    // The debug provider is driven by the number-row keys; a camera backend
+    // replaces it later behind the same seam.
+    {
+        const char* se = std::getenv("GBARECOMP_SOLAR");
+        bus.set_solar_enabled(se && se[0] && se[0] != '0');
+    }
     bus.set_rom(rom.data(), rom.size());
+    if (bus.solar().active()) bus.solar().set_provider(&solar_debug_brightness);
 
     // Resolve the save chip once, with explicit and testable precedence:
     // ROM signature -> game config -> process environment. Keep type and
@@ -2393,6 +2412,24 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             input_record_last_value = ev.keyinput;
         }
         if (ev.quit) host_quit = true;
+        if (ev.solar_step) {
+            // Step -> brightness, shaped from measured in-game gauge response
+            // rather than spread evenly over 0..255. An even spread wastes half
+            // the keys: Boktai's gauge saturates at brightness ~159, so 6/7/8/9
+            // all read as full sun. It is also very steep at the bottom — 0
+            // gives an empty gauge but 31 already gives 4 of 8 bars — so the low
+            // end gets finer steps.
+            //
+            // Observed (linear map, 8 gauge bars): 0->0, 31->4, 63->5, 95->6,
+            // 127->7, 159->full, and 191/223/255 indistinguishable from 159.
+            static constexpr unsigned kSolarSteps[9] = {
+                0, 8, 16, 24, 31, 63, 95, 127, 159,
+            };
+            const unsigned level = kSolarSteps[ev.solar_step - 1];
+            g_solar_brightness.store(level, std::memory_order_relaxed);
+            std::printf("solar_level=%d/9 brightness=%u\n", ev.solar_step, level);
+            std::fflush(stdout);
+        }
         if (pacer) pacer->set_uncapped(ev.fast_forward);
         // System hotkeys (config.ini [KeyMap], rebindable in the launcher).
         if (ev.toggle_fullscreen) {

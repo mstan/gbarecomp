@@ -224,6 +224,7 @@ add_library(gbarecomp_gba STATIC
     src/gba/gba_save.cpp
     src/gba/gba_gpio.cpp
     src/gba/gba_gyro.cpp
+    src/gba/gba_solar.cpp
     src/gba/gba_rtc.cpp
     src/gba/gba_bios.cpp
     src/gba/gba_scheduler.cpp
