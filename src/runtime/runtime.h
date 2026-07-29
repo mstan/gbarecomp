@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace gbarecomp {
@@ -54,6 +55,32 @@ struct RunOptions {
     // the generated function-entry fast path too.
     void (*extended_view_init)(std::uint32_t extra_left,
                                std::uint32_t extra_right) = nullptr;
+
+    // ---- game-owned items appended to the in-game settings menu -------------
+    // The runtime builds the common surface (display, audio, save states) from
+    // recomp-ui's standard catalog, which necessarily knows nothing about any
+    // one cartridge. A game with its own player-facing settings — Boktai's
+    // light source, for instance — contributes them here instead of teaching
+    // the engine about them, so the only alternative to a menu entry is not an
+    // undocumented keystroke.
+    //
+    // ui_extra_items points at an array of recomp-ui `RecompRuntimeUiItem`,
+    // deliberately typed as void* so runtime.h stays parseable (and RunOptions
+    // stays one layout) in builds compiled without the runtime-UI headers. The
+    // array and every string it references must outlive run_game().
+    //
+    // Keys the engine does not recognize fall through to these callbacks, which
+    // return non-zero when they handled the key. Called on the main loop's
+    // thread between frames, never mid-frame.
+    const void* ui_extra_items      = nullptr;
+    std::size_t ui_extra_item_count = 0;
+    int (*ui_get)(const char* key, int* value_out) = nullptr;
+    int (*ui_set)(const char* key, int value)      = nullptr;
+    int (*ui_action)(const char* key)              = nullptr;
+    // Greys an item out. Unlike the three above this is a positive answer
+    // (non-zero = selectable), so a game that only wants to disable a couple
+    // of keys returns 1 for everything else. Null = everything enabled.
+    int (*ui_enabled)(const char* key)             = nullptr;
 
     // ---- pre-boot launcher identity (launcher_seam.h, RECOMP_LAUNCHER builds) --
     // Consumed by the recomp-ui launcher seam a game's main() runs BEFORE
