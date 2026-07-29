@@ -63,6 +63,13 @@ struct RunOptions {
     // seam reads its [rom].path / [bios].path to PREFILL the launcher when no
     // rom.cfg / bios.cfg sidecar exists yet, so a first run isn't blank.
     const char* launcher_game_config = nullptr;
+    // Optional launcher state/cache filenames, relative to the executable dir.
+    // Multi-variant repos can use these to keep side-by-side launchers from
+    // sharing one config.ini / rom.cfg in the same build output directory.
+    const char* launcher_config_filename = nullptr;
+    const char* launcher_keybinds_filename = nullptr;
+    const char* launcher_rom_cache_filename = nullptr;
+    const char* launcher_bios_cache_filename = nullptr;
     const char* launcher_save_path = nullptr;   // explicit save file (game.toml
                                                 // [save].path); null => <rom>.sav
                                                 // derived from the seeded ROM

@@ -335,8 +335,17 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     if (headless || (skip_once && !force_launcher)) return 0;
 
     const std::string dir = exe_dir(args);
-    const std::string config_path = dir + "/config.ini";
-    const std::string keybinds_path = dir + "/keybinds.ini";
+    const auto state_path = [&](const char* filename,
+                                const char* fallback) -> std::string {
+        const char* chosen = (filename && filename[0]) ? filename : fallback;
+        std::filesystem::path path(chosen);
+        if (path.is_absolute()) return path.string();
+        return (std::filesystem::path(dir) / path).string();
+    };
+    const std::string config_path =
+        state_path(opts.launcher_config_filename, "config.ini");
+    const std::string keybinds_path =
+        state_path(opts.launcher_keybinds_filename, "keybinds.ini");
 
 #if defined(GBARECOMP_ENABLE_MODS)
     const RecompLauncherCModProvider* mod_provider = nullptr;
@@ -365,8 +374,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     // ---- seed the launcher: last pick (rom.cfg/bios.cfg) -> game.toml -------
     // so a first run (no sidecar yet) still prefills from the paths the game
     // already declares, instead of opening blank and forcing a re-browse.
-    const std::string rom_cfg  = dir + "/rom.cfg";
-    const std::string bios_cfg = dir + "/bios.cfg";
+    const std::string rom_cfg =
+        state_path(opts.launcher_rom_cache_filename, "rom.cfg");
+    const std::string bios_cfg =
+        state_path(opts.launcher_bios_cache_filename, "bios.cfg");
     std::string seed_rom  = read_single_line(rom_cfg);
     std::string seed_bios = read_single_line(bios_cfg);
     if ((seed_rom.empty() || seed_bios.empty()) &&
