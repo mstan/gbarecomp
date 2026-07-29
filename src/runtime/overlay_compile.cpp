@@ -51,14 +51,27 @@ bool heal_simulate_shipped() {
     return be && std::strcmp(be, "auto-no-gcc") == 0;
 }
 
-// The C++ compiler used to build overlay DLLs. The dev machine has msys2
-// mingw64 g++ on PATH at run time (the runtime exits 127 without it anyway);
-// GBARECOMP_HEAL_CXX overrides for non-default installs.
+// The C++ compiler used to build overlay shared objects. GBARECOMP_HEAL_CXX
+// overrides for non-default installs.
+//
+// The default used to be the Windows dev box's absolute msys2 path
+// unconditionally, so on macOS and Linux every heal attempt died with
+//
+//     sh: C:/msys64/mingw64/bin/g++.exe: No such file or directory
+//
+// which surfaces as `gcc exit 32512` (127 << 8, "command not found") and leaves
+// the session permanently on the interpreter bridge: coverage can never reach
+// FULLY STATIC off Windows, however many misses are merged into the config.
+// Prefer a bare compiler name elsewhere and let PATH resolve it.
 std::string gxx_path() {
     if (const char* e = std::getenv("GBARECOMP_HEAL_CXX")) {
         if (e[0]) return e;
     }
+#if defined(_WIN32)
     return "C:/msys64/mingw64/bin/g++.exe";
+#else
+    return "c++";
+#endif
 }
 
 // The bundled, toolchain-free C compiler used to build overlay DLLs on a player
@@ -191,15 +204,61 @@ bool load_and_resolve(const std::string& dll, uint32_t pc,
     return true;
 }
 #else
+#include <dlfcn.h>
+
 int run_process(const std::string& cmdline, const std::string& logpath,
                 std::string*) {
     std::string c = cmdline + " > \"" + logpath + "\" 2>&1";
     return std::system(c.c_str());
 }
-bool load_and_resolve(const std::string&, uint32_t, const GbaOverlayCallbacks*,
-                      void**, void (**)(void), std::string* err) {
-    if (err) *err = "overlay loading unimplemented on this platform";
-    return false;
+// POSIX mirror of the Win32 path above: dlopen/dlsym for
+// LoadLibrary/GetProcAddress. Until this existed, every heal off Windows failed
+// with "overlay loading unimplemented on this platform", so a macOS or Linux
+// session could compile an overlay and still never run it -- coverage was
+// permanently NOT_STATIC no matter what the config contained.
+bool load_and_resolve(const std::string& dll, uint32_t pc,
+                      const GbaOverlayCallbacks* cb,
+                      void** out_module, void (**out_fn)(void),
+                      std::string* err) {
+    // RTLD_LOCAL so an overlay's symbols cannot collide with the next one's:
+    // every overlay exports the same overlay_abi / overlay_init names.
+    void* h = dlopen(dll.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!h) {
+        const char* e = dlerror();
+        if (err) *err = "dlopen(" + dll + ") failed: " + (e ? e : "unknown");
+        return false;
+    }
+    auto abi = reinterpret_cast<uint32_t (*)(void)>(dlsym(h, "overlay_abi"));
+    if (!abi || abi() != GBA_OVERLAY_ABI_VERSION) {
+        if (err) *err = "ABI mismatch in " + dll + " (so=" +
+                        std::to_string(abi ? abi() : 0u) + " runtime=" +
+                        std::to_string(GBA_OVERLAY_ABI_VERSION) +
+                        ") — rejecting + deleting stale cache entry";
+        dlclose(h);
+        std::error_code ec;
+        fs::remove(dll, ec);
+        return false;
+    }
+    auto init = reinterpret_cast<void (*)(const GbaOverlayCallbacks*)>(
+        dlsym(h, "overlay_init"));
+    if (!init) {
+        if (err) *err = "no overlay_init in " + dll;
+        dlclose(h);
+        return false;
+    }
+    init(cb);
+
+    char fname[24];
+    std::snprintf(fname, sizeof(fname), "func_%08X", pc);
+    auto fn = reinterpret_cast<void (*)(void)>(dlsym(h, fname));
+    if (!fn) {
+        if (err) *err = std::string("no ") + fname + " export in " + dll;
+        dlclose(h);
+        return false;
+    }
+    *out_module = h;
+    *out_fn = fn;
+    return true;
 }
 #endif
 
@@ -294,6 +353,18 @@ bool overlay_compile_one(const OverlayWorkItem& w,
                 " -o \"" + dlltmp.generic_string() + "\""
                 " \"" + cpath.generic_string() + "\"";
         } else {
+            // Platform-specific tail. --export-all-symbols is a PE/MinGW
+            // linker flag: Apple's ld64 rejects it outright, and on ELF it is
+            // meaningless because a shared object exports its non-hidden
+            // symbols anyway. ELF does need -fPIC for -shared, which Windows
+            // and macOS do not (both are PIC by default).
+#if defined(_WIN32)
+            const char* plat = " -Wl,--export-all-symbols";
+#elif defined(__APPLE__)
+            const char* plat = "";
+#else
+            const char* plat = " -fPIC";
+#endif
             cmd =
                 "\"" + gxx_path() + "\""
                 " -O2 -std=gnu++17 -fno-exceptions -fno-rtti -shared" + inc +
@@ -301,8 +372,8 @@ bool overlay_compile_one(const OverlayWorkItem& w,
                 // -x c++: under gcc the emitted body compiles as C++ to match
                 // the static corpus's C++ semantics exactly. Explicit so it
                 // never depends on the driver's .c-suffix handling.
-                " -x c++ \"" + cpath.generic_string() + "\""
-                " -Wl,--export-all-symbols";
+                " -x c++ \"" + cpath.generic_string() + "\"" +
+                plat;
         }
 
         const int rc = run_process(cmd, logpath.string(), err);
