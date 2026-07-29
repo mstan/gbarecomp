@@ -7,9 +7,10 @@
 // etc.) are detected by the Seiko SDK library signature; carts without the
 // chip are untouched (their 0xC4 region reads ordinary ROM).
 //
-// Reads are answered from the HOST clock (no battery). A game that *sets*
-// the clock is honored for the session via a seconds offset, so the in-game
-// clock advances with real time. RECOMP_RTC_OFF disables; RECOMP_RTC_EPOCH
+// On boot, the RTC is seeded once from the host's local civil time. After that
+// reads come from the emulated chip's own monotonic timeline, so host clock
+// changes do not resync the game. A game that *sets* the clock is honored for
+// the session via a seconds offset. RECOMP_RTC_OFF disables; RECOMP_RTC_EPOCH
 // pins a deterministic time for reproducible differential runs.
 //
 // ── Attribution ───────────────────────────────────────────────────
@@ -23,6 +24,11 @@
 #include <cstdint>
 
 #include "gba_gpio.h"
+
+namespace gbarecomp::debug {
+class SnapshotWriter;
+class SnapshotReader;
+}  // namespace gbarecomp::debug
 
 namespace gba {
 
@@ -44,6 +50,9 @@ public:
     void gpio_write(uint8_t pins) override;
     int  gpio_drive(uint8_t bit) const override;
 
+    void serialize(gbarecomp::debug::SnapshotWriter& w) const;
+    void deserialize(gbarecomp::debug::SnapshotReader& r);
+
 private:
     enum class Phase { Idle, Command, Read, Write };
 
@@ -61,7 +70,11 @@ private:
     void    load_time();
     void    commit_write();
     void    reset_clock();
-    Civil   base_now() const;
+    void    seed_boot_time();
+    int64_t linear_seconds(const Civil& c) const;
+    int64_t current_seconds() const;
+    Civil   civil_from_seconds(int64_t lin) const;
+    Civil   host_now() const;
     Civil   now() const;
     void    set_offset_from(const Civil& target);
 
@@ -83,7 +96,11 @@ private:
     bool    lsb_first_ = false;
 
     uint8_t control_ = 0;   // bit6 = 24h mode, bit7 = power-lost
-    int64_t offset_ = 0;    // seconds added to host time when game sets clock
+    int64_t offset_ = 0;    // seconds added to boot timeline when game sets clock
+
+    bool    boot_seeded_ = false;
+    int64_t boot_seconds_ = 0;
+    int64_t boot_monotonic_seconds_ = 0;
 
     bool    have_fixed_ = false;  // RECOMP_RTC_EPOCH override
     int64_t fixed_ = 0;

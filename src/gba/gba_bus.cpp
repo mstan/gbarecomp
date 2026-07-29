@@ -33,6 +33,7 @@ void GbaBus::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     w.u32(last_fetched_);
     w.boolean(bios_access_enabled_);
     w.u64(unmapped_count_);
+    rtc_.serialize(w);
 }
 
 void GbaBus::deserialize(gbarecomp::debug::SnapshotReader& r) {
@@ -44,6 +45,9 @@ void GbaBus::deserialize(gbarecomp::debug::SnapshotReader& r) {
     last_fetched_        = r.u32();
     bios_access_enabled_ = r.boolean();
     unmapped_count_      = static_cast<std::size_t>(r.u64());
+    if (r.remaining() != 0) {
+        rtc_.deserialize(r);
+    }
 }
 
 namespace {

@@ -1687,8 +1687,6 @@ RecompLauncherCModProvider provider = {
     provider_feature_set_option,
     provider_diagnostic_count,
     provider_diagnostic_get,
-    ".gbamod",
-    "GBARecomp mod package (.gbamod)",
 };
 #endif
 

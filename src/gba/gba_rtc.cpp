@@ -6,9 +6,12 @@
 
 #include "gba_rtc.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#include "snapshot.h"
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
@@ -40,6 +43,7 @@ uint8_t encode_hour(uint8_t hour, bool h24) {
     uint8_t h;
     if (h24) {
         h = hour;
+        pm = 0;
     } else {
         h = hour % 12;
         if (h == 0) h = 12;
@@ -88,6 +92,12 @@ int64_t div_euclid(int64_t a, int64_t b) {
     return q;
 }
 
+int64_t steady_seconds() {
+    using clock = std::chrono::steady_clock;
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        clock::now().time_since_epoch()).count();
+}
+
 }  // namespace
 
 GbaRtc::GbaRtc() {
@@ -106,10 +116,48 @@ void GbaRtc::configure(const uint8_t* rom, std::size_t len) {
     for (std::size_t i = 0; i + kSigLen <= len; ++i) {
         if (std::memcmp(rom + i, kSignature, kSigLen) == 0) { active_ = true; break; }
     }
+    if (active_) seed_boot_time();
 }
 
+void GbaRtc::serialize(gbarecomp::debug::SnapshotWriter& w) const {
+    w.boolean(active_);
+    w.boolean(sck_);
+    w.boolean(cs_);
+    w.boolean(sio_out_);
+    w.u8(static_cast<uint8_t>(phase_));
+    w.u8(cmd_acc_);
+    w.u8(nbits_);
+    w.u64(static_cast<uint64_t>(byte_idx_));
+    w.u64(static_cast<uint64_t>(buflen_));
+    w.bytes(buffer_, sizeof(buffer_));
+    w.u8(reg_);
+    w.boolean(lsb_first_);
+    w.u8(control_);
+    w.u64(static_cast<uint64_t>(current_seconds()));
+    w.boolean(boot_seeded_);
+}
 
-
+void GbaRtc::deserialize(gbarecomp::debug::SnapshotReader& r) {
+    active_ = r.boolean();
+    sck_ = r.boolean();
+    cs_ = r.boolean();
+    sio_out_ = r.boolean();
+    phase_ = static_cast<Phase>(r.u8());
+    cmd_acc_ = r.u8();
+    nbits_ = r.u8();
+    byte_idx_ = static_cast<std::size_t>(r.u64());
+    buflen_ = static_cast<std::size_t>(r.u64());
+    r.bytes(buffer_, sizeof(buffer_));
+    reg_ = r.u8();
+    lsb_first_ = r.boolean();
+    control_ = r.u8();
+    boot_seconds_ = static_cast<int64_t>(r.u64());
+    boot_seeded_ = r.boolean();
+    boot_monotonic_seconds_ = steady_seconds();
+    offset_ = 0;
+    if (byte_idx_ > sizeof(buffer_)) byte_idx_ = sizeof(buffer_);
+    if (buflen_ > sizeof(buffer_)) buflen_ = sizeof(buffer_);
+}
 
 // Pin 1 (SIO) is the only line the clock drives; everything else on the port
 // is either guest-driven or another device's business.
@@ -184,7 +232,10 @@ void GbaRtc::decode_command() {
         cmd = reverse_bits(cmd_acc_);
         lsb = true;
     }
-    lsb_first_ = lsb;
+    // S-3511A commands are commonly sent MSB-first by Nintendo's SIIRTC
+    // library, while payload bytes are transferred LSB-first. If a caller
+    // sends the command byte reversed, mirror the payload direction too.
+    lsb_first_ = !lsb;
     reg_ = (cmd >> 1) & 0x07;
     bool read = (cmd & 1) != 0;
     nbits_ = 0;
@@ -266,22 +317,54 @@ void GbaRtc::commit_write() {
     }
 }
 
-GbaRtc::Civil GbaRtc::base_now() const {
+void GbaRtc::seed_boot_time() {
+    if (boot_seeded_) return;
+
     if (have_fixed_) {
-        int64_t s = fixed_;
-        int64_t days = div_euclid(s, 86400);
-        int64_t rem  = mod_euclid(s, 86400);
-        int64_t y, m, d;
-        civil_from_days(days, y, m, d);
-        Civil c;
-        c.year = static_cast<int>(y);
-        c.month = static_cast<uint8_t>(m);
-        c.day = static_cast<uint8_t>(d);
-        c.dow = static_cast<uint8_t>(mod_euclid(days + 4, 7));
-        c.hour = static_cast<uint8_t>(rem / 3600);
-        c.min = static_cast<uint8_t>(rem % 3600 / 60);
-        c.sec = static_cast<uint8_t>(rem % 60);
-        return c;
+        boot_seconds_ = fixed_;
+    } else {
+        Civil host = host_now();
+        boot_seconds_ = linear_seconds(host);
+    }
+    boot_monotonic_seconds_ = steady_seconds();
+    offset_ = 0;
+    control_ = static_cast<uint8_t>(control_ & ~0x80u);  // battery is present
+    boot_seeded_ = true;
+}
+
+int64_t GbaRtc::linear_seconds(const Civil& c) const {
+    return days_from_civil(c.year, c.month, c.day) * 86400 +
+           c.hour * 3600 + c.min * 60 + c.sec;
+}
+
+int64_t GbaRtc::current_seconds() const {
+    if (boot_seeded_) {
+        const int64_t elapsed = have_fixed_ ? 0 : (steady_seconds() - boot_monotonic_seconds_);
+        return boot_seconds_ + elapsed + offset_;
+    }
+
+    return linear_seconds(host_now()) + offset_;
+}
+
+GbaRtc::Civil GbaRtc::civil_from_seconds(int64_t lin) const {
+    int64_t days = div_euclid(lin, 86400);
+    int64_t rem  = mod_euclid(lin, 86400);
+    int64_t y, m, d;
+    civil_from_days(days, y, m, d);
+    Civil c;
+    c.year = static_cast<int>(y);
+    c.month = static_cast<uint8_t>(m);
+    c.day = static_cast<uint8_t>(d);
+    c.dow = static_cast<uint8_t>(mod_euclid(days + 4, 7));
+    c.hour = static_cast<uint8_t>(rem / 3600);
+    c.min = static_cast<uint8_t>(rem % 3600 / 60);
+    c.sec = static_cast<uint8_t>(rem % 60);
+    return c;
+}
+
+GbaRtc::Civil GbaRtc::host_now() const {
+    if (have_fixed_) {
+        return civil_from_seconds(fixed_);
     }
     Civil c{2000, 1, 1, 6, 0, 0, 0};  // fallback: 2000-01-01 Sat
 #if defined(_WIN32)
@@ -311,32 +394,19 @@ GbaRtc::Civil GbaRtc::base_now() const {
 }
 
 GbaRtc::Civil GbaRtc::now() const {
-    Civil base = base_now();
-    if (offset_ == 0) return base;
-    int64_t lin = days_from_civil(base.year, base.month, base.day) * 86400 +
-                  base.hour * 3600 + base.min * 60 + base.sec + offset_;
-    int64_t days = div_euclid(lin, 86400);
-    int64_t rem  = mod_euclid(lin, 86400);
-    int64_t y, m, d;
-    civil_from_days(days, y, m, d);
-    Civil c;
-    c.year = static_cast<int>(y);
-    c.month = static_cast<uint8_t>(m);
-    c.day = static_cast<uint8_t>(d);
-    c.dow = static_cast<uint8_t>(mod_euclid(days + 4, 7));
-    c.hour = static_cast<uint8_t>(rem / 3600);
-    c.min = static_cast<uint8_t>(rem % 3600 / 60);
-    c.sec = static_cast<uint8_t>(rem % 60);
-    return c;
+    return civil_from_seconds(current_seconds());
 }
 
 void GbaRtc::set_offset_from(const Civil& target) {
-    Civil host = base_now();
-    int64_t tlin = days_from_civil(target.year, target.month, target.day) * 86400 +
-                   target.hour * 3600 + target.min * 60 + target.sec;
-    int64_t hlin = days_from_civil(host.year, host.month, host.day) * 86400 +
-                   host.hour * 3600 + host.min * 60 + host.sec;
-    offset_ = tlin - hlin;
+    int64_t tlin = linear_seconds(target);
+    int64_t base_lin;
+    if (boot_seeded_) {
+        const int64_t elapsed = have_fixed_ ? 0 : (steady_seconds() - boot_monotonic_seconds_);
+        base_lin = boot_seconds_ + elapsed;
+    } else {
+        base_lin = linear_seconds(host_now());
+    }
+    offset_ = tlin - base_lin;
     if (trace_) {
         std::fprintf(stderr, "rtc: clock set to %04d-%02u-%02u %02u:%02u:%02u (offset %lld s)\n",
                      target.year, target.month, target.day, target.hour, target.min,

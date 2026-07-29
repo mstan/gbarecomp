@@ -612,6 +612,10 @@ add_executable(gpio_tests tests/gpio/test_main.cpp)
 target_link_libraries(gpio_tests PRIVATE gbarecomp_gba)
 add_test(NAME gpio_tests COMMAND gpio_tests)
 
+add_executable(rtc_tests tests/rtc/test_main.cpp)
+target_link_libraries(rtc_tests PRIVATE gbarecomp_gba)
+add_test(NAME rtc_tests COMMAND rtc_tests)
+
 add_executable(irq_tests tests/irq/test_main.cpp)
 target_link_libraries(irq_tests PRIVATE gbarecomp_gba)
 add_test(NAME irq_tests COMMAND irq_tests)
