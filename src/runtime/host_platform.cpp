@@ -63,34 +63,48 @@ void FramePacer::wait_for_next_frame() {
         next_ = now + period_;
         return;
     }
-    // Hybrid wait: sleep most of the gap (cheap, but coarse), then spin
-    // the final ~1 ms for deadline accuracy.
-    constexpr auto kSpinTail = std::chrono::microseconds(1200);
-    if (next_ - now > kSpinTail) {
+    // A high-resolution waitable timer is already precise enough on modern
+    // Windows. Waiting directly on it avoids a 1.2 ms yield/spin tail whose
+    // wake time becomes erratic when the game process runs at Idle priority.
 #if defined(_WIN32)
+    if (next_ > now) {
         if (wait_timer_) {
-            // Relative due time in 100 ns units (negative = relative).
             const auto due_ns = std::chrono::duration_cast<
-                std::chrono::nanoseconds>(next_ - kSpinTail - now).count();
+                std::chrono::nanoseconds>(next_ - now).count();
             LARGE_INTEGER due;
-            due.QuadPart = -static_cast<LONGLONG>(due_ns / 100);
+            due.QuadPart = -static_cast<LONGLONG>(
+                due_ns >= 100 ? due_ns / 100 : 1);
             HANDLE t = static_cast<HANDLE>(wait_timer_);
             if (SetWaitableTimer(t, &due, 0, nullptr, nullptr, FALSE)) {
                 WaitForSingleObject(t, INFINITE);
             } else {
-                std::this_thread::sleep_until(next_ - kSpinTail);
+                std::this_thread::sleep_until(next_);
             }
         } else {
-            std::this_thread::sleep_until(next_ - kSpinTail);
+            std::this_thread::sleep_until(next_);
         }
-#else
-        std::this_thread::sleep_until(next_ - kSpinTail);
-#endif
     }
+#else
+    // Hybrid wait: sleep most of the gap (cheap, but coarse), then yield
+    // through the final ~1 ms for deadline accuracy.
+    constexpr auto kSpinTail = std::chrono::microseconds(1200);
+    if (next_ - now > kSpinTail) {
+        std::this_thread::sleep_until(next_ - kSpinTail);
+    }
+#endif
     while (clock::now() < next_) {
         std::this_thread::yield();
     }
-    next_ += period_;
+
+    // Never pay back a late wake with a shortened following frame. That
+    // short/long pair is especially visible during steady pixel scrolling.
+    // Normal sub-millisecond timer error retains the absolute cadence; a
+    // scheduler or present stall above 1.5 ms establishes a fresh full-frame
+    // period instead of producing a visibly short recovery frame.
+    const clock::time_point woke = clock::now();
+    constexpr auto kLateTolerance = std::chrono::microseconds(1500);
+    next_ = woke > next_ + kLateTolerance ? woke + period_
+                                          : next_ + period_;
 }
 
 std::vector<unsigned char> read_file(const std::string& path, std::string* error) {
