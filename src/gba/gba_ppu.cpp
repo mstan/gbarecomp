@@ -78,6 +78,11 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
         // Historical native-width restore path, deliberately unchanged.
         has_latched_fb_ = serialized_latch;
         r.bytes(latched_fb_.data(), kFramebufferBytes);
+        // Seed the scanline compositor with the restored frame: a state saved
+        // mid-frame resumes rendering at scanline_, so rows at and below it
+        // are not re-rendered until the frame after next. Without the seed
+        // those rows of the first latched frame would be stale garbage.
+        std::memcpy(work_fb_.data(), latched_fb_.data(), kFramebufferBytes);
     } else {
         // The fixed-size payload has no authored wide margins. Consume it to
         // preserve snapshot framing, then invalidate only the presentation
@@ -86,6 +91,18 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
         std::array<uint8_t, kFramebufferBytes> native_latch{};
         r.bytes(native_latch.data(), native_latch.size());
         has_latched_fb_ = false;
+        // Seed the compositor's authentic center from the restored native
+        // frame (margins stay whatever the pillarbox policy paints), so rows
+        // the resumed mid-frame render never revisits before the next latch
+        // show the restored image instead of stale pre-load pixels.
+        constexpr std::size_t kNativeStride = kScreenWidth * 3u;
+        const std::size_t wide_stride = render_width() * 3u;
+        const std::size_t center_x = extra_left_ * 3u;
+        for (std::size_t y = 0; y < kScreenHeight; ++y) {
+            std::memcpy(work_fb_.data() + y * wide_stride + center_x,
+                        native_latch.data() + y * kNativeStride,
+                        kNativeStride);
+        }
         // A host may re-present immediately after load, before a game-owned
         // state-epoch hook has invalidated/rebuilt its margin caches. Fail those
         // unauthored margins closed for that interim render; the game's normal
@@ -104,6 +121,7 @@ void GbaPpu::reset() {
     frame_count_ = 0;
     has_latched_fb_ = false;
     std::memset(latched_fb_.data(), 0xFF, latched_fb_.size());
+    std::memset(work_fb_.data(), 0xFF, work_fb_.size());
 }
 
 void GbaPpu::set_view_margins(uint32_t left, uint32_t right,
@@ -1744,11 +1762,11 @@ void GbaPpu::render_scanline(uint32_t y,
                              const uint8_t* oam,
                              const uint8_t* pal) {
     if (!view_expanded()) {
-        render_scanline_internal(latched_fb_.data(), y, dispcnt, io, vram, oam,
+        render_scanline_internal(work_fb_.data(), y, dispcnt, io, vram, oam,
                                  pal, kScreenWidth, kScreenHeight);
         return;
     }
-    render_scanline_wide(latched_fb_.data(), y, dispcnt, io, vram, oam, pal,
+    render_scanline_wide(work_fb_.data(), y, dispcnt, io, vram, oam, pal,
                          render_width(), extra_left_);
 }
 
@@ -1757,11 +1775,12 @@ void GbaPpu::latch_framebuffer(uint16_t dispcnt,
                                const uint8_t* vram,
                                const uint8_t* oam,
                                const uint8_t* pal) {
-    render(latched_fb_.data(), dispcnt, io, vram, oam, pal);
-    has_latched_fb_ = true;
+    render(work_fb_.data(), dispcnt, io, vram, oam, pal);
+    mark_framebuffer_latched();
 }
 
 void GbaPpu::mark_framebuffer_latched() {
+    std::memcpy(latched_fb_.data(), work_fb_.data(), render_bytes());
     has_latched_fb_ = true;
 }
 

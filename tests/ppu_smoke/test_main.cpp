@@ -808,6 +808,57 @@ void test_bitmap_mode_wide_center_and_margins() {
                  "mode 4 wide right margin");
 }
 
+// The latched frame is a VBlank snapshot: scanlines of the NEXT frame being
+// composited must never show through latched_framebuffer(). (Regression test
+// for the Minish Cap walk "warble": render_scanline used to write directly
+// into the latched buffer, so any consumer reading it after the guest ran
+// into the next frame's visible lines saw a horizontal one-frame tear.)
+void test_latched_frame_immune_to_in_progress_scanlines() {
+    Fixture f;
+    f.ppu.reset();
+    const uint16_t dispcnt = 0;  // mode 0, no layers -> backdrop everywhere
+
+    store16(&f.pal[0], 0x001F);  // frame A backdrop: red
+    for (uint32_t y = 0; y < gba::GbaPpu::kScreenHeight; ++y)
+        f.ppu.render_scanline(y, dispcnt, f.io.data(), f.vram.data(),
+                              f.oam.data(), f.pal.data());
+    f.ppu.mark_framebuffer_latched();
+    if (!f.ppu.has_latched_framebuffer()) {
+        std::fprintf(stderr, "latch immunity: frame A did not latch\n");
+        std::exit(1);
+    }
+    std::array<uint8_t, gba::GbaPpu::kFramebufferBytes> frame_a{};
+    std::memcpy(frame_a.data(), f.ppu.latched_framebuffer(), frame_a.size());
+
+    // Frame B starts compositing (guest ran past VBlank into visible lines).
+    store16(&f.pal[0], 0x03E0);  // frame B backdrop: green
+    for (uint32_t y = 0; y < gba::GbaPpu::kScreenHeight / 2; ++y)
+        f.ppu.render_scanline(y, dispcnt, f.io.data(), f.vram.data(),
+                              f.oam.data(), f.pal.data());
+    if (std::memcmp(f.ppu.latched_framebuffer(), frame_a.data(),
+                    frame_a.size()) != 0) {
+        std::fprintf(stderr,
+                     "latch immunity: in-progress frame B scanlines leaked "
+                     "into the latched frame A snapshot\n");
+        std::exit(1);
+    }
+
+    // Completing frame B and latching publishes it.
+    for (uint32_t y = gba::GbaPpu::kScreenHeight / 2;
+         y < gba::GbaPpu::kScreenHeight; ++y)
+        f.ppu.render_scanline(y, dispcnt, f.io.data(), f.vram.data(),
+                              f.oam.data(), f.pal.data());
+    f.ppu.mark_framebuffer_latched();
+    if (std::memcmp(f.ppu.latched_framebuffer(), frame_a.data(),
+                    frame_a.size()) == 0) {
+        std::fprintf(stderr,
+                     "latch immunity: completed frame B failed to publish\n");
+        std::exit(1);
+    }
+    expect_pixel(f.ppu.latched_framebuffer(), 0, 255, 0,
+                 "latch immunity: frame B backdrop");
+}
+
 } // namespace
 
 int main() {
@@ -828,6 +879,7 @@ int main() {
     test_bitmap_mode5_bounds_and_page_flip();
     test_bitmap_mode_obj_compositing_and_obj_window();
     test_bitmap_mode_wide_center_and_margins();
+    test_latched_frame_immune_to_in_progress_scanlines();
     std::puts("ppu_smoke_tests: PASS");
     return 0;
 }

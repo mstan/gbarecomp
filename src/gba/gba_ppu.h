@@ -163,6 +163,16 @@ private:
     uint64_t frame_count_     = 0;
     // Oversized to the compile-time max so the widened frame fits without
     // reallocation; only the first render_bytes() are used (vanilla = 115200).
+    // work_fb_ is the scanline compositor's target: render_scanline() writes
+    // each line here as the PPU reaches it, so mid-frame it holds a mix of the
+    // frame in progress (top) and the previous frame (bottom). latched_fb_
+    // only ever holds COMPLETE frames: mark_framebuffer_latched() snapshots
+    // work_fb_ at VBlank start. Consumers (present, framedump, TCP screenshot)
+    // read latched_fb_ at arbitrary guest-time points — handing them work_fb_
+    // directly produced a horizontal one-frame-stale tear band at whatever
+    // scanline the guest happened to have rendered to (the Minish Cap
+    // walk-scroll "warble").
+    std::array<uint8_t, kMaxFramebufferBytes> work_fb_{};
     std::array<uint8_t, kMaxFramebufferBytes> latched_fb_{};
     bool has_latched_fb_ = false;
 
