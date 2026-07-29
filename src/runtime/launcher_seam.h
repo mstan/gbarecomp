@@ -52,9 +52,51 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace gbarecomp_seam {
+
+template <typename T, typename = void>
+struct has_gyro_sensitivity : std::false_type {};
+
+template <typename T>
+struct has_gyro_sensitivity<
+    T,
+    std::void_t<decltype(std::declval<T&>().gyro_sensitivity)>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_gyro_controls : std::false_type {};
+
+template <typename T>
+struct has_gyro_controls<
+    T,
+    std::void_t<decltype(std::declval<T&>().has_gyro_controls)>>
+    : std::true_type {};
+
+template <typename T>
+inline void set_gyro_sensitivity(T& settings, float value) {
+    if constexpr (has_gyro_sensitivity<T>::value) {
+        settings.gyro_sensitivity = value;
+    }
+}
+
+template <typename T>
+inline float get_gyro_sensitivity(const T& settings, float fallback) {
+    if constexpr (has_gyro_sensitivity<T>::value) {
+        return settings.gyro_sensitivity;
+    }
+    return fallback;
+}
+
+template <typename T>
+inline void set_has_gyro_controls(T& game_info, bool enabled) {
+    if constexpr (has_gyro_controls<T>::value) {
+        game_info.has_gyro_controls = enabled ? 1 : 0;
+    }
+}
 
 // gbarecomp's screen-model tokens, in the launcher's kGbaScreenKindNames
 // index order (Raw/Unlit/Frontlit/Backlit/Classic).
@@ -421,7 +463,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     ls.skip_launcher = cfg.skip_launcher;
     ls.screen_kind   = cfg.screen_kind;
     ls.aspect_index  = cfg.aspect_index;
-    ls.gyro_sensitivity = cfg.gyro_sensitivity;
+    gbarecomp_seam::set_gyro_sensitivity(ls, cfg.gyro_sensitivity);
     std::snprintf(ls.bios_path, sizeof(ls.bios_path), "%s", seed_bios.c_str());
 
     RecompLauncherCGameInfo gi;
@@ -446,7 +488,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     gi.config_path = config_path.c_str();
     gi.keybinds_path = keybinds_path.c_str();
     gi.boxart_path = opts.launcher_boxart;   // NULL => default assets/img/boxart.tga
-    gi.has_gyro_controls = opts.launcher_expose_gyro ? 1 : 0;
+    gbarecomp_seam::set_has_gyro_controls(gi, opts.launcher_expose_gyro);
 #if defined(GBARECOMP_ENABLE_MODS)
     gi.mods = mod_provider;
 #endif
@@ -499,7 +541,9 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
                          ls.aspect_index < opts.launcher_num_aspects)
                           ? ls.aspect_index : 0;
     cfg.gyro_sensitivity =
-        std::clamp(ls.gyro_sensitivity, 0.25f, 4.00f);
+        std::clamp(gbarecomp_seam::get_gyro_sensitivity(
+                       ls, cfg.gyro_sensitivity),
+                   0.25f, 4.00f);
     seam_config_save(config_path, cfg);
 
     if (picked_rom[0]) {

@@ -182,9 +182,11 @@ int runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int* out) {
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER) == 0) *out = c->window->linear_filter();
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0) *out = c->window->audio_enabled();
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) *out = c->window->volume();
+#if defined(RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY)
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY) == 0 &&
              c->gyro_sensitivity)
         *out = static_cast<int>(std::lround(*c->gyro_sensitivity * 100.0f));
+#endif
     else return 0;
     return 1;
 }
@@ -204,10 +206,12 @@ int runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int value) {
         c->window->set_audio_enabled(value != 0);
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0)
         c->window->set_volume(value);
+#if defined(RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY)
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY) == 0 &&
              c->gyro_sensitivity)
         *c->gyro_sensitivity =
             std::clamp(static_cast<float>(value) / 100.0f, 0.25f, 4.0f);
+#endif
     else return 0;
     return 1;
 }
@@ -2176,6 +2180,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 #if defined(GBARECOMP_RUNTIME_UI)
         runtime_ui_context.window = &win;
         runtime_ui_context.gyro_sensitivity = &args.gyro_sensitivity;
+#if defined(RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY)
         static const RecompRuntimeUiItem gyro_item{
             RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY,
             "Motion",
@@ -2189,6 +2194,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             0,
             nullptr,
         };
+#endif
         RecompRuntimeUiStandardConfig runtime_ui_config{};
         runtime_ui_config.menu.title = runtime_title;
         runtime_ui_config.menu.subtitle = "Game Boy Advance runtime settings";
@@ -2208,10 +2214,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |
             RECOMP_RUNTIME_UI_STANDARD_WINDOW_SCALE;
 #endif
+#if defined(RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY)
         if (opts.launcher_expose_gyro) {
             runtime_ui_config.extra_items = &gyro_item;
             runtime_ui_config.extra_item_count = 1;
         }
+#endif
         runtime_ui_config.view_modes = RECOMP_RUNTIME_UI_VIEW_MODE_NATIVE;
         if (opts.launcher_expose_widescreen && opts.max_view_width > 240)
             runtime_ui_config.view_modes |=
