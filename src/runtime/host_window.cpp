@@ -3,7 +3,9 @@
 #include "host_window.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -276,6 +278,20 @@ struct Backend {
     SDL_GameController* controller = nullptr;
     SDL_JoystickID      controller_id = -1;
     bool                controller_gyro = false;
+    SDL_Sensor*         device_gyro = nullptr;
+    struct TouchPoint {
+        SDL_FingerID id = 0;
+        float x = 0.0f;
+        float y = 0.0f;
+        float start_x = 0.0f;
+        float start_y = 0.0f;
+        Uint32 started_at = 0;
+        uint16_t buttons = 0;
+        bool active = false;
+        bool long_press_candidate = false;
+    };
+    std::array<TouchPoint, 10> touches{};
+    bool touch_controls = false;
     // Callback-driven clock-domain bridge (replaces SDL queue push).
     rab_bridge    bridge{};
     bool          bridge_ready = false;
@@ -369,6 +385,160 @@ void open_first_game_controller(Backend* b) {
     for (int i = 0; i < SDL_NumJoysticks(); ++i) {
         if (open_game_controller(b, i)) return;
     }
+}
+
+void open_device_gyro(Backend* b) {
+    if (!b || b->device_gyro) return;
+#if SDL_VERSION_ATLEAST(2, 0, 9)
+    for (int i = 0; i < SDL_NumSensors(); ++i) {
+        if (SDL_SensorGetDeviceType(i) != SDL_SENSOR_GYRO) continue;
+        b->device_gyro = SDL_SensorOpen(i);
+        if (b->device_gyro) {
+            std::fprintf(stderr, "host_window: device gyro=%s\n",
+                         SDL_SensorGetName(b->device_gyro)
+                             ? SDL_SensorGetName(b->device_gyro) : "available");
+            std::fflush(stderr);
+        }
+        break;
+    }
+#endif
+}
+
+// Normalized landscape touch layout. It deliberately leaves the center of the
+// screen empty so a stationary long press there can open runtime settings.
+uint16_t touch_buttons_at(float x, float y) {
+    auto in_circle = [x, y](float cx, float cy, float r) {
+        const float dx = x - cx;
+        const float dy = y - cy;
+        return dx * dx + dy * dy <= r * r;
+    };
+
+    uint16_t buttons = 0;
+    if (x < 0.31f && y > 0.37f) {
+        const float dx = x - 0.17f;
+        const float dy = y - 0.70f;
+        if (std::abs(dx) > std::abs(dy)) {
+            if (dx > 0.035f) buttons |= 1u << 4;  // Right
+            if (dx < -0.035f) buttons |= 1u << 5; // Left
+        } else {
+            if (dy < -0.035f) buttons |= 1u << 6; // Up
+            if (dy > 0.035f) buttons |= 1u << 7;  // Down
+        }
+    }
+    if (in_circle(0.87f, 0.62f, 0.095f)) buttons |= 1u << 0; // A
+    if (in_circle(0.74f, 0.76f, 0.095f)) buttons |= 1u << 1; // B
+    if (x >= 0.39f && x <= 0.48f && y >= 0.84f) buttons |= 1u << 2; // Select
+    if (x >= 0.52f && x <= 0.61f && y >= 0.84f) buttons |= 1u << 3; // Start
+    if (x <= 0.24f && y <= 0.16f) buttons |= 1u << 9; // L
+    if (x >= 0.76f && y <= 0.16f) buttons |= 1u << 8; // R
+    return buttons;
+}
+
+Backend::TouchPoint* find_touch(Backend* b, SDL_FingerID id) {
+    if (!b) return nullptr;
+    for (auto& touch : b->touches)
+        if (touch.active && touch.id == id) return &touch;
+    return nullptr;
+}
+
+Backend::TouchPoint* allocate_touch(Backend* b, SDL_FingerID id) {
+    if (!b) return nullptr;
+    if (auto* existing = find_touch(b, id)) return existing;
+    for (auto& touch : b->touches) {
+        if (!touch.active) {
+            touch = {};
+            touch.active = true;
+            touch.id = id;
+            return &touch;
+        }
+    }
+    return nullptr;
+}
+
+uint16_t active_touch_buttons(const Backend* b) {
+    uint16_t buttons = 0;
+    if (!b) return buttons;
+    for (const auto& touch : b->touches)
+        if (touch.active) buttons |= touch.buttons;
+    return buttons;
+}
+
+void clear_touches(Backend* b) {
+    if (!b) return;
+    for (auto& touch : b->touches) touch = {};
+}
+
+void fill_circle(SDL_Renderer* renderer, int cx, int cy, int radius) {
+    for (int y = -radius; y <= radius; ++y) {
+        const int half = static_cast<int>(
+            std::sqrt(static_cast<float>(radius * radius - y * y)));
+        SDL_RenderDrawLine(renderer, cx - half, cy + y, cx + half, cy + y);
+    }
+}
+
+void render_touch_controls(Backend* b) {
+    if (!b || !b->touch_controls || !b->renderer) return;
+#if defined(GBARECOMP_RUNTIME_UI)
+    if (b->runtime_ui && recomp_runtime_ui_is_open(b->runtime_ui)) return;
+#endif
+    const int w = b->base_w;
+    const int h = b->base_h;
+    const uint16_t held = active_touch_buttons(b);
+    SDL_SetRenderDrawBlendMode(b->renderer, SDL_BLENDMODE_BLEND);
+
+    auto color_for = [b, held](int bit) {
+        if (held & (1u << bit))
+            SDL_SetRenderDrawColor(b->renderer, 125, 225, 255, 150);
+        else
+            SDL_SetRenderDrawColor(b->renderer, 235, 245, 255, 76);
+    };
+    const int dpad_x = static_cast<int>(w * 0.17f);
+    const int dpad_y = static_cast<int>(h * 0.70f);
+    const int arm = std::max(8, h / 11);
+    const int thick = std::max(6, h / 17);
+    SDL_SetRenderDrawColor(b->renderer, 235, 245, 255, 70);
+    SDL_Rect vertical{dpad_x - thick / 2, dpad_y - arm,
+                      thick, arm * 2};
+    SDL_Rect horizontal{dpad_x - arm, dpad_y - thick / 2,
+                        arm * 2, thick};
+    SDL_RenderFillRect(b->renderer, &vertical);
+    SDL_RenderFillRect(b->renderer, &horizontal);
+
+    const int button_r = std::max(7, h / 18);
+    color_for(0);
+    fill_circle(b->renderer, static_cast<int>(w * 0.87f),
+                static_cast<int>(h * 0.62f), button_r);
+    color_for(1);
+    fill_circle(b->renderer, static_cast<int>(w * 0.74f),
+                static_cast<int>(h * 0.76f), button_r);
+
+    SDL_SetRenderDrawColor(b->renderer, 235, 245, 255, 70);
+    SDL_Rect left_shoulder{0, 0, static_cast<int>(w * 0.24f),
+                           std::max(5, h / 14)};
+    SDL_Rect right_shoulder{static_cast<int>(w * 0.76f), 0,
+                            static_cast<int>(w * 0.24f),
+                            std::max(5, h / 14)};
+    SDL_RenderFillRect(b->renderer, &left_shoulder);
+    SDL_RenderFillRect(b->renderer, &right_shoulder);
+    SDL_Rect select{static_cast<int>(w * 0.40f), static_cast<int>(h * 0.87f),
+                    static_cast<int>(w * 0.07f), std::max(3, h / 32)};
+    SDL_Rect start{static_cast<int>(w * 0.53f), static_cast<int>(h * 0.87f),
+                   static_cast<int>(w * 0.07f), std::max(3, h / 32)};
+    SDL_RenderFillRect(b->renderer, &select);
+    SDL_RenderFillRect(b->renderer, &start);
+
+    for (const auto& touch : b->touches) {
+        if (!touch.active || !touch.long_press_candidate) continue;
+        const Uint32 elapsed = SDL_GetTicks() - touch.started_at;
+        const float progress =
+            std::min(1.0f, static_cast<float>(elapsed) / 650.0f);
+        SDL_SetRenderDrawColor(b->renderer, 80, 210, 255, 190);
+        SDL_Rect bar{static_cast<int>(w * 0.30f), std::max(2, h / 30),
+                     static_cast<int>(w * 0.40f * progress),
+                     std::max(2, h / 45)};
+        SDL_RenderFillRect(b->renderer, &bar);
+    }
+    SDL_SetRenderDrawBlendMode(b->renderer, SDL_BLENDMODE_NONE);
 }
 
 // GBA KEYINPUT bit order: 0=A 1=B 2=Sel 3=Sta 4=Right 5=Left 6=Up 7=Down 8=R 9=L.
@@ -542,6 +712,12 @@ bool runtime_imgui_init(Backend* b) {
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
     ImGui::StyleColorsDark();
+#if defined(__ANDROID__)
+    io.ConfigFlags |= ImGuiConfigFlags_IsTouchScreen;
+    io.FontGlobalScale = 1.75f;
+    ImGui::GetStyle().ScaleAllSizes(1.75f);
+    ImGui::GetStyle().TouchExtraPadding = ImVec2(5.0f, 5.0f);
+#endif
 
     if (!ImGui_ImplSDL2_InitForSDLRenderer(b->window, b->renderer)) {
         std::fprintf(stderr,
@@ -705,6 +881,12 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     b->linear_filter = linear_filter;
     b->scale = scale;
     b->title = title ? title : "gbarecomp";
+#if defined(__ANDROID__)
+    b->touch_controls = true;
+#else
+    if (const char* touch_env = std::getenv("GBARECOMP_TOUCH_CONTROLS"))
+        b->touch_controls = *touch_env && *touch_env != '0';
+#endif
     std::memcpy(b->bind_sc, kDefaultBinds, sizeof(kDefaultBinds));
     for (int h = 0; h < HK_COUNT; ++h)
         b->hotkeys[h] = parse_hotkey(kHotkeyDefaults[h]);
@@ -712,9 +894,13 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, linear_filter ? "linear" : "nearest");
     const int win_w = base_w * scale;
     const int win_h = base_h * scale;
-    const Uint32 window_flags = SDL_WINDOW_SHOWN |
+    Uint32 window_flags = SDL_WINDOW_SHOWN |
         ((b->expanded_view || b->resize_driven_view)
              ? static_cast<Uint32>(SDL_WINDOW_RESIZABLE) : Uint32{0});
+#if defined(__ANDROID__)
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_BORDERLESS;
+#endif
     b->window = SDL_CreateWindow(title ? title : "gbarecomp",
                                  SDL_WINDOWPOS_CENTERED,
                                  SDL_WINDOWPOS_CENTERED,
@@ -726,6 +912,9 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         delete b;
         return false;
     }
+#if defined(__ANDROID__)
+    b->fullscreen = 1;
+#endif
     // The independent FramePacer still governs emulation at 59.7275 Hz
     // (MC-HP-004) — vsync below only aligns scanout, in series after the
     // pacer, and can never become the game clock.
@@ -819,6 +1008,7 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
 #endif
 
     open_first_game_controller(b);
+    open_device_gyro(b);
 
     // Open the audio device at 65536 Hz mono 16-bit signed. The
     // running BIOS sets SOUNDBIAS resolution=1 which raises the
@@ -1014,6 +1204,7 @@ void HostWindow::close() {
     if (b->bridge_ready) rab_free(&b->bridge);
     if (b->audio_mtx) SDL_DestroyMutex(b->audio_mtx);
     close_game_controller(b);
+    if (b->device_gyro) SDL_SensorClose(b->device_gyro);
 #if defined(GBARECOMP_RUNTIME_UI)
     runtime_imgui_shutdown(b);
 #endif
@@ -1117,6 +1308,7 @@ void HostWindow::present(const uint8_t* rgb888) {
             SDL_RenderCopy(b->renderer, b->texture, nullptr, &destination);
         }
     }
+    render_touch_controls(b);
 #if defined(GBARECOMP_RUNTIME_UI)
     runtime_imgui_render(b);
 #endif
@@ -1174,6 +1366,12 @@ void HostWindow::load_input_config(const char* dir) {
 void HostWindow::set_fullscreen(int mode) {
     if (!open_ || !impl_) return;
     auto* b = static_cast<Backend*>(impl_);
+#if defined(__ANDROID__)
+    (void)mode;
+    b->fullscreen = 1;
+    SDL_SetWindowFullscreen(b->window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    return;
+#endif
     if (mode < 0) mode = 0;
     if (mode > 2) mode = 2;
     if (b->fullscreen == mode) return;
@@ -1198,6 +1396,10 @@ int HostWindow::fullscreen() const {
 
 void HostWindow::adjust_scale(int delta) {
     if (!open_ || !impl_) return;
+#if defined(__ANDROID__)
+    (void)delta;
+    return;
+#endif
     auto* b = static_cast<Backend*>(impl_);
     if (b->fullscreen) return;   // meaningless while fullscreen
     int s = b->scale + delta;
@@ -1309,6 +1511,37 @@ HostWindow::Events HostWindow::pump() {
         } else if (e.type == SDL_WINDOWEVENT &&
                    e.window.event == SDL_WINDOWEVENT_CLOSE) {
             ev.quit = true;
+        } else if (e.type == SDL_FINGERDOWN ||
+                   e.type == SDL_FINGERMOTION ||
+                   e.type == SDL_FINGERUP) {
+            if (!b->touch_controls) continue;
+#if defined(GBARECOMP_RUNTIME_UI)
+            if (b->runtime_ui && recomp_runtime_ui_is_open(b->runtime_ui)) {
+                if (e.type == SDL_FINGERUP) {
+                    if (auto* touch = find_touch(b, e.tfinger.fingerId))
+                        *touch = {};
+                }
+                continue;
+            }
+#endif
+            if (e.type == SDL_FINGERDOWN) {
+                if (auto* touch = allocate_touch(b, e.tfinger.fingerId)) {
+                    touch->x = touch->start_x = e.tfinger.x;
+                    touch->y = touch->start_y = e.tfinger.y;
+                    touch->started_at = SDL_GetTicks();
+                    touch->buttons = touch_buttons_at(touch->x, touch->y);
+                    touch->long_press_candidate = touch->buttons == 0;
+                }
+            } else if (auto* touch = find_touch(b, e.tfinger.fingerId)) {
+                touch->x = e.tfinger.x;
+                touch->y = e.tfinger.y;
+                touch->buttons = touch_buttons_at(touch->x, touch->y);
+                const float dx = touch->x - touch->start_x;
+                const float dy = touch->y - touch->start_y;
+                if (touch->buttons != 0 || dx * dx + dy * dy > 0.000625f)
+                    touch->long_press_candidate = false;
+                if (e.type == SDL_FINGERUP) *touch = {};
+            }
         } else if (e.type == SDL_KEYDOWN && e.key.repeat == 0) {
             // Edge-triggered hotkeys (ignore key-repeat). F1..F9 are
             // save-state slots: plain = load, Shift = save. SDL's F1..F12
@@ -1342,6 +1575,22 @@ HostWindow::Events HostWindow::pump() {
             }
         }
     }
+
+#if defined(GBARECOMP_RUNTIME_UI)
+    if (b->touch_controls && b->runtime_ui &&
+        !recomp_runtime_ui_is_open(b->runtime_ui)) {
+        const Uint32 now = SDL_GetTicks();
+        for (auto& touch : b->touches) {
+            if (!touch.active || !touch.long_press_candidate ||
+                now - touch.started_at < 650) {
+                continue;
+            }
+            recomp_runtime_ui_open(b->runtime_ui);
+            clear_touches(b);
+            break;
+        }
+    }
+#endif
 
     // Build the GBA KEYINPUT value from current keyboard state via the
     // rebindable table (keybinds.ini; defaults in kDefaultBinds).
@@ -1377,6 +1626,10 @@ HostWindow::Events HostWindow::pump() {
                 keys &= static_cast<uint16_t>(~(1u << binding.bit));
         }
     }
+    if (b->touch_controls) {
+        const uint16_t touch_buttons = active_touch_buttons(b);
+        keys &= static_cast<uint16_t>(~touch_buttons);
+    }
     ev.keyinput = keys;
 #if defined(GBARECOMP_RUNTIME_UI)
     if (b->runtime_ui && recomp_runtime_ui_is_open(b->runtime_ui))
@@ -1386,9 +1639,18 @@ HostWindow::Events HostWindow::pump() {
     int mouse_x = 0;
     int mouse_y = 0;
     const Uint32 mouse_buttons = SDL_GetRelativeMouseState(&mouse_x, &mouse_y);
-    ev.mouse_gyro_active = (mouse_buttons & SDL_BUTTON_LMASK) != 0;
+    ev.mouse_gyro_active =
+        !b->touch_controls && (mouse_buttons & SDL_BUTTON_LMASK) != 0;
     ev.gyro_delta_x = ev.mouse_gyro_active ? mouse_x : 0;
 #if SDL_VERSION_ATLEAST(2, 0, 14)
+    if (b->device_gyro) {
+        float rate[3] = {};
+        if (SDL_SensorGetData(b->device_gyro, rate, 3) == 0) {
+            constexpr float kDeviceDriftDeadzone = 0.025f;
+            ev.gyro_rate_z =
+                std::abs(rate[2]) >= kDeviceDriftDeadzone ? rate[2] : 0.0f;
+        }
+    }
     if (b->controller && b->controller_gyro) {
         float rate[3] = {};
         if (SDL_GameControllerGetSensorData(

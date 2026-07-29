@@ -92,6 +92,15 @@ option(GBA_COSIM
     "Build the first-divergence co-simulation oracle (state hash + TCP park/step)"
     OFF)
 
+if(ANDROID AND TARGET SDL2::SDL2)
+    # Android applications provide SDL from the parent Gradle/CMake project.
+    # Reusing that target keeps SDLActivity's libSDL2.so as the single backend.
+    set(GBARECOMP_SDL2_OK TRUE)
+    set(SDL2_LIBRARIES SDL2::SDL2)
+    get_target_property(SDL2_INCLUDE_DIRS SDL2::SDL2
+                        INTERFACE_INCLUDE_DIRECTORIES)
+    message(STATUS "gbarecomp: using parent-provided Android SDL2 target")
+else()
 find_path(SDL2_INCLUDE_DIR
     NAMES SDL.h
     PATH_SUFFIXES SDL2 SDL2/include
@@ -150,6 +159,8 @@ if(SDL2_INCLUDE_DIR AND SDL2_LIBRARY)
     message(STATUS "gbarecomp: SDL2 found — inc=${SDL2_INCLUDE_DIR} lib=${SDL2_LIBRARY} static=${GBARECOMP_STATIC_RELEASE}")
 else()
     message(STATUS "gbarecomp: SDL2 NOT found — host_window will stub out (inc=${SDL2_INCLUDE_DIR} lib=${SDL2_LIBRARY})")
+endif()
+
 endif()
 
 if(GBARECOMP_STATIC_RELEASE)

@@ -148,7 +148,7 @@ struct SeamConfig {
     int  widescreen = 0;       // legacy fixed-width toggle
     int  aspect_index = 0;     // games with a launcher_aspect vocabulary only
     int  adaptive_view = 0;    // live drawable aspect; fixed aspect is retained
-    float gyro_sensitivity = 1.0f;
+    float gyro_sensitivity = 0.25f;
 };
 
 inline void seam_config_load(const std::string& path, SeamConfig* c) {
@@ -378,8 +378,20 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
             if (std::filesystem::exists(alt)) toml = alt;
         }
         if (std::filesystem::exists(toml)) {
-            if (seed_rom.empty())  seed_rom  = toml_path_value(toml, "rom", "path");
-            if (seed_bios.empty()) seed_bios = toml_path_value(toml, "bios", "path");
+            auto config_relative_path =
+                [&toml](const std::string& value) -> std::string {
+                    if (value.empty()) return {};
+                    std::filesystem::path path(value);
+                    if (path.is_relative())
+                        path = std::filesystem::path(toml).parent_path() / path;
+                    return path.lexically_normal().string();
+                };
+            if (seed_rom.empty())
+                seed_rom = config_relative_path(
+                    toml_path_value(toml, "rom", "path"));
+            if (seed_bios.empty())
+                seed_bios = config_relative_path(
+                    toml_path_value(toml, "bios", "path"));
         }
     }
 

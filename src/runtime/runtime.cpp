@@ -139,7 +139,7 @@ struct Args {
     int fullscreen = 0;
     int  volume = 100;            // --volume 0..100: pushed-sample gain
     bool linear_filter = false;   // --linear-filter 1: linear texture scaling
-    float gyro_sensitivity = 1.0f; // --gyro-sensitivity 0.25..4.00
+    float gyro_sensitivity = 0.25f; // --gyro-sensitivity 0.25..4.00
     // [audio] shadow = true|false — arm the MP2K verified-enhancement shadow
     // mixer (default off). GBARECOMP_AUDIO_SHADOW overrides at launch.
     bool audio_shadow = false;
@@ -168,6 +168,7 @@ struct Args {
 struct RuntimeUiContext {
     HostWindow* window = nullptr;
     RecompRuntimeUi* ui = nullptr;
+    float* gyro_sensitivity = nullptr;
     int view_mode = RECOMP_RUNTIME_UI_VIEW_NATIVE;
     bool view_mode_dirty = false;
 };
@@ -181,6 +182,9 @@ int runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int* out) {
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER) == 0) *out = c->window->linear_filter();
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0) *out = c->window->audio_enabled();
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) *out = c->window->volume();
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY) == 0 &&
+             c->gyro_sensitivity)
+        *out = static_cast<int>(std::lround(*c->gyro_sensitivity * 100.0f));
     else return 0;
     return 1;
 }
@@ -200,6 +204,10 @@ int runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int value) {
         c->window->set_audio_enabled(value != 0);
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0)
         c->window->set_volume(value);
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY) == 0 &&
+             c->gyro_sensitivity)
+        *c->gyro_sensitivity =
+            std::clamp(static_cast<float>(value) / 100.0f, 0.25f, 4.0f);
     else return 0;
     return 1;
 }
@@ -2167,6 +2175,20 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         win.set_volume(args.volume);
 #if defined(GBARECOMP_RUNTIME_UI)
         runtime_ui_context.window = &win;
+        runtime_ui_context.gyro_sensitivity = &args.gyro_sensitivity;
+        static const RecompRuntimeUiItem gyro_item{
+            RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY,
+            "Motion",
+            "Gyro sensitivity",
+            "Adjust phone or controller motion steering.",
+            RECOMP_RUNTIME_UI_INT,
+            25,
+            400,
+            25,
+            nullptr,
+            0,
+            nullptr,
+        };
         RecompRuntimeUiStandardConfig runtime_ui_config{};
         runtime_ui_config.menu.title = runtime_title;
         runtime_ui_config.menu.subtitle = "Game Boy Advance runtime settings";
@@ -2177,12 +2199,19 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         runtime_ui_config.menu.callbacks.run_action = runtime_ui_action;
         runtime_ui_config.menu.callbacks.is_enabled = runtime_ui_enabled;
         runtime_ui_config.features =
-            RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |
-            RECOMP_RUNTIME_UI_STANDARD_WINDOW_SCALE |
             RECOMP_RUNTIME_UI_STANDARD_LINEAR_FILTER |
             RECOMP_RUNTIME_UI_STANDARD_AUDIO |
             RECOMP_RUNTIME_UI_STANDARD_VOLUME |
             RECOMP_RUNTIME_UI_STANDARD_RESUME;
+#if !defined(__ANDROID__)
+        runtime_ui_config.features |=
+            RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |
+            RECOMP_RUNTIME_UI_STANDARD_WINDOW_SCALE;
+#endif
+        if (opts.launcher_expose_gyro) {
+            runtime_ui_config.extra_items = &gyro_item;
+            runtime_ui_config.extra_item_count = 1;
+        }
         runtime_ui_config.view_modes = RECOMP_RUNTIME_UI_VIEW_MODE_NATIVE;
         if (opts.launcher_expose_widescreen && opts.max_view_width > 240)
             runtime_ui_config.view_modes |=
