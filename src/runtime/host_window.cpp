@@ -1555,6 +1555,11 @@ HostWindow::Events HostWindow::pump() {
                 // Solar-sensor debug level. The number row deliberately, since
                 // F1..F9 are already the save-state slots.
                 ev.solar_step = static_cast<int>(sym - SDLK_1) + 1;
+            } else if (sym == SDLK_0 &&
+                       !(mods & (KMOD_SHIFT | KMOD_CTRL | KMOD_ALT))) {
+                // 0 releases the override rather than meaning "level 0" —
+                // level 0 is already reachable as key 1 (brightness 0).
+                ev.solar_step = -1;
             } else if (sym >= SDLK_F1 && sym <= SDLK_F9) {
                 int slot = static_cast<int>(sym - SDLK_F1) + 1;
                 if (mods & KMOD_SHIFT) ev.save_slot = slot;

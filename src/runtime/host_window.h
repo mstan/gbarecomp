@@ -113,6 +113,10 @@ public:
         int      load_slot = 0;
         // Debug light level for the Boktai solar sensor: number keys 1..9 pick
         // a brightness step (1 = darkest, 9 = full sun). 0 = unchanged.
+        // -1 (the 0 key) drops the manual override and hands the sensor back
+        // to the game's own light source, so a live provider — a camera, a
+        // weather service — can be spot-checked against a known level and
+        // then resumed within one session.
         int      solar_step = 0;
         // Level-triggered: true while the fast-forward (Turbo) binding is
         // held (default Tab). Uncaps the frame limiter for as long as it's

@@ -95,12 +95,23 @@ void runtime_set_frame_present_hook(std::function<bool()>);
 #endif
 
 namespace {
-// Debug light level for the solar sensor, set by the number-row keys and read
-// once per conversion. 0 = darkest, 255 = full sun; gba_solar.h owns the
-// inversion to the comparator threshold so the polarity lives in one place.
-std::atomic<unsigned> g_solar_brightness{0};
-uint8_t solar_debug_brightness() {
-    return static_cast<uint8_t>(g_solar_brightness.load(std::memory_order_relaxed));
+// Host light level for the solar sensor, read once per ADC conversion.
+// 0 = darkest, 255 = full sun; gba_solar.h owns the inversion to the
+// comparator threshold so the polarity lives in exactly one place.
+//
+// Two sources, in precedence order:
+//   1. the number-row debug keys, while an override is set;
+//   2. RunOptions::solar_provider, the game's own light source.
+// With neither, the sensor reads dark — the behaviour before this seam.
+constexpr unsigned kSolarNoOverride = ~0u;
+std::atomic<unsigned> g_solar_override{kSolarNoOverride};
+std::uint8_t (*g_solar_game_provider)() = nullptr;
+
+uint8_t solar_host_brightness() {
+    const unsigned ov = g_solar_override.load(std::memory_order_relaxed);
+    if (ov != kSolarNoOverride) return static_cast<uint8_t>(ov);
+    if (g_solar_game_provider) return g_solar_game_provider();
+    return 0;
 }
 }  // namespace
 
@@ -1368,14 +1379,18 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     }
     // Boktai's solar sensor: opt-in per game (no ROM signature exists for it).
-    // The debug provider is driven by the number-row keys; a camera backend
-    // replaces it later behind the same seam.
+    // Light arrives either from the number-row debug keys or from the game's
+    // own RunOptions::solar_provider; the engine itself does no light I/O.
     {
         const char* se = std::getenv("GBARECOMP_SOLAR");
-        bus.set_solar_enabled(se && se[0] && se[0] != '0');
+        bus.set_solar_enabled(opts.has_solar_sensor ||
+                              (se && se[0] && se[0] != '0'));
     }
     bus.set_rom(rom.data(), rom.size());
-    if (bus.solar().active()) bus.solar().set_provider(&solar_debug_brightness);
+    if (bus.solar().active()) {
+        g_solar_game_provider = opts.solar_provider;
+        bus.solar().set_provider(&solar_host_brightness);
+    }
 
     // Resolve the save chip once, with explicit and testable precedence:
     // ROM signature -> game config -> process environment. Keep type and
@@ -2412,7 +2427,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             input_record_last_value = ev.keyinput;
         }
         if (ev.quit) host_quit = true;
-        if (ev.solar_step) {
+        if (ev.solar_step < 0) {
+            // Release the manual override; the game's light source resumes.
+            g_solar_override.store(kSolarNoOverride, std::memory_order_relaxed);
+            std::printf("solar_override=off (%s)\n",
+                        g_solar_game_provider ? "game provider resumes"
+                                              : "no provider, sensor dark");
+            std::fflush(stdout);
+        } else if (ev.solar_step) {
             // Step -> brightness, shaped from measured in-game gauge response
             // rather than spread evenly over 0..255. An even spread wastes half
             // the keys: Boktai's gauge saturates at brightness ~159, so 6/7/8/9
@@ -2426,8 +2448,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 0, 8, 16, 24, 31, 63, 95, 127, 159,
             };
             const unsigned level = kSolarSteps[ev.solar_step - 1];
-            g_solar_brightness.store(level, std::memory_order_relaxed);
-            std::printf("solar_level=%d/9 brightness=%u\n", ev.solar_step, level);
+            g_solar_override.store(level, std::memory_order_relaxed);
+            std::printf("solar_level=%d/9 brightness=%u (override; 0 releases)\n",
+                        ev.solar_step, level);
             std::fflush(stdout);
         }
         if (pacer) pacer->set_uncapped(ev.fast_forward);
