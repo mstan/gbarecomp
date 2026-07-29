@@ -130,6 +130,10 @@ public:
         // Horizontal mouse velocity while the left button is held. The runtime
         // maps this host-neutral delta onto cartridge gyroscope sample units.
         int      gyro_delta_x = 0;
+        bool     mouse_gyro_active = false;
+        // Controller angular velocity around its face-normal axis, in rad/s.
+        // A DualSense supplies this through SDL's standard gyro sensor API.
+        float    gyro_rate_z = 0.0f;
     };
     Events pump();
 

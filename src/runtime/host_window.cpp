@@ -273,10 +273,23 @@ struct Backend {
     SDL_Renderer* renderer = nullptr;
     SDL_Texture*  texture  = nullptr;
     SDL_AudioDeviceID audio_dev = 0;
+    SDL_GameController* controller = nullptr;
+    SDL_JoystickID      controller_id = -1;
+    bool                controller_gyro = false;
     // Callback-driven clock-domain bridge (replaces SDL queue push).
     rab_bridge    bridge{};
     bool          bridge_ready = false;
     SDL_mutex*    audio_mtx = nullptr;
+    // Diagnostic/direct path: let SDL own format conversion and queue the
+    // engine's verified 65536 Hz mono stream without passing it through RAB.
+    bool          audio_direct = false;
+    bool          audio_direct_started = false;
+    int           audio_direct_rate = 65536;
+    uint64_t      audio_direct_pushes = 0;
+    uint64_t      audio_direct_samples = 0;
+    uint64_t      audio_direct_underruns = 0;
+    Uint32        audio_direct_min_bytes = UINT32_MAX;
+    Uint32        audio_direct_max_bytes = 0;
     // Present-time screen-color simulation. Built once from
     // GBARECOMP_SCREEN; default Raw = exact passthrough (no copy, no
     // grading), so default behavior is byte-identical to upstream.
@@ -310,6 +323,53 @@ struct Backend {
     // MC-WS-002: always-on per-present timing/scanout ring (see above).
     PresentCadence cadence;
 };
+
+void close_game_controller(Backend* b) {
+    if (!b || !b->controller) return;
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    if (b->controller_gyro)
+        SDL_GameControllerSetSensorEnabled(
+            b->controller, SDL_SENSOR_GYRO, SDL_FALSE);
+#endif
+    SDL_GameControllerClose(b->controller);
+    b->controller = nullptr;
+    b->controller_id = -1;
+    b->controller_gyro = false;
+}
+
+bool open_game_controller(Backend* b, int device_index) {
+    if (!b || b->controller || device_index < 0 ||
+        !SDL_IsGameController(device_index))
+        return false;
+
+    SDL_GameController* controller = SDL_GameControllerOpen(device_index);
+    if (!controller) return false;
+    b->controller = controller;
+    SDL_Joystick* joystick = SDL_GameControllerGetJoystick(controller);
+    b->controller_id = joystick ? SDL_JoystickInstanceID(joystick) : -1;
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    if (SDL_GameControllerHasSensor(controller, SDL_SENSOR_GYRO) &&
+        SDL_GameControllerSetSensorEnabled(
+            controller, SDL_SENSOR_GYRO, SDL_TRUE) == 0) {
+        b->controller_gyro = true;
+    }
+#endif
+    std::fprintf(stderr,
+                 "host_window: controller=%s id=%d gyro=%s\n",
+                 SDL_GameControllerName(controller)
+                     ? SDL_GameControllerName(controller) : "unknown",
+                 static_cast<int>(b->controller_id),
+                 b->controller_gyro ? "enabled" : "unavailable");
+    std::fflush(stderr);
+    return true;
+}
+
+void open_first_game_controller(Backend* b) {
+    if (!b || b->controller) return;
+    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+        if (open_game_controller(b, i)) return;
+    }
+}
 
 // GBA KEYINPUT bit order: 0=A 1=B 2=Sel 3=Sta 4=Right 5=Left 6=Up 7=Down 8=R 9=L.
 // Defaults MATCH recomp-ui's generic keybinds defaults (keybinds.c) so the
@@ -621,6 +681,21 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
                          SDL_GetError());
         }
     }
+    const Uint32 controller_flags =
+        SDL_INIT_GAMECONTROLLER | SDL_INIT_SENSOR;
+    if ((SDL_WasInit(controller_flags) & controller_flags) !=
+        controller_flags) {
+        // HIDAPI is required for DualSense motion data on Windows. This hint
+        // is the SDL default, but setting it before subsystem init makes the
+        // intended driver explicit when a global SDL config changed it.
+        SDL_SetHintWithPriority("SDL_JOYSTICK_HIDAPI_PS5", "1",
+                                SDL_HINT_DEFAULT);
+        if (SDL_InitSubSystem(controller_flags) != 0) {
+            std::fprintf(stderr,
+                         "host_window: SDL controller/sensor init failed: %s\n",
+                         SDL_GetError());
+        }
+    }
 
     auto* b = new Backend{};
     b->base_w = base_w;
@@ -743,6 +818,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     }
 #endif
 
+    open_first_game_controller(b);
+
     // Open the audio device at 65536 Hz mono 16-bit signed. The
     // running BIOS sets SOUNDBIAS resolution=1 which raises the
     // mixer's effective sample rate from 32768 to 65536; opening
@@ -757,25 +834,44 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     want.format   = AUDIO_S16SYS;
     want.channels = 1;
     want.samples  = 1024;  // ~15 ms callback quantum at 65 kHz
-    want.callback = gba_audio_callback;  // pull mode (bridge-fed)
-    want.userdata = b;
+    const char* direct_audio_env = std::getenv("GBARECOMP_AUDIO_DIRECT");
+    b->audio_direct =
+        direct_audio_env && *direct_audio_env && *direct_audio_env != '0';
+    want.callback = b->audio_direct ? nullptr : gba_audio_callback;
+    want.userdata = b->audio_direct ? nullptr : b;
     SDL_AudioSpec got{};
-    // Allow the device to pick its native rate; the bridge resamples the GBA
-    // mixer rate (65536) to whatever the device opened at.
+    // In direct mode, disallow application-visible format changes so SDL
+    // converts the exact 65536 Hz mono stream to the physical device itself.
+    // Bridge mode instead opens at the native rate and performs that clock
+    // conversion in RAB.
     b->audio_dev = SDL_OpenAudioDevice(nullptr, /*iscapture=*/0,
-                                       &want, &got, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+                                       &want, &got,
+                                       b->audio_direct
+                                           ? 0
+                                           : SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
     if (b->audio_dev != 0) {
-        b->audio_mtx = SDL_CreateMutex();
-        rab_config cfg;
-        rab_config_defaults(&cfg);
-        cfg.channels    = 1;
-        cfg.source_rate = 65536.0;                 // engine's standardized GBA mixer rate
-        cfg.host_rate   = static_cast<double>(got.freq);
-        cfg.target_ms   = 60.0;                     // steady cushion (matches NES)
-        cfg.preroll_ms  = 250.0;                    // boot pre-roll: hide the cold-start
-                                                    // recomp warm-up hitch (drains to target)
-        if (rab_init(&b->bridge, &cfg) == 0) b->bridge_ready = true;
-        SDL_PauseAudioDevice(b->audio_dev, 0);      // start the callback
+        if (b->audio_direct) {
+            b->audio_direct_rate = got.freq;
+            std::fprintf(stderr,
+                         "host_window: audio=direct-queue format=%dHz mono S16 "
+                         "quantum=%u\n",
+                         got.freq, static_cast<unsigned>(got.samples));
+            std::fflush(stderr);
+            // SDL devices start paused. push_audio_samples starts playback
+            // after roughly four video frames have been queued.
+        } else {
+            b->audio_mtx = SDL_CreateMutex();
+            rab_config cfg;
+            rab_config_defaults(&cfg);
+            cfg.channels    = 1;
+            cfg.source_rate = 65536.0;                 // engine's standardized GBA mixer rate
+            cfg.host_rate   = static_cast<double>(got.freq);
+            cfg.target_ms   = 60.0;                     // steady cushion (matches NES)
+            cfg.preroll_ms  = 250.0;                    // boot pre-roll: hide the cold-start
+                                                        // recomp warm-up hitch (drains to target)
+            if (rab_init(&b->bridge, &cfg) == 0) b->bridge_ready = true;
+            SDL_PauseAudioDevice(b->audio_dev, 0);      // start the callback
+        }
     }
 
     b->color_lut = std::make_unique<runtime::ColorLut>(resolve_color_settings(screen));
@@ -795,7 +891,7 @@ uint64_t overlay_game_thread_compile_ns();
 void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
     if (!open_ || !impl_ || !samples || count == 0) return;
     auto* b = static_cast<Backend*>(impl_);
-    if (b->audio_dev == 0 || !b->bridge_ready) return;
+    if (b->audio_dev == 0) return;
 
     // Volume (launcher setting + VolumeUp/Down hotkeys): scale into scratch
     // before the bridge. 100 = passthrough, byte-identical to before.
@@ -807,6 +903,66 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
                 (static_cast<int32_t>(samples[i]) * v) / 100);
         samples = b->volume_buf.data();
     }
+
+    if (b->audio_direct) {
+        const Uint32 queued_before = SDL_GetQueuedAudioSize(b->audio_dev);
+        if (b->audio_direct_started && queued_before == 0)
+            ++b->audio_direct_underruns;
+        b->audio_direct_min_bytes =
+            std::min(b->audio_direct_min_bytes, queued_before);
+
+        const Uint32 bytes = static_cast<Uint32>(count * sizeof(int16_t));
+        if (SDL_QueueAudio(b->audio_dev, samples, bytes) != 0) {
+            static bool s_reported_queue_failure = false;
+            if (!s_reported_queue_failure) {
+                std::fprintf(stderr,
+                             "host_window: SDL_QueueAudio failed: %s\n",
+                             SDL_GetError());
+                std::fflush(stderr);
+                s_reported_queue_failure = true;
+            }
+            return;
+        }
+        const Uint32 queued_after = SDL_GetQueuedAudioSize(b->audio_dev);
+        b->audio_direct_max_bytes =
+            std::max(b->audio_direct_max_bytes, queued_after);
+        ++b->audio_direct_pushes;
+        b->audio_direct_samples += count;
+
+        constexpr Uint32 kDirectPrerollBytes = 8192;  // 62.5 ms at 65536 Hz S16
+        if (!b->audio_direct_started &&
+            queued_after >= kDirectPrerollBytes) {
+            b->audio_direct_started = true;
+            SDL_PauseAudioDevice(b->audio_dev, 0);
+        }
+
+        static int s_direct_probe = -1;
+        if (s_direct_probe < 0) {
+            const char* e = std::getenv("GBARECOMP_AUDIO_PROBE");
+            s_direct_probe = (e && *e && *e != '0') ? 1 : 0;
+        }
+        if (s_direct_probe && (b->audio_direct_pushes % 120ULL) == 0ULL) {
+            const double bytes_per_ms =
+                static_cast<double>(b->audio_direct_rate) *
+                sizeof(int16_t) / 1000.0;
+            const double audio_secs =
+                static_cast<double>(b->audio_direct_samples) / 65536.0;
+            std::fprintf(
+                stderr,
+                "[gba-audio-probe] direct pushes=%llu audio=%.1fs "
+                "queue=%.1fms min=%.1fms max=%.1fms underrun=%llu\n",
+                static_cast<unsigned long long>(b->audio_direct_pushes),
+                audio_secs, queued_after / bytes_per_ms,
+                b->audio_direct_min_bytes / bytes_per_ms,
+                b->audio_direct_max_bytes / bytes_per_ms,
+                static_cast<unsigned long long>(b->audio_direct_underruns));
+            std::fflush(stderr);
+            b->audio_direct_min_bytes = queued_after;
+            b->audio_direct_max_bytes = queued_after;
+        }
+        return;
+    }
+    if (!b->bridge_ready) return;
 
     // Producer: append mono frames into the bridge ring. The SDL callback
     // (gba_audio_callback) drains it at the device rate with band-limited
@@ -857,6 +1013,7 @@ void HostWindow::close() {
     if (b->audio_dev) SDL_CloseAudioDevice(b->audio_dev);  // stops the callback first
     if (b->bridge_ready) rab_free(&b->bridge);
     if (b->audio_mtx) SDL_DestroyMutex(b->audio_mtx);
+    close_game_controller(b);
 #if defined(GBARECOMP_RUNTIME_UI)
     runtime_imgui_shutdown(b);
 #endif
@@ -1141,6 +1298,14 @@ HostWindow::Events HostWindow::pump() {
 #endif
         if (e.type == SDL_QUIT) {
             ev.quit = true;
+        } else if (e.type == SDL_CONTROLLERDEVICEADDED) {
+            if (!b->controller) open_game_controller(b, e.cdevice.which);
+        } else if (e.type == SDL_CONTROLLERDEVICEREMOVED) {
+            if (b->controller &&
+                e.cdevice.which == b->controller_id) {
+                close_game_controller(b);
+                open_first_game_controller(b);
+            }
         } else if (e.type == SDL_WINDOWEVENT &&
                    e.window.event == SDL_WINDOWEVENT_CLOSE) {
             ev.quit = true;
@@ -1187,6 +1352,31 @@ HostWindow::Events HostWindow::pump() {
         if (sc != SDL_SCANCODE_UNKNOWN && ks[sc])
             keys &= static_cast<uint16_t>(~(1u << bit));
     }
+
+    // SDL's standard controller vocabulary maps naturally to the ten GBA
+    // inputs. Keyboard and controller are additive so either can be used at
+    // any time, including while testing motion.
+    if (b->controller && SDL_GameControllerGetAttached(b->controller)) {
+        const struct {
+            int bit;
+            SDL_GameControllerButton button;
+        } pad_map[] = {
+            {0, SDL_CONTROLLER_BUTTON_A},
+            {1, SDL_CONTROLLER_BUTTON_B},
+            {2, SDL_CONTROLLER_BUTTON_BACK},
+            {3, SDL_CONTROLLER_BUTTON_START},
+            {4, SDL_CONTROLLER_BUTTON_DPAD_RIGHT},
+            {5, SDL_CONTROLLER_BUTTON_DPAD_LEFT},
+            {6, SDL_CONTROLLER_BUTTON_DPAD_UP},
+            {7, SDL_CONTROLLER_BUTTON_DPAD_DOWN},
+            {8, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER},
+            {9, SDL_CONTROLLER_BUTTON_LEFTSHOULDER},
+        };
+        for (const auto& binding : pad_map) {
+            if (SDL_GameControllerGetButton(b->controller, binding.button))
+                keys &= static_cast<uint16_t>(~(1u << binding.bit));
+        }
+    }
     ev.keyinput = keys;
 #if defined(GBARECOMP_RUNTIME_UI)
     if (b->runtime_ui && recomp_runtime_ui_is_open(b->runtime_ui))
@@ -1196,7 +1386,21 @@ HostWindow::Events HostWindow::pump() {
     int mouse_x = 0;
     int mouse_y = 0;
     const Uint32 mouse_buttons = SDL_GetRelativeMouseState(&mouse_x, &mouse_y);
-    ev.gyro_delta_x = (mouse_buttons & SDL_BUTTON_LMASK) ? mouse_x : 0;
+    ev.mouse_gyro_active = (mouse_buttons & SDL_BUTTON_LMASK) != 0;
+    ev.gyro_delta_x = ev.mouse_gyro_active ? mouse_x : 0;
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    if (b->controller && b->controller_gyro) {
+        float rate[3] = {};
+        if (SDL_GameControllerGetSensorData(
+                b->controller, SDL_SENSOR_GYRO, rate, 3) == 0) {
+            // SDL reports radians/second. Z is rotation around the controller
+            // face normal: the steering-wheel-like twist WarioWare expects.
+            constexpr float kDriftDeadzone = 0.035f;
+            ev.gyro_rate_z =
+                std::abs(rate[2]) >= kDriftDeadzone ? rate[2] : 0.0f;
+        }
+    }
+#endif
 
     // Turbo is level-triggered: held = uncap the frame limiter (default Tab).
     ev.fast_forward = false;

@@ -272,14 +272,23 @@ struct Oracle {
         video_buf.assign(static_cast<std::size_t>(w) * h, 0);
         core->setVideoBuffer(core, video_buf.data(), w);
 
+        // With no BIOS and a cartridge present, ask mGBA to synthesize its
+        // canonical post-BIOS handoff state. Do not overwrite that state with
+        // apply_real_hw_reset(): doing so put PC back at zero in mGBA's HLE
+        // BIOS image, so the old --no-bios comparison never reached the game.
+        const bool skip_bios =
+            (!bios_path || !*bios_path) && rom_path && *rom_path;
+        core->opts.skipBios = skip_bios;
         core->reset(core);
-        apply_real_hw_reset();
+        if (!skip_bios) apply_real_hw_reset();
         core->setAVStream(core, &audio.stream);
         audio.clear_samples();
         std::printf("oracle: mGBA core ready (bios=%s rom=%s video=%ux%u) "
-                    "[reset state forced to real ARM7TDMI: PC=0 SVC I=F=1]\n",
+                    "[boot=%s]\n",
                     bios_path ? bios_path : "(none)",
-                    rom_path  ? rom_path  : "(none)", w, h);
+                    rom_path  ? rom_path  : "(none)", w, h,
+                    skip_bios ? "HLE skip" :
+                                "real ARM7TDMI reset: PC=0 SVC I=F=1");
         return true;
     }
 
@@ -458,6 +467,61 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         std::snprintf(cf, sizeof(cf), ",\"cpsr\":%u}",
                       static_cast<unsigned>(cpsr));
         body += cf;
+        out = body;
+        return;
+    }
+    if (starts("\"emu_find_dma_source_reset\"")) {
+        if (!o.core) { emit_error(out, "no core"); return; }
+        uint64_t channel_arg = 2;
+        uint64_t max_steps = 5'000'000;
+        extract_uint(req, "\"channel\"", channel_arg);
+        extract_uint(req, "\"max_steps\"", max_steps);
+        if (channel_arg > 3 || max_steps == 0) {
+            emit_error(out, "invalid channel/max_steps");
+            return;
+        }
+        auto* gba = static_cast<GBA*>(o.core->board);
+        const int ch = static_cast<int>(channel_arg);
+        uint32_t previous = gba->memory.dma[ch].nextSource;
+        for (uint64_t i = 1; i <= max_steps; ++i) {
+            o.core->step(o.core);
+            const GBADMA& dma = gba->memory.dma[ch];
+            if (dma.nextSource < previous) {
+                int32_t pc = 0, cpsr = 0;
+                o.core->readRegister(o.core, "r15", &pc);
+                o.core->readRegister(o.core, "cpsr", &cpsr);
+                char body[512];
+                std::snprintf(
+                    body, sizeof(body),
+                    "{\"ok\":true,\"found\":true,\"steps\":%llu,"
+                    "\"time\":%u,\"pc\":%u,\"cpsr\":%u,"
+                    "\"previous\":%u,\"next_source\":%u,"
+                    "\"source\":%u,\"dest\":%u,\"reg\":%u,"
+                    "\"count\":%d,\"next_count\":%d}",
+                    static_cast<unsigned long long>(i),
+                    static_cast<unsigned>(
+                        mTimingCurrentTime(&gba->timing)),
+                    static_cast<unsigned>(pc),
+                    static_cast<unsigned>(cpsr),
+                    static_cast<unsigned>(previous),
+                    static_cast<unsigned>(dma.nextSource),
+                    static_cast<unsigned>(dma.source),
+                    static_cast<unsigned>(dma.dest),
+                    static_cast<unsigned>(dma.reg),
+                    static_cast<int>(dma.count),
+                    static_cast<int>(dma.nextCount));
+                out = body;
+                return;
+            }
+            previous = dma.nextSource;
+        }
+        char body[192];
+        std::snprintf(
+            body, sizeof(body),
+            "{\"ok\":true,\"found\":false,\"steps\":%llu,"
+            "\"next_source\":%u}",
+            static_cast<unsigned long long>(max_steps),
+            static_cast<unsigned>(gba->memory.dma[ch].nextSource));
         out = body;
         return;
     }
@@ -645,18 +709,23 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
     }
 
     if (starts("\"emu_timer_state\"")) {
+        auto* gba = static_cast<GBA*>(o.core->board);
         std::string body = "{\"ok\":true,\"timers\":[";
         for (int t = 0; t < 4; ++t) {
             if (t) body += ",";
             uint32_t base = 0x100u + t * 4u;
             uint16_t count_or_reload = io16(base);
             uint16_t cnt_h           = io16(base + 2);
-            char chunk[160];
+            char chunk[256];
             std::snprintf(chunk, sizeof(chunk),
                 "{\"t\":%d,\"counter\":%u,\"cnt_h\":%u,"
-                "\"enable\":%d,\"cascade\":%d,\"prescaler\":%d}",
+                "\"enable\":%d,\"cascade\":%d,\"prescaler\":%d,"
+                "\"reload\":%u,\"last_event\":%d,\"flags\":%u}",
                 t, count_or_reload, cnt_h,
-                (cnt_h >> 7) & 1, (cnt_h >> 2) & 1, cnt_h & 3);
+                (cnt_h >> 7) & 1, (cnt_h >> 2) & 1, cnt_h & 3,
+                static_cast<unsigned>(gba->timers[t].reload),
+                static_cast<int>(gba->timers[t].lastEvent),
+                static_cast<unsigned>(gba->timers[t].flags));
             body += chunk;
         }
         body += "]}";
@@ -949,6 +1018,7 @@ Args parse_args(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string_view s = argv[i];
         if (s == "--bios" && i + 1 < argc) { a.bios = argv[++i]; continue; }
+        if (s == "--no-bios") { a.bios.clear(); continue; }
         if (s == "--rom"  && i + 1 < argc) { a.rom  = argv[++i]; continue; }
         if (s == "--port" && i + 1 < argc) { a.port = std::atoi(argv[++i]); continue; }
         std::fprintf(stderr, "oracle: unknown arg %.*s\n",
@@ -962,7 +1032,7 @@ Args parse_args(int argc, char** argv) {
 int main(int argc, char** argv) {
     Args args = parse_args(argc, argv);
     Oracle o;
-    if (!o.init(args.bios.c_str(),
+    if (!o.init(args.bios.empty() ? nullptr : args.bios.c_str(),
                 args.rom.empty() ? nullptr : args.rom.c_str())) {
         return 1;
     }

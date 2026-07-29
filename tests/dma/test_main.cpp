@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstdio>
 
+#include "gba_audio.h"
 #include "gba_io.h"
 
 namespace {
@@ -105,12 +106,52 @@ void test_timed_word_alignment() {
     check_eq("timed_word_no_unaligned_write", bus.read32(0x03000044u), 0u);
 }
 
+void test_sound_fifo_dma_completion_irq() {
+    TestBus bus;
+    gba::GbaIo io;
+    gba::GbaAudio audio;
+    io.set_bus(&bus);
+    io.set_audio(&audio);
+
+    for (uint32_t i = 0; i < 8; ++i) {
+        bus.write32(0x02000100u + i * 4u, 0x11111111u * (i + 1u));
+    }
+
+    // DMA2 -> FIFO B: repeat, 32-bit, special/FIFO timing, completion IRQ.
+    io.write32(0xC8u, 0x02000100u);
+    io.write32(0xCCu, 0x040000A4u);
+    io.write16(0xD0u, 4u);
+    io.write16(0xD2u, 0xF640u);
+
+    // Timer 0 clocks both direct-sound FIFOs by default. Its first overflow
+    // requests an empty FIFO refill, which is one four-word DMA burst.
+    io.write16(0x100u, 0xFFFEu);
+    io.write16(0x102u, 0x0080u);
+    io.tick_timers(2u);
+
+    check_eq("sound_fifo_dma_run_count_1",
+             static_cast<uint32_t>(io.dma_runs(2)), 1u);
+    check_eq("sound_fifo_dma_word_count_1",
+             static_cast<uint32_t>(io.dma_words(2)), 4u);
+    check_eq("sound_fifo_dma_irq_1",
+             io.if_reg() & gba::GbaIo::IrqDma2, gba::GbaIo::IrqDma2);
+
+    // Completion IRQ is per burst, not just the channel's initial enable.
+    io.write16(gba::IoReg::IF, gba::GbaIo::IrqDma2);
+    io.tick_timers(2u);
+    check_eq("sound_fifo_dma_run_count_2",
+             static_cast<uint32_t>(io.dma_runs(2)), 2u);
+    check_eq("sound_fifo_dma_irq_2",
+             io.if_reg() & gba::GbaIo::IrqDma2, gba::GbaIo::IrqDma2);
+}
+
 }  // namespace
 
 int main() {
     test_immediate_word_alignment();
     test_immediate_halfword_alignment();
     test_timed_word_alignment();
+    test_sound_fifo_dma_completion_irq();
     if (failures) {
         std::printf("dma_tests: %d failure(s)\n", failures);
         return 1;

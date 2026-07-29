@@ -343,6 +343,19 @@ void cmd_audio_state(gba::GbaBus& bus, std::string& out) {
     out = hdr;
     append_fifo_state(out, "fifo_a", audio.debug_fifo_state(0));
     append_fifo_state(out, "fifo_b", audio.debug_fifo_state(1));
+    for (int ch = 1; ch <= 2; ++ch) {
+        char dma[192];
+        std::snprintf(
+            dma, sizeof(dma),
+            ",\"dma%d\":{\"next_source\":%u,\"next_dest\":%u,"
+            "\"runs\":%llu,\"words\":%llu}",
+            ch,
+            static_cast<unsigned>(bus.io().debug_dma_next_source(ch)),
+            static_cast<unsigned>(bus.io().debug_dma_next_dest(ch)),
+            static_cast<unsigned long long>(bus.io().dma_runs(ch)),
+            static_cast<unsigned long long>(bus.io().dma_words(ch)));
+        out += dma;
+    }
     out += "}";
 }
 

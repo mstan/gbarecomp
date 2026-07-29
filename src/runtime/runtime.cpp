@@ -53,6 +53,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <functional>
 #include <cstdint>
@@ -138,6 +139,7 @@ struct Args {
     int fullscreen = 0;
     int  volume = 100;            // --volume 0..100: pushed-sample gain
     bool linear_filter = false;   // --linear-filter 1: linear texture scaling
+    float gyro_sensitivity = 1.0f; // --gyro-sensitivity 0.25..4.00
     // [audio] shadow = true|false — arm the MP2K verified-enhancement shadow
     // mixer (default off). GBARECOMP_AUDIO_SHADOW overrides at launch.
     bool audio_shadow = false;
@@ -267,6 +269,15 @@ bool parse_int(std::string_view text, int* out) {
         return false;
     }
     *out = static_cast<int>(v);
+    return true;
+}
+
+bool parse_float(std::string_view text, float* out) {
+    std::string s(text);
+    char* end = nullptr;
+    const float v = std::strtof(s.c_str(), &end);
+    if (end == s.c_str() || *end != '\0' || !std::isfinite(v)) return false;
+    *out = v;
     return true;
 }
 
@@ -604,7 +615,8 @@ void find_config_arg(int argc, char** argv, Args* args) {
              s == "--scale" || s == "--tcp" || s == "--dump-bmp" ||
              s == "--dump-png" || s == "--load-state" ||
              s == "--view-width" || s == "--widescreen" ||
-             s == "--save" || s == "--save-path") &&
+             s == "--save" || s == "--save-path" ||
+             s == "--gyro-sensitivity") &&
             i + 1 < argc) {
             ++i;
             continue;
@@ -820,6 +832,18 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
                 return false;
             }
             args->linear_filter = lf != 0;
+            continue;
+        }
+        if (s == "--gyro-sensitivity") {
+            const char* v = need_value("--gyro-sensitivity");
+            if (!v || !parse_float(v, &args->gyro_sensitivity) ||
+                args->gyro_sensitivity < 0.25f ||
+                args->gyro_sensitivity > 4.00f) {
+                if (err)
+                    *err = "invalid --gyro-sensitivity value "
+                           "(expected 0.25..4.00)";
+                return false;
+            }
             continue;
         }
         if (s == "--quiet") {
@@ -2295,8 +2319,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (bus.gyro().active()) {
             // Mouse-drag is angular velocity, not absolute angle: moving while
             // held produces rotation and holding still returns to center.
-            bus.gyro().set_sample_offset(
-                std::clamp(ev.gyro_delta_x * 64, -0x600, 0x600));
+            const float raw_offset = ev.mouse_gyro_active
+                ? static_cast<float>(ev.gyro_delta_x * 25)
+                : -ev.gyro_rate_z * 128.0f;
+            bus.gyro().set_sample_offset(std::clamp(
+                static_cast<int>(raw_offset * args.gyro_sensitivity),
+                -0x600, 0x600));
         }
         if (input_record_requested &&
             (!input_record_have_value || ev.keyinput != input_record_last_value)) {

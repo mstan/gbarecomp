@@ -409,6 +409,15 @@ void GbaIo::run_sound_fifo_dma(int channel) {
     }
     dma_next_source_[channel] = s;
     dma_next_dest_[channel] = dad;
+
+    // A sound-FIFO request is still a complete DMA transfer: hardware raises
+    // the channel's completion IRQ after each four-word burst when CNT_H.IRQ
+    // is set. Some MP2K variants (including WarioWare: Twisted!) use DMA2's
+    // completion IRQ as the cadence for rotating/restarting their PCM ring.
+    // Omitting it lets the live source walk past the ring into unrelated RAM.
+    if (cnt_h & 0x4000u) {
+        request_irq(static_cast<uint16_t>(1u << (8 + channel)));
+    }
 }
 
 void GbaIo::tick_timers(uint32_t cycles) {

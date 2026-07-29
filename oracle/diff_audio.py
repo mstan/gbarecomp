@@ -102,6 +102,16 @@ def main() -> int:
     ap.add_argument("--native-port", type=int, default=19842)
     ap.add_argument("--oracle-port", type=int, default=19843)
     ap.add_argument("--no-spawn", action="store_true")
+    ap.add_argument(
+        "--align-native-frame", type=int, nargs="?", const=300, default=0,
+        metavar="FRAME",
+        help="warm the native runner to at least FRAME (default 300), advance "
+             "the oracle to the resulting frame, and discard pre-alignment "
+             "audio before comparing")
+    ap.add_argument(
+        "--oracle-warmup", type=int, default=0, metavar="FRAMES",
+        help="advance only the oracle by FRAMES before comparison (useful "
+             "when the native side uses BIOS HLE boot skip)")
     args = ap.parse_args()
 
     procs: list[subprocess.Popen] = []
@@ -125,6 +135,27 @@ def main() -> int:
         oracle_samples: list[int] = []
         native_rate = oracle_rate = 0
         native_generated = oracle_generated = 0
+
+        if args.oracle_warmup:
+            of = oracle.call(cmd="frame")["frame"]
+            target = of + args.oracle_warmup
+            while of < target:
+                of = oracle.call(cmd="emu_step")["frame"]
+            drain_audio(native, "audio_samples")
+            drain_audio(oracle, "emu_audio_samples")
+            print(f"oracle warmup: native@"
+                  f"{native.call(cmd='frame')['frame']} oracle@{of}")
+
+        if args.align_native_frame:
+            nf = native.call(cmd="frame")["frame"]
+            while nf < args.align_native_frame:
+                nf = native.call(cmd="step")["frame"]
+            of = oracle.call(cmd="frame")["frame"]
+            while of < nf:
+                of = oracle.call(cmd="emu_step")["frame"]
+            drain_audio(native, "audio_samples")
+            drain_audio(oracle, "emu_audio_samples")
+            print(f"aligned startup: native@{nf} oracle@{of}")
 
         for frame in range(1, args.frames + 1):
             nf = native.call(cmd="step")["frame"]

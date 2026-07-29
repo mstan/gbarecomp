@@ -44,7 +44,9 @@
 #include "recomp_launcher.h"    // recomp-ui C ABI (include dir via recomp_ui.cmake)
 #include "launcher_profile.h"   // launcher_profile_apply("gba", ...)
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -146,6 +148,7 @@ struct SeamConfig {
     int  widescreen = 0;       // legacy fixed-width toggle
     int  aspect_index = 0;     // games with a launcher_aspect vocabulary only
     int  adaptive_view = 0;    // live drawable aspect; fixed aspect is retained
+    float gyro_sensitivity = 1.0f;
 };
 
 inline void seam_config_load(const std::string& path, SeamConfig* c) {
@@ -183,6 +186,8 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
         else if (key == "widescreen")    c->widescreen = std::atoi(val.c_str());
         else if (key == "aspect_index")  c->aspect_index = std::atoi(val.c_str());
         else if (key == "adaptive_view") c->adaptive_view = std::atoi(val.c_str());
+        else if (key == "gyro_sensitivity")
+            c->gyro_sensitivity = std::strtof(val.c_str(), nullptr);
     }
     if (c->scale < 1) c->scale = 1;
     if (c->scale > 8) c->scale = 8;
@@ -192,6 +197,8 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
     // Tri-state: 0 off, 1 borderless, 2 exclusive. Guard against a hand-
     // edited/garbage config.ini value; do NOT collapse to a bool here.
     if (c->fullscreen < 0 || c->fullscreen > 2) c->fullscreen = 0;
+    if (c->gyro_sensitivity < 0.25f) c->gyro_sensitivity = 0.25f;
+    if (c->gyro_sensitivity > 4.00f) c->gyro_sensitivity = 4.00f;
 }
 
 // Rewrite ONLY the [Launcher] section of config.ini, preserving every other
@@ -233,6 +240,7 @@ inline void seam_config_save(const std::string& path, const SeamConfig& c) {
     f << "widescreen = " << c.widescreen << "\n";
     f << "aspect_index = " << c.aspect_index << "\n";
     f << "adaptive_view = " << c.adaptive_view << "\n";
+    f << "gyro_sensitivity = " << c.gyro_sensitivity << "\n";
 }
 
 // Append the persisted/committed settings as ordinary run_game() CLI args.
@@ -252,6 +260,10 @@ inline void seam_append_setting_args(std::vector<std::string>& args,
     // parses as mode 1 for back-compat with older seam/CLI invocations.
     if (c.fullscreen) {
         args.push_back("--fullscreen=" + std::to_string(c.fullscreen));
+    }
+    if (opts.launcher_expose_gyro) {
+        args.push_back("--gyro-sensitivity");
+        args.push_back(std::to_string(c.gyro_sensitivity));
     }
     const bool adaptive_view =
         c.adaptive_view && opts.launcher_expose_adaptive_view &&
@@ -386,6 +398,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     ls.skip_launcher = cfg.skip_launcher;
     ls.screen_kind   = cfg.screen_kind;
     ls.aspect_index  = cfg.aspect_index;
+    ls.gyro_sensitivity = cfg.gyro_sensitivity;
     std::snprintf(ls.bios_path, sizeof(ls.bios_path), "%s", seed_bios.c_str());
 
     RecompLauncherCGameInfo gi;
@@ -410,6 +423,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     gi.config_path = config_path.c_str();
     gi.keybinds_path = keybinds_path.c_str();
     gi.boxart_path = opts.launcher_boxart;   // NULL => default assets/img/boxart.tga
+    gi.has_gyro_controls = opts.launcher_expose_gyro ? 1 : 0;
 #if defined(GBARECOMP_ENABLE_MODS)
     gi.mods = mod_provider;
 #endif
@@ -461,6 +475,8 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
                          ls.aspect_index >= 0 &&
                          ls.aspect_index < opts.launcher_num_aspects)
                           ? ls.aspect_index : 0;
+    cfg.gyro_sensitivity =
+        std::clamp(ls.gyro_sensitivity, 0.25f, 4.00f);
     seam_config_save(config_path, cfg);
 
     if (picked_rom[0]) {

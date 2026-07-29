@@ -5,7 +5,8 @@
 # and stays a separate process — see ../PRINCIPLES.md "zero copyleft
 # emulator dependencies in the native build".
 
-set(MGBA_ROOT ${CMAKE_SOURCE_DIR}/third_party/mgba)
+set(MGBA_ROOT "${CMAKE_SOURCE_DIR}/third_party/mgba" CACHE PATH
+    "Path to the mGBA source checkout used by the external oracle")
 set(MGBA_BUILD ${MGBA_ROOT}/build)
 set(MGBA_LIB   ${MGBA_BUILD}/libmgba.a)
 

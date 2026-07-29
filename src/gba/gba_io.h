@@ -175,6 +175,12 @@ public:
     const uint8_t* raw() const { return io_.data(); }
     std::size_t dma_runs(int ch) const { return dma_runs_[ch]; }
     std::size_t dma_words(int ch) const { return dma_words_[ch]; }
+    uint32_t debug_dma_next_source(int ch) const {
+        return (ch >= 0 && ch < 4) ? dma_next_source_[ch] : 0;
+    }
+    uint32_t debug_dma_next_dest(int ch) const {
+        return (ch >= 0 && ch < 4) ? dma_next_dest_[ch] : 0;
+    }
 
     // Trigger an immediate-mode DMA on the given channel (0..3).
     // Called internally when CNT_H is written with enable+mode=0.

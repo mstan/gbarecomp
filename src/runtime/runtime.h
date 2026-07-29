@@ -75,6 +75,10 @@ struct RunOptions {
     // sufficient: every title must explicitly opt into the launcher surface
     // after its live-resize presentation has been validated.
     bool launcher_expose_adaptive_view = false;
+    // Show recomp-ui's controller-motion sensitivity surface. The runtime
+    // remains responsible for discovering a sensor and mapping its angular
+    // rate onto the cartridge peripheral.
+    bool launcher_expose_gyro = false;
     // >240 offers the launcher's 16:9 widescreen toggle, mapped to
     // --view-width <this> when enabled. 0/240 = no widescreen surface shown.
     // Games with MULTIPLE extended widths use the aspect vocabulary below
