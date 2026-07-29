@@ -6,10 +6,11 @@
 struct DispatchEntry {
     std::uint32_t addr;
     std::uint8_t thumb;
+    std::uint8_t resume;
     void (*fn)(void);
 };
 
 extern "C" const DispatchEntry kBiosDispatchTable[] = {
-    {0u, 0u, nullptr},
+    {0u, 0u, 0u, nullptr},
 };
 extern "C" const unsigned kBiosDispatchTableLen = 0;

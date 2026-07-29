@@ -44,6 +44,14 @@ struct ConfigProgram {
     // exploration, but can misclassify data as code. Targets that drive a
     // strict static corpus can disable it and add only observed callbacks.
     bool        speculative_literal_harvest = true;
+    // Optional half-open executable ROM range for AOT pointer-table
+    // discovery. Zero/empty disables it. Reachable table bases are validated
+    // with compiler-shaped prologues before address-taken leaves are seeded.
+    uint32_t    aot_scan_start = 0;
+    uint32_t    aot_scan_end = 0;
+    // Emit native resume entries for every instruction boundary so IRQ/SWI
+    // returns never require interpreter or self-heal fallback.
+    bool        static_resume_all = false;
     // Number of deterministic C++ translation units used for emitted guest
     // bodies. Zero selects the adaptive cartridge default. Cartridge output
     // is never monolithic; BIOS output remains one small translation unit.

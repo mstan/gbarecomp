@@ -300,8 +300,8 @@ std::string emit_function_body_str(
                                            fn.alias_entries.end());
     if (has_aliases) {
         // Resume routing FIRST so an alternate entry skips the entry hook
-        // (it is not a fresh call). g_runtime_resume_pc is set by the thin
-        // per-alias dispatch wrapper (see main.cpp) and consumed here.
+        // (it is not a fresh call). runtime_dispatch sets
+        // g_runtime_resume_pc from the alias-marked dispatch-table entry.
         appendf(out, "    if (g_runtime_resume_pc) {\n");
         appendf(out,
             "        uint32_t _resume = g_runtime_resume_pc;"

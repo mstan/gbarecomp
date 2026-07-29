@@ -116,6 +116,108 @@ int main() {
         return 1;
     }
 
+    // A bounded AOT sweep finds compiler-shaped prologues without runtime
+    // evidence, then uses two strong entries in an even-address THUMB pointer
+    // table to infer the table mode and recover a leaf function with no PUSH.
+    std::vector<std::uint8_t> aot_rom(0x100, 0);
+    put16(aot_rom, 0x00, 0x4802u);  // ldr r0,[pc,#8] -> table base
+    put16(aot_rom, 0x02, 0x4770u);  // bx lr
+    put32(aot_rom, 0x0C, kBase + 0xC0u);
+    put16(aot_rom, 0x40, 0xB500u);  // push {lr}
+    put16(aot_rom, 0x42, 0x46C0u);
+    put16(aot_rom, 0x44, 0x46C0u);
+    put16(aot_rom, 0x46, 0x46C0u);
+    put16(aot_rom, 0x48, 0x46C0u);
+    put16(aot_rom, 0x4A, 0xBD00u);  // pop {pc}
+    put16(aot_rom, 0x50, 0xB500u);  // second strong table-mode vote
+    put16(aot_rom, 0x52, 0x46C0u);
+    put16(aot_rom, 0x54, 0x46C0u);
+    put16(aot_rom, 0x56, 0x46C0u);
+    put16(aot_rom, 0x58, 0x46C0u);
+    put16(aot_rom, 0x5A, 0xBD00u);
+    put16(aot_rom, 0x60, 0x2001u);  // movs r0,#1 (leaf, no prologue)
+    put16(aot_rom, 0x62, 0x46C0u);
+    put16(aot_rom, 0x64, 0x46C0u);
+    put16(aot_rom, 0x66, 0x46C0u);
+    put16(aot_rom, 0x68, 0x46C0u);
+    put16(aot_rom, 0x6A, 0x4770u);  // bx lr
+    put32(aot_rom, 0xC0, kBase + 0x40u);
+    put32(aot_rom, 0xC4, kBase + 0x50u);
+    put32(aot_rom, 0xC8, kBase + 0x60u);
+
+    gbarecomp::FunctionFinder aot(aot_rom.data(), aot_rom.size(), kBase);
+    aot.set_speculative_literal_harvest(false);
+    aot.set_aot_scan_range(kBase + 0x40u, kBase + 0x80u);
+    aot.add_seed({kBase, gbarecomp::CpuMode::Thumb, "entry"});
+    aot.run(64);
+    if (!has_function(aot, kBase + 0x40u, gbarecomp::CpuMode::Thumb) ||
+        !has_function(aot, kBase + 0x50u, gbarecomp::CpuMode::Thumb) ||
+        !has_function(aot, kBase + 0x60u, gbarecomp::CpuMode::Thumb)) {
+        std::fprintf(stderr,
+                     "bounded AOT scan missed a prologue or address-taken "
+                     "THUMB leaf\n");
+        return 1;
+    }
+    if (aot.stats().aot_prologue_seeds != 2 ||
+        aot.stats().aot_pointer_tables != 1 ||
+        aot.stats().aot_pointer_seeds != 1) {
+        std::fprintf(stderr,
+                     "bounded AOT scan stats disagree: prologues=%zu "
+                     "tables=%zu leaves=%zu\n",
+                     aot.stats().aot_prologue_seeds,
+                     aot.stats().aot_pointer_tables,
+                     aot.stats().aot_pointer_seeds);
+        return 1;
+    }
+
+    // A copied ARM blob can contain internal callable helpers that are not
+    // reachable from its declared entry. Scan the ROM backing of a known
+    // code-copy range for stack-frame prologues, including leaf helpers that
+    // save callee-saved registers without saving LR.
+    std::vector<std::uint8_t> copied_rom(0x100, 0);
+    constexpr std::size_t kCopiedTemplate = 0x40;
+    put32(copied_rom, kCopiedTemplate + 0x00, 0xE12FFF1Eu); // bx lr
+    put32(copied_rom, kCopiedTemplate + 0x1C, 0xE1A0C00Du); // mov ip,sp
+    put32(copied_rom, kCopiedTemplate + 0x20, 0xE92D0030u); // push {r4,r5}
+    put32(copied_rom, kCopiedTemplate + 0x24, 0xE1A00000u); // nop
+    put32(copied_rom, kCopiedTemplate + 0x28, 0xE1A00000u);
+    put32(copied_rom, kCopiedTemplate + 0x2C, 0xE1A00000u);
+    put32(copied_rom, kCopiedTemplate + 0x30, 0xE1A00000u);
+    put32(copied_rom, kCopiedTemplate + 0x34, 0xE8BD0030u); // pop {r4,r5}
+    put32(copied_rom, kCopiedTemplate + 0x38, 0xE12FFF1Eu); // bx lr
+
+    constexpr std::uint32_t kCopiedRam = 0x03001000u;
+    gbarecomp::FunctionFinder copied(
+        copied_rom.data(), copied_rom.size(), kBase);
+    copied.set_speculative_literal_harvest(false);
+    copied.set_static_resume_all(true);
+    copied.add_code_copy(
+        kCopiedRam, kBase + kCopiedTemplate, 0x40, "ARM helper blob");
+    copied.add_seed(
+        {kCopiedRam, gbarecomp::CpuMode::Arm, "copied_entry"});
+    copied.run(32);
+    const auto* copied_helper = find_function(
+        copied, kCopiedRam + 0x1Cu, gbarecomp::CpuMode::Arm);
+    bool copied_push_resume = false;
+    if (copied_helper) {
+        for (std::uint32_t pc : copied_helper->alias_entries) {
+            if (pc == kCopiedRam + 0x20u) copied_push_resume = true;
+        }
+    }
+    if (!copied_helper ||
+        copied_helper->source_addr != kBase + kCopiedTemplate + 0x1Cu ||
+        copied.stats().aot_code_copy_seeds != 1 ||
+        !copied_push_resume) {
+        std::fprintf(stderr,
+                     "code-copy scan missed internal ARM helper: fn=%s "
+                     "source=0x%08X seeds=%zu push_resume=%s\n",
+                     copied_helper ? "yes" : "no",
+                     copied_helper ? copied_helper->source_addr : 0u,
+                     copied.stats().aot_code_copy_seeds,
+                     copied_push_resume ? "yes" : "no");
+        return 1;
+    }
+
     std::printf("function_finder_tests: PASS\n");
     return 0;
 }

@@ -44,6 +44,9 @@ load_address = 0x00000000
 size         = 0x00004000
 entry_pc     = 0x00000000
 speculative_literal_harvest = false # optional; default true
+aot_scan_start = 0x080000C0         # optional executable-ROM sweep start
+aot_scan_end   = 0x080A0000         # exclusive; both bounds required
+static_resume_all = true            # every native instruction is IRQ-resumable
 # codegen_shards = 16               # optional cartridge override; default auto
 
 [identity]
@@ -110,6 +113,8 @@ reason = "literal pool walked as code by finder pre-vX.Y"
 | `size`         | int hex | Byte size of the binary (must match the file on disk). |
 | `entry_pc`     | int hex | Initial PC. Seeded as `[[extra_func]]` automatically; declaring it again is a redundant no-op. |
 | `speculative_literal_harvest` | bool | Optional, default `true`. Harvest plausible callback pointers from PC-relative literal loads. Set `false` for evidence-driven strict-static corpora where runtime-observed `[[extra_func]]` roots are preferred over speculative reachability. Direct branch discovery is unchanged. |
+| `aot_scan_start` / `aot_scan_end` | int hex | Optional half-open executable-ROM range. When both are present, reachable PC-relative literal loads may identify callback tables whose targets fall in this range. Compiler-shaped prologues validate each candidate table before its address-taken entries are recursively explored. Keep compressed graphics and other assets outside this range. Omit both fields to disable this discovery. |
+| `static_resume_all` | bool | Optional, default `false`. Add a static dispatch/resume entry for every aligned instruction inside each emitted native body. Enable this for strict end-to-end AOT builds because an IRQ or SWI may resume at any instruction boundary. |
 | `codegen_shards` | int | Optional cartridge override, range 2..256. When omitted or `0`, the recompiler chooses an adaptive power-of-two count from 2..64. Cartridge output is never monolithic. `1` is accepted only as legacy input and upgraded to the adaptive count with a warning. Stable address hashing and write-if-changed output keep unrelated shards untouched when a reviewed seed is added. BIOS output remains one small translation unit. |
 
 ### `[identity]` (required)

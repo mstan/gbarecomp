@@ -131,6 +131,14 @@ struct FinderStats {
     // that looks like a code pointer seeds a new function entry.
     std::size_t literal_pool_words_seen = 0;  // PC-rel literals examined
     std::size_t literal_pool_seeds_kept = 0;  // passed the code filter
+    // Optional bounded AOT pointer-table discovery. Compiler-shaped
+    // prologues validate tables referenced by reachable code; accepted tables
+    // then recover address-taken leaf functions that direct CFG discovery
+    // cannot reach.
+    std::size_t aot_prologue_seeds = 0;
+    std::size_t aot_pointer_tables = 0;
+    std::size_t aot_pointer_seeds = 0;
+    std::size_t aot_code_copy_seeds = 0;
     // Mid-function aliasing: entries rolled into a host as resume points
     // (not emitted as standalone functions).
     std::size_t alias_entries_total = 0;
@@ -196,6 +204,22 @@ public:
     // literal loads. Direct control-flow discovery is unaffected.
     void set_speculative_literal_harvest(bool enabled) {
         speculative_literal_harvest_enabled_ = enabled;
+    }
+
+    // Opt-in bounded AOT discovery. The range is guest-addressed and
+    // half-open. Reachable literal loads may identify callback tables whose
+    // targets fall in this executable range. Passing an empty/invalid range
+    // disables that discovery.
+    void set_aot_scan_range(uint32_t start, uint32_t end) {
+        aot_scan_start_ = start;
+        aot_scan_end_ = end;
+    }
+
+    // Make every aligned instruction inside an emitted native body a
+    // resumable dispatch entry. IRQs may return to any instruction boundary,
+    // not only a function root.
+    void set_static_resume_all(bool enabled) {
+        static_resume_all_ = enabled;
     }
 
     // Run discovery starting from all seeds. Bounded by
@@ -268,7 +292,13 @@ private:
     // a dead func_XXXX, never a hard data_range collision. (Stage 0.1,
     // ported from jrickey gba-recomp analyze.rs literal-pool scan.)
     std::vector<FunctionSeed>        literal_pool_seeds_;
+    std::vector<FunctionSeed>        aot_pointer_seeds_;
+    std::unordered_set<uint32_t>     aot_seen_pointer_tables_;
+    std::unordered_set<uint64_t>     aot_seen_seed_keys_;
     bool speculative_literal_harvest_enabled_ = true;
+    bool static_resume_all_ = false;
+    uint32_t aot_scan_start_ = 0;
+    uint32_t aot_scan_end_ = 0;
 
     bool addr_in_rom(uint32_t addr) const {
         return addr >= rom_base_ &&
@@ -285,6 +315,11 @@ private:
 
     uint32_t read_u32(uint32_t addr) const;
     uint16_t read_u16(uint32_t addr) const;
+    bool looks_like_code(uint32_t addr, CpuMode mode, bool strict) const;
+    bool is_arm_func_prologue(uint32_t addr) const;
+    bool is_thumb_func_prologue(uint32_t addr) const;
+    void harvest_aot_pointer_table(uint32_t table_base);
+    std::vector<FunctionSeed> collect_code_copy_seeds() const;
     void discover_one(uint32_t addr, CpuMode mode,
                       const std::string& name,
                       uint32_t source_addr = 0,

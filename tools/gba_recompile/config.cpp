@@ -614,6 +614,31 @@ bool load_config(const std::string& path, Config& out) {
         out.program.entry_pc     = get_u32_field   (t, "entry_pc",     true,  ok, err);
         out.program.speculative_literal_harvest =
             t["speculative_literal_harvest"].value_or(true);
+        const int64_t aot_scan_start =
+            t["aot_scan_start"].value_or<int64_t>(0);
+        const int64_t aot_scan_end =
+            t["aot_scan_end"].value_or<int64_t>(0);
+        if (aot_scan_start < 0 || aot_scan_start > 0xFFFFFFFFll ||
+            aot_scan_end < 0 || aot_scan_end > 0xFFFFFFFFll) {
+            std::fprintf(stderr,
+                "%s[program]: AOT scan bounds must fit uint32\n",
+                kAbortHeader);
+            return false;
+        }
+        out.program.aot_scan_start = static_cast<uint32_t>(aot_scan_start);
+        out.program.aot_scan_end = static_cast<uint32_t>(aot_scan_end);
+        out.program.static_resume_all =
+            t["static_resume_all"].value_or(false);
+        if ((out.program.aot_scan_start == 0) !=
+            (out.program.aot_scan_end == 0) ||
+            (out.program.aot_scan_start != 0 &&
+             out.program.aot_scan_start >= out.program.aot_scan_end)) {
+            std::fprintf(stderr,
+                "%s[program]: aot_scan_start/aot_scan_end must be an "
+                "ordered non-empty pair, or both omitted\n",
+                kAbortHeader);
+            return false;
+        }
         const int64_t configured_shards =
             t["codegen_shards"].value_or<int64_t>(0);
         if (configured_shards < 0 || configured_shards > 256) {
@@ -746,6 +771,15 @@ void print_config_summary(const Config& cfg) {
     std::printf("  speculative literals:  %s\n",
                 cfg.program.speculative_literal_harvest
                     ? "enabled" : "disabled");
+    if (cfg.program.aot_scan_start != 0) {
+        std::printf("  AOT scan range:         [0x%08X,0x%08X)\n",
+                    cfg.program.aot_scan_start,
+                    cfg.program.aot_scan_end);
+    } else {
+        std::printf("  AOT scan range:         disabled\n");
+    }
+    std::printf("  static resume all:      %s\n",
+                cfg.program.static_resume_all ? "enabled" : "disabled");
     if (cfg.program.codegen_shards == 0) {
         std::printf("  codegen shards:         auto\n");
     } else {

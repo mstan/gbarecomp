@@ -189,6 +189,236 @@ uint16_t FunctionFinder::read_u16(uint32_t addr) const {
          | (static_cast<uint16_t>(rom_[off + 1]) << 8);
 }
 
+bool FunctionFinder::looks_like_code(uint32_t addr, CpuMode mode,
+                                     bool strict) const {
+    if (mode == CpuMode::Thumb) {
+        if (addr & 1u) return false;
+    } else if (addr & 3u) {
+        return false;
+    }
+    // Runtime code-copy addresses are valid code locations too; can_read_at()
+    // resolves them back to their ROM backing.
+    if (!can_read_at(addr, mode == CpuMode::Thumb ? 2u : 4u) ||
+        addr_in_data_range(addr)) {
+        return false;
+    }
+
+    const uint32_t count = strict ? 6u : 1u;
+    uint32_t pc = addr;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (mode == CpuMode::Thumb) {
+            if (!can_read_at(pc, 2)) return i > 0;
+            if (armv4t::ThumbDecoder::decode(read_u16(pc), pc).is_undefined)
+                return false;
+            pc += 2;
+        } else {
+            if (!can_read_at(pc, 4)) return i > 0;
+            if (armv4t::ArmDecoder::decode(read_u32(pc), pc).is_undefined)
+                return false;
+            pc += 4;
+        }
+    }
+    return true;
+}
+
+bool FunctionFinder::is_arm_func_prologue(uint32_t addr) const {
+    uint32_t pc = addr;
+    for (int i = 0; i < 2; ++i) {
+        if (!can_read_at(pc, 4)) return false;
+        armv4t::Instr ins = armv4t::ArmDecoder::decode(read_u32(pc), pc);
+        if (ins.op == armv4t::IrOp::STM && !ins.block.load &&
+            ins.block.writeback && ins.block.rn == 13 &&
+            ins.block.pre_indexed && !ins.block.add &&
+            (ins.block.reg_list & (1u << 14)) != 0) {
+            return true;
+        }
+        pc += 4;
+    }
+    return false;
+}
+
+bool FunctionFinder::is_thumb_func_prologue(uint32_t addr) const {
+    if (!can_read_at(addr, 2)) return false;
+    // PUSH {...,lr}. GCC/agbcc-generated non-leaf THUMB functions use this
+    // highly distinctive entry shape; leaf functions are recovered from
+    // pointer tables rooted by these strong candidates.
+    return (read_u16(addr) & 0xFF00u) == 0xB500u;
+}
+
+void FunctionFinder::harvest_aot_pointer_table(uint32_t table_base) {
+    if (aot_scan_start_ >= aot_scan_end_ || (table_base & 3u) != 0u ||
+        !addr_in_rom(table_base) ||
+        !aot_seen_pointer_tables_.insert(table_base).second) {
+        return;
+    }
+
+    struct PointerWord {
+        uint32_t raw;
+        uint32_t target;
+    };
+    std::vector<PointerWord> entries;
+    entries.reserve(32);
+    for (uint32_t i = 0; i < 1024u; ++i) {
+        const uint32_t pos = table_base + i * 4u;
+        if (!can_read_at(pos, 4)) break;
+        const uint32_t raw = read_u32(pos);
+        const uint32_t target = raw & ~uint32_t{1};
+        const bool aligned =
+            (raw & 1u) != 0u || (raw & 3u) == 0u;
+        if (!aligned || target < aot_scan_start_ ||
+            target >= aot_scan_end_) {
+            break;
+        }
+        entries.push_back(PointerWord{raw, target});
+    }
+    if (entries.size() < 2) return;
+
+    std::size_t odd_thumb_evidence = 0;
+    std::size_t thumb_prologues = 0;
+    std::size_t arm_prologues = 0;
+    std::unordered_set<uint32_t> unique_targets;
+    std::unordered_set<uint32_t> odd_thumb_targets;
+    std::unordered_set<uint32_t> thumb_prologue_targets;
+    std::unordered_set<uint32_t> arm_prologue_targets;
+    for (const auto& p : entries) {
+        unique_targets.insert(p.target);
+        if ((p.raw & 1u) &&
+            looks_like_code(p.target, CpuMode::Thumb, true)) {
+            odd_thumb_targets.insert(p.target);
+        }
+        if (is_thumb_func_prologue(p.target) &&
+            looks_like_code(p.target, CpuMode::Thumb, true)) {
+            thumb_prologue_targets.insert(p.target);
+        } else if (is_arm_func_prologue(p.target) &&
+                   looks_like_code(p.target, CpuMode::Arm, true)) {
+            arm_prologue_targets.insert(p.target);
+        }
+    }
+    odd_thumb_evidence = odd_thumb_targets.size();
+    thumb_prologues = thumb_prologue_targets.size();
+    arm_prologues = arm_prologue_targets.size();
+
+    const bool interworking =
+        odd_thumb_evidence >= 2 &&
+        odd_thumb_evidence * 2 >= unique_targets.size();
+    CpuMode uniform_mode = CpuMode::Thumb;
+    bool uniform = false;
+    if (!interworking && thumb_prologues >= 2 &&
+        thumb_prologues * 2 >= unique_targets.size() &&
+        arm_prologues == 0) {
+        uniform = true;
+        uniform_mode = CpuMode::Thumb;
+    } else if (!interworking && arm_prologues >= 2 &&
+               arm_prologues * 2 >= unique_targets.size() &&
+               thumb_prologues == 0) {
+        uniform = true;
+        uniform_mode = CpuMode::Arm;
+    }
+    if (!interworking && !uniform) return;
+
+    std::size_t emitted = 0;
+    for (const auto& p : entries) {
+        CpuMode mode = uniform_mode;
+        if (interworking)
+            mode = (p.raw & 1u) ? CpuMode::Thumb : CpuMode::Arm;
+        if (!looks_like_code(p.target, mode, true)) continue;
+        if (mode == CpuMode::Arm && !is_arm_func_prologue(p.target))
+            continue;
+
+        const uint64_t key = visit_key(p.target, mode);
+        if (!aot_seen_seed_keys_.insert(key).second) continue;
+        aot_pointer_seeds_.push_back(FunctionSeed{
+            p.target, mode, "", 0, /*speculative=*/true});
+        if ((mode == CpuMode::Thumb && is_thumb_func_prologue(p.target)) ||
+            (mode == CpuMode::Arm && is_arm_func_prologue(p.target))) {
+            ++stats_.aot_prologue_seeds;
+        } else {
+            ++stats_.aot_pointer_seeds;
+        }
+        ++emitted;
+    }
+    if (emitted != 0) ++stats_.aot_pointer_tables;
+}
+
+std::vector<FunctionSeed> FunctionFinder::collect_code_copy_seeds() const {
+    std::vector<FunctionSeed> out;
+    std::unordered_set<uint64_t> emitted;
+    for (const auto& seed : seeds_)
+        emitted.insert(visit_key(seed.addr, seed.mode));
+    for (const auto& cc : code_copies_) {
+        bool scan_arm = false;
+        bool scan_thumb = false;
+        for (const auto& seed : seeds_) {
+            if (seed.addr < cc.runtime_start ||
+                seed.addr - cc.runtime_start >= cc.size) {
+                continue;
+            }
+            if (seed.mode == CpuMode::Arm) scan_arm = true;
+            else                           scan_thumb = true;
+        }
+        if (scan_arm) {
+            uint32_t pc = (cc.runtime_start + 3u) & ~uint32_t{3};
+            const uint32_t end = cc.runtime_start + cc.size;
+            for (; pc + 4u <= end; pc += 4u) {
+                if (!can_read_at(pc, 4)) break;
+                armv4t::Instr ins =
+                    armv4t::ArmDecoder::decode(read_u32(pc), pc);
+                const bool stack_push =
+                    ins.op == armv4t::IrOp::STM && !ins.block.load &&
+                    ins.block.writeback && ins.block.rn == 13 &&
+                    ins.block.pre_indexed && !ins.block.add &&
+                    ins.block.reg_list != 0;
+                if (!stack_push) {
+                    continue;
+                }
+
+                // Old APCS ARM functions commonly begin with `mov ip,sp`
+                // immediately before their stack push. The callable entry is
+                // the MOV, not the push itself; rooting the latter misses
+                // address-taken helpers such as SMA2's copied sound mixer.
+                uint32_t entry = pc;
+                if (pc >= cc.runtime_start + 4u &&
+                    read_u32(pc - 4u) == 0xE1A0C00Du) {
+                    entry = pc - 4u;
+                }
+                if (!looks_like_code(entry, CpuMode::Arm, true)) continue;
+
+                const uint64_t key = visit_key(entry, CpuMode::Arm);
+                if (!emitted.insert(key).second) continue;
+                FunctionSeed seed{
+                    entry, CpuMode::Arm, "", 0, /*speculative=*/true};
+                seed.source_addr =
+                    cc.source_start + (entry - cc.runtime_start);
+                out.push_back(std::move(seed));
+            }
+        }
+
+        if (scan_thumb) {
+            uint32_t pc = (cc.runtime_start + 1u) & ~uint32_t{1};
+            const uint32_t end = cc.runtime_start + cc.size;
+            for (; pc + 2u <= end; pc += 2u) {
+                if (!can_read_at(pc, 2)) break;
+                const uint16_t op = read_u16(pc);
+                const bool stack_push =
+                    (op & 0xFE00u) == 0xB400u &&
+                    (op & 0x01FFu) != 0;
+                if (!stack_push ||
+                    !looks_like_code(pc, CpuMode::Thumb, true)) {
+                    continue;
+                }
+                const uint64_t key = visit_key(pc, CpuMode::Thumb);
+                if (!emitted.insert(key).second) continue;
+                FunctionSeed seed{
+                    pc, CpuMode::Thumb, "", 0, /*speculative=*/true};
+                seed.source_addr =
+                    cc.source_start + (pc - cc.runtime_start);
+                out.push_back(std::move(seed));
+            }
+        }
+    }
+    return out;
+}
+
 void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                                    const std::string& seed_name,
                                    uint32_t seed_source_addr,
@@ -1413,6 +1643,12 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                     // tracked pointer is already resolved separately.
                     if (ins.mem.rn == 15 && !ins.mem.by_register) {
                         maybe_harvest_literal(raw);
+                        // If the literal is a ROM data address, inspect only
+                        // that referenced location as a possible callback
+                        // table. This reachability evidence avoids the
+                        // catastrophic false-positive rate of sweeping every
+                        // pointer-shaped word in asset/compressed-data space.
+                        harvest_aot_pointer_table(raw);
                     }
                 } else {
                     reg_const[ins.rd].known = false;
@@ -1605,6 +1841,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         visited_.erase(key);
         mode_switch_seeds_.clear();
         literal_pool_seeds_.clear();
+        aot_pointer_seeds_.clear();
         current_walk_dropped_ = false;
         return;  // do NOT push_back fn
     }
@@ -1616,6 +1853,15 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
 }
 
 void FunctionFinder::run(std::size_t max_functions) {
+    const std::size_t manual_seed_count = seeds_.size();
+    std::unordered_set<uint64_t> manual_seed_keys;
+    for (const auto& s : seeds_)
+        manual_seed_keys.insert(visit_key(s.addr, s.mode));
+    std::vector<FunctionSeed> code_copy_seeds = collect_code_copy_seeds();
+    stats_.aot_code_copy_seeds = code_copy_seeds.size();
+    seeds_.insert(seeds_.end(),
+                  code_copy_seeds.begin(), code_copy_seeds.end());
+
     // Validate seeds against data_ranges before any walking. A seed
     // landing inside a data_range is a collision (the TOML author
     // is contradicting themselves; or a jump_table expanded onto
@@ -1635,7 +1881,7 @@ void FunctionFinder::run(std::size_t max_functions) {
         seed_keys.insert(k);
         seed_by_key.emplace(k, s);
     }
-    stats_.manual_seeds_total = seeds_.size();
+    stats_.manual_seeds_total = manual_seed_count;
 
     // Dedup-at-push: every (addr,mode) ever queued. discover_one already
     // dedups at visit time, so the worklist otherwise fills with
@@ -1656,17 +1902,19 @@ void FunctionFinder::run(std::size_t max_functions) {
     // is intentionally bounded during bring-up.
     std::vector<QueuedSeed> worklist;
     worklist.reserve(seeds_.size());
-    for (const auto& s : seeds_) {
-        worklist.push_back(QueuedSeed{s, true});
+    for (std::size_t i = 0; i < seeds_.size(); ++i) {
+        worklist.push_back(QueuedSeed{
+            seeds_[i], i < manual_seed_count});
     }
-    std::size_t required_remaining = seeds_.size();
+    std::size_t required_remaining = manual_seed_count;
 
     // Per-key origin marker: was this (addr, mode) reached as a
     // seed, by walk, or both? Walks add "walk"; seeds add "seed".
     // Both → "redundant_manual".
     std::unordered_map<uint64_t, uint8_t> origin_mask;  // 1=seed, 2=walk
-    for (const auto& s : seeds_) {
-        origin_mask[visit_key(s.addr, s.mode)] |= 1u;
+    for (std::size_t i = 0; i < seeds_.size(); ++i) {
+        origin_mask[visit_key(seeds_[i].addr, seeds_[i].mode)] |=
+            (i < manual_seed_count) ? 1u : 2u;
     }
 
     std::size_t pos = 0;
@@ -1693,7 +1941,8 @@ void FunctionFinder::run(std::size_t max_functions) {
         FunctionSeed s = queued.seed;
         uint64_t s_key = visit_key(s.addr, s.mode);
         auto seed_it = seed_by_key.find(s_key);
-        bool current_required = queued.required || seed_it != seed_by_key.end();
+        bool current_required =
+            queued.required || manual_seed_keys.count(s_key) != 0;
         if (!current_required && functions_.size() >= max_functions) {
             continue;
         }
@@ -1772,6 +2021,18 @@ void FunctionFinder::run(std::size_t max_functions) {
             }
         }
         literal_pool_seeds_.clear();
+        // Drain address-taken functions from pointer tables whose base was
+        // itself loaded by this reachable walk.
+        for (const auto& as : aot_pointer_seeds_) {
+            uint64_t k = visit_key(as.addr, as.mode);
+            origin_mask[k] |= 2u;
+            if (!enqueued.insert(k).second) continue;
+            discovered_seeds.push_back(QueuedSeed{as, current_required});
+            if (current_required) {
+                ++required_remaining;
+            }
+        }
+        aot_pointer_seeds_.clear();
         if (!discovered_seeds.empty()) {
             worklist.insert(worklist.begin() + static_cast<std::ptrdiff_t>(pos),
                             discovered_seeds.begin(),
@@ -1897,6 +2158,36 @@ void FunctionFinder::run(std::size_t max_functions) {
             std::remove_if(functions_.begin(), functions_.end(),
                            [](const Function& f) { return f.is_alias; }),
             functions_.end());
+    }
+
+    // Full static-resume coverage. IRQ/SWI return may land at any instruction
+    // boundary in a native body. Add every interior boundary as an alias after
+    // real function boundaries and explicit aliases have been consolidated.
+    // The host body stays intact, preserving native straight-line execution
+    // and goto back-edges.
+    if (static_resume_all_) {
+        for (Function& f : functions_) {
+            const uint32_t step =
+                f.mode == CpuMode::Thumb ? 2u : 4u;
+            for (uint32_t pc = f.addr + step;
+                 pc < f.end_addr && pc > f.addr;
+                 pc += step) {
+                f.alias_entries.push_back(pc);
+            }
+            if (!f.alias_entries.empty()) {
+                std::sort(f.alias_entries.begin(), f.alias_entries.end());
+                f.alias_entries.erase(
+                    std::unique(f.alias_entries.begin(),
+                                f.alias_entries.end()),
+                    f.alias_entries.end());
+            }
+        }
+        stats_.alias_entries_total = 0;
+        stats_.alias_hosts_total = 0;
+        for (const Function& f : functions_) {
+            stats_.alias_entries_total += f.alias_entries.size();
+            if (!f.alias_entries.empty()) ++stats_.alias_hosts_total;
+        }
     }
 
     // Stats

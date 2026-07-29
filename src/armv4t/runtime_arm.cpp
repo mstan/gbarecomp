@@ -31,6 +31,7 @@
 struct DispatchEntry {
     uint32_t addr;
     uint8_t thumb;
+    uint8_t resume;
     void (*fn)(void);
 };
 extern "C" const DispatchEntry kDispatchTable[];
@@ -745,8 +746,8 @@ namespace {
 // Binary-search a sorted DispatchEntry table for `pc` and current
 // instruction-set state. Same numeric addresses can have both ARM
 // and THUMB entries, so scan the equal-address run for CPSR.T.
-void (*lookup_in(const DispatchEntry* table, unsigned len,
-                 uint32_t pc, bool thumb))(void) {
+const DispatchEntry* lookup_in(const DispatchEntry* table, unsigned len,
+                               uint32_t pc, bool thumb) {
     unsigned lo = 0, hi = len;
     while (lo < hi) {
         unsigned mid = (lo + hi) >> 1u;
@@ -754,7 +755,7 @@ void (*lookup_in(const DispatchEntry* table, unsigned len,
         else                       hi = mid;
     }
     for (unsigned i = lo; i < len && table[i].addr == pc; ++i) {
-        if ((table[i].thumb != 0) == thumb) return table[i].fn;
+        if ((table[i].thumb != 0) == thumb) return &table[i];
     }
     return nullptr;
 }
@@ -778,13 +779,18 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
         g_runtime_ram_dispatch_hook(pc, thumb ? 1 : 0)) {
         return;
     }
-    void (*fn)(void) = nullptr;
+    const DispatchEntry* entry = nullptr;
     if (pc < kBiosRegionEnd) {
-        fn = lookup_in(kBiosDispatchTable, kBiosDispatchTableLen, pc, thumb);
+        entry = lookup_in(
+            kBiosDispatchTable, kBiosDispatchTableLen, pc, thumb);
     } else {
-        fn = lookup_in(kDispatchTable, kDispatchTableLen, pc, thumb);
+        entry = lookup_in(kDispatchTable, kDispatchTableLen, pc, thumb);
     }
-    if (fn) { fn(); return; }
+    if (entry) {
+        g_runtime_resume_pc = entry->resume ? pc : 0u;
+        entry->fn();
+        return;
+    }
     // Stage-2 self-heal: third dispatch tier. After the static tables miss,
     // consult the runtime-healed native overlays before bridging. Defined in
     // src/runtime/overlay_loader.cpp (a null stub in tests/codegen/stubs.cpp,
@@ -804,10 +810,10 @@ extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
 
 extern "C" int runtime_has_static_entry(uint32_t pc, int thumb) {
     uint32_t a = pc & ~1u;
-    void (*fn)(void) = (a < kBiosRegionEnd)
+    const DispatchEntry* entry = (a < kBiosRegionEnd)
         ? lookup_in(kBiosDispatchTable, kBiosDispatchTableLen, a, thumb != 0)
         : lookup_in(kDispatchTable, kDispatchTableLen, a, thumb != 0);
-    return fn != nullptr ? 1 : 0;
+    return entry != nullptr ? 1 : 0;
 }
 
 extern "C" void runtime_call_push_return(uint32_t return_pc) {

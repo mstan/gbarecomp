@@ -103,15 +103,22 @@ uint32_t g_unimplemented_pc     = 0;
 
 // ── DispatchEntry definitions ──────────────────────────────────────
 // runtime_arm.cpp declares:
-//   struct DispatchEntry { uint32_t addr; uint8_t thumb; void (*fn)(void); };
+//   struct DispatchEntry {
+//       uint32_t addr; uint8_t thumb; uint8_t resume; void (*fn)(void);
+//   };
 //   extern "C" const DispatchEntry kDispatchTable[];
 //   extern "C" const unsigned kDispatchTableLen;
 // Provide minimal stubs. Empty length means every dispatch falls
 // through to runtime_dispatch_miss, which we override below.
-struct DispatchEntry { uint32_t addr; uint8_t thumb; void (*fn)(void); };
+struct DispatchEntry {
+    uint32_t addr;
+    uint8_t thumb;
+    uint8_t resume;
+    void (*fn)(void);
+};
 
 extern "C" const DispatchEntry kDispatchTable[1] = {
-    {0xFFFFFFFFu, 0u, nullptr},
+    {0xFFFFFFFFu, 0u, 0u, nullptr},
 };
 extern "C" const unsigned kDispatchTableLen = 0u;
 
@@ -120,7 +127,7 @@ extern "C" const unsigned kDispatchTableLen = 0u;
 // PC falls through to kDispatchTable, then to runtime_dispatch_miss,
 // which is the stubbed recorder above.
 extern "C" const DispatchEntry kBiosDispatchTable[1] = {
-    {0xFFFFFFFFu, 0u, nullptr},
+    {0xFFFFFFFFu, 0u, 0u, nullptr},
 };
 extern "C" const unsigned kBiosDispatchTableLen = 0u;
 
