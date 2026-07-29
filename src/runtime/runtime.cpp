@@ -1179,6 +1179,24 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         args.bios_hle = (e[0] && e[0] != '0');
     if (const char* e = std::getenv("GBARECOMP_BIOS_HLE_KEEP_INTRO"))
         args.bios_hle_keep_intro = (e[0] && e[0] != '0');
+#if !defined(GBARECOMP_HAVE_BIOS_RECOMP)
+    if (!args.bios_hle) {
+        args.bios_hle = true;
+        if (!args.quiet) {
+            std::fprintf(stderr,
+                "[gbarecomp:runtime] recompiled BIOS is not linked; "
+                "using BIOS HLE boot instead\n");
+        }
+    }
+    if (args.bios_hle_keep_intro) {
+        args.bios_hle_keep_intro = false;
+        if (!args.quiet) {
+            std::fprintf(stderr,
+                "[gbarecomp:runtime] recompiled BIOS is not linked; "
+                "cannot keep the BIOS intro in HLE mode\n");
+        }
+    }
+#endif
     gba::bios_hle_set_mode(args.bios_hle ? gba::BiosHleMode::On
                                          : gba::BiosHleMode::Off);
     if (!args.quiet)
