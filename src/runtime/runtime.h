@@ -81,6 +81,12 @@ struct RunOptions {
     // (non-zero = selectable), so a game that only wants to disable a couple
     // of keys returns 1 for everything else. Null = everything enabled.
     int (*ui_enabled)(const char* key)             = nullptr;
+    // Text-valued settings (recomp-ui's RECOMP_RUNTIME_UI_TEXT). ui_get_text
+    // fills buf NUL-terminated; ui_set_text returns non-zero if it accepted the
+    // value. A postal code or a server address is neither a number nor a fixed
+    // choice, and stepping one with -/+ is unusable.
+    int (*ui_get_text)(const char* key, char* buf, std::size_t buf_len) = nullptr;
+    int (*ui_set_text)(const char* key, const char* value) = nullptr;
 
     // ---- pre-boot launcher identity (launcher_seam.h, RECOMP_LAUNCHER builds) --
     // Consumed by the recomp-ui launcher seam a game's main() runs BEFORE
