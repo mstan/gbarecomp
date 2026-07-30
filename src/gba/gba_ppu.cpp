@@ -111,6 +111,9 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
         g_ws_pillarbox_left = 0;
         g_ws_pillarbox_right = 0;
     }
+    // The snapshot format predates the PPU's internal affine reference
+    // accumulator. Reconstruct it from live BGxX/Y on the next scanline.
+    affine_line_ = {};
 }
 
 void GbaPpu::reset() {
@@ -120,6 +123,7 @@ void GbaPpu::reset() {
     vcount_ = 0;
     frame_count_ = 0;
     has_latched_fb_ = false;
+    affine_line_ = {};
     std::memset(latched_fb_.data(), 0xFF, latched_fb_.size());
     std::memset(work_fb_.data(), 0xFF, work_fb_.size());
 }
@@ -296,6 +300,14 @@ static inline int32_t read_s28_ref(const uint8_t* io, uint32_t off) {
     v &= 0x0FFFFFFFu;
     if (v & 0x08000000u) v |= 0xF0000000u;
     return static_cast<int32_t>(v);
+}
+
+static inline void write_s28_ref(uint8_t* io, uint32_t off, int32_t value) {
+    const uint32_t v = static_cast<uint32_t>(value) & 0x0FFFFFFFu;
+    io[off + 0] = static_cast<uint8_t>(v);
+    io[off + 1] = static_cast<uint8_t>(v >> 8);
+    io[off + 2] = static_cast<uint8_t>(v >> 16);
+    io[off + 3] = static_cast<uint8_t>(v >> 24);
 }
 
 namespace {
@@ -1761,13 +1773,56 @@ void GbaPpu::render_scanline(uint32_t y,
                              const uint8_t* vram,
                              const uint8_t* oam,
                              const uint8_t* pal) {
+    // BG2/BG3 affine coordinates are backed by hidden current-reference
+    // registers. With constant PB/PD, ref + y*delta is equivalent. Mario Kart
+    // HBlank-DMAs PA/PB/PC/PD/X/Y for every road scanline, however: each X/Y
+    // write reloads the hidden reference and must be used directly rather than
+    // multiplied by the absolute screen Y. Track the hardware accumulator and
+    // rewrite a local IO image so the established compositor receives the
+    // effective reference for this line through its ref + y*delta interface.
+    std::array<uint8_t, 0x60> affine_io{};
+    std::memcpy(affine_io.data(), io, affine_io.size());
+    for (unsigned index = 0; index < affine_line_.size(); ++index) {
+        AffineLineState& state = affine_line_[index];
+        const uint32_t base = index == 0 ? 0x20u : 0x30u;
+        const int32_t external_x = read_s28_ref(io, base + 0x08u);
+        const int32_t external_y = read_s28_ref(io, base + 0x0Cu);
+        if (y == 0 || !state.valid_x || state.reload_x) {
+            state.x = external_x;
+            state.valid_x = true;
+        }
+        if (y == 0 || !state.valid_y || state.reload_y) {
+            state.y = external_y;
+            state.valid_y = true;
+        }
+        state.reload_x = false;
+        state.reload_y = false;
+
+        const int32_t pb = read_s16(io, base + 0x02u);
+        const int32_t pd = read_s16(io, base + 0x06u);
+        write_s28_ref(affine_io.data(), base + 0x08u,
+                      state.x - static_cast<int32_t>(y) * pb);
+        write_s28_ref(affine_io.data(), base + 0x0Cu,
+                      state.y - static_cast<int32_t>(y) * pd);
+        state.x += pb;
+        state.y += pd;
+    }
+
     if (!view_expanded()) {
-        render_scanline_internal(work_fb_.data(), y, dispcnt, io, vram, oam,
-                                 pal, kScreenWidth, kScreenHeight);
+        render_scanline_internal(work_fb_.data(), y, dispcnt,
+                                 affine_io.data(), vram, oam, pal,
+                                 kScreenWidth, kScreenHeight);
         return;
     }
-    render_scanline_wide(work_fb_.data(), y, dispcnt, io, vram, oam, pal,
-                         render_width(), extra_left_);
+    render_scanline_wide(work_fb_.data(), y, dispcnt, affine_io.data(),
+                         vram, oam, pal, render_width(), extra_left_);
+}
+
+void GbaPpu::note_affine_reference_write(unsigned bg, bool y_axis) {
+    if (bg < 2 || bg > 3) return;
+    AffineLineState& state = affine_line_[bg - 2];
+    if (y_axis) state.reload_y = true;
+    else state.reload_x = true;
 }
 
 void GbaPpu::latch_framebuffer(uint16_t dispcnt,

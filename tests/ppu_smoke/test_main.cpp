@@ -808,6 +808,52 @@ void test_bitmap_mode_wide_center_and_margins() {
                  "mode 4 wide right margin");
 }
 
+void test_affine_reference_reload_overrides_scanline_accumulation() {
+    Fixture f;
+    disable_all_objects(f);
+
+    // Mode 1 BG2, 128x128 affine map at block 0, 256-color tiles at
+    // character block 1. Tile 0 is red; its right-hand neighbor is green.
+    const uint16_t dispcnt = 0x0401;
+    store16(&f.io[0x0C], 0x0084);
+    f.vram[0] = 0;
+    f.vram[1] = 1;
+    std::fill_n(f.vram.begin() + 0x4000, 64, static_cast<uint8_t>(1));
+    std::fill_n(f.vram.begin() + 0x4040, 64, static_cast<uint8_t>(2));
+    store16(&f.pal[2], 0x001F);
+    store16(&f.pal[4], 0x03E0);
+
+    store16(&f.io[0x20], 0x0100);  // PA = 1 pixel per output pixel.
+    store16(&f.io[0x22], 0x0800);  // PB = 8 pixels per scanline.
+    store16(&f.io[0x24], 0x0000);
+    store16(&f.io[0x26], 0x0000);
+    store32(&f.io[0x28], 0);
+    store32(&f.io[0x2C], 0);
+
+    f.ppu.render_scanline(0, dispcnt, f.io.data(), f.vram.data(),
+                          f.oam.data(), f.pal.data());
+
+    // HBlank DMA writes the same zero BG2X again. The write itself reloads the
+    // hidden affine reference, so line 1 must still begin at red tile 0. The
+    // old ref + y*PB shortcut incorrectly began at green tile 1.
+    f.ppu.note_affine_reference_write(2, false);
+    f.ppu.render_scanline(1, dispcnt, f.io.data(), f.vram.data(),
+                          f.oam.data(), f.pal.data());
+
+    // With no second reload, the internal reference advances by PB and line 2
+    // correctly begins at green tile 1.
+    f.ppu.render_scanline(2, dispcnt, f.io.data(), f.vram.data(),
+                          f.oam.data(), f.pal.data());
+    f.ppu.mark_framebuffer_latched();
+    const uint8_t* frame = f.ppu.latched_framebuffer();
+    expect_pixel(frame + (0 * 240) * 3, 255, 0, 0,
+                 "affine line 0 reference");
+    expect_pixel(frame + (1 * 240) * 3, 255, 0, 0,
+                 "affine HBlank reference reload");
+    expect_pixel(frame + (2 * 240) * 3, 0, 255, 0,
+                 "affine internal reference accumulation");
+}
+
 // The latched frame is a VBlank snapshot: scanlines of the NEXT frame being
 // composited must never show through latched_framebuffer(). (Regression test
 // for the Minish Cap walk "warble": render_scanline used to write directly
@@ -879,6 +925,7 @@ int main() {
     test_bitmap_mode5_bounds_and_page_flip();
     test_bitmap_mode_obj_compositing_and_obj_window();
     test_bitmap_mode_wide_center_and_margins();
+    test_affine_reference_reload_overrides_scanline_accumulation();
     test_latched_frame_immune_to_in_progress_scanlines();
     std::puts("ppu_smoke_tests: PASS");
     return 0;

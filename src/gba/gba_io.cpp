@@ -669,6 +669,12 @@ void GbaIo::write8(uint32_t off, uint8_t v) {
             break;
     }
     io_[off] = v;
+    if (ppu_) {
+        if (off >= 0x028u && off <= 0x02Fu)
+            ppu_->note_affine_reference_write(2, off >= 0x02Cu);
+        else if (off >= 0x038u && off <= 0x03Fu)
+            ppu_->note_affine_reference_write(3, off >= 0x03Cu);
+    }
 }
 
 void GbaIo::write16(uint32_t off, uint16_t v) {
@@ -779,6 +785,12 @@ void GbaIo::write16(uint32_t off, uint16_t v) {
         }
     }
     store_u16(&io_[off], v);
+    if (ppu_) {
+        if (off >= 0x028u && off <= 0x02Eu)
+            ppu_->note_affine_reference_write(2, off >= 0x02Cu);
+        else if (off >= 0x038u && off <= 0x03Eu)
+            ppu_->note_affine_reference_write(3, off >= 0x03Cu);
+    }
 }
 
 void GbaIo::write32(uint32_t off, uint32_t v) {
