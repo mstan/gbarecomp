@@ -65,11 +65,44 @@ subst() {
         -e "s|@APP_NAME@|$APP_NAME|g" \
         -e "s|@TARGET@|$TARGET|g" \
         -e "s|@SUMMARY@|$SUMMARY|g" \
-        -e "s|@SOURCE_DIR@|$SOURCE_DIR|g"
+        -e "s|@SOURCE_DIR@|$SOURCE_DIR|g" \
+        -e "s|@SUPPORT_DIR@|$OUT|g"
 }
 
+# Build the source `skip:` list from what this tree actually contains, so the
+# template stays game-agnostic (layouts differ: variants/<name>/roms in the
+# multi-variant repos, a flat roms/ elsewhere).
+echo "==> skip list"
+SKIP_FILE="$(mktemp)"
+{
+    # Any directory holding cartridge dumps, plus any BIOS image.
+    ( cd "$SOURCE_DIR" && find . -type d -name roms -not -path '*/.git/*' \
+        -printf '          - %P\n' 2>/dev/null ) || true
+    ( cd "$SOURCE_DIR" && find . -type f \( -name '*.gba' -o -name '*.agb' \
+        -o -name 'gba_bios.bin' \) -not -path '*/.git/*' \
+        -printf '          - %P\n' 2>/dev/null ) || true
+    # Build output and caches: large, host-specific, and never an input.
+    for d in build build-ui build-release build-sub release-stage \
+             recomp_cache flatpak-build .flatpak-builder .git; do
+        if [ -e "$SOURCE_DIR/$d" ]; then echo "          - $d"; fi
+    done
+    # The group's exit status is the last command's, and a false `[ -e ]` would
+    # make the pipeline fail under `set -o pipefail` and abort the script.
+    true
+} | sort -u > "$SKIP_FILE"
+sed 's/^          - /    /' "$SKIP_FILE" | sed 's/^/    skipping: /'
+
 echo "==> manifest"
-subst < "$HERE/manifest.template.yml" > "$OUT/$APP_ID.yml"
+subst < "$HERE/manifest.template.yml" | \
+    awk -v skipfile="$SKIP_FILE" '
+        /^@SKIP@$/ {
+            print "        skip:"
+            while ((getline line < skipfile) > 0) print line
+            next
+        }
+        { print }
+    ' > "$OUT/$APP_ID.yml"
+rm -f "$SKIP_FILE"
 
 echo "==> desktop entry"
 # Categories=Game;Emulator; is what Steam's "Add a Non-Steam Game" and the Deck's
