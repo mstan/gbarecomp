@@ -2455,8 +2455,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // the frame from INSIDE runtime_should_yield and resumes the guest in place —
     // the guest never unwinds to the runner, so its interrupted interior PC is
     // never re-dispatched (which previously self-healed through the interpreter
-    // every frame). Returns true to request quit. Headless/TCP leave the hook
-    // unset and keep the original unwind-and-redispatch path.
+    // every frame). Returns true to request quit. TCP and frame-driven
+    // input/replay paths leave the hook unset and keep the original
+    // unwind-and-redispatch path.
     // Present-in-place is the default for windowed play (validated on busy-spin
     // games AND HALT-based Minish Cap). Escape hatch: GBARECOMP_PRESENT_IN_PLACE=0.
     // Stepped aside while the WIP widescreen sidecar is armed, since that path
@@ -2726,6 +2727,27 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // more frames past the restored frame counter instead of breaking on the
     // first step when the loaded index already exceeds the cap.
     const uint64_t headless_base_frame = ppu.frame_count();
+    // Passive bounded headless runs need no per-frame host work. Keep their
+    // guest call stack intact just like windowed play and unwind only after the
+    // requested final VBlank. Emerald's IRQ-driven SoundMainRAM mixer is a
+    // particularly useful regression: redispatching an interrupted interior
+    // PC every frame eventually corrupts its mixer state, while resuming in
+    // place follows the hardware control flow.
+    //
+    // Demo input, input replay, TCP debugging, and widescreen sidecar runs
+    // still require the outer loop at each frame boundary.
+    const bool passive_headless_present_in_place =
+        !args.window && args.frames >= 0 && args.tcp_port <= 0 &&
+        !demo_input && !input_replay_requested && present_in_place;
+    if (passive_headless_present_in_place) {
+        std::fprintf(stderr, "[gbarecomp:runtime] headless present-in-place ON "
+                     "(unwind at final frame only; "
+                     "GBARECOMP_PRESENT_IN_PLACE=0 to disable)\n");
+        runtime_set_frame_present_hook([&]() -> bool {
+            return ppu.frame_count() - headless_base_frame >=
+                   static_cast<uint64_t>(args.frames);
+        });
+    }
 
     int dispatches_since_pump = 0;
     // Battery-save auto-flush debounce (see the loop body). ~1 s at 59.7 Hz.

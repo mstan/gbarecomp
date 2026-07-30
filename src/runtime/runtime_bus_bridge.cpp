@@ -848,7 +848,8 @@ extern "C" void runtime_idle_backedge(uint32_t header_pc) {
 // re-dispatched from an arbitrary interior PC, eliminating the whole class of
 // frame-boundary resume dispatch-misses. The hook returns true to request quit
 // (then the yield DOES unwind, so the runner can exit). Set by the windowed
-// runner only; unset for headless/TCP, which keep the unwind-and-redispatch path.
+// runner and by bounded, passive headless frame runs; unset for TCP and
+// frame-driven input/replay paths, which keep the unwind-and-redispatch path.
 std::function<bool()> g_frame_present_hook;
 // Sticky quit: once the present hook requests exit, EVERY subsequent yield must
 // unwind (return true) so the guest's whole host call stack pops back to the
