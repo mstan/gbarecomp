@@ -55,6 +55,27 @@ struct RunOptions {
     void (*extended_view_init)(std::uint32_t extra_left,
                                std::uint32_t extra_right) = nullptr;
 
+    // This cartridge carries a solar sensor. Unlike the RTC there is no ROM
+    // signature to detect one from, so it has to be declared. Games that leave
+    // this false are unaffected; GBARECOMP_SOLAR still forces it on for
+    // experiments, and RECOMP_SOLAR_OFF forces it off regardless.
+    bool has_solar_sensor = false;
+
+    // Optional game-owned light source for the cartridge solar sensor
+    // (gba_solar.h). Emulating the sensor is a runner CAPABILITY; deciding
+    // where light comes from is game POLICY, so anything with I/O — a camera,
+    // a weather service — belongs in the game binary behind this seam and not
+    // in the engine. Returns host brightness, 0 = dark, 255 = full sun.
+    //
+    // Sampled once per ADC conversion on the guest's thread, so it MUST be
+    // non-blocking: a network-backed provider polls on its own thread and
+    // answers from cache. Null leaves the sensor dark until a configured solar
+    // hotkey is pressed, which is the pre-existing behaviour.
+    //
+    // SolarBrighter/SolarDimmer override this while set; SolarLive releases
+    // the override. All three are unbound by default.
+    std::uint8_t (*solar_provider)() = nullptr;
+
     // ---- pre-boot launcher identity (launcher_seam.h, RECOMP_LAUNCHER builds) --
     // Consumed by the recomp-ui launcher seam a game's main() runs BEFORE
     // run_game(); the runtime itself never reads these. All optional.

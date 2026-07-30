@@ -64,6 +64,7 @@ enum HostHotkey {
     HK_FULLSCREEN = 0, HK_PAUSE, HK_TURBO,
     HK_WINDOW_BIGGER, HK_WINDOW_SMALLER,
     HK_VOLUME_UP, HK_VOLUME_DOWN, HK_DISPLAY_PERF,
+    HK_SOLAR_BRIGHTER, HK_SOLAR_DIMMER, HK_SOLAR_LIVE,
     HK_COUNT
 };
 
@@ -574,11 +575,13 @@ const char* const kHotkeyNames[HK_COUNT] = {
     "Fullscreen", "Pause", "Turbo",
     "WindowBigger", "WindowSmaller",
     "VolumeUp", "VolumeDown", "DisplayPerf",
+    "SolarBrighter", "SolarDimmer", "SolarLive",
 };
 const char* const kHotkeyDefaults[HK_COUNT] = {
     "Alt+Return", "Shift+P", "Tab",
     "", "",
     "", "", "F",
+    "", "", "",
 };
 
 // SDL_GetScancodeFromName plus the same lowercase aliases recomp-ui's
@@ -1570,6 +1573,9 @@ HostWindow::Events HostWindow::pump() {
                         case HK_VOLUME_UP:      ev.volume_up = true;         break;
                         case HK_VOLUME_DOWN:    ev.volume_down = true;       break;
                         case HK_DISPLAY_PERF:   ev.toggle_fps = true;        break;
+                        case HK_SOLAR_BRIGHTER: ev.solar_brighter = true;    break;
+                        case HK_SOLAR_DIMMER:   ev.solar_dimmer = true;      break;
+                        case HK_SOLAR_LIVE:     ev.solar_live = true;        break;
                     }
                 }
             }

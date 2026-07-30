@@ -15,11 +15,14 @@ written it. Pure observation.
 """
 from __future__ import annotations
 import argparse, json, os, pathlib, socket, subprocess, sys, time
+import sys as _sys, pathlib as _pl
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
+from recomp_paths import exe_name
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROJ = ROOT.parent / "MinishCapRecomp"
-REC = os.environ.get("GBARECOMP_RECOMP_EXE", str(PROJ / "build" / "MinishCapRecomp.exe"))
-INT = os.environ.get("GBARECOMP_INTERP_EXE", str(ROOT / "build" / "bios_smoke.exe"))
+REC = os.environ.get("GBARECOMP_RECOMP_EXE", str(PROJ / "build" / exe_name("MinishCapRecomp")))
+INT = os.environ.get("GBARECOMP_INTERP_EXE", str(ROOT / "build" / exe_name("bios_smoke")))
 BIOS = str(ROOT / "bios" / "gba_bios.bin")
 ROM = str(PROJ / "roms" / "minishcap_usa.gba")
 FRAME_CYC = 280896

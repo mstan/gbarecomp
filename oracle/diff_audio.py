@@ -6,6 +6,9 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import sys as _sys, pathlib as _pl
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
+from recomp_paths import exe_name
 import socket
 import struct
 import subprocess
@@ -14,8 +17,8 @@ import time
 from typing import Optional
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-BIOS_SMOKE = ROOT / "build" / "bios_smoke.exe"
-ORACLE = ROOT / "build" / "oracle" / "gbarecomp_oracle.exe"
+BIOS_SMOKE = ROOT / "build" / exe_name("bios_smoke")
+ORACLE = ROOT / "build" / "oracle" / exe_name("gbarecomp_oracle")
 BIOS_PATH = "bios/gba_bios.bin"
 
 
