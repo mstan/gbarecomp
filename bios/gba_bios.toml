@@ -23,12 +23,22 @@ md5  = "a860e8c0b6d573d191e4ec7db1b1e4f6"
 # only deliberately-named labels survive. Plus a hand-coded
 # tail of exception-vector slots (0x08 SWI, 0x18 IRQ) that the
 # runtime dispatches separately even though the disasm groups
-# them under a single `_start` label.
+# them under a single reset label.
+#
+# The reset vector is deliberately NOT named `_start`: the recompiler emits each
+# entry as a C function of the same name, and on Linux/glibc `_start` is the
+# process entry point in Scrt1.o, so every game fails to link with
+#
+#   multiple definition of `_start';
+#   .../Scrt1.o:.../start.S:57: first defined here
+#
+# Windows and macOS use different CRT entry symbols and never hit it. The bios_
+# prefix also matches the vector entries below.
 
 [[extra_func]]
 addr = 0x00000000
 mode = "arm"
-name = "_start"
+name = "bios_reset_vector"
 
 [[extra_func]]
 addr = 0x00000008

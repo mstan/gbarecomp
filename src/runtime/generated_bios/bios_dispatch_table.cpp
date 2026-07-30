@@ -9,7 +9,7 @@
 
 struct DispatchEntry { uint32_t addr; uint8_t thumb; uint8_t resume; void (*fn)(void); };
 extern "C" const DispatchEntry kBiosDispatchTable[] = {
-    {0x00000000u, 0u, 0u, _start},
+    {0x00000000u, 0u, 0u, bios_reset_vector},
     {0x00000008u, 0u, 0u, bios_swi_vector},
     {0x00000018u, 0u, 0u, bios_irq_vector},
     {0x0000001Cu, 0u, 0u, reserved_vector},
