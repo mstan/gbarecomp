@@ -69,10 +69,11 @@ struct RunOptions {
     //
     // Sampled once per ADC conversion on the guest's thread, so it MUST be
     // non-blocking: a network-backed provider polls on its own thread and
-    // answers from cache. Null leaves the sensor dark until a debug key is
-    // pressed, which is the pre-existing behaviour.
+    // answers from cache. Null leaves the sensor dark until a configured solar
+    // hotkey is pressed, which is the pre-existing behaviour.
     //
-    // The number-row debug keys override this while set; 0 releases them.
+    // SolarBrighter/SolarDimmer override this while set; SolarLive releases
+    // the override. All three are unbound by default.
     std::uint8_t (*solar_provider)() = nullptr;
 
     // ---- pre-boot launcher identity (launcher_seam.h, RECOMP_LAUNCHER builds) --

@@ -64,6 +64,7 @@ enum HostHotkey {
     HK_FULLSCREEN = 0, HK_PAUSE, HK_TURBO,
     HK_WINDOW_BIGGER, HK_WINDOW_SMALLER,
     HK_VOLUME_UP, HK_VOLUME_DOWN, HK_DISPLAY_PERF,
+    HK_SOLAR_BRIGHTER, HK_SOLAR_DIMMER, HK_SOLAR_LIVE,
     HK_COUNT
 };
 
@@ -574,11 +575,13 @@ const char* const kHotkeyNames[HK_COUNT] = {
     "Fullscreen", "Pause", "Turbo",
     "WindowBigger", "WindowSmaller",
     "VolumeUp", "VolumeDown", "DisplayPerf",
+    "SolarBrighter", "SolarDimmer", "SolarLive",
 };
 const char* const kHotkeyDefaults[HK_COUNT] = {
     "Alt+Return", "Shift+P", "Tab",
     "", "",
     "", "", "F",
+    "", "", "",
 };
 
 // SDL_GetScancodeFromName plus the same lowercase aliases recomp-ui's
@@ -1550,16 +1553,6 @@ HostWindow::Events HostWindow::pump() {
             Uint16 mods = e.key.keysym.mod;
             if (sym == SDLK_ESCAPE) {
                 ev.quit = true;
-            } else if (sym >= SDLK_1 && sym <= SDLK_9 &&
-                       !(mods & (KMOD_SHIFT | KMOD_CTRL | KMOD_ALT))) {
-                // Solar-sensor debug level. The number row deliberately, since
-                // F1..F9 are already the save-state slots.
-                ev.solar_step = static_cast<int>(sym - SDLK_1) + 1;
-            } else if (sym == SDLK_0 &&
-                       !(mods & (KMOD_SHIFT | KMOD_CTRL | KMOD_ALT))) {
-                // 0 releases the override rather than meaning "level 0" —
-                // level 0 is already reachable as key 1 (brightness 0).
-                ev.solar_step = -1;
             } else if (sym >= SDLK_F1 && sym <= SDLK_F9) {
                 int slot = static_cast<int>(sym - SDLK_F1) + 1;
                 if (mods & KMOD_SHIFT) ev.save_slot = slot;
@@ -1580,6 +1573,9 @@ HostWindow::Events HostWindow::pump() {
                         case HK_VOLUME_UP:      ev.volume_up = true;         break;
                         case HK_VOLUME_DOWN:    ev.volume_down = true;       break;
                         case HK_DISPLAY_PERF:   ev.toggle_fps = true;        break;
+                        case HK_SOLAR_BRIGHTER: ev.solar_brighter = true;    break;
+                        case HK_SOLAR_DIMMER:   ev.solar_dimmer = true;      break;
+                        case HK_SOLAR_LIVE:     ev.solar_live = true;        break;
                     }
                 }
             }
