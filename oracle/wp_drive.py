@@ -18,11 +18,14 @@ Usage:
 """
 from __future__ import annotations
 import argparse, json, os, pathlib, socket, subprocess, sys, time
+import sys as _sys, pathlib as _pl
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
+from recomp_paths import exe_name
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROJ = ROOT.parent / "MinishCapRecomp"
 RECOMP_EXE = pathlib.Path(os.environ.get(
-    "GBARECOMP_RECOMP_EXE", PROJ / "build" / "MinishCapRecomp.exe"))
+    "GBARECOMP_RECOMP_EXE", PROJ / "build" / exe_name("MinishCapRecomp")))
 START_KEYINPUT = 0x3F7
 NONE_KEYINPUT = 0x3FF
 

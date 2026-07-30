@@ -111,6 +111,12 @@ public:
         // dispatch boundary), never mid-frame.
         int      save_slot = 0;
         int      load_slot = 0;
+        // Optional, edge-triggered solar controls from config.ini [KeyMap].
+        // They have no built-in bindings; recomp-ui exposes them only for
+        // cartridges that declare a solar sensor.
+        bool     solar_brighter = false;
+        bool     solar_dimmer = false;
+        bool     solar_live = false;
         // Level-triggered: true while the fast-forward (Turbo) binding is
         // held (default Tab). Uncaps the frame limiter for as long as it's
         // down.

@@ -57,6 +57,7 @@
 #include <condition_variable>
 #include <functional>
 #include <cstdint>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -92,6 +93,31 @@ void runtime_set_frame_present_hook(std::function<bool()>);
 #ifndef GBARECOMP_DEFAULT_DEBUG_PORT
 #define GBARECOMP_DEFAULT_DEBUG_PORT 0
 #endif
+
+namespace {
+// Host light level for the solar sensor, read once per ADC conversion.
+// 0 = darkest, 255 = full sun; gba_solar.h owns the inversion to the
+// comparator threshold so the polarity lives in exactly one place.
+//
+// Two sources, in precedence order:
+//   1. the optional solar hotkeys, while a manual override is set;
+//   2. RunOptions::solar_provider, the game's own light source.
+// With neither, the sensor reads dark — the behaviour before this seam.
+constexpr int kSolarNoOverride = -1;
+constexpr unsigned kSolarSteps[9] = {
+    0, 8, 16, 24, 31, 63, 95, 127, 159,
+};
+std::atomic<int> g_solar_override_step{kSolarNoOverride};
+std::uint8_t (*g_solar_game_provider)() = nullptr;
+
+uint8_t solar_host_brightness() {
+    const int step = g_solar_override_step.load(std::memory_order_relaxed);
+    if (step != kSolarNoOverride)
+        return static_cast<uint8_t>(kSolarSteps[step]);
+    if (g_solar_game_provider) return g_solar_game_provider();
+    return 0;
+}
+}  // namespace
 
 namespace gbarecomp {
 namespace {
@@ -1420,7 +1446,21 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 static_cast<unsigned>(ppu.view_extra_right()));
         }
     }
+    // Boktai's solar sensor: opt-in per game (no ROM signature exists for it).
+    // Light arrives either from optional, unbound hotkeys or from the game's
+    // own RunOptions::solar_provider; the engine itself does no light I/O.
+    {
+        const char* se = std::getenv("GBARECOMP_SOLAR");
+        bus.set_solar_enabled(opts.has_solar_sensor ||
+                              (se && se[0] && se[0] != '0'));
+    }
     bus.set_rom(rom.data(), rom.size());
+    g_solar_override_step.store(kSolarNoOverride, std::memory_order_relaxed);
+    g_solar_game_provider = nullptr;
+    if (bus.solar().active()) {
+        g_solar_game_provider = opts.solar_provider;
+        bus.solar().set_provider(&solar_host_brightness);
+    }
 
     // Resolve the save chip once, with explicit and testable precedence:
     // ROM signature -> game config -> process environment. Keep type and
@@ -2499,6 +2539,35 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             input_record_last_value = ev.keyinput;
         }
         if (ev.quit) host_quit = true;
+        if (bus.solar().active() && ev.solar_live) {
+            // Release the manual override; the game's light source resumes.
+            g_solar_override_step.store(kSolarNoOverride,
+                                        std::memory_order_relaxed);
+            std::printf("solar_override=off (%s)\n",
+                        g_solar_game_provider ? "game provider resumes"
+                                              : "no provider, sensor dark");
+            std::fflush(stdout);
+        } else if (bus.solar().active() &&
+                   ev.solar_brighter != ev.solar_dimmer) {
+            // Step -> brightness, shaped from measured in-game gauge response
+            // rather than spread evenly over 0..255. An even spread wastes half
+            // the range: Boktai's gauge saturates at brightness ~159. It is also
+            // very steep at the bottom — 0 gives an empty gauge but 31 already
+            // gives 4 of 8 bars — so the low end gets finer steps.
+            //
+            // Observed (linear map, 8 gauge bars): 0->0, 31->4, 63->5, 95->6,
+            // 127->7, 159->full, and 191/223/255 indistinguishable from 159.
+            int step = g_solar_override_step.load(std::memory_order_relaxed);
+            if (ev.solar_brighter)
+                step = step == kSolarNoOverride ? 0 : std::min(step + 1, 8);
+            else
+                step = step == kSolarNoOverride ? 8 : std::max(step - 1, 0);
+            g_solar_override_step.store(step, std::memory_order_relaxed);
+            std::printf("solar_level=%d/9 brightness=%u (override; "
+                        "SolarLive releases)\n",
+                        step + 1, kSolarSteps[step]);
+            std::fflush(stdout);
+        }
         if (pacer) pacer->set_uncapped(ev.fast_forward);
         // System hotkeys (config.ini [KeyMap], rebindable in the launcher).
         if (ev.toggle_fullscreen) {

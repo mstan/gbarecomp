@@ -23,6 +23,17 @@ import os
 import pathlib
 
 
+def exe_name(stem: str) -> str:
+    """Executable filename for the host platform.
+
+    The oracle scripts were written on Windows and hardcoded a `.exe` suffix, so
+    none of them could find bios_smoke / gbarecomp_oracle / the game binary on
+    macOS or Linux — where CMake emits no suffix. Route every executable name
+    through here instead.
+    """
+    return stem + (".exe" if os.name == "nt" else "")
+
+
 def game_dir(root: pathlib.Path) -> pathlib.Path:
     env = os.environ.get("GBARECOMP_GAME_DIR")
     if env:
@@ -37,4 +48,4 @@ def recomp_exe(root: pathlib.Path) -> pathlib.Path:
     env = os.environ.get("GBARECOMP_RECOMP_EXE")
     if env:
         return pathlib.Path(env)
-    return game_dir(root) / "build" / "MinishCapRecomp.exe"
+    return game_dir(root) / "build" / exe_name("MinishCapRecomp")

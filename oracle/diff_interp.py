@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import sys as _sys, pathlib as _pl
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
+from recomp_paths import exe_name
 import socket
 import subprocess
 import sys
@@ -29,7 +32,7 @@ from diff_m4a import (JsonClient, spawn, coalesce_diffs,  # noqa: E402
                       NATIVE_EXE, BIOS_PATH, ROM_PATH, PROJ, ROOT)
 from diff_intro import held_this_frame, START_KEYINPUT, NONE_KEYINPUT  # noqa: E402
 
-BIOS_SMOKE = ROOT / "build" / "bios_smoke.exe"
+BIOS_SMOKE = ROOT / "build" / exe_name("bios_smoke")
 
 
 def main() -> int:

@@ -22,6 +22,7 @@
 #include "gba_memory.h"
 #include "gba_gpio.h"
 #include "gba_gyro.h"
+#include "gba_solar.h"
 #include "gba_rtc.h"
 #include "gba_save.h"
 
@@ -115,6 +116,11 @@ public:
         gpio_.attach(&rtc_);   // idempotent; further devices attach here
         gyro_.configure(rom_bytes, rom_size);
         gpio_.attach(&gyro_);
+        // Boktai's solar sensor shares those same four pins with the clock,
+        // arbitrating on pin 2 (the RTC's chip select). It has no ROM
+        // signature to detect, so it is an explicit per-game opt-in.
+        solar_.configure(solar_enabled_);
+        gpio_.attach(&solar_);
         // Arm the MP2K audio shadow mixer (QoL; off unless the ROM links
         // MP2K and it's requested via [audio].shadow / GBARECOMP_AUDIO_SHADOW).
         // The region pointers back its side-effect-free MemView.
@@ -148,6 +154,10 @@ public:
 
     GbaGyro&       gyro()       { return gyro_; }
     const GbaGyro& gyro() const { return gyro_; }
+    GbaSolarSensor&       solar()       { return solar_; }
+    const GbaSolarSensor& solar() const { return solar_; }
+    // Must be set before set_rom(); the sensor is opt-in per game.
+    void set_solar_enabled(bool on) { solar_enabled_ = on; }
 
 
     // Region accessors — useful for tests, debug snapshots, and the
@@ -250,8 +260,10 @@ private:
     GbaAudio    audio_;
     GbaSave     save_;
     GbaRtc      rtc_;
-    GbaGyro     gyro_;
-    GpioPort    gpio_;
+    GbaGyro        gyro_;
+    GpioPort       gpio_;
+    GbaSolarSensor solar_;
+    bool           solar_enabled_ = false;
 
     uint32_t    last_fetched_   = 0;
     std::size_t unmapped_count_ = 0;

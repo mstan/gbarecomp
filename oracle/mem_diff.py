@@ -15,13 +15,16 @@ Drives the diff_intro START pulse to --frame on both, reads IWRAM (32K) and, wit
 """
 from __future__ import annotations
 import argparse, json, os, pathlib, socket, subprocess, sys, time
+import sys as _sys, pathlib as _pl
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
+from recomp_paths import exe_name
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PROJ = ROOT.parent / "MinishCapRecomp"
 RECOMP_EXE = pathlib.Path(os.environ.get(
-    "GBARECOMP_RECOMP_EXE", PROJ / "build" / "MinishCapRecomp.exe"))
+    "GBARECOMP_RECOMP_EXE", PROJ / "build" / exe_name("MinishCapRecomp")))
 INTERP_EXE = pathlib.Path(os.environ.get(
-    "GBARECOMP_INTERP_EXE", ROOT / "build" / "bios_smoke.exe"))
+    "GBARECOMP_INTERP_EXE", ROOT / "build" / exe_name("bios_smoke")))
 BIOS = ROOT / "bios" / "gba_bios.bin"
 ROM = PROJ / "roms" / "minishcap_usa.gba"
 START_KEYINPUT = 0x3F7
