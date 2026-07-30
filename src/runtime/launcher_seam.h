@@ -37,6 +37,7 @@
 #if defined(RECOMP_LAUNCHER)
 
 #include "runtime.h"
+#include "../gba/gba_bios.h"
 #if defined(GBARECOMP_ENABLE_MODS)
 #include "mod_runtime.h"
 #endif
@@ -57,6 +58,31 @@
 #include <vector>
 
 namespace gbarecomp_seam {
+
+inline int verify_retail_gba_bios(const char* path,
+                                  RecompLauncherCBiosVerify* out) {
+    if (!out) return 0;
+    std::memset(out, 0, sizeof(*out));
+    if (!path || !*path) {
+        std::snprintf(out->detail, sizeof(out->detail),
+                      "Retail Game Boy Advance BIOS required (16 KB).");
+        return 1;
+    }
+
+    gba::GbaBios bios;
+    std::string error;
+    if (!bios.load_from_file(path, gba::GbaBios::kExpectedSha1, &error)) {
+        std::snprintf(out->detail, sizeof(out->detail), "%s",
+                      error.empty() ? "Invalid Game Boy Advance BIOS."
+                                    : error.c_str());
+        return 1;
+    }
+
+    out->ok = 1;
+    std::snprintf(out->detail, sizeof(out->detail),
+                  "Retail Game Boy Advance BIOS verified (16 KB).");
+    return 1;
+}
 
 template <typename T, typename = void>
 struct has_gyro_sensitivity : std::false_type {};
@@ -422,13 +448,33 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         state_path(opts.launcher_bios_cache_filename, "bios.cfg");
     std::string seed_rom  = read_single_line(rom_cfg);
     std::string seed_bios = read_single_line(bios_cfg);
+    auto normalize_cached_path =
+        [](const std::string& value, const std::string& cache_path) {
+            if (value.empty()) return std::string{};
+            std::filesystem::path path(value);
+            if (path.is_relative())
+                path = std::filesystem::path(cache_path).parent_path() / path;
+            std::error_code ec;
+            if (!std::filesystem::exists(path, ec) || ec) return std::string{};
+            const std::filesystem::path absolute =
+                std::filesystem::weakly_canonical(path, ec);
+            return (ec ? path.lexically_normal() : absolute).string();
+        };
+    seed_rom = normalize_cached_path(seed_rom, rom_cfg);
+    seed_bios = normalize_cached_path(seed_bios, bios_cfg);
     if ((seed_rom.empty() || seed_bios.empty()) &&
         opts.launcher_game_config && opts.launcher_game_config[0]) {
-        // game.toml path is relative to the exe/CWD; try both.
+        // Packaged builds put game.toml beside the executable. Development
+        // builds commonly keep it one directory above build/.
         std::string toml = opts.launcher_game_config;
         if (!std::filesystem::exists(toml)) {
             std::string alt = dir + "/" + toml;
-            if (std::filesystem::exists(alt)) toml = alt;
+            if (std::filesystem::exists(alt)) {
+                toml = alt;
+            } else {
+                alt = (std::filesystem::path(dir).parent_path() / toml).string();
+                if (std::filesystem::exists(alt)) toml = alt;
+            }
         }
         if (std::filesystem::exists(toml)) {
             auto config_relative_path =
@@ -488,6 +534,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     gi.config_path = config_path.c_str();
     gi.keybinds_path = keybinds_path.c_str();
     gi.boxart_path = opts.launcher_boxart;   // NULL => default assets/img/boxart.tga
+    gi.bios_verify = &gbarecomp_seam::verify_retail_gba_bios;
     gbarecomp_seam::set_has_gyro_controls(gi, opts.launcher_expose_gyro);
 #if defined(GBARECOMP_ENABLE_MODS)
     gi.mods = mod_provider;
