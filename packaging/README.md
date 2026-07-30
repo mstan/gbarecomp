@@ -7,7 +7,8 @@ rather than copying scripts around.
 | Platform | Script | Status |
 |---|---|---|
 | macOS | `package_macos.sh` | verified booting a real ROM |
-| Steam Deck / Flatpak | `flatpak/build_flatpak.sh` | manifest generation verified; **the flatpak build itself is untested** |
+| Steam Deck / Flatpak | `flatpak/build_flatpak.sh` | **verified on a real Deck**: builds, installs, launches |
+| Linux (ordinary distros) | `package_linux.sh` | **untested** — the counterpart to the macOS script |
 | Windows | see a game's `tools/package_release.ps1` | pre-existing, unchanged |
 
 ## macOS
@@ -40,6 +41,22 @@ Two things this handles that a naive script does not:
 `GBARECOMP_STATIC_RELEASE` is deliberately unused here: it pins
 `C:/msys64/mingw64/lib/libSDL2.a` and links Windows system libs, so it is
 MSYS2-only, and macOS has no static libSystem either.
+
+## Linux
+
+```bash
+gbarecomp/packaging/package_linux.sh --target BoktaiRecomp --name Boktai \
+    -DGBAGAME_RECOMP_UI=ON
+```
+
+Same shape as the macOS script, with an `$ORIGIN` rpath instead of
+`@executable_path`. It deliberately does **not** bundle everything `ldd` reports:
+glibc, libstdc++, the loader and the graphics stack stay on the host, or the binary
+breaks on any machine with a different driver or glibc — bundling libGL in
+particular kills hardware acceleration.
+
+For a Steam Deck prefer the Flatpak below; SteamOS has an immutable root, so a
+package bringing its own runtime beats a tarball that depends on the host.
 
 ## Steam Deck
 
