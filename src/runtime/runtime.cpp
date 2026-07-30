@@ -262,6 +262,7 @@ int runtime_ui_action(void* opaque, const RecompRuntimeUiItem* item) {
     return 0;
 }
 
+#if defined(RECOMP_RUNTIME_UI_HAS_TEXT)
 int runtime_ui_get_text(void* opaque, const RecompRuntimeUiItem* item,
                         char* buf, std::size_t buf_size) {
     auto* c = static_cast<RuntimeUiContext*>(opaque);
@@ -279,6 +280,7 @@ int runtime_ui_set_text(void* opaque, const RecompRuntimeUiItem* item,
         return c->opts->ui_set_text(item->key, value);
     return 0;
 }
+#endif
 
 int runtime_ui_enabled(void* opaque, const RecompRuntimeUiItem* item) {
     auto* c = static_cast<RuntimeUiContext*>(opaque);
@@ -2284,8 +2286,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         runtime_ui_config.menu.callbacks.set_value = runtime_ui_set;
         runtime_ui_config.menu.callbacks.run_action = runtime_ui_action;
         runtime_ui_config.menu.callbacks.is_enabled = runtime_ui_enabled;
+#if defined(RECOMP_RUNTIME_UI_HAS_TEXT)
         runtime_ui_config.menu.callbacks.get_text = runtime_ui_get_text;
         runtime_ui_config.menu.callbacks.set_text = runtime_ui_set_text;
+#endif
         runtime_ui_config.features =
             RECOMP_RUNTIME_UI_STANDARD_LINEAR_FILTER |
             RECOMP_RUNTIME_UI_STANDARD_AUDIO |
