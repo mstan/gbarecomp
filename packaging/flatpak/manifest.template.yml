@@ -46,7 +46,7 @@ modules:
     sources:
       - type: archive
         url: https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-2.30.9.tar.gz
-        sha256: 24b574f71c87a763f50704bbb630cbe38298d544a1f890f099a4696b1d6beac4
+        sha256: 24b574f71c87a763f50704bbb630cbe38298d544a1f890f099a4696b1d6beba4
     cleanup:
       - /bin/sdl2-config
       - /include
@@ -64,6 +64,22 @@ modules:
       # the user's own ROM and is not in any git remote.
       - type: dir
         path: '@SOURCE_DIR@'
+      # gba_recompile is built unconditionally and needs toml++, which the
+      # engine's CMakeLists resolves with FetchContent. A flatpak build has no
+      # network during the build phase, so that clone fails:
+      #
+      #   fatal: unable to access 'https://github.com/marzer/tomlplusplus.git/'
+      #   Could not resolve host: github.com
+      #
+      # Declaring it as a source instead fetches it during the download phase,
+      # where network IS allowed. CMake skips FetchContent entirely when
+      # third_party/tomlpp/toml.hpp already exists, so dropping the single
+      # header there is all that is needed. Pinned to the same commit the engine
+      # pins, so there is no version drift.
+      - type: file
+        url: https://raw.githubusercontent.com/marzer/tomlplusplus/30172438cee64926dc41fdd9c11fb3ba5b2ba9de/toml.hpp
+        sha256: 6b5172ad4dd6519aec67b919181fa7a38a2234131e5b2afa232dfe444819783e
+        dest: gbarecomp/third_party/tomlpp
     post-install:
       - install -Dm755 '@TARGET@' '/app/bin/@TARGET@'
       # recomp-ui resolves its launcher assets relative to the executable.

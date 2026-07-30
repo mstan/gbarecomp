@@ -128,22 +128,30 @@ if [ "$GENERATE_ONLY" = 1 ]; then
     exit 0
 fi
 
-command -v flatpak-builder >/dev/null 2>&1 || {
+# Resolve a builder. On SteamOS there is no native flatpak-builder and none can
+# be installed — the root filesystem is immutable — so the flatpak-packaged
+# org.flatpak.Builder is the only option there, and is what the Deck actually
+# has. Prefer a native binary when one exists (ordinary distros).
+if command -v flatpak-builder >/dev/null 2>&1; then
+    BUILDER=(flatpak-builder)
+elif flatpak info org.flatpak.Builder >/dev/null 2>&1; then
+    # --filesystem=host so the sandboxed builder can read the source tree and
+    # write the output dir; without it every `type: dir` source fails to resolve.
+    BUILDER=(flatpak run --filesystem=host --share=network org.flatpak.Builder)
+    echo "==> using flatpak-packaged org.flatpak.Builder"
+else
     cat >&2 <<'MSG'
 
-flatpak-builder not found. On a Steam Deck, in Desktop Mode:
+No flatpak-builder available. On a Steam Deck, in Desktop Mode:
 
-    flatpak install -y flathub org.flatpak.Builder
-    flatpak install -y flathub org.freedesktop.Platform//23.08 \
-                              org.freedesktop.Sdk//23.08
+    flatpak install -y --user flathub org.flatpak.Builder
+    flatpak install -y --user flathub org.freedesktop.Platform/x86_64/23.08 \
+                                      org.freedesktop.Sdk/x86_64/23.08
 
-then re-run, or build with:
-
-    flatpak run org.flatpak.Builder --force-clean --install --user \
-        flatpak-build/build flatpak-build/<app-id>.yml
+then re-run this script.
 MSG
     exit 1
-}
+fi
 
 # The recompiled sources are what make this buildable at all; fail early and
 # clearly rather than deep inside the sandbox.
@@ -157,8 +165,8 @@ fi
 ARGS=(--force-clean --user)
 [ "$INSTALL" = 1 ] && ARGS+=(--install)
 
-echo "==> flatpak-builder"
-flatpak-builder "${ARGS[@]}" "$OUT/build" "$OUT/$APP_ID.yml"
+echo "==> ${BUILDER[*]}"
+"${BUILDER[@]}" "${ARGS[@]}" "$OUT/build" "$OUT/$APP_ID.yml"
 
 echo
 echo "Done. Launch with:  flatpak run $APP_ID"
