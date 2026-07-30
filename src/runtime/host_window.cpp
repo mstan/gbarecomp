@@ -787,6 +787,18 @@ bool runtime_ui_event(RecompRuntimeUi* ui, const SDL_Event& e) {
         recomp_runtime_ui_open(ui);
         return true;
     }
+    // A focused text field owns the keyboard. ImGui already saw this event
+    // (ImGui_ImplSDL2_ProcessEvent runs first in pump()), so the field is
+    // receiving the keystrokes; mapping them to navigation as well would move
+    // the selection out from under the caret and letters would double as menu
+    // input. Still swallow them so the guest never sees the player typing.
+    //
+    // Guarded because TEXT items post-date some recomp-ui pins: calling this
+    // unconditionally would fail to link against an older submodule, which is
+    // the same trap the gyro fields already avoid in launcher_seam.h.
+#if defined(RECOMP_RUNTIME_UI_HAS_TEXT)
+    if (recomp_runtime_ui_wants_text_input(ui)) return true;
+#endif
     if (e.type != SDL_KEYDOWN && e.type != SDL_KEYUP &&
         e.type != SDL_CONTROLLERBUTTONDOWN && e.type != SDL_CONTROLLERBUTTONUP)
         return false;
