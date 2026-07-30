@@ -87,6 +87,10 @@ int test_margin_tilemap(int bg, int, int, uint16_t* out_entry) {
     return g_margin_provider_action;
 }
 
+int test_affine_filter(int bg, int) {
+    return bg == 2;
+}
+
 int g_bg_x_provider_calls = 0;
 
 int test_bg_x_provider(int bg, int output_x, int, int* out_hw_x) {
@@ -854,6 +858,49 @@ void test_affine_reference_reload_overrides_scanline_accumulation() {
                  "affine internal reference accumulation");
 }
 
+void test_wide_affine_filter_is_selective_and_bilinear() {
+    Fixture f;
+    disable_all_objects(f);
+
+    // Mode 1 BG2, 128x128 affine map at block 0, 256-color tile data at
+    // character block 1. Sample halfway between a red and green texel.
+    const uint16_t dispcnt = 0x0401;
+    store16(&f.io[0x0C], 0x0084);
+    f.vram[0] = 0;
+    f.vram[0x4000] = 1;
+    f.vram[0x4001] = 2;
+    f.vram[0x4008] = 1;
+    f.vram[0x4009] = 2;
+    store16(&f.pal[2], 0x001F);
+    store16(&f.pal[4], 0x03E0);
+    set_bg2_identity(f);
+    store32(&f.io[0x28], 0x80);
+
+    constexpr uint32_t margin = 24;
+    f.ppu.set_view_margins(margin, margin, 0, 0);
+    std::vector<uint8_t> wide(gba::GbaPpu::kMaxFramebufferBytes, 0);
+
+    gba::g_ws_affine_filter_enabled = 0;
+    gba::g_ws_affine_filter_provider = test_affine_filter;
+    f.ppu.render(wide.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&wide[margin * 3], 255, 0, 0,
+                 "wide affine nearest baseline");
+
+    gba::g_ws_affine_filter_enabled = 1;
+    f.ppu.render(wide.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&wide[margin * 3], 132, 132, 0,
+                 "wide affine bilinear sample");
+
+    gba::g_ws_affine_filter_provider = nullptr;
+    f.ppu.render(wide.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&wide[margin * 3], 255, 0, 0,
+                 "wide affine provider opt-in");
+    gba::g_ws_affine_filter_enabled = 0;
+}
+
 // The latched frame is a VBlank snapshot: scanlines of the NEXT frame being
 // composited must never show through latched_framebuffer(). (Regression test
 // for the Minish Cap walk "warble": render_scanline used to write directly
@@ -926,6 +973,7 @@ int main() {
     test_bitmap_mode_obj_compositing_and_obj_window();
     test_bitmap_mode_wide_center_and_margins();
     test_affine_reference_reload_overrides_scanline_accumulation();
+    test_wide_affine_filter_is_selective_and_bilinear();
     test_latched_frame_immune_to_in_progress_scanlines();
     std::puts("ppu_smoke_tests: PASS");
     return 0;

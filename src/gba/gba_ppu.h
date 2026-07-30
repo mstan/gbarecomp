@@ -220,6 +220,11 @@ extern "C" int (*g_ws_bg_x_provider)(int bg, int output_x, int screen_y,
 // Bitmask of regular BG layers that may use g_ws_bg_x_provider. Defaults to
 // all layers; game adapters can narrow it to avoid per-pixel callback traffic.
 extern "C" unsigned g_ws_bg_x_provider_layers;
+// Optional enhancement for affine backgrounds in expanded rendering. The
+// global switch is presentation configuration; the provider lets a game
+// authorize only known-safe layers and scenes.
+extern "C" int g_ws_affine_filter_enabled;
+extern "C" int (*g_ws_affine_filter_provider)(int bg, int screen_y);
 // Per-game policy for self-sufficient authored margin providers. Off keeps the
 // established fail-closed window/savestate behavior. On lets provider-sourced
 // regular BG margins continue independently beside native HUD/dialog windows.

@@ -274,6 +274,10 @@ struct Backend {
     SDL_Window*   window   = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_Texture*  texture  = nullptr;
+    SDL_Texture*  sharp_texture = nullptr;
+    int           sharp_texture_w = 0;
+    int           sharp_texture_h = 0;
+    bool          sharp_target_failed = false;
     SDL_AudioDeviceID audio_dev = 0;
     SDL_GameController* controller = nullptr;
     SDL_JoystickID      controller_id = -1;
@@ -321,6 +325,7 @@ struct Backend {
     bool expanded_view = false;  // native games retain the historical SDL path
     bool resize_driven_view = false;
     bool linear_filter = false;
+    bool sharp_filter = false;
 
     // ---- rebindable input (see HostWindow::load_input_config) --------------
     // GBA KEYINPUT bit (0..9) per bound SDL scancode; seeded from the
@@ -339,6 +344,64 @@ struct Backend {
     // MC-WS-002: always-on per-present timing/scanout ring (see above).
     PresentCadence cadence;
 };
+
+void destroy_sharp_texture(Backend* b) {
+    if (!b) return;
+    if (b->sharp_texture) SDL_DestroyTexture(b->sharp_texture);
+    b->sharp_texture = nullptr;
+    b->sharp_texture_w = 0;
+    b->sharp_texture_h = 0;
+}
+
+bool ensure_sharp_texture(Backend* b, int factor) {
+    if (!b || !b->renderer || factor < 2) return false;
+    const int width = b->base_w * factor;
+    const int height = b->base_h * factor;
+    if (b->sharp_texture &&
+        b->sharp_texture_w == width &&
+        b->sharp_texture_h == height) {
+        return true;
+    }
+
+    SDL_RendererInfo info{};
+    if (SDL_GetRendererInfo(b->renderer, &info) == 0 &&
+        ((info.max_texture_width > 0 && width > info.max_texture_width) ||
+         (info.max_texture_height > 0 && height > info.max_texture_height))) {
+        if (!b->sharp_target_failed) {
+            std::fprintf(stderr,
+                         "host_window: sharp scaler target %dx%d exceeds "
+                         "renderer limit %dx%d; using nearest fallback\n",
+                         width, height, info.max_texture_width,
+                         info.max_texture_height);
+            b->sharp_target_failed = true;
+        }
+        destroy_sharp_texture(b);
+        return false;
+    }
+
+    destroy_sharp_texture(b);
+    b->sharp_texture = SDL_CreateTexture(
+        b->renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
+        width, height);
+    if (!b->sharp_texture) {
+        if (!b->sharp_target_failed) {
+            std::fprintf(stderr,
+                         "host_window: sharp scaler target creation failed: "
+                         "%s; using nearest fallback\n",
+                         SDL_GetError());
+            b->sharp_target_failed = true;
+        }
+        return false;
+    }
+    b->sharp_texture_w = width;
+    b->sharp_texture_h = height;
+    b->sharp_target_failed = false;
+    SDL_SetTextureBlendMode(b->sharp_texture, SDL_BLENDMODE_NONE);
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_SetTextureScaleMode(b->sharp_texture, SDL_ScaleModeLinear);
+#endif
+    return true;
+}
 
 void close_game_controller(Backend* b) {
     if (!b || !b->controller) return;
@@ -836,7 +899,7 @@ HostWindow::~HostWindow() {
 bool HostWindow::is_available() { return true; }
 
 bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
-                      const char* screen, bool linear_filter,
+                      const char* screen, bool linear_filter, bool sharp_filter,
                       bool resize_driven_view) {
     if (open_) return true;
     if (scale < 1) scale = 1;
@@ -878,7 +941,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     b->base_h = base_h;
     b->expanded_view = base_w != 240 || base_h != 160;
     b->resize_driven_view = resize_driven_view;
-    b->linear_filter = linear_filter;
+    b->linear_filter = linear_filter && !sharp_filter;
+    b->sharp_filter = sharp_filter;
     b->scale = scale;
     b->title = title ? title : "gbarecomp";
 #if defined(__ANDROID__)
@@ -962,11 +1026,14 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         SDL_RendererInfo info{};
         if (SDL_GetRendererInfo(b->renderer, &info) == 0) {
             std::fprintf(stderr,
-                         "host_window: renderer=%s flags=0x%08x vsync=%s%s\n",
+                         "host_window: renderer=%s flags=0x%08x vsync=%s%s "
+                         "scaler=%s\n",
                          info.name ? info.name : "unknown",
                          static_cast<unsigned>(info.flags),
                          (info.flags & SDL_RENDERER_PRESENTVSYNC) ? "yes" : "no",
-                         b->resize_driven_view ? " (adaptive)" : "");
+                         b->resize_driven_view ? " (adaptive)" : "",
+                         b->sharp_filter ? "sharp"
+                         : b->linear_filter ? "linear" : "nearest");
             std::fflush(stderr);
         }
         log_display_mode(b->window, "open");
@@ -996,6 +1063,11 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         delete b;
         return false;
     }
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_SetTextureScaleMode(
+        b->texture,
+        b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
 
 #if defined(GBARECOMP_RUNTIME_UI)
     if (!runtime_imgui_init(b)) {
@@ -1208,6 +1280,7 @@ void HostWindow::close() {
 #if defined(GBARECOMP_RUNTIME_UI)
     runtime_imgui_shutdown(b);
 #endif
+    destroy_sharp_texture(b);
     if (b->texture)   SDL_DestroyTexture(b->texture);
     if (b->renderer)  SDL_DestroyRenderer(b->renderer);
     if (b->window)    SDL_DestroyWindow(b->window);
@@ -1232,7 +1305,13 @@ bool HostWindow::set_surface_size(int base_w, int base_h) {
                      SDL_GetError());
         return false;
     }
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_SetTextureScaleMode(
+        replacement,
+        b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
     SDL_DestroyTexture(b->texture);
+    destroy_sharp_texture(b);
     b->texture = replacement;
     b->base_w = base_w;
     b->base_h = base_h;
@@ -1305,7 +1384,33 @@ void HostWindow::present(const uint8_t* rgb888) {
         if (layout.width > 0 && layout.height > 0) {
             const SDL_Rect destination = {
                 layout.x, layout.y, layout.width, layout.height};
-            SDL_RenderCopy(b->renderer, b->texture, nullptr, &destination);
+            bool sharp_presented = false;
+            const int sharp_factor = b->sharp_filter
+                ? compute_sharp_prescale_factor(
+                      layout, b->base_w, b->base_h)
+                : 0;
+            if (sharp_factor > 0 &&
+                ensure_sharp_texture(b, sharp_factor) &&
+                SDL_SetRenderTarget(b->renderer, b->sharp_texture) == 0) {
+                const bool prescaled =
+                    SDL_RenderCopy(
+                        b->renderer, b->texture, nullptr, nullptr) == 0;
+                const bool restored =
+                    SDL_SetRenderTarget(b->renderer, nullptr) == 0;
+                if (prescaled && restored) {
+                    sharp_presented =
+                        SDL_RenderCopy(
+                            b->renderer, b->sharp_texture, nullptr,
+                            &destination) == 0;
+                }
+            }
+            if (!sharp_presented) {
+                // Exact integer scales and unsupported render-target backends
+                // retain the crisp nearest path.
+                SDL_SetRenderTarget(b->renderer, nullptr);
+                SDL_RenderCopy(
+                    b->renderer, b->texture, nullptr, &destination);
+            }
         }
     }
     render_touch_controls(b);
@@ -1432,6 +1537,10 @@ int HostWindow::window_scale() const {
 void HostWindow::set_linear_filter(bool enabled) {
     if (!open_ || !impl_) return;
     auto* b = static_cast<Backend*>(impl_);
+    if (enabled && b->sharp_filter) {
+        b->sharp_filter = false;
+        destroy_sharp_texture(b);
+    }
     b->linear_filter = enabled;
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     SDL_SetTextureScaleMode(b->texture,
@@ -1691,7 +1800,8 @@ bool HostWindow::is_available() { return false; }
 
 bool HostWindow::open(int /*scale*/, int /*base_w*/, int /*base_h*/,
                       const char* /*title*/, const char* /*screen*/,
-                      bool /*linear_filter*/, bool /*resize_driven_view*/) {
+                      bool /*linear_filter*/, bool /*sharp_filter*/,
+                      bool /*resize_driven_view*/) {
     std::fprintf(stderr,
                  "host_window: built without SDL2; --window unavailable\n");
     return false;

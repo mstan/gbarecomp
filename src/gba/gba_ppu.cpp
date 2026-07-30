@@ -22,6 +22,8 @@ extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
 extern "C" int (*g_ws_bg_x_provider)(int bg, int output_x, int screen_y,
                                      int* out_hw_x) = nullptr;
 extern "C" unsigned g_ws_bg_x_provider_layers = 0xFu;
+extern "C" int g_ws_affine_filter_enabled = 0;
+extern "C" int (*g_ws_affine_filter_provider)(int, int) = nullptr;
 extern "C" int g_ws_authored_margin_layers = 0;
 
 // Widescreen pillarbox (Step C policy): when nonzero, the wide path renders the
@@ -1210,24 +1212,76 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                      static_cast<int32_t>(-static_cast<int>(ox)) * pa;
         int32_t yt = refy + static_cast<int32_t>(y) * pd +
                      static_cast<int32_t>(-static_cast<int>(ox)) * pc;
+        const bool filter =
+            g_ws_affine_filter_enabled &&
+            g_ws_affine_filter_provider &&
+            g_ws_affine_filter_provider(
+                static_cast<int>(layer), static_cast<int>(y));
+        auto sample_color = [&](int32_t tex_x, int32_t tex_y,
+                                uint16_t* out_color) -> bool {
+            if (wrap) {
+                tex_x &= (bg_pixels - 1);
+                tex_y &= (bg_pixels - 1);
+            } else if (tex_x < 0 || tex_x >= bg_pixels ||
+                       tex_y < 0 || tex_y >= bg_pixels) {
+                return false;
+            }
+            const uint32_t map_off =
+                screen_base + (tex_y >> 3) * bg_tiles + (tex_x >> 3);
+            if (map_off >= 96u * 1024u) return false;
+            const uint8_t tile_index = vram[map_off];
+            const uint32_t tile_addr =
+                char_base + tile_index * 64u +
+                (tex_y & 7) * 8 + (tex_x & 7);
+            if (tile_addr >= 96u * 1024u) return false;
+            const uint8_t pal_idx = vram[tile_addr];
+            if (pal_idx == 0) return false;
+            *out_color = load_u16_le(&pal[pal_idx * 2]);
+            return true;
+        };
         for (uint32_t x = 0; x < out_w; ++x) {
-            int32_t tex_x = xt >> 8;
-            int32_t tex_y = yt >> 8;
+            const int32_t sample_x = xt;
+            const int32_t sample_y = yt;
             xt += pa;
             yt += pc;
             if (!layer_enabled(x, layer)) continue;
-            if (wrap) { tex_x &= (bg_pixels - 1); tex_y &= (bg_pixels - 1); }
-            else if (tex_x < 0 || tex_x >= bg_pixels ||
-                     tex_y < 0 || tex_y >= bg_pixels) continue;
-            uint32_t map_off = screen_base + (tex_y >> 3) * bg_tiles + (tex_x >> 3);
-            if (map_off >= 96u * 1024u) continue;
-            uint8_t tile_index = vram[map_off];
-            uint32_t tile_addr = char_base + tile_index * 64u +
-                                 (tex_y & 7) * 8 + (tex_x & 7);
-            if (tile_addr >= 96u * 1024u) continue;
-            uint8_t pal_idx = vram[tile_addr];
-            if (pal_idx == 0) continue;
-            const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
+            const int32_t tex_x = sample_x >> 8;
+            const int32_t tex_y = sample_y >> 8;
+            uint16_t color = 0;
+            if (!filter) {
+                if (!sample_color(tex_x, tex_y, &color)) continue;
+            } else {
+                uint16_t c00 = 0, c10 = 0, c01 = 0, c11 = 0;
+                if (!sample_color(tex_x, tex_y, &c00)) continue;
+                if (sample_color(tex_x + 1, tex_y, &c10) &&
+                    sample_color(tex_x, tex_y + 1, &c01) &&
+                    sample_color(tex_x + 1, tex_y + 1, &c11)) {
+                    const uint32_t fx =
+                        static_cast<uint32_t>(sample_x) & 0xFFu;
+                    const uint32_t fy =
+                        static_cast<uint32_t>(sample_y) & 0xFFu;
+                    const uint32_t ix = 256u - fx;
+                    const uint32_t iy = 256u - fy;
+                    const uint32_t w00 = ix * iy;
+                    const uint32_t w10 = fx * iy;
+                    const uint32_t w01 = ix * fy;
+                    const uint32_t w11 = fx * fy;
+                    auto blend_channel = [&](unsigned shift) {
+                        const uint32_t sum =
+                            ((c00 >> shift) & 31u) * w00 +
+                            ((c10 >> shift) & 31u) * w10 +
+                            ((c01 >> shift) & 31u) * w01 +
+                            ((c11 >> shift) & 31u) * w11;
+                        return (sum + 0x8000u) >> 16;
+                    };
+                    color = static_cast<uint16_t>(
+                        blend_channel(0) |
+                        (blend_channel(5) << 5) |
+                        (blend_channel(10) << 10));
+                } else {
+                    color = c00;
+                }
+            }
             submit(x, color,
                    static_cast<int>(bg_priority * 256 + 128 + layer),
                    static_cast<uint8_t>(layer),

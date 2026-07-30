@@ -139,6 +139,8 @@ struct Args {
     int fullscreen = 0;
     int  volume = 100;            // --volume 0..100: pushed-sample gain
     bool linear_filter = false;   // --linear-filter 1: linear texture scaling
+    bool sharp_filter = false;    // --sharp-filter 1: integer prescale + linear finish
+    bool affine_filter = false;   // --affine-filter 1: game-authorized smoothing
     float gyro_sensitivity = 0.25f; // --gyro-sensitivity 0.25..4.00
     // [audio] shadow = true|false — arm the MP2K verified-enhancement shadow
     // mixer (default off). GBARECOMP_AUDIO_SHADOW overrides at launch.
@@ -597,6 +599,10 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
             if (parse_int(val.c_str(), &n) && n >= 240) args->view_width = n;
         } else if (section == "video" && key == "resize_view") {
             args->resize_view = (val == "true" || val == "1");
+        } else if (section == "video" && key == "sharp_filter") {
+            args->sharp_filter = (val == "true" || val == "1");
+        } else if (section == "video" && key == "affine_filter") {
+            args->affine_filter = (val == "true" || val == "1");
         } else if (section == "video" && key == "widescreen") {
             int n = 0;
             int width = 240;
@@ -628,7 +634,8 @@ void find_config_arg(int argc, char** argv, Args* args) {
              s == "--dump-png" || s == "--load-state" ||
              s == "--view-width" || s == "--widescreen" ||
              s == "--save" || s == "--save-path" ||
-             s == "--gyro-sensitivity") &&
+             s == "--gyro-sensitivity" || s == "--sharp-filter" ||
+             s == "--affine-filter") &&
             i + 1 < argc) {
             ++i;
             continue;
@@ -846,6 +853,28 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             args->linear_filter = lf != 0;
             continue;
         }
+        if (s == "--sharp-filter") {
+            const char* v = need_value("--sharp-filter");
+            if (!v) return false;
+            int sf = 0;
+            if (!parse_int(v, &sf) || (sf != 0 && sf != 1)) {
+                if (err) *err = "invalid --sharp-filter value (expected 0 or 1)";
+                return false;
+            }
+            args->sharp_filter = sf != 0;
+            continue;
+        }
+        if (s == "--affine-filter") {
+            const char* v = need_value("--affine-filter");
+            if (!v) return false;
+            int af = 0;
+            if (!parse_int(v, &af) || (af != 0 && af != 1)) {
+                if (err) *err = "invalid --affine-filter value (expected 0 or 1)";
+                return false;
+            }
+            args->affine_filter = af != 0;
+            continue;
+        }
         if (s == "--gyro-sensitivity") {
             const char* v = need_value("--gyro-sensitivity");
             if (!v || !parse_float(v, &args->gyro_sensitivity) ||
@@ -961,6 +990,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gba::g_ws_obj_attr_x_provider = nullptr;
     gba::g_ws_bg_x_provider = nullptr;
     gba::g_ws_bg_x_provider_layers = 0xFu;
+    gba::g_ws_affine_filter_enabled = 0;
+    gba::g_ws_affine_filter_provider = nullptr;
     gba::g_ws_authored_margin_layers = 0;
     gba::g_ws_pillarbox = 0;
     gba::g_ws_pillarbox_left = 0;
@@ -998,6 +1029,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
         return 1;
     }
+    gba::g_ws_affine_filter_enabled = args.affine_filter ? 1 : 0;
 
 #if defined(GBARECOMP_ENABLE_MODS)
     bool mods_ready = false;
@@ -2177,7 +2209,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (!win.open(args.scale, ppu.render_width(), ppu.render_height(),
                       runtime_title,
                       args.screen.empty() ? nullptr : args.screen.c_str(),
-                      args.linear_filter, resize_view_enabled)) {
+                      args.linear_filter, args.sharp_filter,
+                      resize_view_enabled)) {
             gbarecomp::overlay_loader_shutdown();
             runtime_shutdown();
             return 1;

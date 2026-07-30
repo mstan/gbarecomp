@@ -28,6 +28,20 @@ void expect_layout(int drawable_width, int drawable_height,
     }
 }
 
+void expect_sharp_factor(int drawable_width, int drawable_height,
+                         int logical_width, int logical_height,
+                         int expected, const char* label) {
+    const auto layout = gbarecomp::compute_presentation_layout(
+        drawable_width, drawable_height, logical_width, logical_height);
+    const int got = gbarecomp::compute_sharp_prescale_factor(
+        layout, logical_width, logical_height);
+    if (got != expected) {
+        std::fprintf(stderr, "%s: got sharp factor %d, expected %d\n",
+                     label, got, expected);
+        std::exit(1);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -47,6 +61,14 @@ int main() {
                   1, 5, 198, 110, 0, "widescreen exact-ratio downscale");
     expect_layout(0, 480, 240, 160,
                   0, 0, 0, 0, 0, "invalid drawable");
+    expect_sharp_factor(720, 480, 240, 160,
+                        0, "exact scale skips sharp pass");
+    expect_sharp_factor(1000, 700, 240, 160,
+                        4, "faithful fractional sharp scale");
+    expect_sharp_factor(1280, 720, 288, 160,
+                        4, "widescreen fractional sharp scale");
+    expect_sharp_factor(200, 150, 240, 160,
+                        0, "downscale skips sharp pass");
     std::puts("presentation_layout_tests: PASS");
     return 0;
 }
