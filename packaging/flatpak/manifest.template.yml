@@ -1,0 +1,79 @@
+# manifest.template.yml — Flatpak manifest for a gbarecomp game, for Steam Deck
+# and any other Flatpak host.
+#
+# build_flatpak.sh substitutes @APP_ID@ / @APP_NAME@ / @TARGET@ and writes a
+# concrete manifest next to itself. Do not edit the generated copy.
+#
+# Why Flatpak is the right Deck answer: SteamOS has an immutable root, so
+# installing build dependencies or system SDL2 is not an option. Flatpak brings
+# its own runtime, which is also why nothing here needs static linking —
+# GBARECOMP_STATIC_RELEASE is MSYS2-only and deliberately unused on this path.
+#
+# The build happens INSIDE the sandbox from the checked-out source tree, so the
+# recompiled sources must already exist (generated/ is ROM-derivative and is
+# never committed — regenerate before packaging).
+
+id: '@APP_ID@'
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+command: '@TARGET@'
+
+finish-args:
+  # Graphics + input. --device=all covers the Deck's own controller and any pad.
+  - --socket=x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --device=all
+  - --share=ipc
+  # Network is needed ONLY by games with a network-backed peripheral (Boktai's
+  # solar sensor resolves a postal code to current irradiance). Remove this line
+  # for a game that has none — the launcher and runtime work without it.
+  - --share=network
+  # The user's ROM and BIOS live outside the sandbox. Home access lets the
+  # launcher's file picker reach them; narrow it if you keep them in one place.
+  - --filesystem=home
+
+modules:
+  - name: sdl2
+    buildsystem: autotools
+    config-opts:
+      - --disable-static
+      - --disable-arts
+      - --disable-esd
+      - --disable-nas
+      - --disable-sndio
+    sources:
+      - type: archive
+        url: https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-2.30.9.tar.gz
+        sha256: 24b574f71c87a763f50704bbb630cbe38298d544a1f890f099a4696b1d6beac4
+    cleanup:
+      - /bin/sdl2-config
+      - /include
+      - /lib/cmake
+      - /lib/pkgconfig
+      - /share/aclocal
+
+  - name: '@TARGET@'
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DGBAGAME_RECOMP_UI=ON
+    sources:
+      # Built from the working tree: the recompiled C is generated locally from
+      # the user's own ROM and is not in any git remote.
+      - type: dir
+        path: '@SOURCE_DIR@'
+    post-install:
+      - install -Dm755 '@TARGET@' '/app/bin/@TARGET@'
+      # recomp-ui resolves its launcher assets relative to the executable.
+      - |
+        if [ -d assets ]; then
+          mkdir -p /app/bin/assets
+          cp -r assets/. /app/bin/assets/
+        fi
+      - install -Dm644 '@APP_ID@.desktop' '/app/share/applications/@APP_ID@.desktop'
+      - install -Dm644 '@APP_ID@.png'
+        '/app/share/icons/hicolor/256x256/apps/@APP_ID@.png'
+      - install -Dm644 '@APP_ID@.metainfo.xml'
+        '/app/share/metainfo/@APP_ID@.metainfo.xml'
