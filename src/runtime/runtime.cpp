@@ -57,6 +57,7 @@
 #include <condition_variable>
 #include <functional>
 #include <cstdint>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -92,6 +93,31 @@ void runtime_set_frame_present_hook(std::function<bool()>);
 #ifndef GBARECOMP_DEFAULT_DEBUG_PORT
 #define GBARECOMP_DEFAULT_DEBUG_PORT 0
 #endif
+
+namespace {
+// Host light level for the solar sensor, read once per ADC conversion.
+// 0 = darkest, 255 = full sun; gba_solar.h owns the inversion to the
+// comparator threshold so the polarity lives in exactly one place.
+//
+// Two sources, in precedence order:
+//   1. the optional solar hotkeys, while a manual override is set;
+//   2. RunOptions::solar_provider, the game's own light source.
+// With neither, the sensor reads dark — the behaviour before this seam.
+constexpr int kSolarNoOverride = -1;
+constexpr unsigned kSolarSteps[9] = {
+    0, 8, 16, 24, 31, 63, 95, 127, 159,
+};
+std::atomic<int> g_solar_override_step{kSolarNoOverride};
+std::uint8_t (*g_solar_game_provider)() = nullptr;
+
+uint8_t solar_host_brightness() {
+    const int step = g_solar_override_step.load(std::memory_order_relaxed);
+    if (step != kSolarNoOverride)
+        return static_cast<uint8_t>(kSolarSteps[step]);
+    if (g_solar_game_provider) return g_solar_game_provider();
+    return 0;
+}
+}  // namespace
 
 namespace gbarecomp {
 namespace {
@@ -167,12 +193,26 @@ struct Args {
 };
 
 #if defined(GBARECOMP_RUNTIME_UI)
+// Engine-owned extra item: which slot the menu's Save/Load act on. The
+// standard catalog's save_state/load_state are bare actions with no slot
+// vocabulary, and the F1..F9 bindings are exactly the hidden knowledge the
+// menu exists to replace.
+#define GBARECOMP_UI_KEY_STATE_SLOT "system.state_slot"
+#define GBARECOMP_UI_KEY_FPS        "display.fps_readout"
+
 struct RuntimeUiContext {
     HostWindow* window = nullptr;
     RecompRuntimeUi* ui = nullptr;
     float* gyro_sensitivity = nullptr;
     int view_mode = RECOMP_RUNTIME_UI_VIEW_NATIVE;
     bool view_mode_dirty = false;
+    // Menu-driven state slots, drained by the main loop alongside the
+    // equivalent hotkeys so both paths share one implementation.
+    int state_slot = 1;
+    int pending_save_slot = 0;
+    int pending_load_slot = 0;
+    // Game-supplied handlers for keys the engine does not own.
+    const RunOptions* opts = nullptr;
 };
 
 int runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int* out) {
@@ -184,11 +224,14 @@ int runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int* out) {
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER) == 0) *out = c->window->linear_filter();
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0) *out = c->window->audio_enabled();
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) *out = c->window->volume();
+    else if (std::strcmp(item->key, GBARECOMP_UI_KEY_STATE_SLOT) == 0) *out = c->state_slot;
+    else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FPS) == 0) *out = c->window->fps_readout();
 #if defined(RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY)
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY) == 0 &&
              c->gyro_sensitivity)
         *out = static_cast<int>(std::lround(*c->gyro_sensitivity * 100.0f));
 #endif
+    else if (c->opts && c->opts->ui_get) return c->opts->ui_get(item->key, out);
     else return 0;
     return 1;
 }
@@ -208,29 +251,71 @@ int runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int value) {
         c->window->set_audio_enabled(value != 0);
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0)
         c->window->set_volume(value);
+    else if (std::strcmp(item->key, GBARECOMP_UI_KEY_STATE_SLOT) == 0)
+        c->state_slot = (value < 1) ? 1 : (value > 9 ? 9 : value);
+    else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FPS) == 0)
+        c->window->set_fps_readout(value != 0);
 #if defined(RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY)
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY) == 0 &&
              c->gyro_sensitivity)
         *c->gyro_sensitivity =
             std::clamp(static_cast<float>(value) / 100.0f, 0.25f, 4.0f);
 #endif
+    else if (c->opts && c->opts->ui_set) return c->opts->ui_set(item->key, value);
     else return 0;
     return 1;
 }
 
 int runtime_ui_action(void* opaque, const RecompRuntimeUiItem* item) {
     auto* c = static_cast<RuntimeUiContext*>(opaque);
-    if (c && item && std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_RESUME) == 0) {
+    if (!c || !item) return 0;
+    if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_RESUME) == 0) {
         recomp_runtime_ui_close(c->ui);
         return 1;
     }
+    // Record the request and close: the actual save/load runs on the main loop
+    // at the same clean dispatch boundary the hotkeys use, never from inside a
+    // menu callback mid-frame.
+    if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_SAVE_STATE) == 0) {
+        c->pending_save_slot = c->state_slot;
+        recomp_runtime_ui_close(c->ui);
+        return 1;
+    }
+    if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LOAD_STATE) == 0) {
+        c->pending_load_slot = c->state_slot;
+        recomp_runtime_ui_close(c->ui);
+        return 1;
+    }
+    if (c->opts && c->opts->ui_action) return c->opts->ui_action(item->key);
     return 0;
 }
 
+#if defined(RECOMP_RUNTIME_UI_HAS_TEXT)
+int runtime_ui_get_text(void* opaque, const RecompRuntimeUiItem* item,
+                        char* buf, std::size_t buf_size) {
+    auto* c = static_cast<RuntimeUiContext*>(opaque);
+    if (!c || !item || !buf || buf_size == 0) return 0;
+    if (c->opts && c->opts->ui_get_text)
+        return c->opts->ui_get_text(item->key, buf, buf_size);
+    return 0;
+}
+
+int runtime_ui_set_text(void* opaque, const RecompRuntimeUiItem* item,
+                        const char* value) {
+    auto* c = static_cast<RuntimeUiContext*>(opaque);
+    if (!c || !item || !value) return 0;
+    if (c->opts && c->opts->ui_set_text)
+        return c->opts->ui_set_text(item->key, value);
+    return 0;
+}
+#endif
+
 int runtime_ui_enabled(void* opaque, const RecompRuntimeUiItem* item) {
     auto* c = static_cast<RuntimeUiContext*>(opaque);
-    if (c && item && std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE) == 0)
+    if (!c || !item) return 1;
+    if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE) == 0)
         return c->window->fullscreen() == 0;
+    if (c->opts && c->opts->ui_enabled) return c->opts->ui_enabled(item->key);
     return 1;
 }
 #endif
@@ -1286,10 +1371,15 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         opts.max_resize_view_width > 240 && args.window;
 #if defined(GBARECOMP_RUNTIME_UI)
     RuntimeUiContext runtime_ui_context;
+    runtime_ui_context.opts = &opts;
     runtime_ui_context.view_mode = resize_view_enabled
         ? RECOMP_RUNTIME_UI_VIEW_ADAPTIVE
         : args.view_width > 240 ? RECOMP_RUNTIME_UI_VIEW_FIXED_16_9
                                 : RECOMP_RUNTIME_UI_VIEW_NATIVE;
+    // Engine extras followed by the game's own. recomp-ui keeps a pointer to
+    // this array, so it must outlive the menu — hence function scope here
+    // rather than inside the construction block below.
+    std::vector<RecompRuntimeUiItem> runtime_ui_extras;
 #endif
     if (args.resize_view && !args.quiet) {
         std::fprintf(stderr,
@@ -1388,7 +1478,21 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 static_cast<unsigned>(ppu.view_extra_right()));
         }
     }
+    // Boktai's solar sensor: opt-in per game (no ROM signature exists for it).
+    // Light arrives either from optional, unbound hotkeys or from the game's
+    // own RunOptions::solar_provider; the engine itself does no light I/O.
+    {
+        const char* se = std::getenv("GBARECOMP_SOLAR");
+        bus.set_solar_enabled(opts.has_solar_sensor ||
+                              (se && se[0] && se[0] != '0'));
+    }
     bus.set_rom(rom.data(), rom.size());
+    g_solar_override_step.store(kSolarNoOverride, std::memory_order_relaxed);
+    g_solar_game_provider = nullptr;
+    if (bus.solar().active()) {
+        g_solar_game_provider = opts.solar_provider;
+        bus.solar().set_provider(&solar_host_brightness);
+    }
 
     // Resolve the save chip once, with explicit and testable precedence:
     // ROM signature -> game config -> process environment. Keep type and
@@ -2255,21 +2359,25 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         runtime_ui_config.menu.callbacks.set_value = runtime_ui_set;
         runtime_ui_config.menu.callbacks.run_action = runtime_ui_action;
         runtime_ui_config.menu.callbacks.is_enabled = runtime_ui_enabled;
+#if defined(RECOMP_RUNTIME_UI_HAS_TEXT)
+        runtime_ui_config.menu.callbacks.get_text = runtime_ui_get_text;
+        runtime_ui_config.menu.callbacks.set_text = runtime_ui_set_text;
+#endif
         runtime_ui_config.features =
             RECOMP_RUNTIME_UI_STANDARD_LINEAR_FILTER |
             RECOMP_RUNTIME_UI_STANDARD_AUDIO |
             RECOMP_RUNTIME_UI_STANDARD_VOLUME |
+            RECOMP_RUNTIME_UI_STANDARD_SAVE_STATE |
+            RECOMP_RUNTIME_UI_STANDARD_LOAD_STATE |
             RECOMP_RUNTIME_UI_STANDARD_RESUME;
+        // INTEGER_SCALE is deliberately absent: HostWindow::adjust_scale only
+        // ever produces integer scales (clamped 1..8), so there is no
+        // fractional mode for a toggle to switch off. Offering one would
+        // advertise a choice the presentation path cannot make.
 #if !defined(__ANDROID__)
         runtime_ui_config.features |=
             RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |
             RECOMP_RUNTIME_UI_STANDARD_WINDOW_SCALE;
-#endif
-#if defined(RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY)
-        if (opts.launcher_expose_gyro) {
-            runtime_ui_config.extra_items = &gyro_item;
-            runtime_ui_config.extra_item_count = 1;
-        }
 #endif
         runtime_ui_config.view_modes = RECOMP_RUNTIME_UI_VIEW_MODE_NATIVE;
         if (opts.launcher_expose_widescreen && opts.max_view_width > 240)
@@ -2282,6 +2390,44 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (runtime_ui_config.view_modes != RECOMP_RUNTIME_UI_VIEW_MODE_NATIVE)
             runtime_ui_config.features |=
                 RECOMP_RUNTIME_UI_STANDARD_VIEW_MODE;
+
+        // Engine extras first, then whatever the game contributed.
+#if defined(RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY)
+        // Previously this row was installed with extra_items = &gyro_item, a
+        // single-owner assignment. There are three contributors now (this row,
+        // the engine rows below, RunOptions::ui_extra_items), so whichever
+        // wrote last would silently drop the others.
+        if (opts.launcher_expose_gyro) runtime_ui_extras.push_back(gyro_item);
+#endif
+        RecompRuntimeUiItem slot_item{};
+        slot_item.key         = GBARECOMP_UI_KEY_STATE_SLOT;
+        slot_item.section     = "System";
+        slot_item.label       = "State slot";
+        slot_item.description = "Slot used by Save state and Load state "
+                                "(same slots as F1-F9).";
+        slot_item.type        = RECOMP_RUNTIME_UI_INT;
+        slot_item.minimum     = 1;
+        slot_item.maximum     = 9;
+        slot_item.step        = 1;
+        runtime_ui_extras.push_back(slot_item);
+
+        RecompRuntimeUiItem fps_item{};
+        fps_item.key         = GBARECOMP_UI_KEY_FPS;
+        fps_item.section     = "Display";
+        fps_item.label       = "Show FPS";
+        fps_item.description = "Presents-per-second in the window title bar.";
+        fps_item.type        = RECOMP_RUNTIME_UI_BOOL;
+        runtime_ui_extras.push_back(fps_item);
+
+        if (opts.ui_extra_items && opts.ui_extra_item_count) {
+            const auto* game_items =
+                static_cast<const RecompRuntimeUiItem*>(opts.ui_extra_items);
+            runtime_ui_extras.insert(runtime_ui_extras.end(), game_items,
+                                     game_items + opts.ui_extra_item_count);
+        }
+        runtime_ui_config.extra_items      = runtime_ui_extras.data();
+        runtime_ui_config.extra_item_count = runtime_ui_extras.size();
+
         runtime_ui_context.ui =
             recomp_runtime_ui_create_standard(&runtime_ui_config);
         win.set_runtime_ui(runtime_ui_context.ui);
@@ -2426,6 +2572,35 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             input_record_last_value = ev.keyinput;
         }
         if (ev.quit) host_quit = true;
+        if (bus.solar().active() && ev.solar_live) {
+            // Release the manual override; the game's light source resumes.
+            g_solar_override_step.store(kSolarNoOverride,
+                                        std::memory_order_relaxed);
+            std::printf("solar_override=off (%s)\n",
+                        g_solar_game_provider ? "game provider resumes"
+                                              : "no provider, sensor dark");
+            std::fflush(stdout);
+        } else if (bus.solar().active() &&
+                   ev.solar_brighter != ev.solar_dimmer) {
+            // Step -> brightness, shaped from measured in-game gauge response
+            // rather than spread evenly over 0..255. An even spread wastes half
+            // the range: Boktai's gauge saturates at brightness ~159. It is also
+            // very steep at the bottom — 0 gives an empty gauge but 31 already
+            // gives 4 of 8 bars — so the low end gets finer steps.
+            //
+            // Observed (linear map, 8 gauge bars): 0->0, 31->4, 63->5, 95->6,
+            // 127->7, 159->full, and 191/223/255 indistinguishable from 159.
+            int step = g_solar_override_step.load(std::memory_order_relaxed);
+            if (ev.solar_brighter)
+                step = step == kSolarNoOverride ? 0 : std::min(step + 1, 8);
+            else
+                step = step == kSolarNoOverride ? 8 : std::max(step - 1, 0);
+            g_solar_override_step.store(step, std::memory_order_relaxed);
+            std::printf("solar_level=%d/9 brightness=%u (override; "
+                        "SolarLive releases)\n",
+                        step + 1, kSolarSteps[step]);
+            std::fflush(stdout);
+        }
         if (pacer) pacer->set_uncapped(ev.fast_forward);
         // System hotkeys (config.ini [KeyMap], rebindable in the launcher).
         if (ev.toggle_fullscreen) {
@@ -2447,6 +2622,18 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             // accumulated wall-clock lag catching up.
             if (!host_paused && pacer) pacer->reset();
         }
+#if defined(GBARECOMP_RUNTIME_UI)
+        // Fold a menu request into the hotkey path so save/load has exactly
+        // one implementation regardless of how the player asked for it.
+        if (runtime_ui_context.pending_save_slot) {
+            ev.save_slot = runtime_ui_context.pending_save_slot;
+            runtime_ui_context.pending_save_slot = 0;
+        }
+        if (runtime_ui_context.pending_load_slot) {
+            ev.load_slot = runtime_ui_context.pending_load_slot;
+            runtime_ui_context.pending_load_slot = 0;
+        }
+#endif
         if (ev.save_slot) {
             std::string path = slot_path(ev.save_slot);
             std::string e;

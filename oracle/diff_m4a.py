@@ -25,6 +25,9 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import sys as _sys, pathlib as _pl
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
+from recomp_paths import exe_name
 import socket
 import subprocess
 import sys
@@ -35,7 +38,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent          # gbarecomp/
 import recomp_paths as _rp
 PROJ = _rp.game_dir(ROOT)
 NATIVE_EXE = _rp.recomp_exe(ROOT)
-ORACLE     = ROOT / "build" / "oracle" / "gbarecomp_oracle.exe"
+ORACLE     = ROOT / "build" / "oracle" / exe_name("gbarecomp_oracle")
 BIOS_PATH  = ROOT / "bios" / "gba_bios.bin"
 ROM_PATH   = PROJ / "roms" / "minishcap_usa.gba"
 DEF_STATE  = PROJ / "roms" / "minishcap_usa.state3"

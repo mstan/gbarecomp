@@ -175,6 +175,65 @@ inline void set_presentation_filter_caps(T& game_info,
     }
 }
 
+// Same treatment for the solar-sensor fields, so this header still compiles
+// against a recomp-ui pin that predates them. Without the guard a game only has
+// to update gbarecomp to get a hard error in a third-party header it did not
+// change.
+template <typename T, typename = void>
+struct has_solar_sensor_field : std::false_type {};
+
+template <typename T>
+struct has_solar_sensor_field<
+    T, std::void_t<decltype(std::declval<T&>().has_solar_sensor)>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_solar_settings : std::false_type {};
+
+template <typename T>
+struct has_solar_settings<
+    T, std::void_t<decltype(std::declval<T&>().solar_zip)>> : std::true_type {};
+
+template <typename T>
+inline void set_has_solar_sensor(T& game_info, bool enabled) {
+    if constexpr (has_solar_sensor_field<T>::value) {
+        game_info.has_solar_sensor = enabled ? 1 : 0;
+    }
+}
+
+// Returns false when this recomp-ui pin has no solar fields, so the caller can
+// leave config.ini [Solar] exactly as the game wrote it rather than round-trip
+// it through settings that do not exist.
+template <typename T, typename S>
+inline bool push_solar_settings(T& settings, const S& src) {
+    if constexpr (has_solar_settings<T>::value) {
+        std::snprintf(settings.solar_zip, sizeof(settings.solar_zip), "%s",
+                      src.zip.c_str());
+        std::snprintf(settings.solar_country, sizeof(settings.solar_country),
+                      "%s", src.country.c_str());
+        settings.solar_source      = src.source;
+        settings.solar_manual_step = src.manual_step;
+        settings.solar_full_sun    = src.full_sun;
+        return true;
+    }
+    return false;
+}
+
+template <typename T, typename S>
+inline bool pull_solar_settings(const T& settings, S* dst) {
+    if constexpr (has_solar_settings<T>::value) {
+        dst->zip         = settings.solar_zip;
+        dst->country     = settings.solar_country[0] ? settings.solar_country
+                                                     : "us";
+        dst->source      = settings.solar_source ? 1 : 0;
+        dst->manual_step = settings.solar_manual_step;
+        dst->full_sun    = settings.solar_full_sun > 0 ? settings.solar_full_sun
+                                                       : 900;
+        return true;
+    }
+    return false;
+}
+
 // gbarecomp's screen-model tokens, in the launcher's kGbaScreenKindNames
 // index order (Raw/Unlit/Frontlit/Backlit/Classic).
 inline const char* const kScreenTokens[5] = {
@@ -368,6 +427,103 @@ inline void seam_config_save(const std::string& path, const SeamConfig& c) {
     f << "gyro_sensitivity = " << c.gyro_sensitivity << "\n";
 }
 
+// ---- config.ini [Solar] ------------------------------------------------------
+// Cartridge light-sensor location, for games with RunOptions::has_solar_sensor.
+// The GAME also reads and writes this section (it owns the sensor's light
+// source), so the key names and the live/manual spelling here must match its
+// writer exactly, and unknown keys inside the section are preserved rather than
+// dropped -- the game keeps settings of its own here that the launcher has no
+// opinion about.
+struct SeamSolar {
+    std::string zip;
+    std::string country = "us";
+    int source = 0;        // 0 live, 1 manual
+    int manual_step = 0;   // 0..8
+    int full_sun = 900;    // W/m^2
+};
+
+inline void seam_solar_load(const std::string& path, SeamSolar* s) {
+    std::ifstream f(path);
+    if (!f) return;
+    std::string line;
+    bool in_section = false;
+    while (std::getline(f, line)) {
+        size_t b = line.find_first_not_of(" \t");
+        if (b == std::string::npos) continue;
+        size_t e = line.find_last_not_of(" \t\r\n");
+        std::string t = line.substr(b, e - b + 1);
+        if (t.empty() || t[0] == '#' || t[0] == ';') continue;
+        if (t[0] == '[') { in_section = t.rfind("[Solar]", 0) == 0; continue; }
+        if (!in_section) continue;
+        size_t eq = t.find('=');
+        if (eq == std::string::npos) continue;
+        auto trim = [](std::string v) {
+            size_t vb = v.find_first_not_of(" \t");
+            if (vb == std::string::npos) return std::string();
+            size_t ve = v.find_last_not_of(" \t");
+            return v.substr(vb, ve - vb + 1);
+        };
+        const std::string k = trim(t.substr(0, eq));
+        const std::string v = trim(t.substr(eq + 1));
+        if (k == "zip")              s->zip = v;
+        else if (k == "country")     s->country = v;
+        else if (k == "source")      s->source = (v == "manual") ? 1 : 0;
+        else if (k == "manual_step") s->manual_step = std::atoi(v.c_str());
+        else if (k == "full_sun")    s->full_sun = std::atoi(v.c_str());
+    }
+}
+
+inline void seam_solar_save(const std::string& path, const SeamSolar& s) {
+    std::vector<std::string> lines;
+    {
+        std::ifstream f(path);
+        std::string line;
+        while (std::getline(f, line)) {
+            while (!line.empty() && line.back() == '\r') line.pop_back();
+            lines.push_back(line);
+        }
+    }
+    // Keep every other section, and inside [Solar] keep the keys we do not own.
+    static const char* kOwned[] = {"zip", "country", "source", "manual_step",
+                                   "full_sun"};
+    std::vector<std::string> kept, foreign;
+    bool in_section = false;
+    for (const auto& l : lines) {
+        size_t b = l.find_first_not_of(" \t");
+        const bool is_header = b != std::string::npos && l[b] == '[';
+        if (is_header) in_section = l.compare(b, 7, "[Solar]") == 0;
+        if (is_header && in_section) continue;
+        if (in_section) {
+            if (b == std::string::npos) continue;
+            size_t eq = l.find('=');
+            if (eq != std::string::npos) {
+                std::string k = l.substr(b, eq - b);
+                while (!k.empty() && (k.back() == ' ' || k.back() == '\t'))
+                    k.pop_back();
+                bool owned = false;
+                for (const char* o : kOwned)
+                    if (k == o) { owned = true; break; }
+                if (!owned) foreign.push_back(l);
+            }
+            continue;   // drop comments and owned keys; they are rewritten
+        }
+        kept.push_back(l);
+    }
+    while (!kept.empty() && kept.back().empty()) kept.pop_back();
+
+    std::ofstream f(path, std::ios::trunc);
+    if (!f) return;
+    for (const auto& l : kept) f << l << "\n";
+    if (!kept.empty()) f << "\n";
+    f << "[Solar]\n";
+    f << "zip = " << s.zip << "\n";
+    f << "country = " << s.country << "\n";
+    f << "source = " << (s.source ? "manual" : "live") << "\n";
+    f << "manual_step = " << s.manual_step << "\n";
+    f << "full_sun = " << s.full_sun << "\n";
+    for (const auto& l : foreign) f << l << "\n";
+}
+
 // Append the persisted/committed settings as ordinary run_game() CLI args.
 inline void seam_append_setting_args(std::vector<std::string>& args,
                                      const SeamConfig& c,
@@ -502,6 +658,8 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         cfg.sharp_filter = opts.launcher_default_sharp_filter ? 1 : 0;
     if (cfg.affine_filter < 0)
         cfg.affine_filter = opts.launcher_default_affine_filter ? 1 : 0;
+    SeamSolar solar;
+    if (opts.has_solar_sensor) seam_solar_load(config_path, &solar);
     if (cfg.skip_launcher && !force_launcher) {
         // Boot straight in, but still honor the persisted settings.
         seam_append_setting_args(args, cfg, opts);
@@ -576,6 +734,8 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     ls.volume        = cfg.volume;
     ls.player_src[0] = 1;                 // keyboard (gbarecomp host input)
     ls.skip_launcher = cfg.skip_launcher;
+    bool solar_in_launcher = false;
+    if (opts.has_solar_sensor) solar_in_launcher = push_solar_settings(ls, solar);
     ls.screen_kind   = cfg.screen_kind;
     ls.aspect_index  = cfg.aspect_index;
     gbarecomp_seam::set_gyro_sensitivity(ls, cfg.gyro_sensitivity);
@@ -600,6 +760,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     }
     gi.widescreen_supported = opts.launcher_expose_widescreen &&
         opts.widescreen_view_width > 240 ? 1 : 0;
+    set_has_solar_sensor(gi, opts.has_solar_sensor);
     gi.adaptive_view_supported = opts.launcher_expose_adaptive_view &&
         opts.resize_driven_view && opts.max_resize_view_width > 240 ? 1 : 0;
     gi.config_path = config_path.c_str();
@@ -670,6 +831,11 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
                        ls, cfg.gyro_sensitivity),
                    0.25f, 4.00f);
     seam_config_save(config_path, cfg);
+    // Only rewrite [Solar] when this recomp-ui pin actually surfaced the panel;
+    // otherwise the values never round-tripped through it and writing them back
+    // would just churn the file the game owns.
+    if (solar_in_launcher && pull_solar_settings(ls, &solar))
+        seam_solar_save(config_path, solar);
 
     if (picked_rom[0]) {
         args.push_back("--rom");

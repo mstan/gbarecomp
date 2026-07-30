@@ -64,6 +64,7 @@ enum HostHotkey {
     HK_FULLSCREEN = 0, HK_PAUSE, HK_TURBO,
     HK_WINDOW_BIGGER, HK_WINDOW_SMALLER,
     HK_VOLUME_UP, HK_VOLUME_DOWN, HK_DISPLAY_PERF,
+    HK_SOLAR_BRIGHTER, HK_SOLAR_DIMMER, HK_SOLAR_LIVE,
     HK_COUNT
 };
 
@@ -637,11 +638,13 @@ const char* const kHotkeyNames[HK_COUNT] = {
     "Fullscreen", "Pause", "Turbo",
     "WindowBigger", "WindowSmaller",
     "VolumeUp", "VolumeDown", "DisplayPerf",
+    "SolarBrighter", "SolarDimmer", "SolarLive",
 };
 const char* const kHotkeyDefaults[HK_COUNT] = {
     "Alt+Return", "Shift+P", "Tab",
     "", "",
     "", "", "F",
+    "", "", "",
 };
 
 // SDL_GetScancodeFromName plus the same lowercase aliases recomp-ui's
@@ -847,6 +850,18 @@ bool runtime_ui_event(RecompRuntimeUi* ui, const SDL_Event& e) {
         recomp_runtime_ui_open(ui);
         return true;
     }
+    // A focused text field owns the keyboard. ImGui already saw this event
+    // (ImGui_ImplSDL2_ProcessEvent runs first in pump()), so the field is
+    // receiving the keystrokes; mapping them to navigation as well would move
+    // the selection out from under the caret and letters would double as menu
+    // input. Still swallow them so the guest never sees the player typing.
+    //
+    // Guarded because TEXT items post-date some recomp-ui pins: calling this
+    // unconditionally would fail to link against an older submodule, which is
+    // the same trap the gyro fields already avoid in launcher_seam.h.
+#if defined(RECOMP_RUNTIME_UI_HAS_TEXT)
+    if (recomp_runtime_ui_wants_text_input(ui)) return true;
+#endif
     if (e.type != SDL_KEYDOWN && e.type != SDL_KEYUP &&
         e.type != SDL_CONTROLLERBUTTONDOWN && e.type != SDL_CONTROLLERBUTTONUP)
         return false;
@@ -1679,6 +1694,9 @@ HostWindow::Events HostWindow::pump() {
                         case HK_VOLUME_UP:      ev.volume_up = true;         break;
                         case HK_VOLUME_DOWN:    ev.volume_down = true;       break;
                         case HK_DISPLAY_PERF:   ev.toggle_fps = true;        break;
+                        case HK_SOLAR_BRIGHTER: ev.solar_brighter = true;    break;
+                        case HK_SOLAR_DIMMER:   ev.solar_dimmer = true;      break;
+                        case HK_SOLAR_LIVE:     ev.solar_live = true;        break;
                     }
                 }
             }

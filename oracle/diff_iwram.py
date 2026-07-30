@@ -23,9 +23,12 @@ import argparse, json, pathlib, socket, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 import recomp_paths as _rp
+import sys as _sys, pathlib as _pl
+_sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
+from recomp_paths import exe_name
 PROJ = _rp.game_dir(ROOT)
 RECOMP_EXE = _rp.recomp_exe(ROOT)
-INTERP_EXE = ROOT / "build" / "bios_smoke.exe"
+INTERP_EXE = ROOT / "build" / exe_name("bios_smoke")
 BIOS = ROOT / "bios" / "gba_bios.bin"
 ROM = PROJ / "roms" / "minishcap_usa.gba"
 DEF_STATE = PROJ / "roms" / "minishcap_usa.state3"
