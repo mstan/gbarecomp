@@ -73,24 +73,42 @@ subst() {
 # template stays game-agnostic (layouts differ: variants/<name>/roms in the
 # multi-variant repos, a flat roms/ elsewhere).
 echo "==> skip list"
+# Keeps the cartridge, the BIOS and build output out of the build sandbox.
+# post-install stages only the executable and the launcher assets, so none of it
+# reached the installed app even before this existed -- but the build tree has no
+# use for it and stale copies accumulate under .flatpak-builder/.
+#
+# Two portability traps this has already hit, both silent:
+#   * `find -printf` is GNU-only. On macOS BSD find it errors, and with the error
+#     swallowed the list came out EMPTY -- the ROM was not excluded at all.
+#   * `-type f` skips SYMLINKS, and a ROM is very often a symlink into a shared
+#     dump directory, so the cartridge slipped through.
+# Hence -print with sed, and matching by name without a -type filter.
 SKIP_FILE="$(mktemp)"
-{
-    # Any directory holding cartridge dumps, plus any BIOS image.
-    ( cd "$SOURCE_DIR" && find . -type d -name roms -not -path '*/.git/*' \
-        -printf '          - %P\n' 2>/dev/null ) || true
-    ( cd "$SOURCE_DIR" && find . -type f \( -name '*.gba' -o -name '*.agb' \
-        -o -name 'gba_bios.bin' \) -not -path '*/.git/*' \
-        -printf '          - %P\n' 2>/dev/null ) || true
-    # Build output and caches: large, host-specific, and never an input.
-    for d in build build-ui build-release build-sub release-stage \
-             recomp_cache flatpak-build .flatpak-builder .git; do
-        if [ -e "$SOURCE_DIR/$d" ]; then echo "          - $d"; fi
-    done
-    # The group's exit status is the last command's, and a false `[ -e ]` would
-    # make the pipeline fail under `set -o pipefail` and abort the script.
-    true
-} | sort -u > "$SKIP_FILE"
-sed 's/^          - /    /' "$SKIP_FILE" | sed 's/^/    skipping: /'
+: > "$SKIP_FILE"
+
+add_skip() {   # relative path -> one YAML list entry
+    printf '          - %s\n' "$1" >> "$SKIP_FILE"
+}
+
+while IFS= read -r p; do
+    [ -n "$p" ] && add_skip "${p#./}"
+done <<EOF_ROMS
+$(cd "$SOURCE_DIR" && find . -name roms -not -path './.git/*' 2>/dev/null)
+$(cd "$SOURCE_DIR" && find . \( -name '*.gba' -o -name '*.agb' \
+    -o -name 'gba_bios.bin' \) -not -path './.git/*' 2>/dev/null)
+EOF_ROMS
+
+for d in build build-ui build-release build-sub release-stage \
+         recomp_cache flatpak-build .flatpak-builder .git; do
+    if [ -e "$SOURCE_DIR/$d" ]; then add_skip "$d"; fi
+done
+
+LC_ALL=C sort -u "$SKIP_FILE" -o "$SKIP_FILE"
+sed 's/^          - /    skipping: /' "$SKIP_FILE"
+if ! grep -q . "$SKIP_FILE"; then
+    echo "    WARNING: nothing to skip -- verify this is really a clean tree" >&2
+fi
 
 echo "==> manifest"
 subst < "$HERE/manifest.template.yml" | \
