@@ -86,6 +86,13 @@ struct RunOptions {
     // remains responsible for discovering a sensor and mapping its angular
     // rate onto the cartridge peripheral.
     bool launcher_expose_gyro = false;
+    // Optional renderer enhancements exposed as independent recomp-ui Video
+    // toggles. Defaults are explicit per game so an older config.ini that
+    // lacks the new keys inherits the title's intended shipped behavior.
+    bool launcher_expose_sharp_filter = false;
+    bool launcher_default_sharp_filter = false;
+    bool launcher_expose_affine_filter = false;
+    bool launcher_default_affine_filter = false;
     // >240 offers the launcher's 16:9 widescreen toggle, mapped to
     // --view-width <this> when enabled. 0/240 = no widescreen surface shown.
     // Games with MULTIPLE extended widths use the aspect vocabulary below

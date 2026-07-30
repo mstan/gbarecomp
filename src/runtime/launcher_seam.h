@@ -124,6 +124,57 @@ inline void set_has_gyro_controls(T& game_info, bool enabled) {
     }
 }
 
+template <typename T, typename = void>
+struct has_presentation_filters : std::false_type {};
+
+template <typename T>
+struct has_presentation_filters<
+    T,
+    std::void_t<decltype(std::declval<T&>().sharp_filter),
+                decltype(std::declval<T&>().affine_filter)>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_presentation_filter_caps : std::false_type {};
+
+template <typename T>
+struct has_presentation_filter_caps<
+    T,
+    std::void_t<decltype(std::declval<T&>().has_sharp_filter),
+                decltype(std::declval<T&>().has_affine_filter)>>
+    : std::true_type {};
+
+template <typename T>
+inline void set_presentation_filters(T& settings, bool sharp, bool affine) {
+    if constexpr (has_presentation_filters<T>::value) {
+        settings.sharp_filter = sharp ? 1 : 0;
+        settings.affine_filter = affine ? 1 : 0;
+    }
+}
+
+template <typename T>
+inline bool get_sharp_filter(const T& settings, bool fallback) {
+    if constexpr (has_presentation_filters<T>::value)
+        return settings.sharp_filter != 0;
+    return fallback;
+}
+
+template <typename T>
+inline bool get_affine_filter(const T& settings, bool fallback) {
+    if constexpr (has_presentation_filters<T>::value)
+        return settings.affine_filter != 0;
+    return fallback;
+}
+
+template <typename T>
+inline void set_presentation_filter_caps(T& game_info,
+                                         bool sharp, bool affine) {
+    if constexpr (has_presentation_filter_caps<T>::value) {
+        game_info.has_sharp_filter = sharp ? 1 : 0;
+        game_info.has_affine_filter = affine ? 1 : 0;
+    }
+}
+
 // gbarecomp's screen-model tokens, in the launcher's kGbaScreenKindNames
 // index order (Raw/Unlit/Frontlit/Backlit/Classic).
 inline const char* const kScreenTokens[5] = {
@@ -210,6 +261,8 @@ struct SeamConfig {
     int  scale = 3;
     int  fullscreen = 0;
     int  linear_filter = 0;
+    int  sharp_filter = -1;
+    int  affine_filter = -1;
     int  screen_kind = 0;      // kScreenTokens index
     int  volume = 100;
     int  skip_launcher = 0;
@@ -248,6 +301,8 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
         if (key == "scale")         c->scale = std::atoi(val.c_str());
         else if (key == "fullscreen")    c->fullscreen = std::atoi(val.c_str());
         else if (key == "linear_filter") c->linear_filter = std::atoi(val.c_str());
+        else if (key == "sharp_filter") c->sharp_filter = std::atoi(val.c_str());
+        else if (key == "affine_filter") c->affine_filter = std::atoi(val.c_str());
         else if (key == "screen")        c->screen_kind = screen_token_to_index(val);
         else if (key == "volume")        c->volume = std::atoi(val.c_str());
         else if (key == "skip_launcher") c->skip_launcher = std::atoi(val.c_str());
@@ -302,6 +357,8 @@ inline void seam_config_save(const std::string& path, const SeamConfig& c) {
     f << "scale = " << c.scale << "\n";
     f << "fullscreen = " << c.fullscreen << "\n";
     f << "linear_filter = " << c.linear_filter << "\n";
+    f << "sharp_filter = " << c.sharp_filter << "\n";
+    f << "affine_filter = " << c.affine_filter << "\n";
     f << "screen = " << kScreenTokens[c.screen_kind] << "\n";
     f << "volume = " << c.volume << "\n";
     f << "skip_launcher = " << c.skip_launcher << "\n";
@@ -321,6 +378,14 @@ inline void seam_append_setting_args(std::vector<std::string>& args,
     args.push_back(std::to_string(c.volume));
     args.push_back("--linear-filter");
     args.push_back(c.linear_filter ? "1" : "0");
+    if (opts.launcher_expose_sharp_filter) {
+        args.push_back("--sharp-filter");
+        args.push_back(c.sharp_filter ? "1" : "0");
+    }
+    if (opts.launcher_expose_affine_filter) {
+        args.push_back("--affine-filter");
+        args.push_back(c.affine_filter ? "1" : "0");
+    }
     args.push_back("--screen");
     args.push_back(kScreenTokens[c.screen_kind]);
     // Tri-state: 0 off, 1 borderless, 2 exclusive. Pass the value explicitly
@@ -433,6 +498,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
 
     SeamConfig cfg;
     seam_config_load(config_path, &cfg);
+    if (cfg.sharp_filter < 0)
+        cfg.sharp_filter = opts.launcher_default_sharp_filter ? 1 : 0;
+    if (cfg.affine_filter < 0)
+        cfg.affine_filter = opts.launcher_default_affine_filter ? 1 : 0;
     if (cfg.skip_launcher && !force_launcher) {
         // Boot straight in, but still honor the persisted settings.
         seam_append_setting_args(args, cfg, opts);
@@ -510,6 +579,8 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     ls.screen_kind   = cfg.screen_kind;
     ls.aspect_index  = cfg.aspect_index;
     gbarecomp_seam::set_gyro_sensitivity(ls, cfg.gyro_sensitivity);
+    gbarecomp_seam::set_presentation_filters(
+        ls, cfg.sharp_filter != 0, cfg.affine_filter != 0);
     std::snprintf(ls.bios_path, sizeof(ls.bios_path), "%s", seed_bios.c_str());
 
     RecompLauncherCGameInfo gi;
@@ -536,6 +607,9 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     gi.boxart_path = opts.launcher_boxart;   // NULL => default assets/img/boxart.tga
     gi.bios_verify = &gbarecomp_seam::verify_retail_gba_bios;
     gbarecomp_seam::set_has_gyro_controls(gi, opts.launcher_expose_gyro);
+    gbarecomp_seam::set_presentation_filter_caps(
+        gi, opts.launcher_expose_sharp_filter,
+        opts.launcher_expose_affine_filter);
 #if defined(GBARECOMP_ENABLE_MODS)
     gi.mods = mod_provider;
 #endif
@@ -577,6 +651,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     // on every subsequent launch.
     cfg.fullscreen    = (ls.fullscreen >= 0 && ls.fullscreen <= 2) ? ls.fullscreen : 0;
     cfg.linear_filter = ls.linear_filter ? 1 : 0;
+    cfg.sharp_filter =
+        gbarecomp_seam::get_sharp_filter(ls, cfg.sharp_filter != 0) ? 1 : 0;
+    cfg.affine_filter =
+        gbarecomp_seam::get_affine_filter(ls, cfg.affine_filter != 0) ? 1 : 0;
     cfg.screen_kind   = (ls.screen_kind >= 0 && ls.screen_kind <= 4)
                           ? ls.screen_kind : 0;
     cfg.volume        = ls.volume;
