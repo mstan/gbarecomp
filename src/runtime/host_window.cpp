@@ -309,6 +309,10 @@ struct Backend {
     uint64_t      audio_direct_pushes = 0;
     uint64_t      audio_direct_samples = 0;
     uint64_t      audio_direct_underruns = 0;
+    uint64_t      audio_direct_probe_samples = 0;
+    uint64_t      audio_direct_probe_nonzero = 0;
+    long double   audio_direct_probe_square_sum = 0.0;
+    int           audio_direct_probe_peak = 0;
     Uint32        audio_direct_min_bytes = UINT32_MAX;
     Uint32        audio_direct_max_bytes = 0;
     // Present-time screen-color simulation. Built once from
@@ -1121,7 +1125,10 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     // converts the exact 65536 Hz mono stream to the physical device itself.
     // Bridge mode instead opens at the native rate and performs that clock
     // conversion in RAB.
-    b->audio_dev = SDL_OpenAudioDevice(nullptr, /*iscapture=*/0,
+    const char* audio_device_env = std::getenv("GBARECOMP_AUDIO_DEVICE");
+    const char* audio_device_name =
+        audio_device_env && *audio_device_env ? audio_device_env : nullptr;
+    b->audio_dev = SDL_OpenAudioDevice(audio_device_name, /*iscapture=*/0,
                                        &want, &got,
                                        b->audio_direct
                                            ? 0
@@ -1130,9 +1137,21 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         if (b->audio_direct) {
             b->audio_direct_rate = got.freq;
             std::fprintf(stderr,
-                         "host_window: audio=direct-queue format=%dHz mono S16 "
-                         "quantum=%u\n",
+                         "host_window: audio=direct-queue driver=%s "
+                         "device=%s format=%dHz mono S16 quantum=%u\n",
+                         SDL_GetCurrentAudioDriver()
+                             ? SDL_GetCurrentAudioDriver() : "(unknown)",
+                         audio_device_name ? audio_device_name : "(default)",
                          got.freq, static_cast<unsigned>(got.samples));
+            if (const char* probe = std::getenv("GBARECOMP_AUDIO_PROBE");
+                probe && *probe && *probe != '0') {
+                const int devices = SDL_GetNumAudioDevices(0);
+                for (int i = 0; i < devices; ++i) {
+                    std::fprintf(stderr,
+                                 "host_window: audio_device[%d]=%s\n", i,
+                                 SDL_GetAudioDeviceName(i, 0));
+                }
+            }
             std::fflush(stderr);
             // SDL devices start paused. push_audio_samples starts playback
             // after roughly four video frames have been queued.
@@ -1183,8 +1202,14 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
 
     if (b->audio_direct) {
         const Uint32 queued_before = SDL_GetQueuedAudioSize(b->audio_dev);
-        if (b->audio_direct_started && queued_before == 0)
+        if (b->audio_direct_started && queued_before == 0) {
             ++b->audio_direct_underruns;
+            // A reset, loading hitch, or other long producer stall exhausted
+            // the queue. Pause and build a fresh cushion instead of repeatedly
+            // restarting the device on one tiny block (audible as crackle).
+            b->audio_direct_started = false;
+            SDL_PauseAudioDevice(b->audio_dev, 1);
+        }
         b->audio_direct_min_bytes =
             std::min(b->audio_direct_min_bytes, queued_before);
 
@@ -1206,7 +1231,7 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
         ++b->audio_direct_pushes;
         b->audio_direct_samples += count;
 
-        constexpr Uint32 kDirectPrerollBytes = 8192;  // 62.5 ms at 65536 Hz S16
+        constexpr Uint32 kDirectPrerollBytes = 16384;  // 125 ms at 65536 Hz S16
         if (!b->audio_direct_started &&
             queued_after >= kDirectPrerollBytes) {
             b->audio_direct_started = true;
@@ -1218,22 +1243,46 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
             const char* e = std::getenv("GBARECOMP_AUDIO_PROBE");
             s_direct_probe = (e && *e && *e != '0') ? 1 : 0;
         }
+        if (s_direct_probe) {
+            for (std::size_t i = 0; i < count; ++i) {
+                const int sample = samples[i];
+                if (sample != 0) ++b->audio_direct_probe_nonzero;
+                b->audio_direct_probe_peak =
+                    std::max(b->audio_direct_probe_peak, std::abs(sample));
+                b->audio_direct_probe_square_sum +=
+                    static_cast<long double>(sample) * sample;
+            }
+            b->audio_direct_probe_samples += count;
+        }
         if (s_direct_probe && (b->audio_direct_pushes % 120ULL) == 0ULL) {
             const double bytes_per_ms =
                 static_cast<double>(b->audio_direct_rate) *
                 sizeof(int16_t) / 1000.0;
             const double audio_secs =
                 static_cast<double>(b->audio_direct_samples) / 65536.0;
+            const double rms = b->audio_direct_probe_samples
+                ? std::sqrt(static_cast<double>(
+                      b->audio_direct_probe_square_sum /
+                      b->audio_direct_probe_samples))
+                : 0.0;
             std::fprintf(
                 stderr,
                 "[gba-audio-probe] direct pushes=%llu audio=%.1fs "
-                "queue=%.1fms min=%.1fms max=%.1fms underrun=%llu\n",
+                "queue=%.1fms min=%.1fms max=%.1fms underrun=%llu "
+                "block_nonzero=%zu/%zu rms=%.1f peak=%d\n",
                 static_cast<unsigned long long>(b->audio_direct_pushes),
                 audio_secs, queued_after / bytes_per_ms,
                 b->audio_direct_min_bytes / bytes_per_ms,
                 b->audio_direct_max_bytes / bytes_per_ms,
-                static_cast<unsigned long long>(b->audio_direct_underruns));
+                static_cast<unsigned long long>(b->audio_direct_underruns),
+                static_cast<std::size_t>(b->audio_direct_probe_nonzero),
+                static_cast<std::size_t>(b->audio_direct_probe_samples),
+                rms, b->audio_direct_probe_peak);
             std::fflush(stderr);
+            b->audio_direct_probe_samples = 0;
+            b->audio_direct_probe_nonzero = 0;
+            b->audio_direct_probe_square_sum = 0.0;
+            b->audio_direct_probe_peak = 0;
             b->audio_direct_min_bytes = queued_after;
             b->audio_direct_max_bytes = queued_after;
         }

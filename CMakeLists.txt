@@ -583,6 +583,10 @@ add_executable(codegen_shards_tests tests/recompile/codegen_shards_test.cpp)
 target_link_libraries(codegen_shards_tests PRIVATE gbarecomp_recompile_core)
 add_test(NAME codegen_shards_tests COMMAND codegen_shards_tests)
 
+add_executable(audio_drc_tests tests/runtime/audio_drc_test.cpp)
+target_include_directories(audio_drc_tests PRIVATE src/runtime)
+add_test(NAME audio_drc_tests COMMAND audio_drc_tests)
+
 # Self-heal proposal clustering — pure logic, links only the standalone
 # clustering TU (no runtime/bus/overlay dependencies).
 add_executable(selfheal_cluster_test

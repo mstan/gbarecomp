@@ -2710,6 +2710,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (n > 0) win.push_audio_samples(audio_buf, n);
                 const uint64_t fp_t3 = FramePhaseRing::now_ns();
                 pump_host_input();
+                // Present-in-place can remain inside a single step_once() for
+                // the entire windowed session. Advance deterministic replays
+                // here as well as in the outer loop so windowed repros exercise
+                // the same frame-indexed input as headless acceptance runs.
+                if (input_replay_requested) apply_input_replay();
                 const uint64_t fp_t4 = FramePhaseRing::now_ns();
                 last_presented_frame = frame;
                 ++frames_presented;

@@ -58,6 +58,7 @@ typedef struct {
     double stretch_min_ms;  /* min loop period / correlation search floor (5)        */
     double stretch_max_ms;  /* max loop period / correlation search ceil  (25)       */
     double stretch_xfade_ms;/* loop-wrap crossfade length (4)                        */
+    double stretch_limit_ms;/* maximum concealment before fading silent (80)         */
 } rab_config;
 
 typedef struct {
@@ -98,6 +99,7 @@ typedef struct rab_bridge {
     double loop_start;      /* source-frame index: start of the looped region  */
     double loop_len;        /* looped region length in source frames           */
     double loop_pos;        /* fractional read cursor within the looped region */
+    uint64_t conceal_frames;/* host frames emitted in the current stall        */
 
     rab_stats stats;
 } rab_bridge;
@@ -170,6 +172,7 @@ void rab_config_defaults(rab_config *c) {
     c->stretch_min_ms   = 5.0;
     c->stretch_max_ms   = 25.0;
     c->stretch_xfade_ms = 4.0;
+    c->stretch_limit_ms = 80.0;
 }
 
 int rab_init(rab_bridge *b, const rab_config *cfg) {
@@ -234,6 +237,7 @@ int rab_init(rab_bridge *b, const rab_config *cfg) {
     b->prime_ms = (cfg->preroll_ms > cfg->target_ms) ? cfg->preroll_ms : cfg->target_ms;
     b->concealing = 0;
     b->loop_start = b->loop_len = b->loop_pos = 0.0;
+    b->conceal_frames = 0;
     return 0;
 }
 
@@ -374,6 +378,7 @@ void rab_pull(rab_bridge *b, int16_t *out, int frames) {
         if (have) {
             /* live forward play; caught up to real audio, so leave conceal mode */
             b->concealing = 0;
+            b->conceal_frames = 0;
             double fr = b->out_pos - (double)i;
             int phase = (int)(fr * b->cfg.phases);
             if (phase >= b->cfg.phases) phase = b->cfg.phases - 1;
@@ -387,11 +392,17 @@ void rab_pull(rab_bridge *b, int16_t *out, int frames) {
             b->out_pos += step;             /* advance only when we consumed live */
             delivering = 1;
         } else if (b->primed && b->cfg.stretch_enable
+                   && (b->cfg.stretch_limit_ms <= 0.0 ||
+                       b->conceal_frames <
+                           (uint64_t)(b->cfg.stretch_limit_ms *
+                                      b->cfg.host_rate / 1000.0))
                    && (int64_t)b->in_count > (int64_t)(2 * b->half + 4)) {
-            /* Producer stalled: conceal by looping the most recent audio,
-             * pitch-aligned, instead of fading to silence. out_pos is held at the
-             * stall edge so live play resumes seamlessly once the producer
-             * recovers (the concealed time becomes latency the servo drains). */
+            /* Producer stalled: briefly conceal by looping the most recent
+             * audio, pitch-aligned. Bound the loop duration: a guest reset,
+             * pause, or genuine hang can stop presentation for seconds, and
+             * repeating the last waveform throughout that interval is heard
+             * as a loud buzz. After stretch_limit_ms the fallback below fades
+             * smoothly to silence until live samples resume. */
             if (!b->concealing) {
                 int64_t end_i = (int64_t)b->in_count - b->half - 1;
                 if (end_i < (int64_t)b->half + 2) end_i = (int64_t)b->half + 2;
@@ -415,6 +426,7 @@ void rab_pull(rab_bridge *b, int16_t *out, int frames) {
             b->loop_pos += step;
             if (b->loop_pos >= loop_end) b->loop_pos -= b->loop_len;
             b->stats.stretch_frames++;
+            b->conceal_frames++;
             delivering = 1;
         } else {
             /* not primed, or no history to loop: hold last sample, fade to silence */
