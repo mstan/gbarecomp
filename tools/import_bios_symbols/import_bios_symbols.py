@@ -259,6 +259,7 @@ def emit_toml(out_path: pathlib.Path,
     lines.append("load_address = 0x00000000")
     lines.append("size         = 0x00004000  # 16 KB")
     lines.append("entry_pc     = 0x00000000")
+    lines.append("static_resume_all = true  # BIOS instructions can be interrupted and resumed anywhere")
     lines.append("")
 
     lines.append("[identity]")

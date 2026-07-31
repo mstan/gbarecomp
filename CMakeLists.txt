@@ -199,6 +199,7 @@ add_library(gbarecomp_recompile_core STATIC
     src/recompile/function_finder.cpp
     src/recompile/emit_function.cpp
     src/recompile/codegen_shards.cpp
+    src/recompile/dispatch_table_entries.cpp
 )
 target_include_directories(gbarecomp_recompile_core PUBLIC src/recompile)
 target_link_libraries(gbarecomp_recompile_core PUBLIC gbarecomp_armv4t)

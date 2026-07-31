@@ -49,6 +49,7 @@
 
 #include "config.h"
 #include "codegen_shards.h"
+#include "dispatch_table_entries.h"
 #include "function_finder.h"
 #include "arm_decode.h"    // armv4t::ArmDecoder
 #include "thumb_decode.h"  // armv4t::ThumbDecoder
@@ -460,27 +461,20 @@ void write_dispatch_table(const std::string& dir,
         "uint8_t resume; void (*fn)(void); };\n"
         "extern \"C\" const DispatchEntry %s[] = {\n",
         names.header, names.table_symbol);
-    // funcs is sorted by addr; each host's alias entries are interior to it
-    // (host.addr < alias < next_host.addr), so emitting [host, its sorted
-    // aliases] per host keeps the whole table sorted for the binary search.
-    std::size_t total = 0;
-    for (const auto& fn : funcs) {
-        std::fprintf(f, "    {0x%08Xu, %uu, 0u, %s},\n",
-                     fn.addr,
-                     fn.mode == CpuMode::Thumb ? 1u : 0u,
+    const auto entries =
+        gbarecomp::build_dispatch_table_entries(funcs);
+    for (const auto& entry : entries) {
+        const auto& fn = funcs[entry.function_index];
+        std::fprintf(f, "    {0x%08Xu, %uu, %uu, %s},\n",
+                     entry.addr,
+                     entry.thumb ? 1u : 0u,
+                     entry.resume ? 1u : 0u,
                      fn.name.c_str());
-        ++total;
-        for (uint32_t a : fn.alias_entries) {
-            std::fprintf(f, "    {0x%08Xu, %uu, 1u, %s},\n",
-                         a, fn.mode == CpuMode::Thumb ? 1u : 0u,
-                         fn.name.c_str());
-            ++total;
-        }
     }
     std::fprintf(f,
         "};\n"
         "extern \"C\" const unsigned %s = %zu;\n",
-        names.table_len_symbol, total);
+        names.table_len_symbol, entries.size());
     std::fclose(f);
     commit_generated_file(temp, path);
 }
