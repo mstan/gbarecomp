@@ -900,6 +900,19 @@ extern "C" bool runtime_should_yield(void) {
     if (bus && g_cpu.R[15] < 0x00004000u)
         bus->latch_bios_prefetch(g_cpu.R[15], (g_cpu.cpsr & CPSR_T_BIT) != 0);
 
+    // Generated direct calls can enter mutable/self-modifying code without
+    // crossing runtime_dispatch. Unwind stale AOT at its per-instruction
+    // prologue; the outer execution loop will re-enter this PC through the
+    // live interpreter. Do not re-trigger while the interpreter itself checks
+    // the ordinary halt/frame/debug yield conditions below.
+    if (!g_runtime_force_interp_step_active &&
+        g_runtime_force_interp_hook &&
+        g_runtime_force_interp_hook(
+            g_cpu.R[15] & ~1u,
+            (g_cpu.cpsr & CPSR_T_BIT) != 0 ? 1 : 0)) {
+        return true;
+    }
+
     // Present-in-place quit: fully unwind the guest to the runner once requested.
     if (g_frame_present_quit) return true;
 

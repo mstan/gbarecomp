@@ -1066,7 +1066,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // return path so a later game launched in the same process cannot call a
     // stale game-specific copied-code dispatcher.
     struct RamDispatchHookReset {
-        ~RamDispatchHookReset() { g_runtime_ram_dispatch_hook = nullptr; }
+        ~RamDispatchHookReset() {
+            g_runtime_ram_dispatch_hook = nullptr;
+            g_runtime_force_interp_hook = nullptr;
+        }
     } ram_dispatch_hook_reset;
 
     // run_game is normally process-terminal, but tests and launchers may invoke
@@ -1860,7 +1863,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         // than dispatching generated code. Reuses runtime_tick/runtime_swi so the
         // device/IRQ/BIOS/clock path is identical to the recomp backend; only
         // main-thread instruction execution differs. See COSIM_ORACLE.md §1.
-        if (g_force_interp) {
+        const uint32_t step_pc = g_cpu.R[15] & ~1u;
+        const int step_thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+        if (g_force_interp ||
+            (g_runtime_force_interp_hook &&
+             g_runtime_force_interp_hook(step_pc, step_thumb))) {
             runtime_force_interp_step();
         } else {
             runtime_dispatch(g_cpu.R[15]);

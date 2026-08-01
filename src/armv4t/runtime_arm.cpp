@@ -57,6 +57,8 @@ extern "C" ArmCpuState g_cpu = {};
 extern "C" RuntimeThumbAluImmediateOverride
     g_runtime_thumb_alu_imm_override = nullptr;
 extern "C" RuntimeRamDispatchHook g_runtime_ram_dispatch_hook = nullptr;
+extern "C" RuntimeForceInterpHook g_runtime_force_interp_hook = nullptr;
+extern "C" int g_runtime_force_interp_step_active = 0;
 
 // VBlank-start counter (defined in src/runtime/runtime_bus_bridge.cpp).
 // Used to frame-gate the mem-write watchpoint.
@@ -774,6 +776,15 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
     runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
 
     bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+    // A generated caller may enter mutable code without returning through the
+    // outer run loop first. Honor the per-PC interpreter predicate at this
+    // central dispatch boundary too, and use the existing whole-subtree bridge
+    // so the generated call/return ABI remains balanced.
+    if (g_runtime_force_interp_hook &&
+        g_runtime_force_interp_hook(pc, thumb ? 1 : 0)) {
+        runtime_bridge_interpret(pc, thumb, 0u, 0u);
+        return;
+    }
     if (pc >= 0x02000000u && pc < 0x04000000u &&
         g_runtime_ram_dispatch_hook &&
         g_runtime_ram_dispatch_hook(pc, thumb ? 1 : 0)) {
@@ -1277,7 +1288,11 @@ extern "C" void runtime_irq(uint32_t return_address) {
     // diagnostic backend non-uniform, that let static call-stack defects in a
     // new game's IRQ corpus leak into an otherwise interpreter-only run.
     auto drive_irq_instruction = []() {
-        if (g_force_interp) {
+        const uint32_t pc = g_cpu.R[15] & ~1u;
+        const int thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+        if (g_force_interp ||
+            (g_runtime_force_interp_hook &&
+             g_runtime_force_interp_hook(pc, thumb))) {
             runtime_force_interp_step();
         } else {
             runtime_dispatch(g_cpu.R[15]);

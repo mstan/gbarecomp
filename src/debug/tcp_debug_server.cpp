@@ -799,6 +799,29 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         cmd_read_io_dynamic(*ctx.bus, req, out);
         return;
     }
+    if (contains("\"matrix_state\"")) {
+        if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
+        const auto& matrix = ctx.bus->matrix();
+        char header[256];
+        std::snprintf(
+            header, sizeof(header),
+            "{\"ok\":true,\"active\":%s,\"command\":%u,"
+            "\"physical\":%u,\"virtual\":%u,\"size\":%u,"
+            "\"commands\":%u,\"mappings\":[",
+            matrix.active() ? "true" : "false", matrix.command(),
+            matrix.physical_address(), matrix.virtual_address(),
+            matrix.transfer_size(), matrix.map_command_count());
+        out = header;
+        const auto& mappings = matrix.mappings();
+        for (std::size_t i = 0; i < mappings.size(); ++i) {
+            char value[32];
+            std::snprintf(value, sizeof(value), "%s%u",
+                          i == 0 ? "" : ",", mappings[i]);
+            out += value;
+        }
+        out += "]}";
+        return;
+    }
     if (contains("\"m4a_dump\"")) {
         // Observability (MC-HP-002): read the live MP2K SoundInfo +
         // 12-channel array out of guest RAM and flag any voice whose

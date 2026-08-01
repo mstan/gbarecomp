@@ -23,12 +23,12 @@ import json
 import pathlib
 import sys as _sys, pathlib as _pl
 _sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
-from recomp_paths import exe_name
 import socket
 import subprocess
 import sys
 import time
 from typing import Iterable, Optional
+from recomp_paths import exe_name
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BIOS_SMOKE = ROOT / "build" / exe_name("bios_smoke")
@@ -40,6 +40,7 @@ REGIONS = [
     ("oam",   "OAM",      1024,         "read_oam",   "read_emu_oam"),
     ("pal",   "PAL",      1024,         "read_pal",   "read_emu_pal"),
     ("vram",  "VRAM",     96 * 1024,    "read_vram",  "read_emu_vram"),
+    ("ewram", "EWRAM",    256 * 1024,   "read_ewram", "read_emu_ewram"),
     ("iwram", "IWRAM",    32 * 1024,    "read_iwram", "read_emu_iwram"),
     ("io",    "IO",       0x400,        "read_io",    "read_emu_io"),
 ]

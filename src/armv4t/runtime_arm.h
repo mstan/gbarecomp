@@ -59,6 +59,15 @@ extern RuntimeThumbAluImmediateOverride g_runtime_thumb_alu_imm_override;
 typedef int (*RuntimeRamDispatchHook)(uint32_t pc, int thumb);
 extern RuntimeRamDispatchHook g_runtime_ram_dispatch_hook;
 
+// Optional game/runtime predicate for executable regions whose bytes can change
+// underneath a static dispatch entry (self-modifying RAM, banked cartridge
+// apertures). A non-zero result selects the reference interpreter instead of
+// entering stale AOT, including when a generated direct call reaches the
+// mutable region without passing through runtime_dispatch first.
+typedef int (*RuntimeForceInterpHook)(uint32_t pc, int thumb);
+extern RuntimeForceInterpHook g_runtime_force_interp_hook;
+extern int g_runtime_force_interp_step_active;
+
 // Only exact PCs opted in by the recompiler config call this helper. The
 // universal/default generated path keeps the compile-time operand and emits no
 // call at all; a configured site's null/reject path still returns it unchanged.

@@ -86,19 +86,24 @@ def main() -> int:
                     help="Cap instructions before bailing")
     ap.add_argument("--native-port", type=int, default=19842)
     ap.add_argument("--oracle-port", type=int, default=19843)
+    ap.add_argument("--no-spawn", action="store_true",
+                    help="Connect to already-running peers")
+    ap.add_argument("--peer-native", action="store_true",
+                    help="Second peer speaks the native step_inst protocol")
     args = ap.parse_args()
 
     procs: list[subprocess.Popen] = []
     try:
-        procs.append(subprocess.Popen(
-            [str(BIOS_SMOKE), "--tcp", str(args.native_port)],
-            cwd=str(ROOT),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-        procs.append(subprocess.Popen(
-            [str(ORACLE), "--bios", "bios/gba_bios.bin",
-             "--port", str(args.oracle_port)],
-            cwd=str(ROOT),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        if not args.no_spawn:
+            procs.append(subprocess.Popen(
+                [str(BIOS_SMOKE), "--tcp", str(args.native_port)],
+                cwd=str(ROOT),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            procs.append(subprocess.Popen(
+                [str(ORACLE), "--bios", "bios/gba_bios.bin",
+                 "--port", str(args.oracle_port)],
+                cwd=str(ROOT),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
 
         native = JsonClient("127.0.0.1", args.native_port)
         oracle = JsonClient("127.0.0.1", args.oracle_port)
@@ -110,16 +115,20 @@ def main() -> int:
             REG_FIELDS = [f"r{i}" for i in range(15)] + ["cpsr"]
             for i in range(1, args.max_steps + 1):
                 n = native.call(cmd="step_inst")
-                o = oracle.call(cmd="emu_step_inst")
+                o = oracle.call(cmd="step_inst" if args.peer_native
+                                else "emu_step_inst")
                 if not n.get("ok") or not o.get("ok"):
                     print(f"step {i}: terminated (native_ok={n.get('ok')} "
                           f"oracle_ok={o.get('ok')})")
                     return 2
                 n_pc = int(n["pc"])
-                # mGBA's gprs[15] = executing_PC + 4 (ARM) or +2 (THUMB).
-                o_pc_raw = int(o["pc"])
-                o_thumb = bool(o.get("thumb", False))
-                o_pc = o_pc_raw - (2 if o_thumb else 4)
+                if args.peer_native:
+                    o_pc = int(o["pc"])
+                else:
+                    # mGBA's gprs[15] = executing_PC + 4 (ARM) or +2 (THUMB).
+                    o_pc_raw = int(o["pc"])
+                    o_thumb = bool(o.get("thumb", False))
+                    o_pc = o_pc_raw - (2 if o_thumb else 4)
                 history.append((i, n_pc, o_pc))
 
                 # Compare PC + R0..R14 + CPSR. CPSR diff is often the
