@@ -59,6 +59,10 @@ extern "C" unsigned long long g_runtime_vblank_starts = 0;
 // the env var is set. Dumped to stderr at exit.
 extern "C" unsigned long long g_prof_scanline_ns = 0;
 extern "C" unsigned long long g_prof_scanline_count = 0;
+// Native event service is deliberately separate from frame presentation and
+// guest input. It keeps a window responsive while one emulated frame spends a
+// long time in translated software-rendering or decode code.
+std::function<void()> g_host_service_hook;
 static const bool g_phase_prof = [] {
     const char* e = std::getenv("GBARECOMP_PHASE_PROF");
     bool on = (e != nullptr) && !(e[0] == '0' && e[1] == '\0');
@@ -664,6 +668,22 @@ extern "C" void runtime_tick(uint32_t cycles) {
     auto* ppu = gbarecomp::g_active_ppu;
     if (!bus || !ppu || cycles == 0) return;
 
+    // Some software renderers execute millions of guest instructions before
+    // reaching a GBA frame boundary. Downsample the wall-clock check so native
+    // window messages keep flowing without putting a clock read on every guest
+    // instruction.
+    if (g_host_service_hook) {
+        static uint32_t service_tick_divider = 0;
+        if ((++service_tick_divider & 0x3FFFu) == 0) {
+            static auto last_service = std::chrono::steady_clock::now();
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_service >= std::chrono::milliseconds(8)) {
+                g_host_service_hook();
+                last_service = now;
+            }
+        }
+    }
+
     cyc_probe("tick", cycles);
     g_runtime_cycles += cycles;
     // Lazy device catch-up: advance the master clock every instruction (cheap),
@@ -859,6 +879,10 @@ bool g_frame_present_quit = false;
 void runtime_set_frame_present_hook(std::function<bool()> h) {
     g_frame_present_hook = std::move(h);
     g_frame_present_quit = false;
+}
+
+void runtime_set_host_service_hook(std::function<void()> h) {
+    g_host_service_hook = std::move(h);
 }
 
 extern "C" bool runtime_should_yield(void) {

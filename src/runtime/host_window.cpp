@@ -1657,6 +1657,11 @@ bool HostWindow::fps_readout() const {
     return static_cast<const Backend*>(impl_)->fps_readout;
 }
 
+void HostWindow::service_events() {
+    if (!open_ || !impl_) return;
+    SDL_PumpEvents();
+}
+
 HostWindow::Events HostWindow::pump() {
     Events ev{};
     if (!open_) { ev.quit = true; return ev; }
@@ -1906,6 +1911,8 @@ bool HostWindow::fps_readout() const { return false; }
 
 void HostWindow::push_audio_samples(const int16_t* /*samples*/,
                                     std::size_t /*count*/) {}
+
+void HostWindow::service_events() {}
 
 HostWindow::Events HostWindow::pump() {
     Events ev{};

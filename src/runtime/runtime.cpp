@@ -81,6 +81,7 @@ extern "C" unsigned long long g_runtime_irq_entries;
 // a hook makes the per-VBlank frame-present yield present + resume in place
 // instead of unwinding the guest stack — see the windowed runner below.
 void runtime_set_frame_present_hook(std::function<bool()>);
+void runtime_set_host_service_hook(std::function<void()>);
 
 #ifndef GBARECOMP_DEFAULT_GAME_CONFIG
 #define GBARECOMP_DEFAULT_GAME_CONFIG "game.toml"
@@ -2679,6 +2680,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     };
 
+    if (args.window) {
+        runtime_set_host_service_hook([&]() { win.service_events(); });
+    }
+
     // Present-in-place (structural fix for frame-boundary resume dispatch-misses).
     // When windowed, register a hook so the per-VBlank frame-present yield presents
     // the frame from INSIDE runtime_should_yield and resumes the guest in place —
@@ -3134,6 +3139,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // Drop the present-in-place hook before the captured runner locals (win,
     // pacer, live_fb, …) go out of scope at function return.
     runtime_set_frame_present_hook(nullptr);
+    runtime_set_host_service_hook(nullptr);
     frame_phase.dump();  // HP-002: flush the phase ring (env-gated CSV)
     // HP-002: flush the always-on MMIO write ring (gba_io.cpp) to CSV.
     // GBARECOMP_MMIO_DUMP=<path>. Offline analysis derives the scanline of

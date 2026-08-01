@@ -101,6 +101,10 @@ public:
     // No-op if audio init failed or this build has no SDL2.
     void push_audio_samples(const int16_t* samples, std::size_t count);
 
+    // Service the native window-system queue without consuming input events.
+    // Long guest frames use this to remain responsive between presentations.
+    void service_events();
+
     struct Events {
         bool     quit = false;
         // GBA KEYINPUT layout. Active-low: 1 = released, 0 = pressed.
