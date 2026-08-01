@@ -212,6 +212,7 @@ set_property(TARGET gbarecomp_recompile_core PROPERTY POSITION_INDEPENDENT_CODE 
 add_library(gbarecomp_gba STATIC
     src/gba/gba_memory.cpp
     src/gba/gba_bus.cpp
+    src/gba/gba_matrix_memory.cpp
     src/gba/gba_io.cpp
     src/gba/gba_irq.cpp
     src/gba/gba_dma.cpp

@@ -34,6 +34,7 @@ void GbaBus::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     w.boolean(bios_access_enabled_);
     w.u64(unmapped_count_);
     rtc_.serialize(w);
+    matrix_.serialize(w);
 }
 
 void GbaBus::deserialize(gbarecomp::debug::SnapshotReader& r) {
@@ -47,6 +48,9 @@ void GbaBus::deserialize(gbarecomp::debug::SnapshotReader& r) {
     unmapped_count_      = static_cast<std::size_t>(r.u64());
     if (r.remaining() != 0) {
         rtc_.deserialize(r);
+    }
+    if (r.remaining() != 0) {
+        matrix_.deserialize(r);
     }
 }
 
@@ -90,17 +94,21 @@ bool is_eeprom_addr(uint32_t addr, const GbaSave& save) {
 uint32_t GbaBus::prefetch_word(uint32_t pc, bool thumb) const {
     auto code32 = [&](uint32_t a) -> uint32_t {
         if (a < 0x00004000u) return bios_ ? bios_->read32(a & 0x3FFFu) : 0u;
-        if (rom_ && a >= 0x08000000u) {
-            uint32_t o = a - 0x08000000u;
-            if (o + 3u < rom_size_) return load_u32(&rom_[o]);
+        if (rom_ && a >= 0x08000000u && a < 0x0E000000u) {
+            std::size_t o = (a - 0x08000000u) & 0x01FFFFFFu;
+            std::size_t physical = 0;
+            if (matrix_.translate(o, 4, &physical))
+                return load_u32(&rom_[physical]);
         }
         return 0u;
     };
     auto code16 = [&](uint32_t a) -> uint16_t {
         if (a < 0x00004000u) return bios_ ? bios_->read16(a & 0x3FFFu) : uint16_t{0};
-        if (rom_ && a >= 0x08000000u) {
-            uint32_t o = a - 0x08000000u;
-            if (o + 1u < rom_size_) return load_u16(&rom_[o]);
+        if (rom_ && a >= 0x08000000u && a < 0x0E000000u) {
+            std::size_t o = (a - 0x08000000u) & 0x01FFFFFFu;
+            std::size_t physical = 0;
+            if (matrix_.translate(o, 2, &physical))
+                return load_u16(&rom_[physical]);
         }
         return 0u;
     };
@@ -132,7 +140,9 @@ uint8_t GbaBus::read8(uint32_t addr) {
             if (is_eeprom_addr(addr, save_)) {
                 return static_cast<uint8_t>(save_.eeprom_read_bit());
             }
-            if (rom_ && off < rom_size_) return rom_[off];
+            std::size_t physical = 0;
+            if (rom_ && matrix_.translate(off, 1, &physical))
+                return rom_[physical];
             // No-cart open-bus: ROM reads return the cart-address-bus
             // value (per GBATEK § "GBA Cartridge ROM" — when no cart
             // asserts data, the 16-bit address drives the data lines).
@@ -186,7 +196,9 @@ uint16_t GbaBus::read16(uint32_t addr) {
             if (is_eeprom_addr(addr, save_)) {
                 return save_.eeprom_read_bit();
             }
-            if (rom_ && off + 1 < rom_size_) return load_u16(&rom_[off]);
+            std::size_t physical = 0;
+            if (rom_ && matrix_.translate(off, 2, &physical))
+                return load_u16(&rom_[physical]);
             // No-cart open-bus: read16 returns the halfword index.
             return static_cast<uint16_t>((off >> 1) & 0xFFFFu);
         }
@@ -242,8 +254,9 @@ uint32_t GbaBus::read32(uint32_t addr) {
             if (is_eeprom_addr(addr, save_)) {
                 return save_.eeprom_read_bit();
             }
-            if (rom_ && off + 3 < rom_size_) {
-                const uint32_t original = load_u32(&rom_[off]);
+            std::size_t physical = 0;
+            if (rom_ && matrix_.translate(off, 4, &physical)) {
+                const uint32_t original = load_u32(&rom_[physical]);
                 uint32_t overridden = original;
                 if (g_rom_read32_override &&
                     g_rom_read32_override(addr, original, &overridden)) {
@@ -324,6 +337,12 @@ void GbaBus::write8(uint32_t addr, uint8_t v) {
             // BIOS is read-only; hardware ignores writes to this window.
             return;
         case Region::Rom:
+            if (matrix_.active() &&
+                GbaMatrixMemory::is_register_address(addr)) {
+                // Matrix Memory does not define an 8-bit command path.
+                log_unmapped(addr, v, true, 1);
+                return;
+            }
             if (gpio_.active() && off >= 0xC4u && off <= 0xC9u) {
                 gpio_.write(static_cast<uint32_t>(off), v);
                 return;
@@ -374,6 +393,11 @@ void GbaBus::write16(uint32_t addr, uint16_t v) {
             // BIOS is read-only; hardware ignores writes to this window.
             return;
         case Region::Rom:
+            if (matrix_.active() &&
+                GbaMatrixMemory::is_register_address(addr)) {
+                matrix_.write16(addr, v);
+                return;
+            }
             if (region == Region::Rom && gpio_.active() && off >= 0xC4u && off <= 0xC8u) {
                 gpio_.write(static_cast<uint32_t>(off), static_cast<uint8_t>(v & 0xFF));
                 return;
@@ -423,6 +447,11 @@ void GbaBus::write32(uint32_t addr, uint32_t v) {
             // BIOS is read-only; hardware ignores writes to this window.
             return;
         case Region::Rom:
+            if (matrix_.active() &&
+                GbaMatrixMemory::is_register_address(addr)) {
+                matrix_.write32(addr, v);
+                return;
+            }
             if (region == Region::Rom && gpio_.active() && off >= 0xC4u && off <= 0xC6u) {
                 gpio_.write(static_cast<uint32_t>(off), static_cast<uint8_t>(v & 0xFF));
                 return;

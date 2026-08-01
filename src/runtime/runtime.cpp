@@ -122,7 +122,9 @@ uint8_t solar_host_brightness() {
 namespace gbarecomp {
 namespace {
 
-constexpr std::size_t kMaxRomSize = 32u * 1024u * 1024u;
+// Standard carts expose at most 32 MiB. GBA Video movie cartridges use a
+// Matrix Memory mapper to page a 64 MiB physical image into that window.
+constexpr std::size_t kMaxRomSize = 64u * 1024u * 1024u;
 
 struct Args {
     std::string config = GBARECOMP_DEFAULT_GAME_CONFIG;
@@ -1487,6 +1489,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                               (se && se[0] && se[0] != '0'));
     }
     bus.set_rom(rom.data(), rom.size());
+    if (!args.quiet && bus.matrix().active()) {
+        std::printf(
+            "matrix_mapper=active physical_size=%zu aperture=%zu page_size=%zu\n",
+            rom.size(),
+            gba::GbaMatrixMemory::kApertureSize,
+            gba::GbaMatrixMemory::kPageSize);
+    }
     g_solar_override_step.store(kSolarNoOverride, std::memory_order_relaxed);
     g_solar_game_provider = nullptr;
     if (bus.solar().active()) {
@@ -3219,6 +3228,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 count_nonzero(bus.pal_ptr(), 1024),
                 count_nonzero(bus.vram_ptr(), 96 * 1024),
                 count_nonzero(bus.oam_ptr(), 1024));
+    if (bus.matrix().active()) {
+        std::printf("matrix_maps=%u matrix_highest_physical_end=0x%08x\n",
+                    bus.matrix().map_command_count(),
+                    bus.matrix().highest_physical_end());
+    }
 
     // Widescreen provenance dump (debug-only): query the always-on owner ring
     // for the final guest state. GBARECOMP_WS_PROBE_DUMP=<path>.

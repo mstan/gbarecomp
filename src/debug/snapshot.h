@@ -34,7 +34,7 @@ namespace gbarecomp::debug {
 // Bump when any subsystem's serialized layout changes. load_state
 // refuses a blob whose version != kSnapshotVersion (savestates are
 // debug-loop artifacts; we don't migrate old formats).
-constexpr uint32_t kSnapshotVersion = 1;
+constexpr uint32_t kSnapshotVersion = 2;
 
 // ── SnapshotWriter ─────────────────────────────────────────────────
 // Append-only little-endian byte sink. Header-only.
