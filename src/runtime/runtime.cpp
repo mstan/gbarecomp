@@ -1120,6 +1120,21 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
         return 1;
     }
+    const float gyro_sensitivity_calibration =
+        std::isfinite(opts.gyro_sensitivity_calibration) &&
+                opts.gyro_sensitivity_calibration > 0.0f
+            ? opts.gyro_sensitivity_calibration
+            : 1.0f;
+    if (opts.launcher_expose_gyro &&
+        gyro_sensitivity_calibration != 1.0f) {
+        std::fprintf(stderr,
+                     "gyro_sensitivity: user=%.2fx calibration=%.2f "
+                     "effective=%.2fx\n",
+                     static_cast<double>(args.gyro_sensitivity),
+                     static_cast<double>(gyro_sensitivity_calibration),
+                     static_cast<double>(args.gyro_sensitivity *
+                                         gyro_sensitivity_calibration));
+    }
     gba::g_ws_affine_filter_enabled = args.affine_filter ? 1 : 0;
 
 #if defined(GBARECOMP_ENABLE_MODS)
@@ -2580,7 +2595,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 ? static_cast<float>(ev.gyro_delta_x * 25)
                 : -ev.gyro_rate_z * 128.0f;
             bus.gyro().set_sample_offset(std::clamp(
-                static_cast<int>(raw_offset * args.gyro_sensitivity),
+                static_cast<int>(raw_offset * args.gyro_sensitivity *
+                                 gyro_sensitivity_calibration),
                 -0x600, 0x600));
         }
         if (input_record_requested &&

@@ -114,6 +114,12 @@ struct RunOptions {
     // copy. False preserves the desktop/TV presentation for existing games.
     bool ui_touch_friendly = false;
 
+    // Game/device calibration beneath the user-facing gyro multiplier.
+    // A menu value of 1.00x means this game's authored baseline; 0.75 here
+    // makes that baseline 75% of the engine's raw sensor conversion while the
+    // player-facing value remains centered on 1.00x.
+    float gyro_sensitivity_calibration = 1.0f;
+
     // ---- pre-boot launcher identity (launcher_seam.h, RECOMP_LAUNCHER builds) --
     // Consumed by the recomp-ui launcher seam a game's main() runs BEFORE
     // run_game(); the runtime itself never reads these. All optional.
