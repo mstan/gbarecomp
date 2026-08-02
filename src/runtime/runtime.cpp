@@ -2371,6 +2371,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         runtime_ui_config.menu.title = runtime_title;
         runtime_ui_config.menu.subtitle = "Game Boy Advance runtime settings";
         runtime_ui_config.menu.theme = "gba";
+#if defined(RECOMP_RUNTIME_UI_HAS_PRESENTATION_FLAGS)
+        if (opts.ui_touch_friendly) {
+            runtime_ui_config.menu.presentation_flags |=
+                RECOMP_RUNTIME_UI_PRESENTATION_TOUCH_FRIENDLY;
+        }
+#endif
         runtime_ui_config.menu.callbacks.context = &runtime_ui_context;
         runtime_ui_config.menu.callbacks.get_value = runtime_ui_get;
         runtime_ui_config.menu.callbacks.set_value = runtime_ui_set;

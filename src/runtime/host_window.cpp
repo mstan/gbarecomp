@@ -325,6 +325,10 @@ struct Backend {
     RecompRuntimeUi* runtime_ui = nullptr;
     ImGuiContext* runtime_imgui_context = nullptr;
     bool runtime_imgui_ready = false;
+    // A stationary long press opens the runtime menu. Its eventual FINGERUP
+    // must not become a click on whichever menu row appeared under the finger.
+    int runtime_ui_suppressed_touch_releases = 0;
+    Uint32 runtime_ui_suppress_touch_until = 0;
 #endif
     int base_w = 240;   // logical surface width  (240 faithful, wider if expanded)
     int base_h = 160;   // logical surface height (160; vertical expansion deferred)
@@ -1786,6 +1790,32 @@ HostWindow::Events HostWindow::pump() {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
 #if defined(GBARECOMP_RUNTIME_UI)
+        const bool finger_event =
+            e.type == SDL_FINGERDOWN || e.type == SDL_FINGERMOTION ||
+            e.type == SDL_FINGERUP;
+        const bool mouse_event =
+            e.type == SDL_MOUSEMOTION || e.type == SDL_MOUSEBUTTONDOWN ||
+            e.type == SDL_MOUSEBUTTONUP;
+        const Uint32 event_now = SDL_GetTicks();
+        const bool suppress_opening_touch =
+            b->runtime_ui_suppressed_touch_releases > 0 ||
+            (b->runtime_ui_suppress_touch_until != 0 &&
+             !SDL_TICKS_PASSED(event_now,
+                               b->runtime_ui_suppress_touch_until));
+        if (finger_event && suppress_opening_touch) {
+            if (e.type == SDL_FINGERDOWN) {
+                ++b->runtime_ui_suppressed_touch_releases;
+            } else if (e.type == SDL_FINGERUP) {
+                --b->runtime_ui_suppressed_touch_releases;
+                if (b->runtime_ui_suppressed_touch_releases <= 0) {
+                    b->runtime_ui_suppressed_touch_releases = 0;
+                    // SDL may follow FINGERUP with a synthetic mouse release.
+                    b->runtime_ui_suppress_touch_until = event_now + 250;
+                }
+            }
+            continue;
+        }
+        if (mouse_event && suppress_opening_touch) continue;
         if (b->runtime_imgui_ready) {
             ImGui::SetCurrentContext(b->runtime_imgui_context);
             ImGui_ImplSDL2_ProcessEvent(&e);
@@ -1882,7 +1912,17 @@ HostWindow::Events HostWindow::pump() {
                 now - touch.started_at < 650) {
                 continue;
             }
+            int active_fingers = 0;
+            for (const auto& active_touch : b->touches)
+                if (active_touch.active) ++active_fingers;
             recomp_runtime_ui_open(b->runtime_ui);
+            b->runtime_ui_suppressed_touch_releases =
+                std::max(1, active_fingers);
+            b->runtime_ui_suppress_touch_until = 0;
+            if (b->runtime_imgui_ready) {
+                ImGui::SetCurrentContext(b->runtime_imgui_context);
+                ImGui::GetIO().ClearInputMouse();
+            }
             clear_touches(b);
             break;
         }

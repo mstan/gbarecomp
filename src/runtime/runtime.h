@@ -109,6 +109,11 @@ struct RunOptions {
     int (*ui_get_text)(const char* key, char* buf, std::size_t buf_len) = nullptr;
     int (*ui_set_text)(const char* key, const char* value) = nullptr;
 
+    // Requests recomp-ui's physically-small/high-density touch presentation:
+    // near-full-screen panels, larger hit targets, and touch-oriented footer
+    // copy. False preserves the desktop/TV presentation for existing games.
+    bool ui_touch_friendly = false;
+
     // ---- pre-boot launcher identity (launcher_seam.h, RECOMP_LAUNCHER builds) --
     // Consumed by the recomp-ui launcher seam a game's main() runs BEFORE
     // run_game(); the runtime itself never reads these. All optional.
