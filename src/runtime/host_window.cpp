@@ -1981,6 +1981,14 @@ HostWindow::Events HostWindow::pump() {
     ev.gyro_delta_x = ev.mouse_gyro_active ? mouse_x : 0;
 #if SDL_VERSION_ATLEAST(2, 0, 14)
     if (b->device_gyro) {
+#if defined(__ANDROID__)
+        // SDL normally updates sensors from SDL_PumpEvents(), but Android's
+        // native sensor queue can remain unread after an Activity transition
+        // even though SDL_SensorOpen() succeeded and SensorService registered
+        // the client. Poll the sensor backend at the point of use so the value
+        // below cannot depend on unrelated window/touch event traffic.
+        SDL_SensorUpdate();
+#endif
         float rate[3] = {};
         if (SDL_SensorGetData(b->device_gyro, rate, 3) == 0) {
             constexpr float kDeviceDriftDeadzone = 0.025f;
