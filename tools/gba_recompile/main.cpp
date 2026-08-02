@@ -74,6 +74,7 @@ struct Cli {
     std::string symbols_path;
     std::string config_path;    // --config <path> (optional, per-binary TOML)
     std::string out_dir;
+    std::string output_prefix;  // --output-prefix <identifier_prefix>
     uint32_t entry = 0x080000C0u;
     uint32_t rom_base = 0x08000000u;
     std::size_t max_functions = 4096;
@@ -88,6 +89,7 @@ void print_usage() {
         "gba_recompile --rom <path> [--entry HEX] [--symbols TSV]\n"
         "              [--config TOML] [--out DIR] [--rom-base HEX]\n"
         "              [--max-functions N] [--codegen-shards N]\n"
+        "              [--output-prefix IDENTIFIER_PREFIX]\n"
         "\n"
         "  Cart-recompile mode. Discovers functions reachable from\n"
         "  --entry + --symbols seeds and writes two or more deterministic\n"
@@ -104,7 +106,10 @@ void print_usage() {
         "\n"
         "  --config <TOML>  Per-binary configuration (manual function\n"
         "                   seeds, data-range exclusions, jump tables,\n"
-        "                   identity hash). See docs/TOML_SCHEMA.md.\n");
+        "                   identity hash). See docs/TOML_SCHEMA.md.\n"
+        "  --output-prefix  Namespace generated filenames, function symbols,\n"
+        "                   and dispatch-table symbols so multiple immutable\n"
+        "                   code images can be linked into one executable.\n");
 }
 
 bool parse_hex(const char* s, uint32_t& out) {
@@ -133,6 +138,8 @@ Cli parse_cli(int argc, char** argv) {
         else if (a == "--symbols")      c.symbols_path = next() ? argv[i] : "";
         else if (a == "--config")       c.config_path  = next() ? argv[i] : "";
         else if (a == "--out")          c.out_dir      = next() ? argv[i] : "";
+        else if (a == "--output-prefix")
+            c.output_prefix = next() ? argv[i] : "";
         else if (a == "--rom-base")     parse_hex(next(), c.rom_base);
         else if (a == "--no-symbol-map") c.emit_symbol_map = false;
         else if (a == "--symbol-map")    c.emit_symbol_map = true;
@@ -184,6 +191,22 @@ Cli parse_cli(int argc, char** argv) {
             c.ok = false;
         }
         if (c.out_dir.empty()) c.out_dir = "generated";
+    }
+    if (!c.output_prefix.empty()) {
+        const auto is_start = [](char ch) {
+            return (ch >= 'A' && ch <= 'Z') ||
+                   (ch >= 'a' && ch <= 'z') || ch == '_';
+        };
+        const auto is_continue = [&](char ch) {
+            return is_start(ch) || (ch >= '0' && ch <= '9');
+        };
+        if (!is_start(c.output_prefix.front()) ||
+            !std::all_of(c.output_prefix.begin() + 1,
+                         c.output_prefix.end(), is_continue)) {
+            std::fprintf(stderr,
+                "--output-prefix must be a C identifier prefix\n");
+            c.ok = false;
+        }
     }
     return c;
 }
@@ -254,31 +277,31 @@ std::vector<FunctionSeed> load_symbols(const std::string& path) {
 // consults kBiosDispatchTable first for PC < 0x4000 and falls
 // through to kDispatchTable otherwise.
 struct OutputNames {
-    const char* header;
-    const char* body;
-    const char* dispatch;
-    const char* table_symbol;
-    const char* table_len_symbol;
-    const char* description;
+    std::string header;
+    std::string body;
+    std::string dispatch;
+    std::string table_symbol;
+    std::string table_len_symbol;
+    std::string description;
 };
 
-OutputNames names_for_mode(bool bios_mode) {
+OutputNames names_for_mode(bool bios_mode, const std::string& prefix) {
     if (bios_mode) {
         return {
-            "bios_recompiled.h",
-            "bios_recompiled.cpp",
-            "bios_dispatch_table.cpp",
-            "kBiosDispatchTable",
-            "kBiosDispatchTableLen",
+            prefix + "bios_recompiled.h",
+            prefix + "bios_recompiled.cpp",
+            prefix + "bios_dispatch_table.cpp",
+            prefix + "kBiosDispatchTable",
+            prefix + "kBiosDispatchTableLen",
             "recompiled GBA BIOS",
         };
     }
     return {
-        "recompiled.h",
-        "recompiled.cpp",
-        "dispatch_table.cpp",
-        "kDispatchTable",
-        "kDispatchTableLen",
+        prefix + "recompiled.h",
+        prefix + "recompiled.cpp",
+        prefix + "dispatch_table.cpp",
+        prefix + "kDispatchTable",
+        prefix + "kDispatchTableLen",
         "recompiled cart code",
     };
 }
@@ -431,7 +454,7 @@ void write_header(const std::string& dir,
         "\n"
         "#pragma once\n\n"
         "extern \"C\" {\n",
-        names.description, funcs.size());
+        names.description.c_str(), funcs.size());
     for (const auto& fn : funcs) {
         std::fprintf(f, "void %s(void);  /* 0x%08X %s */\n",
                      fn.name.c_str(), fn.addr,
@@ -460,7 +483,7 @@ void write_dispatch_table(const std::string& dir,
         "struct DispatchEntry { uint32_t addr; uint8_t thumb; "
         "uint8_t resume; void (*fn)(void); };\n"
         "extern \"C\" const DispatchEntry %s[] = {\n",
-        names.header, names.table_symbol);
+        names.header.c_str(), names.table_symbol.c_str());
     const auto entries =
         gbarecomp::build_dispatch_table_entries(funcs);
     for (const auto& entry : entries) {
@@ -474,7 +497,7 @@ void write_dispatch_table(const std::string& dir,
     std::fprintf(f,
         "};\n"
         "extern \"C\" const unsigned %s = %zu;\n",
-        names.table_len_symbol, entries.size());
+        names.table_len_symbol.c_str(), entries.size());
     std::fclose(f);
     commit_generated_file(temp, path);
 }
@@ -489,8 +512,10 @@ void write_dispatch_table(const std::string& dir,
 // bios_symbol_map.cpp/kGbaBiosSymbolMap.
 void write_symbol_map(const std::string& dir,
                       const std::vector<Function>& funcs,
-                      bool bios_mode) {
-    const char* file = bios_mode ? "bios_symbol_map.cpp" : "symbol_map.cpp";
+                      bool bios_mode,
+                      const std::string& output_prefix) {
+    const std::string file = output_prefix +
+        (bios_mode ? "bios_symbol_map.cpp" : "symbol_map.cpp");
     const char* tab  = bios_mode ? "kGbaBiosSymbolMap" : "kGbaSymbolMap";
     const char* cnt  = bios_mode ? "kGbaBiosSymbolMapCount" : "kGbaSymbolMapCount";
     std::string path = dir + "/" + file;
@@ -613,7 +638,8 @@ void write_body(const std::string& dir,
     for (uint32_t shard = 0; shard < shard_count; ++shard) {
         char filename[128];
         if (shard_count == 1) {
-            std::snprintf(filename, sizeof(filename), "%s", names.body);
+            std::snprintf(
+                filename, sizeof(filename), "%s", names.body.c_str());
         } else {
             std::snprintf(filename, sizeof(filename), "%s_%03u.cpp",
                           stem.c_str(), shard);
@@ -640,7 +666,7 @@ void write_body(const std::string& dir,
         "// honesty is load-bearing\".\n\n"
         "#include \"runtime_arm.h\"\n"
         "#include \"%s\"\n\n",
-        shard, shard_count, names.header);
+        shard, shard_count, names.header.c_str());
         for (const auto& fn : funcs) {
             if (shard_count > 1 &&
                 stable_shard_hash(fn) % shard_count != shard) {
@@ -941,6 +967,11 @@ int main(int argc, char** argv) {
                     case gbarecomp::JumpTableFormat::PcrelThumb:
                         target_addr = entry_pos +
                             static_cast<int32_t>(raw);
+                        // Relative callbacks used with BX/BLX carry the
+                        // THUMB-state bit in the computed pointer just like
+                        // absolute interworking pointers do. FunctionFinder
+                        // stores normalized instruction addresses.
+                        target_addr &= ~uint32_t{1};
                         target_mode = gbarecomp::CpuMode::Thumb;
                         break;
                     default: break;
@@ -1189,9 +1220,15 @@ int main(int argc, char** argv) {
     // inter-function calls, and debug symbol map all agree on each name.
     std::vector<Function> emit_funcs = funcs;
     sanitize_function_identifiers(emit_funcs, /*prefix_guest=*/!cli.bios_mode);
+    if (!cli.output_prefix.empty()) {
+        for (auto& fn : emit_funcs) fn.name = cli.output_prefix + fn.name;
+    }
 
-    OutputNames names = names_for_mode(cli.bios_mode);
-    if (cli.emit_symbol_map) write_symbol_map(cli.out_dir, emit_funcs, cli.bios_mode);
+    OutputNames names = names_for_mode(cli.bios_mode, cli.output_prefix);
+    if (cli.emit_symbol_map) {
+        write_symbol_map(
+            cli.out_dir, emit_funcs, cli.bios_mode, cli.output_prefix);
+    }
     write_header(cli.out_dir, emit_funcs, names);
     uint32_t codegen_shards = cli.codegen_shards != 0
         ? cli.codegen_shards
@@ -1234,9 +1271,10 @@ int main(int argc, char** argv) {
     write_dispatch_table(cli.out_dir, emit_funcs, names);
     std::printf("==> wrote %s/{%s, %s%s, %s}\n",
                 cli.out_dir.c_str(),
-                names.header, codegen_shards == 1u ? names.body : "shards=",
+                names.header.c_str(),
+                codegen_shards == 1u ? names.body.c_str() : "shards=",
                 codegen_shards == 1u ? "" : std::to_string(codegen_shards).c_str(),
-                names.dispatch);
+                names.dispatch.c_str());
 
     return 0;
 }
