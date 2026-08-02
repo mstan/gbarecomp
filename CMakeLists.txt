@@ -610,10 +610,7 @@ add_test(NAME thumb_tests COMMAND thumb_tests)
 
 add_gbarecomp_runtime_stack_test(bus_tests tests/bus/test_main.cpp)
 add_gbarecomp_runtime_stack_test(dma_tests tests/dma/test_main.cpp)
-
-add_executable(timer_tests tests/timers/test_main.cpp)
-target_link_libraries(timer_tests PRIVATE gbarecomp_gba)
-add_test(NAME timer_tests COMMAND timer_tests)
+add_gbarecomp_runtime_stack_test(timer_tests tests/timers/test_main.cpp)
 
 add_executable(gpio_tests tests/gpio/test_main.cpp)
 target_link_libraries(gpio_tests PRIVATE gbarecomp_gba)
