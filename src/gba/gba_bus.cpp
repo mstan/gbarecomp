@@ -16,6 +16,8 @@
 
 namespace gba {
 
+extern "C" int (*g_rom_read16_override)(std::uint32_t, std::uint16_t,
+                                         std::uint16_t*) = nullptr;
 extern "C" int (*g_rom_read32_override)(std::uint32_t, std::uint32_t,
                                          std::uint32_t*) = nullptr;
 
@@ -197,8 +199,15 @@ uint16_t GbaBus::read16(uint32_t addr) {
                 return save_.eeprom_read_bit();
             }
             std::size_t physical = 0;
-            if (rom_ && matrix_.translate(off, 2, &physical))
-                return load_u16(&rom_[physical]);
+            if (rom_ && matrix_.translate(off, 2, &physical)) {
+                const uint16_t original = load_u16(&rom_[physical]);
+                uint16_t overridden = original;
+                if (g_rom_read16_override &&
+                    g_rom_read16_override(addr, original, &overridden)) {
+                    return overridden;
+                }
+                return original;
+            }
             // No-cart open-bus: read16 returns the halfword index.
             return static_cast<uint16_t>((off >> 1) & 0xFFFFu);
         }

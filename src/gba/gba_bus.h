@@ -31,6 +31,13 @@ namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
 namespace gba {
 
+// Optional game-owned, read-only ROM halfword override. This mirrors the
+// 32-bit hook below for games whose immutable configuration tables are read
+// with LDRH/LDRSH. Returning non-zero accepts *out_value.
+extern "C" int (*g_rom_read16_override)(std::uint32_t address,
+                                         std::uint16_t original_value,
+                                         std::uint16_t* out_value);
+
 // Optional game-owned, read-only ROM literal override. This is intended for
 // narrowly scoped, opt-in LLE patches where the original guest code must see a
 // configuration-derived constant. Returning non-zero accepts *out_value.

@@ -1075,6 +1075,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // run_game is normally process-terminal, but tests and launchers may invoke
     // it more than once. Game-owned enhancement hooks never leak into a later
     // faithful run in the same process.
+    gba::g_rom_read16_override = nullptr;
     gba::g_rom_read32_override = nullptr;
     gba::g_ws_tilemap_provider = nullptr;
     gba::g_ws_obj_x_provider = nullptr;
