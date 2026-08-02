@@ -1122,6 +1122,21 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
         return 1;
     }
+    const float gyro_sensitivity_calibration =
+        std::isfinite(opts.gyro_sensitivity_calibration) &&
+                opts.gyro_sensitivity_calibration > 0.0f
+            ? opts.gyro_sensitivity_calibration
+            : 1.0f;
+    if (opts.launcher_expose_gyro &&
+        gyro_sensitivity_calibration != 1.0f) {
+        std::fprintf(stderr,
+                     "gyro_sensitivity: user=%.2fx calibration=%.2f "
+                     "effective=%.2fx\n",
+                     static_cast<double>(args.gyro_sensitivity),
+                     static_cast<double>(gyro_sensitivity_calibration),
+                     static_cast<double>(args.gyro_sensitivity *
+                                         gyro_sensitivity_calibration));
+    }
     gba::g_ws_affine_filter_enabled = args.affine_filter ? 1 : 0;
 
 #if defined(GBARECOMP_ENABLE_MODS)
@@ -1223,10 +1238,6 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             args.frames_set = true;
         }
     }
-    if (!args.steps_set && (args.window || args.frames >= 0 || args.tcp_port > 0)) {
-        args.steps = std::numeric_limits<int>::max() / 2;
-    }
-
     // The picker has already validated SHA-1 (warn-and-try). Pass an
     // empty expected hash here so a non-canonical-but-warned dump
     // doesn't trip a hard fail in the loader.
@@ -2373,6 +2384,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         runtime_ui_config.menu.title = runtime_title;
         runtime_ui_config.menu.subtitle = "Game Boy Advance runtime settings";
         runtime_ui_config.menu.theme = "gba";
+#if defined(RECOMP_RUNTIME_UI_HAS_PRESENTATION_FLAGS)
+        if (opts.ui_touch_friendly) {
+            runtime_ui_config.menu.presentation_flags |=
+                RECOMP_RUNTIME_UI_PRESENTATION_TOUCH_FRIENDLY;
+        }
+#endif
         runtime_ui_config.menu.callbacks.context = &runtime_ui_context;
         runtime_ui_config.menu.callbacks.get_value = runtime_ui_get;
         runtime_ui_config.menu.callbacks.set_value = runtime_ui_set;
@@ -2576,7 +2593,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 ? static_cast<float>(ev.gyro_delta_x * 25)
                 : -ev.gyro_rate_z * 128.0f;
             bus.gyro().set_sample_offset(std::clamp(
-                static_cast<int>(raw_offset * args.gyro_sensitivity),
+                static_cast<int>(raw_offset * args.gyro_sensitivity *
+                                 gyro_sensitivity_calibration),
                 -0x600, 0x600));
         }
         if (input_record_requested &&
@@ -2751,10 +2769,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         });
     }
 
-    const bool open_ended = (args.window || args.frames >= 0);
-    const int step_budget = open_ended
-        ? (args.steps > 16 ? args.steps : std::numeric_limits<int>::max() / 2)
-        : args.steps;
+    // Interactive, frame-limited, and debugger-driven sessions are bounded by
+    // their own exit condition. Do not turn the historical INT_MAX/2 fallback
+    // into a roughly three-minute session limit on fast interpreter builds.
+    // An explicit --steps value remains a deterministic hard cap.
+    const bool step_limited = args.steps_set;
+    const uint64_t step_budget = step_limited && args.steps > 0
+        ? static_cast<uint64_t>(args.steps)
+        : (step_limited ? 0 : std::numeric_limits<uint64_t>::max());
 
     // Headless savestate load (--load-state <path>): boot fresh from the BIOS
     // reset, then restore a saved gameplay state before stepping. Lets a
@@ -3004,7 +3026,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     if (input_replay_requested) apply_input_replay();
     if (args.window) pump_host_input();
 
-    for (int i = 0; i < step_budget && !host_quit; ++i) {
+    for (uint64_t i = 0; i < step_budget && !host_quit; ++i) {
         // Paused: hold the guest still, keep the window alive (input pump,
         // re-present, ~100 Hz idle). Applies to windowed play only.
         while (host_paused && !host_quit && args.window) {
