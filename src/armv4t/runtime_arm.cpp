@@ -56,6 +56,7 @@ extern "C" int overlay_try_dispatch(uint32_t pc, int thumb);
 extern "C" ArmCpuState g_cpu = {};
 extern "C" RuntimeThumbAluImmediateOverride
     g_runtime_thumb_alu_imm_override = nullptr;
+extern "C" RuntimeBusReadOverride g_runtime_bus_read_override = nullptr;
 extern "C" RuntimeRamDispatchHook g_runtime_ram_dispatch_hook = nullptr;
 extern "C" RuntimeForceInterpHook g_runtime_force_interp_hook = nullptr;
 extern "C" int g_runtime_force_interp_step_active = 0;

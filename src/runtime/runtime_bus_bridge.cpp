@@ -394,6 +394,19 @@ static inline bool is_idle_safe_read(uint32_t addr) {
     return false;  // MMIO, palette, VRAM, OAM, save/flash, open-bus, unmapped
 }
 
+static inline uint32_t apply_bus_read_override(uint32_t addr, uint32_t width,
+                                               uint32_t value) {
+    uint32_t overridden = value;
+    if (g_runtime_bus_read_override &&
+        g_runtime_bus_read_override(g_cpu.R[15], addr, width, value,
+                                    &overridden)) {
+        if (width == 1u) return overridden & 0xFFu;
+        if (width == 2u) return overridden & 0xFFFFu;
+        return overridden;
+    }
+    return value;
+}
+
 extern "C" uint32_t bus_read_u32(uint32_t addr) {
     if (is_io_addr(addr)) runtime_mmio_catch_up();
     if (!is_idle_safe_read(addr)) ++g_idle_disturb_epoch;
@@ -402,6 +415,7 @@ extern "C" uint32_t bus_read_u32(uint32_t addr) {
     uint32_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read32(addr)
         : 0u;
+    v = apply_bus_read_override(addr, 4u, v);
     gbarecomp::trace_unmapped_read(addr, v, 4u);
     return v;
 }
@@ -414,6 +428,7 @@ extern "C" uint16_t bus_read_u16(uint32_t addr) {
     uint16_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read16(addr)
         : uint16_t{0};
+    v = static_cast<uint16_t>(apply_bus_read_override(addr, 2u, v));
     gbarecomp::trace_unmapped_read(addr, v, 2u);
     return v;
 }
@@ -426,6 +441,7 @@ extern "C" uint8_t bus_read_u8(uint32_t addr) {
     uint8_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read8(addr)
         : uint8_t{0};
+    v = static_cast<uint8_t>(apply_bus_read_override(addr, 1u, v));
     gbarecomp::trace_unmapped_read(addr, v, 1u);
     return v;
 }

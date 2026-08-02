@@ -1090,6 +1090,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gba::g_ws_pillarbox_right = 0;
     g_runtime_fn_entry_hook = nullptr;
     g_runtime_thumb_alu_imm_override = nullptr;
+    g_runtime_bus_read_override = nullptr;
     Args args;
 
     // Seed built-in defaults from the caller (the per-game runner).

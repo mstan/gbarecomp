@@ -52,6 +52,16 @@ typedef int (*RuntimeThumbAluImmediateOverride)(uint32_t instruction_pc,
                                                 uint32_t* out_value);
 extern RuntimeThumbAluImmediateOverride g_runtime_thumb_alu_imm_override;
 
+// Optional game-owned override for mapped bus reads. This is intended for
+// narrow, exact-PC enhancement patches whose guest-visible data must remain
+// unmodified for every other consumer.
+typedef int (*RuntimeBusReadOverride)(uint32_t instruction_pc,
+                                     uint32_t address,
+                                     uint32_t width,
+                                     uint32_t original_value,
+                                     uint32_t* out_value);
+extern RuntimeBusReadOverride g_runtime_bus_read_override;
+
 // Optional game-owned canonicalizer for position-independent code copied to
 // transient RAM addresses (notably routines executed from a moving stack
 // frame). It runs before the fixed dispatch table and returns non-zero after
