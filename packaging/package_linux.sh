@@ -102,9 +102,16 @@ done
 echo "==> resolve dlopen'd libraries"
 for lib in "$OUT"/*.so*; do
     [ -f "$lib" ] || continue
-    strings "$lib" 2>/dev/null |
-        grep -oE '\$ORIGIN/lib[A-Za-z0-9._+-]*\.so[0-9.]*' |
-        sed 's|\$ORIGIN/||' | sort -u | while read -r want; do
+    # `grep` exits 1 when it matches nothing, and MOST libraries dlopen nothing,
+    # so under `set -o pipefail` the common case made this pipeline non-zero and
+    # `set -e` aborted the whole script right after printing this step's header.
+    # Capture with `|| true` and skip empties instead of letting the pipe decide.
+    wants="$(strings "$lib" 2>/dev/null |
+             grep -oE '\$ORIGIN/lib[A-Za-z0-9._+-]*\.so[0-9.]*' |
+             sed 's|\$ORIGIN/||' | sort -u || true)"
+    [ -n "$wants" ] || continue
+    printf '%s\n' "$wants" | while read -r want; do
+        [ -n "$want" ] || continue
         [ -e "$OUT/$want" ] && continue
         found="$(ldconfig -p 2>/dev/null | awk -v w="$want" '$1==w{print $NF; exit}')"
         if [ -n "$found" ] && [ -f "$found" ]; then
