@@ -176,6 +176,41 @@ endif()
 # armv4t — portable ARM7TDMI decoder, IR, codegen. Reusable for ARM9 later.
 # Must NOT depend on src/gba or src/runtime.
 # ─────────────────────────────────────────────────────────────────────────────
+# Parent game projects can opt into a double-clickable MinGW development
+# directory without duplicating the same four-DLL staging recipe. Static
+# release targets deliberately skip this because those dependencies are baked
+# into the executable.
+set(GBARECOMP_MINGW_RUNTIME_BIN "C:/msys64/mingw64/bin"
+    CACHE PATH "Directory containing MinGW runtime DLLs for development builds")
+
+function(gbarecomp_stage_mingw_runtime target_name)
+    if(NOT TARGET "${target_name}")
+        message(FATAL_ERROR
+            "gbarecomp_stage_mingw_runtime: unknown target '${target_name}'")
+    endif()
+    if(NOT WIN32 OR NOT MINGW OR GBARECOMP_STATIC_RELEASE)
+        return()
+    endif()
+
+    foreach(runtime_dll IN ITEMS
+            SDL2.dll
+            libgcc_s_seh-1.dll
+            libstdc++-6.dll
+            libwinpthread-1.dll)
+        set(runtime_source "${GBARECOMP_MINGW_RUNTIME_BIN}/${runtime_dll}")
+        if(EXISTS "${runtime_source}")
+            add_custom_command(TARGET "${target_name}" POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${runtime_source}"
+                    "$<TARGET_FILE_DIR:${target_name}>/${runtime_dll}"
+                VERBATIM)
+        else()
+            message(WARNING
+                "gbarecomp: development runtime DLL not found: ${runtime_source}")
+        endif()
+    endforeach()
+endfunction()
+
 add_library(gbarecomp_armv4t STATIC
     src/armv4t/arm_decode.cpp
     src/armv4t/thumb_decode.cpp
@@ -295,14 +330,21 @@ if(GBARECOMP_ENABLE_MODS)
         "Enable recomp-ui Mods view for this GBA mod-enabled game" FORCE)
 endif()
 
+# Keep private BIOS-derived output out of a framework checkout when a game
+# supplies a build-local directory. The source-tree default preserves the
+# existing standalone workflow.
+set(GBARECOMP_GENERATED_BIOS_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/generated_bios"
+    CACHE PATH "Directory containing locally generated BIOS recompilation sources")
+
 # When the user has run `gba_recompile --bios`, the recompiled BIOS
 # functions live in src/runtime/generated_bios/bios_recompiled.cpp.
 # We can't list it unconditionally because the placeholder build
 # doesn't have it. Pull it in if present.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/generated_bios/bios_recompiled.cpp")
+if(EXISTS "${GBARECOMP_GENERATED_BIOS_DIR}/bios_recompiled.cpp")
     target_sources(gbarecomp_runtime PRIVATE
-        src/runtime/generated_bios/bios_dispatch_table.cpp
-        src/runtime/generated_bios/bios_recompiled.cpp)
+        "${GBARECOMP_GENERATED_BIOS_DIR}/bios_dispatch_table.cpp"
+        "${GBARECOMP_GENERATED_BIOS_DIR}/bios_recompiled.cpp")
     target_compile_definitions(gbarecomp_runtime PUBLIC
         GBARECOMP_HAVE_BIOS_RECOMP=1)
     message(STATUS "gbarecomp: BIOS recompiled output present — linking")
