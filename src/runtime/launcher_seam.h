@@ -328,7 +328,7 @@ struct SeamConfig {
     int  widescreen = 0;       // legacy fixed-width toggle
     int  aspect_index = 0;     // games with a launcher_aspect vocabulary only
     int  adaptive_view = 0;    // live drawable aspect; fixed aspect is retained
-    float gyro_sensitivity = 0.25f;
+    float gyro_sensitivity = 1.00f;
 };
 
 inline void seam_config_load(const std::string& path, SeamConfig* c) {
