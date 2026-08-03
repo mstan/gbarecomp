@@ -87,6 +87,10 @@ int test_margin_tilemap(int bg, int, int, uint16_t* out_entry) {
     return g_margin_provider_action;
 }
 
+int test_affine_filter(int bg, int) {
+    return bg == 2;
+}
+
 int g_bg_x_provider_calls = 0;
 
 int test_bg_x_provider(int bg, int output_x, int, int* out_hw_x) {
@@ -808,6 +812,95 @@ void test_bitmap_mode_wide_center_and_margins() {
                  "mode 4 wide right margin");
 }
 
+void test_affine_reference_reload_overrides_scanline_accumulation() {
+    Fixture f;
+    disable_all_objects(f);
+
+    // Mode 1 BG2, 128x128 affine map at block 0, 256-color tiles at
+    // character block 1. Tile 0 is red; its right-hand neighbor is green.
+    const uint16_t dispcnt = 0x0401;
+    store16(&f.io[0x0C], 0x0084);
+    f.vram[0] = 0;
+    f.vram[1] = 1;
+    std::fill_n(f.vram.begin() + 0x4000, 64, static_cast<uint8_t>(1));
+    std::fill_n(f.vram.begin() + 0x4040, 64, static_cast<uint8_t>(2));
+    store16(&f.pal[2], 0x001F);
+    store16(&f.pal[4], 0x03E0);
+
+    store16(&f.io[0x20], 0x0100);  // PA = 1 pixel per output pixel.
+    store16(&f.io[0x22], 0x0800);  // PB = 8 pixels per scanline.
+    store16(&f.io[0x24], 0x0000);
+    store16(&f.io[0x26], 0x0000);
+    store32(&f.io[0x28], 0);
+    store32(&f.io[0x2C], 0);
+
+    f.ppu.render_scanline(0, dispcnt, f.io.data(), f.vram.data(),
+                          f.oam.data(), f.pal.data());
+
+    // HBlank DMA writes the same zero BG2X again. The write itself reloads the
+    // hidden affine reference, so line 1 must still begin at red tile 0. The
+    // old ref + y*PB shortcut incorrectly began at green tile 1.
+    f.ppu.note_affine_reference_write(2, false);
+    f.ppu.render_scanline(1, dispcnt, f.io.data(), f.vram.data(),
+                          f.oam.data(), f.pal.data());
+
+    // With no second reload, the internal reference advances by PB and line 2
+    // correctly begins at green tile 1.
+    f.ppu.render_scanline(2, dispcnt, f.io.data(), f.vram.data(),
+                          f.oam.data(), f.pal.data());
+    f.ppu.mark_framebuffer_latched();
+    const uint8_t* frame = f.ppu.latched_framebuffer();
+    expect_pixel(frame + (0 * 240) * 3, 255, 0, 0,
+                 "affine line 0 reference");
+    expect_pixel(frame + (1 * 240) * 3, 255, 0, 0,
+                 "affine HBlank reference reload");
+    expect_pixel(frame + (2 * 240) * 3, 0, 255, 0,
+                 "affine internal reference accumulation");
+}
+
+void test_wide_affine_filter_is_selective_and_bilinear() {
+    Fixture f;
+    disable_all_objects(f);
+
+    // Mode 1 BG2, 128x128 affine map at block 0, 256-color tile data at
+    // character block 1. Sample halfway between a red and green texel.
+    const uint16_t dispcnt = 0x0401;
+    store16(&f.io[0x0C], 0x0084);
+    f.vram[0] = 0;
+    f.vram[0x4000] = 1;
+    f.vram[0x4001] = 2;
+    f.vram[0x4008] = 1;
+    f.vram[0x4009] = 2;
+    store16(&f.pal[2], 0x001F);
+    store16(&f.pal[4], 0x03E0);
+    set_bg2_identity(f);
+    store32(&f.io[0x28], 0x80);
+
+    constexpr uint32_t margin = 24;
+    f.ppu.set_view_margins(margin, margin, 0, 0);
+    std::vector<uint8_t> wide(gba::GbaPpu::kMaxFramebufferBytes, 0);
+
+    gba::g_ws_affine_filter_enabled = 0;
+    gba::g_ws_affine_filter_provider = test_affine_filter;
+    f.ppu.render(wide.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&wide[margin * 3], 255, 0, 0,
+                 "wide affine nearest baseline");
+
+    gba::g_ws_affine_filter_enabled = 1;
+    f.ppu.render(wide.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&wide[margin * 3], 132, 132, 0,
+                 "wide affine bilinear sample");
+
+    gba::g_ws_affine_filter_provider = nullptr;
+    f.ppu.render(wide.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&wide[margin * 3], 255, 0, 0,
+                 "wide affine provider opt-in");
+    gba::g_ws_affine_filter_enabled = 0;
+}
+
 // The latched frame is a VBlank snapshot: scanlines of the NEXT frame being
 // composited must never show through latched_framebuffer(). (Regression test
 // for the Minish Cap walk "warble": render_scanline used to write directly
@@ -879,6 +972,8 @@ int main() {
     test_bitmap_mode5_bounds_and_page_flip();
     test_bitmap_mode_obj_compositing_and_obj_window();
     test_bitmap_mode_wide_center_and_margins();
+    test_affine_reference_reload_overrides_scanline_accumulation();
+    test_wide_affine_filter_is_selective_and_bilinear();
     test_latched_frame_immune_to_in_progress_scanlines();
     std::puts("ppu_smoke_tests: PASS");
     return 0;

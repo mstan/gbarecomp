@@ -20,6 +20,7 @@
 #include "gba_bios.h"
 #include "gba_io.h"
 #include "gba_memory.h"
+#include "gba_matrix_memory.h"
 #include "gba_gpio.h"
 #include "gba_gyro.h"
 #include "gba_solar.h"
@@ -29,6 +30,13 @@
 namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
 namespace gba {
+
+// Optional game-owned, read-only ROM halfword override. This mirrors the
+// 32-bit hook below for games whose immutable configuration tables are read
+// with LDRH/LDRSH. Returning non-zero accepts *out_value.
+extern "C" int (*g_rom_read16_override)(std::uint32_t address,
+                                         std::uint16_t original_value,
+                                         std::uint16_t* out_value);
 
 // Optional game-owned, read-only ROM literal override. This is intended for
 // narrowly scoped, opt-in LLE patches where the original guest code must see a
@@ -110,6 +118,7 @@ public:
     void set_rom(const uint8_t* rom_bytes, std::size_t rom_size) {
         rom_ = rom_bytes;
         rom_size_ = rom_size;
+        matrix_.configure(rom_bytes, rom_size);
         // Detect the cartridge RTC (Seiko S-3511A) by SDK signature and
         // arm the GPIO clock if present. No-op for non-clock carts.
         rtc_.configure(rom_bytes, rom_size);
@@ -156,6 +165,8 @@ public:
     const GbaGyro& gyro() const { return gyro_; }
     GbaSolarSensor&       solar()       { return solar_; }
     const GbaSolarSensor& solar() const { return solar_; }
+    GbaMatrixMemory&       matrix()       { return matrix_; }
+    const GbaMatrixMemory& matrix() const { return matrix_; }
     // Must be set before set_rom(); the sensor is opt-in per game.
     void set_solar_enabled(bool on) { solar_enabled_ = on; }
 
@@ -259,6 +270,7 @@ private:
     GbaIo       io_dispatch_;
     GbaAudio    audio_;
     GbaSave     save_;
+    GbaMatrixMemory matrix_;
     GbaRtc      rtc_;
     GbaGyro        gyro_;
     GpioPort       gpio_;

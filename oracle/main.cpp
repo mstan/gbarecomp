@@ -470,6 +470,50 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         out = body;
         return;
     }
+    if (starts("\"emu_run_until_pc\"")) {
+        if (!o.core) { emit_error(out, "no core"); return; }
+        uint64_t target = 0;
+        uint64_t max_steps = 10'000'000;
+        if (!extract_uint(req, "\"target\"", target)) {
+            emit_error(out, "missing target");
+            return;
+        }
+        extract_uint(req, "\"max_steps\"", max_steps);
+        for (uint64_t i = 0; i <= max_steps; ++i) {
+            int32_t raw_pc = 0, cpsr = 0;
+            o.core->readRegister(o.core, "r15", &raw_pc);
+            o.core->readRegister(o.core, "cpsr", &cpsr);
+            const bool thumb = (static_cast<uint32_t>(cpsr) & (1u << 5)) != 0;
+            const uint32_t bias = thumb ? 2u : 4u;
+            const uint32_t exec_pc = static_cast<uint32_t>(raw_pc) - bias;
+            if (exec_pc == static_cast<uint32_t>(target)) {
+                char body[256];
+                std::snprintf(
+                    body, sizeof(body),
+                    "{\"ok\":true,\"found\":true,\"steps\":%llu,"
+                    "\"pc\":%u,\"raw_pc\":%u,\"cpsr\":%u,"
+                    "\"cycles_elapsed\":%llu}",
+                    static_cast<unsigned long long>(i),
+                    static_cast<unsigned>(exec_pc),
+                    static_cast<unsigned>(raw_pc),
+                    static_cast<unsigned>(cpsr),
+                    static_cast<unsigned long long>(
+                        o.core->timing ? mTimingCurrentTime(o.core->timing) : 0));
+                out = body;
+                return;
+            }
+            if (i == max_steps) break;
+            o.core->step(o.core);
+            ++o.inst_count;
+        }
+        char body[160];
+        std::snprintf(
+            body, sizeof(body),
+            "{\"ok\":true,\"found\":false,\"steps\":%llu}",
+            static_cast<unsigned long long>(max_steps));
+        out = body;
+        return;
+    }
     if (starts("\"emu_find_dma_source_reset\"")) {
         if (!o.core) { emit_error(out, "no core"); return; }
         uint64_t channel_arg = 2;
@@ -525,6 +569,16 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         out = body;
         return;
     }
+    if (starts("\"emu_step_frames\"")) {
+        uint64_t count = 0;
+        if (!extract_uint(req, "\"count\"", count) || count > 10'000'000) {
+            emit_error(out, "invalid count");
+            return;
+        }
+        for (uint64_t i = 0; i < count; ++i) o.step_frame();
+        emit_ok_int(out, "frame", o.frame);
+        return;
+    }
     if (starts("\"emu_step\"") || starts("\"emu_step_to_vblank\"")) {
         o.step_frame();
         emit_ok_int(out, "frame", o.frame);
@@ -570,6 +624,29 @@ void dispatch(Oracle& o, std::string_view req, std::string& out) {
         // ROM cartridge: cap reads at 32 MB so out-of-range queries
         // don't iterate forever.
         cmd_read_region(o, req, Oracle::kBaseROM, 0x02000000u, out);
+        return;
+    }
+    if (starts("\"emu_matrix_state\"")) {
+        auto* gba = static_cast<GBA*>(o.core->board);
+        const GBAMatrix& matrix = gba->memory.matrix;
+        char header[256];
+        std::snprintf(
+            header, sizeof(header),
+            "{\"ok\":true,\"command\":%u,\"physical\":%u,"
+            "\"virtual\":%u,\"size\":%u,\"mappings\":[",
+            static_cast<unsigned>(matrix.cmd),
+            static_cast<unsigned>(matrix.paddr),
+            static_cast<unsigned>(matrix.vaddr),
+            static_cast<unsigned>(matrix.size));
+        out = header;
+        for (int i = 0; i < GBA_MATRIX_MAPPINGS_MAX; ++i) {
+            char value[32];
+            std::snprintf(value, sizeof(value), "%s%u",
+                          i == 0 ? "" : ",",
+                          static_cast<unsigned>(matrix.mappings[i]));
+            out += value;
+        }
+        out += "]}";
         return;
     }
     if (starts("\"emu_registers\"")) {

@@ -744,7 +744,10 @@ extern "C" void runtime_force_interp_step(void) {
     // state the recomp does — without this the co-sim's prefetch sub-hash split every
     // BIOS instruction. On a yield, return without executing (step_once re-enters
     // next iteration), exactly as the generated function returns to the runner.
-    if (runtime_should_yield()) return;
+    g_runtime_force_interp_step_active = 1;
+    const bool should_yield = runtime_should_yield();
+    g_runtime_force_interp_step_active = 0;
+    if (should_yield) return;
 
     armv4t::CPUState cpu{};
     gbarecomp::load_arm_cpu_into_interp(g_cpu, cpu);

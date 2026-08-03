@@ -48,4 +48,21 @@ inline PresentationLayout compute_presentation_layout(int drawable_width,
     };
 }
 
+// Sharp fractional scaling first expands every logical pixel to the largest
+// whole-number block that fits inside the final destination. A second,
+// typically small linear stretch reaches the exact responsive layout. Exact
+// integer layouts need no intermediate pass; downscales cannot use one.
+inline int compute_sharp_prescale_factor(const PresentationLayout& layout,
+                                         int logical_width,
+                                         int logical_height) {
+    if (layout.width <= 0 || layout.height <= 0 ||
+        logical_width <= 0 || logical_height <= 0 ||
+        layout.integer_scale > 0) {
+        return 0;
+    }
+    const int factor = std::min(layout.width / logical_width,
+                                layout.height / logical_height);
+    return factor >= 2 ? factor : 0;
+}
+
 }  // namespace gbarecomp

@@ -37,6 +37,7 @@
 #if defined(RECOMP_LAUNCHER)
 
 #include "runtime.h"
+#include "../gba/gba_bios.h"
 #if defined(GBARECOMP_ENABLE_MODS)
 #include "mod_runtime.h"
 #endif
@@ -57,6 +58,31 @@
 #include <vector>
 
 namespace gbarecomp_seam {
+
+inline int verify_retail_gba_bios(const char* path,
+                                  RecompLauncherCBiosVerify* out) {
+    if (!out) return 0;
+    std::memset(out, 0, sizeof(*out));
+    if (!path || !*path) {
+        std::snprintf(out->detail, sizeof(out->detail),
+                      "Retail Game Boy Advance BIOS required (16 KB).");
+        return 1;
+    }
+
+    gba::GbaBios bios;
+    std::string error;
+    if (!bios.load_from_file(path, gba::GbaBios::kExpectedSha1, &error)) {
+        std::snprintf(out->detail, sizeof(out->detail), "%s",
+                      error.empty() ? "Invalid Game Boy Advance BIOS."
+                                    : error.c_str());
+        return 1;
+    }
+
+    out->ok = 1;
+    std::snprintf(out->detail, sizeof(out->detail),
+                  "Retail Game Boy Advance BIOS verified (16 KB).");
+    return 1;
+}
 
 template <typename T, typename = void>
 struct has_gyro_sensitivity : std::false_type {};
@@ -95,6 +121,57 @@ template <typename T>
 inline void set_has_gyro_controls(T& game_info, bool enabled) {
     if constexpr (has_gyro_controls<T>::value) {
         game_info.has_gyro_controls = enabled ? 1 : 0;
+    }
+}
+
+template <typename T, typename = void>
+struct has_presentation_filters : std::false_type {};
+
+template <typename T>
+struct has_presentation_filters<
+    T,
+    std::void_t<decltype(std::declval<T&>().sharp_filter),
+                decltype(std::declval<T&>().affine_filter)>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct has_presentation_filter_caps : std::false_type {};
+
+template <typename T>
+struct has_presentation_filter_caps<
+    T,
+    std::void_t<decltype(std::declval<T&>().has_sharp_filter),
+                decltype(std::declval<T&>().has_affine_filter)>>
+    : std::true_type {};
+
+template <typename T>
+inline void set_presentation_filters(T& settings, bool sharp, bool affine) {
+    if constexpr (has_presentation_filters<T>::value) {
+        settings.sharp_filter = sharp ? 1 : 0;
+        settings.affine_filter = affine ? 1 : 0;
+    }
+}
+
+template <typename T>
+inline bool get_sharp_filter(const T& settings, bool fallback) {
+    if constexpr (has_presentation_filters<T>::value)
+        return settings.sharp_filter != 0;
+    return fallback;
+}
+
+template <typename T>
+inline bool get_affine_filter(const T& settings, bool fallback) {
+    if constexpr (has_presentation_filters<T>::value)
+        return settings.affine_filter != 0;
+    return fallback;
+}
+
+template <typename T>
+inline void set_presentation_filter_caps(T& game_info,
+                                         bool sharp, bool affine) {
+    if constexpr (has_presentation_filter_caps<T>::value) {
+        game_info.has_sharp_filter = sharp ? 1 : 0;
+        game_info.has_affine_filter = affine ? 1 : 0;
     }
 }
 
@@ -243,13 +320,15 @@ struct SeamConfig {
     int  scale = 3;
     int  fullscreen = 0;
     int  linear_filter = 0;
+    int  sharp_filter = -1;
+    int  affine_filter = -1;
     int  screen_kind = 0;      // kScreenTokens index
     int  volume = 100;
     int  skip_launcher = 0;
     int  widescreen = 0;       // legacy fixed-width toggle
     int  aspect_index = 0;     // games with a launcher_aspect vocabulary only
     int  adaptive_view = 0;    // live drawable aspect; fixed aspect is retained
-    float gyro_sensitivity = 0.25f;
+    float gyro_sensitivity = 1.00f;
 };
 
 inline void seam_config_load(const std::string& path, SeamConfig* c) {
@@ -281,6 +360,8 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
         if (key == "scale")         c->scale = std::atoi(val.c_str());
         else if (key == "fullscreen")    c->fullscreen = std::atoi(val.c_str());
         else if (key == "linear_filter") c->linear_filter = std::atoi(val.c_str());
+        else if (key == "sharp_filter") c->sharp_filter = std::atoi(val.c_str());
+        else if (key == "affine_filter") c->affine_filter = std::atoi(val.c_str());
         else if (key == "screen")        c->screen_kind = screen_token_to_index(val);
         else if (key == "volume")        c->volume = std::atoi(val.c_str());
         else if (key == "skip_launcher") c->skip_launcher = std::atoi(val.c_str());
@@ -335,6 +416,8 @@ inline void seam_config_save(const std::string& path, const SeamConfig& c) {
     f << "scale = " << c.scale << "\n";
     f << "fullscreen = " << c.fullscreen << "\n";
     f << "linear_filter = " << c.linear_filter << "\n";
+    f << "sharp_filter = " << c.sharp_filter << "\n";
+    f << "affine_filter = " << c.affine_filter << "\n";
     f << "screen = " << kScreenTokens[c.screen_kind] << "\n";
     f << "volume = " << c.volume << "\n";
     f << "skip_launcher = " << c.skip_launcher << "\n";
@@ -451,6 +534,14 @@ inline void seam_append_setting_args(std::vector<std::string>& args,
     args.push_back(std::to_string(c.volume));
     args.push_back("--linear-filter");
     args.push_back(c.linear_filter ? "1" : "0");
+    if (opts.launcher_expose_sharp_filter) {
+        args.push_back("--sharp-filter");
+        args.push_back(c.sharp_filter ? "1" : "0");
+    }
+    if (opts.launcher_expose_affine_filter) {
+        args.push_back("--affine-filter");
+        args.push_back(c.affine_filter ? "1" : "0");
+    }
     args.push_back("--screen");
     args.push_back(kScreenTokens[c.screen_kind]);
     // Tri-state: 0 off, 1 borderless, 2 exclusive. Pass the value explicitly
@@ -563,6 +654,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
 
     SeamConfig cfg;
     seam_config_load(config_path, &cfg);
+    if (cfg.sharp_filter < 0)
+        cfg.sharp_filter = opts.launcher_default_sharp_filter ? 1 : 0;
+    if (cfg.affine_filter < 0)
+        cfg.affine_filter = opts.launcher_default_affine_filter ? 1 : 0;
     SeamSolar solar;
     if (opts.has_solar_sensor) seam_solar_load(config_path, &solar);
     if (cfg.skip_launcher && !force_launcher) {
@@ -580,13 +675,33 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         state_path(opts.launcher_bios_cache_filename, "bios.cfg");
     std::string seed_rom  = read_single_line(rom_cfg);
     std::string seed_bios = read_single_line(bios_cfg);
+    auto normalize_cached_path =
+        [](const std::string& value, const std::string& cache_path) {
+            if (value.empty()) return std::string{};
+            std::filesystem::path path(value);
+            if (path.is_relative())
+                path = std::filesystem::path(cache_path).parent_path() / path;
+            std::error_code ec;
+            if (!std::filesystem::exists(path, ec) || ec) return std::string{};
+            const std::filesystem::path absolute =
+                std::filesystem::weakly_canonical(path, ec);
+            return (ec ? path.lexically_normal() : absolute).string();
+        };
+    seed_rom = normalize_cached_path(seed_rom, rom_cfg);
+    seed_bios = normalize_cached_path(seed_bios, bios_cfg);
     if ((seed_rom.empty() || seed_bios.empty()) &&
         opts.launcher_game_config && opts.launcher_game_config[0]) {
-        // game.toml path is relative to the exe/CWD; try both.
+        // Packaged builds put game.toml beside the executable. Development
+        // builds commonly keep it one directory above build/.
         std::string toml = opts.launcher_game_config;
         if (!std::filesystem::exists(toml)) {
             std::string alt = dir + "/" + toml;
-            if (std::filesystem::exists(alt)) toml = alt;
+            if (std::filesystem::exists(alt)) {
+                toml = alt;
+            } else {
+                alt = (std::filesystem::path(dir).parent_path() / toml).string();
+                if (std::filesystem::exists(alt)) toml = alt;
+            }
         }
         if (std::filesystem::exists(toml)) {
             auto config_relative_path =
@@ -624,6 +739,8 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     ls.screen_kind   = cfg.screen_kind;
     ls.aspect_index  = cfg.aspect_index;
     gbarecomp_seam::set_gyro_sensitivity(ls, cfg.gyro_sensitivity);
+    gbarecomp_seam::set_presentation_filters(
+        ls, cfg.sharp_filter != 0, cfg.affine_filter != 0);
     std::snprintf(ls.bios_path, sizeof(ls.bios_path), "%s", seed_bios.c_str());
 
     RecompLauncherCGameInfo gi;
@@ -649,7 +766,11 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     gi.config_path = config_path.c_str();
     gi.keybinds_path = keybinds_path.c_str();
     gi.boxart_path = opts.launcher_boxart;   // NULL => default assets/img/boxart.tga
+    gi.bios_verify = &gbarecomp_seam::verify_retail_gba_bios;
     gbarecomp_seam::set_has_gyro_controls(gi, opts.launcher_expose_gyro);
+    gbarecomp_seam::set_presentation_filter_caps(
+        gi, opts.launcher_expose_sharp_filter,
+        opts.launcher_expose_affine_filter);
 #if defined(GBARECOMP_ENABLE_MODS)
     gi.mods = mod_provider;
 #endif
@@ -691,6 +812,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     // on every subsequent launch.
     cfg.fullscreen    = (ls.fullscreen >= 0 && ls.fullscreen <= 2) ? ls.fullscreen : 0;
     cfg.linear_filter = ls.linear_filter ? 1 : 0;
+    cfg.sharp_filter =
+        gbarecomp_seam::get_sharp_filter(ls, cfg.sharp_filter != 0) ? 1 : 0;
+    cfg.affine_filter =
+        gbarecomp_seam::get_affine_filter(ls, cfg.affine_filter != 0) ? 1 : 0;
     cfg.screen_kind   = (ls.screen_kind >= 0 && ls.screen_kind <= 4)
                           ? ls.screen_kind : 0;
     cfg.volume        = ls.volume;

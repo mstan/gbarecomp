@@ -710,8 +710,14 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
             body << indent << "uint32_t " << target_var << " = "
                  << read_reg_expr(ins.rm, ins) << ";\n";
             body << indent << "g_cpu.R[15] = " << target_var << " & ~1u;\n";
-            // BX always transfers; tick its cost before either the C-
-            // return or the dispatch path (both exit the function).
+            // Commit the complete architectural branch state before ticking.
+            // runtime_tick may deliver an IRQ, whose SPSR/return PC snapshot
+            // must never observe the BX destination paired with the old
+            // instruction-set mode.
+            body << indent << "if (" << target_var
+                 << " & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;\n";
+            // BX always transfers; tick its cost before either the C-return
+            // or the dispatch path (both exit the function).
             body << indent << "runtime_tick(" << cyc_var_for(ins) << ");\n";
             if (ins.rm == 14 || ctx.force_bx_c_return) {
                 // `bx lr` — the AAPCS function-return idiom. In the
@@ -723,8 +729,6 @@ bool emit_branch(std::ostringstream& body, const Instr& ins,
                 // Non-return BX (computed jump, trampoline, BX to a
                 // non-caller via BL/BLX from a different source)
                 // is handled by the dispatch path below.
-                body << indent << "if (" << target_var
-                     << " & 1u) g_cpu.cpsr |= CPSR_T_BIT; else g_cpu.cpsr &= ~CPSR_T_BIT;\n";
                 body << indent << "if (runtime_call_should_return(g_cpu.R[15])) return;\n";
                 body << indent << "runtime_dispatch_with_exchange("
                      << target_var << ");\n";

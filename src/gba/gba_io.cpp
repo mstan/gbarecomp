@@ -422,19 +422,31 @@ void GbaIo::run_sound_fifo_dma(int channel) {
 
 void GbaIo::tick_timers(uint32_t cycles) {
     static constexpr uint32_t kPrescale[4] = {1, 64, 256, 1024};
+    uint64_t overflow_count[4] = {0, 0, 0, 0};
+
     for (int t = 0; t < 4; ++t) {
         uint16_t ctrl = timer_control_[t];
         if ((ctrl & 0x0080u) == 0) continue;
-        if (ctrl & 0x0004u) continue;  // cascade timers are not needed by BIOS audio
 
-        uint32_t prescale = kPrescale[ctrl & 0x3u];
-        timer_accum_[t] += cycles;
-        uint32_t ticks = timer_accum_[t] / prescale;
-        timer_accum_[t] %= prescale;
+        uint64_t ticks = 0;
+        // Timer 1..3 count-up mode advances once for each overflow of the
+        // immediately preceding timer. Hardware ignores the count-up bit on
+        // Timer 0, which continues to use its selected prescaler.
+        if (t > 0 && (ctrl & 0x0004u)) {
+            ticks = overflow_count[t - 1];
+        } else {
+            const uint32_t prescale = kPrescale[ctrl & 0x3u];
+            const uint64_t accumulated =
+                static_cast<uint64_t>(timer_accum_[t]) + cycles;
+            ticks = accumulated / prescale;
+            timer_accum_[t] =
+                static_cast<uint32_t>(accumulated % prescale);
+        }
         if (ticks == 0) continue;
 
         while (ticks != 0) {
-            uint32_t until_overflow = 0x10000u - timer_counter_[t];
+            const uint32_t until_overflow =
+                0x10000u - timer_counter_[t];
             if (ticks < until_overflow) {
                 timer_counter_[t] = static_cast<uint16_t>(
                     timer_counter_[t] + ticks);
@@ -444,6 +456,7 @@ void GbaIo::tick_timers(uint32_t cycles) {
 
             ticks -= until_overflow;
             timer_counter_[t] = timer_reload_[t];
+            ++overflow_count[t];
             if (ctrl & 0x0040u) {
                 request_irq(static_cast<uint16_t>(IrqTimer0 << t));
             }
@@ -474,7 +487,10 @@ uint32_t GbaIo::cycles_until_next_timer_event() const {
     for (int t = 0; t < 4; ++t) {
         uint16_t ctrl = timer_control_[t];
         if ((ctrl & 0x0080u) == 0) continue;
-        if (ctrl & 0x0004u) continue;
+        // A cascaded timer is driven by its predecessor's scheduled overflow,
+        // so only independently clocked timers contribute a master-clock
+        // deadline. Timer 0's count-up bit is ignored by hardware.
+        if (t > 0 && (ctrl & 0x0004u)) continue;
         uint32_t prescale = kPrescale[ctrl & 0x3u];
         uint32_t ticks = 0x10000u - timer_counter_[t];
         uint64_t cycles = static_cast<uint64_t>(ticks) * prescale;
@@ -669,6 +685,12 @@ void GbaIo::write8(uint32_t off, uint8_t v) {
             break;
     }
     io_[off] = v;
+    if (ppu_) {
+        if (off >= 0x028u && off <= 0x02Fu)
+            ppu_->note_affine_reference_write(2, off >= 0x02Cu);
+        else if (off >= 0x038u && off <= 0x03Fu)
+            ppu_->note_affine_reference_write(3, off >= 0x03Cu);
+    }
 }
 
 void GbaIo::write16(uint32_t off, uint16_t v) {
@@ -779,6 +801,12 @@ void GbaIo::write16(uint32_t off, uint16_t v) {
         }
     }
     store_u16(&io_[off], v);
+    if (ppu_) {
+        if (off >= 0x028u && off <= 0x02Eu)
+            ppu_->note_affine_reference_write(2, off >= 0x02Cu);
+        else if (off >= 0x038u && off <= 0x03Eu)
+            ppu_->note_affine_reference_write(3, off >= 0x03Cu);
+    }
 }
 
 void GbaIo::write32(uint32_t off, uint32_t v) {

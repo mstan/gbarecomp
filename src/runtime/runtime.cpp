@@ -81,6 +81,7 @@ extern "C" unsigned long long g_runtime_irq_entries;
 // a hook makes the per-VBlank frame-present yield present + resume in place
 // instead of unwinding the guest stack — see the windowed runner below.
 void runtime_set_frame_present_hook(std::function<bool()>);
+void runtime_set_host_service_hook(std::function<void()>);
 
 #ifndef GBARECOMP_DEFAULT_GAME_CONFIG
 #define GBARECOMP_DEFAULT_GAME_CONFIG "game.toml"
@@ -122,7 +123,9 @@ uint8_t solar_host_brightness() {
 namespace gbarecomp {
 namespace {
 
-constexpr std::size_t kMaxRomSize = 32u * 1024u * 1024u;
+// Standard carts expose at most 32 MiB. GBA Video movie cartridges use a
+// Matrix Memory mapper to page a 64 MiB physical image into that window.
+constexpr std::size_t kMaxRomSize = 64u * 1024u * 1024u;
 
 struct Args {
     std::string config = GBARECOMP_DEFAULT_GAME_CONFIG;
@@ -165,6 +168,8 @@ struct Args {
     int fullscreen = 0;
     int  volume = 100;            // --volume 0..100: pushed-sample gain
     bool linear_filter = false;   // --linear-filter 1: linear texture scaling
+    bool sharp_filter = false;    // --sharp-filter 1: integer prescale + linear finish
+    bool affine_filter = false;   // --affine-filter 1: game-authorized smoothing
     float gyro_sensitivity = 0.25f; // --gyro-sensitivity 0.25..4.00
     // [audio] shadow = true|false — arm the MP2K verified-enhancement shadow
     // mixer (default off). GBARECOMP_AUDIO_SHADOW overrides at launch.
@@ -682,6 +687,10 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
             if (parse_int(val.c_str(), &n) && n >= 240) args->view_width = n;
         } else if (section == "video" && key == "resize_view") {
             args->resize_view = (val == "true" || val == "1");
+        } else if (section == "video" && key == "sharp_filter") {
+            args->sharp_filter = (val == "true" || val == "1");
+        } else if (section == "video" && key == "affine_filter") {
+            args->affine_filter = (val == "true" || val == "1");
         } else if (section == "video" && key == "widescreen") {
             int n = 0;
             int width = 240;
@@ -713,7 +722,8 @@ void find_config_arg(int argc, char** argv, Args* args) {
              s == "--dump-png" || s == "--load-state" ||
              s == "--view-width" || s == "--widescreen" ||
              s == "--save" || s == "--save-path" ||
-             s == "--gyro-sensitivity") &&
+             s == "--gyro-sensitivity" || s == "--sharp-filter" ||
+             s == "--affine-filter") &&
             i + 1 < argc) {
             ++i;
             continue;
@@ -931,6 +941,28 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             args->linear_filter = lf != 0;
             continue;
         }
+        if (s == "--sharp-filter") {
+            const char* v = need_value("--sharp-filter");
+            if (!v) return false;
+            int sf = 0;
+            if (!parse_int(v, &sf) || (sf != 0 && sf != 1)) {
+                if (err) *err = "invalid --sharp-filter value (expected 0 or 1)";
+                return false;
+            }
+            args->sharp_filter = sf != 0;
+            continue;
+        }
+        if (s == "--affine-filter") {
+            const char* v = need_value("--affine-filter");
+            if (!v) return false;
+            int af = 0;
+            if (!parse_int(v, &af) || (af != 0 && af != 1)) {
+                if (err) *err = "invalid --affine-filter value (expected 0 or 1)";
+                return false;
+            }
+            args->affine_filter = af != 0;
+            continue;
+        }
         if (s == "--gyro-sensitivity") {
             const char* v = need_value("--gyro-sensitivity");
             if (!v || !parse_float(v, &args->gyro_sensitivity) ||
@@ -1034,24 +1066,31 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // return path so a later game launched in the same process cannot call a
     // stale game-specific copied-code dispatcher.
     struct RamDispatchHookReset {
-        ~RamDispatchHookReset() { g_runtime_ram_dispatch_hook = nullptr; }
+        ~RamDispatchHookReset() {
+            g_runtime_ram_dispatch_hook = nullptr;
+            g_runtime_force_interp_hook = nullptr;
+        }
     } ram_dispatch_hook_reset;
 
     // run_game is normally process-terminal, but tests and launchers may invoke
     // it more than once. Game-owned enhancement hooks never leak into a later
     // faithful run in the same process.
+    gba::g_rom_read16_override = nullptr;
     gba::g_rom_read32_override = nullptr;
     gba::g_ws_tilemap_provider = nullptr;
     gba::g_ws_obj_x_provider = nullptr;
     gba::g_ws_obj_attr_x_provider = nullptr;
     gba::g_ws_bg_x_provider = nullptr;
     gba::g_ws_bg_x_provider_layers = 0xFu;
+    gba::g_ws_affine_filter_enabled = 0;
+    gba::g_ws_affine_filter_provider = nullptr;
     gba::g_ws_authored_margin_layers = 0;
     gba::g_ws_pillarbox = 0;
     gba::g_ws_pillarbox_left = 0;
     gba::g_ws_pillarbox_right = 0;
     g_runtime_fn_entry_hook = nullptr;
     g_runtime_thumb_alu_imm_override = nullptr;
+    g_runtime_bus_read_override = nullptr;
     Args args;
 
     // Seed built-in defaults from the caller (the per-game runner).
@@ -1083,6 +1122,22 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
         return 1;
     }
+    const float gyro_sensitivity_calibration =
+        std::isfinite(opts.gyro_sensitivity_calibration) &&
+                opts.gyro_sensitivity_calibration > 0.0f
+            ? opts.gyro_sensitivity_calibration
+            : 1.0f;
+    if (opts.launcher_expose_gyro &&
+        gyro_sensitivity_calibration != 1.0f) {
+        std::fprintf(stderr,
+                     "gyro_sensitivity: user=%.2fx calibration=%.2f "
+                     "effective=%.2fx\n",
+                     static_cast<double>(args.gyro_sensitivity),
+                     static_cast<double>(gyro_sensitivity_calibration),
+                     static_cast<double>(args.gyro_sensitivity *
+                                         gyro_sensitivity_calibration));
+    }
+    gba::g_ws_affine_filter_enabled = args.affine_filter ? 1 : 0;
 
 #if defined(GBARECOMP_ENABLE_MODS)
     bool mods_ready = false;
@@ -1183,10 +1238,6 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             args.frames_set = true;
         }
     }
-    if (!args.steps_set && (args.window || args.frames >= 0 || args.tcp_port > 0)) {
-        args.steps = std::numeric_limits<int>::max() / 2;
-    }
-
     // The picker has already validated SHA-1 (warn-and-try). Pass an
     // empty expected hash here so a non-canonical-but-warned dump
     // doesn't trip a hard fail in the loader.
@@ -1455,6 +1506,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                               (se && se[0] && se[0] != '0'));
     }
     bus.set_rom(rom.data(), rom.size());
+    if (!args.quiet && bus.matrix().active()) {
+        std::printf(
+            "matrix_mapper=active physical_size=%zu aperture=%zu page_size=%zu\n",
+            rom.size(),
+            gba::GbaMatrixMemory::kApertureSize,
+            gba::GbaMatrixMemory::kPageSize);
+    }
     g_solar_override_step.store(kSolarNoOverride, std::memory_order_relaxed);
     g_solar_game_provider = nullptr;
     if (bus.solar().active()) {
@@ -1818,7 +1876,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         // than dispatching generated code. Reuses runtime_tick/runtime_swi so the
         // device/IRQ/BIOS/clock path is identical to the recomp backend; only
         // main-thread instruction execution differs. See COSIM_ORACLE.md §1.
-        if (g_force_interp) {
+        const uint32_t step_pc = g_cpu.R[15] & ~1u;
+        const int step_thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+        if (g_force_interp ||
+            (g_runtime_force_interp_hook &&
+             g_runtime_force_interp_hook(step_pc, step_thumb))) {
             runtime_force_interp_step();
         } else {
             runtime_dispatch(g_cpu.R[15]);
@@ -2281,7 +2343,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (!win.open(args.scale, ppu.render_width(), ppu.render_height(),
                       runtime_title,
                       args.screen.empty() ? nullptr : args.screen.c_str(),
-                      args.linear_filter, resize_view_enabled)) {
+                      args.linear_filter, args.sharp_filter,
+                      resize_view_enabled)) {
             gbarecomp::overlay_loader_shutdown();
             runtime_shutdown();
             return 1;
@@ -2321,6 +2384,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         runtime_ui_config.menu.title = runtime_title;
         runtime_ui_config.menu.subtitle = "Game Boy Advance runtime settings";
         runtime_ui_config.menu.theme = "gba";
+#if defined(RECOMP_RUNTIME_UI_HAS_PRESENTATION_FLAGS)
+        if (opts.ui_touch_friendly) {
+            runtime_ui_config.menu.presentation_flags |=
+                RECOMP_RUNTIME_UI_PRESENTATION_TOUCH_FRIENDLY;
+        }
+#endif
         runtime_ui_config.menu.callbacks.context = &runtime_ui_context;
         runtime_ui_config.menu.callbacks.get_value = runtime_ui_get;
         runtime_ui_config.menu.callbacks.set_value = runtime_ui_set;
@@ -2524,7 +2593,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 ? static_cast<float>(ev.gyro_delta_x * 25)
                 : -ev.gyro_rate_z * 128.0f;
             bus.gyro().set_sample_offset(std::clamp(
-                static_cast<int>(raw_offset * args.gyro_sensitivity),
+                static_cast<int>(raw_offset * args.gyro_sensitivity *
+                                 gyro_sensitivity_calibration),
                 -0x600, 0x600));
         }
         if (input_record_requested &&
@@ -2637,6 +2707,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     };
 
+    if (args.window) {
+        runtime_set_host_service_hook([&]() { win.service_events(); });
+    }
+
     // Present-in-place (structural fix for frame-boundary resume dispatch-misses).
     // When windowed, register a hook so the per-VBlank frame-present yield presents
     // the frame from INSIDE runtime_should_yield and resumes the guest in place —
@@ -2677,6 +2751,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (n > 0) win.push_audio_samples(audio_buf, n);
                 const uint64_t fp_t3 = FramePhaseRing::now_ns();
                 pump_host_input();
+                // Present-in-place can remain inside a single step_once() for
+                // the entire windowed session. Advance deterministic replays
+                // here as well as in the outer loop so windowed repros exercise
+                // the same frame-indexed input as headless acceptance runs.
+                if (input_replay_requested) apply_input_replay();
                 const uint64_t fp_t4 = FramePhaseRing::now_ns();
                 last_presented_frame = frame;
                 ++frames_presented;
@@ -2690,10 +2769,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         });
     }
 
-    const bool open_ended = (args.window || args.frames >= 0);
-    const int step_budget = open_ended
-        ? (args.steps > 16 ? args.steps : std::numeric_limits<int>::max() / 2)
-        : args.steps;
+    // Interactive, frame-limited, and debugger-driven sessions are bounded by
+    // their own exit condition. Do not turn the historical INT_MAX/2 fallback
+    // into a roughly three-minute session limit on fast interpreter builds.
+    // An explicit --steps value remains a deterministic hard cap.
+    const bool step_limited = args.steps_set;
+    const uint64_t step_budget = step_limited && args.steps > 0
+        ? static_cast<uint64_t>(args.steps)
+        : (step_limited ? 0 : std::numeric_limits<uint64_t>::max());
 
     // Headless savestate load (--load-state <path>): boot fresh from the BIOS
     // reset, then restore a saved gameplay state before stepping. Lets a
@@ -2943,7 +3026,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     if (input_replay_requested) apply_input_replay();
     if (args.window) pump_host_input();
 
-    for (int i = 0; i < step_budget && !host_quit; ++i) {
+    for (uint64_t i = 0; i < step_budget && !host_quit; ++i) {
         // Paused: hold the guest still, keep the window alive (input pump,
         // re-present, ~100 Hz idle). Applies to windowed play only.
         while (host_paused && !host_quit && args.window) {
@@ -3087,6 +3170,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // Drop the present-in-place hook before the captured runner locals (win,
     // pacer, live_fb, …) go out of scope at function return.
     runtime_set_frame_present_hook(nullptr);
+    runtime_set_host_service_hook(nullptr);
     frame_phase.dump();  // HP-002: flush the phase ring (env-gated CSV)
     // HP-002: flush the always-on MMIO write ring (gba_io.cpp) to CSV.
     // GBARECOMP_MMIO_DUMP=<path>. Offline analysis derives the scanline of
@@ -3181,6 +3265,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 count_nonzero(bus.pal_ptr(), 1024),
                 count_nonzero(bus.vram_ptr(), 96 * 1024),
                 count_nonzero(bus.oam_ptr(), 1024));
+    if (bus.matrix().active()) {
+        std::printf("matrix_maps=%u matrix_highest_physical_end=0x%08x\n",
+                    bus.matrix().map_command_count(),
+                    bus.matrix().highest_physical_end());
+    }
 
     // Widescreen provenance dump (debug-only): query the always-on owner ring
     // for the final guest state. GBARECOMP_WS_PROBE_DUMP=<path>.

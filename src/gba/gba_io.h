@@ -200,8 +200,8 @@ public:
     // the IO backing so the next CPU read sees the current state.
     void set_keyinput(uint16_t keys);
 
-    // Advance hardware timers by CPU cycles. Timer overflows raise IRQs
-    // and clock direct-sound FIFOs.
+    // Advance hardware timers by CPU cycles. Timer overflows raise IRQs,
+    // clock direct-sound FIFOs, and advance the Timer 1..3 count-up chain.
     void tick_timers(uint32_t cycles);
     uint32_t cycles_until_next_timer_event() const;
 

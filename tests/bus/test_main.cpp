@@ -226,6 +226,52 @@ void test_bios_window_writes_are_ignored() {
              bus.unmapped_count(), static_cast<std::size_t>(0));
 }
 
+void test_matrix_memory_mapper() {
+    constexpr std::size_t kRomSize = 64u * 1024u * 1024u;
+    std::vector<uint8_t> rom(kRomSize, 0);
+    rom[0xAC] = static_cast<uint8_t>('M');
+    for (std::size_t i = 0; i < rom.size(); ++i) {
+        rom[i] = static_cast<uint8_t>((i >> 9u) & 0xFFu);
+    }
+    rom[0xAC] = static_cast<uint8_t>('M');
+
+    gba::GbaBus bus;
+    bus.set_rom(rom.data(), rom.size());
+    check_bool("matrix", "detected", bus.matrix().active(), true);
+
+    // Reset maps virtual page 8 (0x1000) to physical page 1 (0x0200).
+    check_eq("matrix", "reset_lower", bus.read8(0x08000000u), 0u);
+    check_eq("matrix", "reset_overlap", bus.read8(0x08001000u), 1u);
+
+    // Map four 512-byte pages from the physical second 32 MiB into virtual
+    // pages 4..7, then commit with command 1.
+    bus.write32(0x08800104u, 0x02000000u);
+    bus.write32(0x08800108u, 0x00000800u);
+    bus.write32(0x0880010Cu, 4u);
+    bus.write32(0x08800100u, 1u);
+    check_eq("matrix", "map_command_count", bus.matrix().map_command_count(),
+             1u);
+    check_eq("matrix", "highest_physical_end",
+             bus.matrix().highest_physical_end(), 0x02000800u);
+    check_eq("matrix", "mapped_first", bus.read8(0x08000800u), 0u);
+    rom[0x02000000u] = 0xA5u;
+    rom[0x02000600u] = 0x5Au;
+    check_eq("matrix", "physical_second_half", bus.read8(0x08000800u), 0xA5u);
+    check_eq("matrix", "mapped_last", bus.read8(0x08000E00u), 0x5Au);
+    check_eq("matrix", "command_write_is_handled", bus.unmapped_count(),
+             static_cast<std::size_t>(0));
+
+    // Any ROM wait-state mirror selects the same command block.
+    bus.write32(0x0A800104u, 0x02001000u);
+    bus.write32(0x0A800108u, 0x00000000u);
+    bus.write32(0x0A80010Cu, 1u);
+    bus.write32(0x0A800100u, 0x11u);
+    rom[0x02001000u] = 0xC3u;
+    check_eq("matrix", "waitstate_mirror", bus.read8(0x0C000000u), 0xC3u);
+    check_eq("matrix", "mirror_map_command_count",
+             bus.matrix().map_command_count(), 2u);
+}
+
 void test_flash1m_beats_flash() {
     // FLASH1M_V must win over the bare FLASH_V prefix detection.
     auto rom = build_synthetic_rom("GAME", "XXXX", "00", 0x00,
@@ -331,6 +377,7 @@ int main() {
     test_sram_bus_width_and_region_mirroring();
     test_bios_undocumented_io_write();
     test_bios_window_writes_are_ignored();
+    test_matrix_memory_mapper();
     test_flash1m_beats_flash();
     test_eeprom_8k_read_write();
     test_eeprom_persistence_bytes_and_dirty();

@@ -275,11 +275,16 @@ struct Backend {
     SDL_Window*   window   = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_Texture*  texture  = nullptr;
+    SDL_Texture*  sharp_texture = nullptr;
+    int           sharp_texture_w = 0;
+    int           sharp_texture_h = 0;
+    bool          sharp_target_failed = false;
     SDL_AudioDeviceID audio_dev = 0;
     SDL_GameController* controller = nullptr;
     SDL_JoystickID      controller_id = -1;
     bool                controller_gyro = false;
     SDL_Sensor*         device_gyro = nullptr;
+    bool                device_gyro_motion_logged = false;
     struct TouchPoint {
         SDL_FingerID id = 0;
         float x = 0.0f;
@@ -305,6 +310,10 @@ struct Backend {
     uint64_t      audio_direct_pushes = 0;
     uint64_t      audio_direct_samples = 0;
     uint64_t      audio_direct_underruns = 0;
+    uint64_t      audio_direct_probe_samples = 0;
+    uint64_t      audio_direct_probe_nonzero = 0;
+    long double   audio_direct_probe_square_sum = 0.0;
+    int           audio_direct_probe_peak = 0;
     Uint32        audio_direct_min_bytes = UINT32_MAX;
     Uint32        audio_direct_max_bytes = 0;
     // Present-time screen-color simulation. Built once from
@@ -316,12 +325,17 @@ struct Backend {
     RecompRuntimeUi* runtime_ui = nullptr;
     ImGuiContext* runtime_imgui_context = nullptr;
     bool runtime_imgui_ready = false;
+    // A stationary long press opens the runtime menu. Its eventual FINGERUP
+    // must not become a click on whichever menu row appeared under the finger.
+    int runtime_ui_suppressed_touch_releases = 0;
+    Uint32 runtime_ui_suppress_touch_until = 0;
 #endif
     int base_w = 240;   // logical surface width  (240 faithful, wider if expanded)
     int base_h = 160;   // logical surface height (160; vertical expansion deferred)
     bool expanded_view = false;  // native games retain the historical SDL path
     bool resize_driven_view = false;
     bool linear_filter = false;
+    bool sharp_filter = false;
 
     // ---- rebindable input (see HostWindow::load_input_config) --------------
     // GBA KEYINPUT bit (0..9) per bound SDL scancode; seeded from the
@@ -340,6 +354,64 @@ struct Backend {
     // MC-WS-002: always-on per-present timing/scanout ring (see above).
     PresentCadence cadence;
 };
+
+void destroy_sharp_texture(Backend* b) {
+    if (!b) return;
+    if (b->sharp_texture) SDL_DestroyTexture(b->sharp_texture);
+    b->sharp_texture = nullptr;
+    b->sharp_texture_w = 0;
+    b->sharp_texture_h = 0;
+}
+
+bool ensure_sharp_texture(Backend* b, int factor) {
+    if (!b || !b->renderer || factor < 2) return false;
+    const int width = b->base_w * factor;
+    const int height = b->base_h * factor;
+    if (b->sharp_texture &&
+        b->sharp_texture_w == width &&
+        b->sharp_texture_h == height) {
+        return true;
+    }
+
+    SDL_RendererInfo info{};
+    if (SDL_GetRendererInfo(b->renderer, &info) == 0 &&
+        ((info.max_texture_width > 0 && width > info.max_texture_width) ||
+         (info.max_texture_height > 0 && height > info.max_texture_height))) {
+        if (!b->sharp_target_failed) {
+            std::fprintf(stderr,
+                         "host_window: sharp scaler target %dx%d exceeds "
+                         "renderer limit %dx%d; using nearest fallback\n",
+                         width, height, info.max_texture_width,
+                         info.max_texture_height);
+            b->sharp_target_failed = true;
+        }
+        destroy_sharp_texture(b);
+        return false;
+    }
+
+    destroy_sharp_texture(b);
+    b->sharp_texture = SDL_CreateTexture(
+        b->renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
+        width, height);
+    if (!b->sharp_texture) {
+        if (!b->sharp_target_failed) {
+            std::fprintf(stderr,
+                         "host_window: sharp scaler target creation failed: "
+                         "%s; using nearest fallback\n",
+                         SDL_GetError());
+            b->sharp_target_failed = true;
+        }
+        return false;
+    }
+    b->sharp_texture_w = width;
+    b->sharp_texture_h = height;
+    b->sharp_target_failed = false;
+    SDL_SetTextureBlendMode(b->sharp_texture, SDL_BLENDMODE_NONE);
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_SetTextureScaleMode(b->sharp_texture, SDL_ScaleModeLinear);
+#endif
+    return true;
+}
 
 void close_game_controller(Backend* b) {
     if (!b || !b->controller) return;
@@ -415,6 +487,25 @@ uint16_t touch_buttons_at(float x, float y) {
     };
 
     uint16_t buttons = 0;
+#if defined(__ANDROID__)
+    if (x < 0.27f && y > 0.39f) {
+        const float dx = x - 0.12f;
+        const float dy = y - 0.69f;
+        if (std::abs(dx) > std::abs(dy)) {
+            if (dx > 0.028f) buttons |= 1u << 4;  // Right
+            if (dx < -0.028f) buttons |= 1u << 5; // Left
+        } else {
+            if (dy < -0.028f) buttons |= 1u << 6; // Up
+            if (dy > 0.028f) buttons |= 1u << 7;  // Down
+        }
+    }
+    if (in_circle(0.90f, 0.62f, 0.085f)) buttons |= 1u << 0; // A
+    if (in_circle(0.83f, 0.78f, 0.085f)) buttons |= 1u << 1; // B
+    if (x >= 0.39f && x <= 0.48f && y >= 0.88f) buttons |= 1u << 2; // Select
+    if (x >= 0.52f && x <= 0.61f && y >= 0.88f) buttons |= 1u << 3; // Start
+    if (x <= 0.22f && y <= 0.17f) buttons |= 1u << 9; // L
+    if (x >= 0.78f && y <= 0.17f) buttons |= 1u << 8; // R
+#else
     if (x < 0.31f && y > 0.37f) {
         const float dx = x - 0.17f;
         const float dy = y - 0.70f;
@@ -432,6 +523,7 @@ uint16_t touch_buttons_at(float x, float y) {
     if (x >= 0.52f && x <= 0.61f && y >= 0.84f) buttons |= 1u << 3; // Start
     if (x <= 0.24f && y <= 0.16f) buttons |= 1u << 9; // L
     if (x >= 0.76f && y <= 0.16f) buttons |= 1u << 8; // R
+#endif
     return buttons;
 }
 
@@ -482,17 +574,69 @@ void render_touch_controls(Backend* b) {
 #if defined(GBARECOMP_RUNTIME_UI)
     if (b->runtime_ui && recomp_runtime_ui_is_open(b->runtime_ui)) return;
 #endif
-    const int w = b->base_w;
-    const int h = b->base_h;
+    int w = b->base_w;
+    int h = b->base_h;
+#if defined(__ANDROID__)
+    if (SDL_GetRendererOutputSize(b->renderer, &w, &h) != 0 ||
+        w <= 0 || h <= 0) {
+        SDL_GetWindowSize(b->window, &w, &h);
+    }
+#endif
     const uint16_t held = active_touch_buttons(b);
     SDL_SetRenderDrawBlendMode(b->renderer, SDL_BLENDMODE_BLEND);
 
     auto color_for = [b, held](int bit) {
         if (held & (1u << bit))
-            SDL_SetRenderDrawColor(b->renderer, 125, 225, 255, 150);
+            SDL_SetRenderDrawColor(b->renderer, 255, 214, 74, 220);
+        else if (bit == 0)
+            SDL_SetRenderDrawColor(b->renderer, 255, 92, 98, 148);
+        else if (bit == 1)
+            SDL_SetRenderDrawColor(b->renderer, 83, 196, 255, 148);
         else
-            SDL_SetRenderDrawColor(b->renderer, 235, 245, 255, 76);
+            SDL_SetRenderDrawColor(b->renderer, 224, 234, 246, 92);
     };
+#if defined(__ANDROID__)
+    const int dpad_x = static_cast<int>(w * 0.12f);
+    const int dpad_y = static_cast<int>(h * 0.69f);
+    const int arm = std::max(42, static_cast<int>(h * 0.105f));
+    const int thick = std::max(30, static_cast<int>(h * 0.050f));
+    SDL_SetRenderDrawColor(b->renderer, 224, 234, 246, 82);
+    SDL_Rect vertical{dpad_x - thick / 2, dpad_y - arm,
+                      thick, arm * 2};
+    SDL_Rect horizontal{dpad_x - arm, dpad_y - thick / 2,
+                        arm * 2, thick};
+    SDL_RenderFillRect(b->renderer, &vertical);
+    SDL_RenderFillRect(b->renderer, &horizontal);
+
+    const int button_r = std::max(34, static_cast<int>(h * 0.060f));
+    color_for(0);
+    fill_circle(b->renderer, static_cast<int>(w * 0.90f),
+                static_cast<int>(h * 0.62f), button_r);
+    color_for(1);
+    fill_circle(b->renderer, static_cast<int>(w * 0.83f),
+                static_cast<int>(h * 0.78f), button_r);
+
+    SDL_SetRenderDrawColor(b->renderer, 224, 234, 246, 70);
+    const int shoulder_w = static_cast<int>(w * 0.17f);
+    const int shoulder_h = std::max(28, static_cast<int>(h * 0.052f));
+    const int shoulder_pad = std::max(16, static_cast<int>(w * 0.015f));
+    SDL_Rect left_shoulder{shoulder_pad, static_cast<int>(h * 0.055f),
+                           shoulder_w, shoulder_h};
+    SDL_Rect right_shoulder{w - shoulder_pad - shoulder_w,
+                            static_cast<int>(h * 0.055f),
+                            shoulder_w, shoulder_h};
+    SDL_RenderFillRect(b->renderer, &left_shoulder);
+    SDL_RenderFillRect(b->renderer, &right_shoulder);
+
+    const int pill_w = std::max(58, static_cast<int>(w * 0.055f));
+    const int pill_h = std::max(12, static_cast<int>(h * 0.018f));
+    SDL_Rect select{static_cast<int>(w * 0.435f) - pill_w / 2,
+                    static_cast<int>(h * 0.925f), pill_w, pill_h};
+    SDL_Rect start{static_cast<int>(w * 0.565f) - pill_w / 2,
+                   static_cast<int>(h * 0.925f), pill_w, pill_h};
+    SDL_RenderFillRect(b->renderer, &select);
+    SDL_RenderFillRect(b->renderer, &start);
+#else
     const int dpad_x = static_cast<int>(w * 0.17f);
     const int dpad_y = static_cast<int>(h * 0.70f);
     const int arm = std::max(8, h / 11);
@@ -527,6 +671,7 @@ void render_touch_controls(Backend* b) {
                    static_cast<int>(w * 0.07f), std::max(3, h / 32)};
     SDL_RenderFillRect(b->renderer, &select);
     SDL_RenderFillRect(b->renderer, &start);
+#endif
 
     for (const auto& touch : b->touches) {
         if (!touch.active || !touch.long_press_candidate) continue;
@@ -540,6 +685,7 @@ void render_touch_controls(Backend* b) {
         SDL_RenderFillRect(b->renderer, &bar);
     }
     SDL_SetRenderDrawBlendMode(b->renderer, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(b->renderer, 7, 11, 20, 255);
 }
 
 // GBA KEYINPUT bit order: 0=A 1=B 2=Sel 3=Sta 4=Right 5=Left 6=Up 7=Down 8=R 9=L.
@@ -851,7 +997,7 @@ HostWindow::~HostWindow() {
 bool HostWindow::is_available() { return true; }
 
 bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
-                      const char* screen, bool linear_filter,
+                      const char* screen, bool linear_filter, bool sharp_filter,
                       bool resize_driven_view) {
     if (open_) return true;
     if (scale < 1) scale = 1;
@@ -881,6 +1027,11 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         // intended driver explicit when a global SDL config changed it.
         SDL_SetHintWithPriority("SDL_JOYSTICK_HIDAPI_PS5", "1",
                                 SDL_HINT_DEFAULT);
+        // Bluetooth DualSense controllers start in basic-report mode.
+        // Enhanced reports carry gyro/accelerometer data (and rumble), so
+        // request them before initializing the controller subsystem.
+        SDL_SetHintWithPriority("SDL_JOYSTICK_HIDAPI_PS5_RUMBLE", "1",
+                                SDL_HINT_DEFAULT);
         if (SDL_InitSubSystem(controller_flags) != 0) {
             std::fprintf(stderr,
                          "host_window: SDL controller/sensor init failed: %s\n",
@@ -893,7 +1044,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     b->base_h = base_h;
     b->expanded_view = base_w != 240 || base_h != 160;
     b->resize_driven_view = resize_driven_view;
-    b->linear_filter = linear_filter;
+    b->linear_filter = linear_filter && !sharp_filter;
+    b->sharp_filter = sharp_filter;
     b->scale = scale;
     b->title = title ? title : "gbarecomp";
 #if defined(__ANDROID__)
@@ -977,16 +1129,25 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         SDL_RendererInfo info{};
         if (SDL_GetRendererInfo(b->renderer, &info) == 0) {
             std::fprintf(stderr,
-                         "host_window: renderer=%s flags=0x%08x vsync=%s%s\n",
+                         "host_window: renderer=%s flags=0x%08x vsync=%s%s "
+                         "scaler=%s\n",
                          info.name ? info.name : "unknown",
                          static_cast<unsigned>(info.flags),
                          (info.flags & SDL_RENDERER_PRESENTVSYNC) ? "yes" : "no",
-                         b->resize_driven_view ? " (adaptive)" : "");
+                         b->resize_driven_view ? " (adaptive)" : "",
+                         b->sharp_filter ? "sharp"
+                         : b->linear_filter ? "linear" : "nearest");
             std::fflush(stderr);
         }
         log_display_mode(b->window, "open");
     }
     b->cadence.init();
+#if defined(__ANDROID__)
+    // Mobile presentation owns the whole drawable: a centered integer-scaled
+    // game viewport plus dedicated side rails for touch controls.
+    SDL_RenderSetLogicalSize(b->renderer, 0, 0);
+    SDL_SetRenderDrawColor(b->renderer, 7, 11, 20, 255);
+#else
     if (b->expanded_view || b->resize_driven_view) {
         // The destination viewport is computed explicitly in present() so
         // resizing maximally fills the drawable at the selected widescreen
@@ -998,6 +1159,7 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         // renderer, including its window flags and copy path.
         SDL_RenderSetLogicalSize(b->renderer, base_w, base_h);
     }
+#endif
 
     b->texture = SDL_CreateTexture(b->renderer,
                                    SDL_PIXELFORMAT_RGB24,
@@ -1011,6 +1173,11 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         delete b;
         return false;
     }
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_SetTextureScaleMode(
+        b->texture,
+        b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
 
 #if defined(GBARECOMP_RUNTIME_UI)
     if (!runtime_imgui_init(b)) {
@@ -1049,7 +1216,10 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     // converts the exact 65536 Hz mono stream to the physical device itself.
     // Bridge mode instead opens at the native rate and performs that clock
     // conversion in RAB.
-    b->audio_dev = SDL_OpenAudioDevice(nullptr, /*iscapture=*/0,
+    const char* audio_device_env = std::getenv("GBARECOMP_AUDIO_DEVICE");
+    const char* audio_device_name =
+        audio_device_env && *audio_device_env ? audio_device_env : nullptr;
+    b->audio_dev = SDL_OpenAudioDevice(audio_device_name, /*iscapture=*/0,
                                        &want, &got,
                                        b->audio_direct
                                            ? 0
@@ -1058,9 +1228,21 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         if (b->audio_direct) {
             b->audio_direct_rate = got.freq;
             std::fprintf(stderr,
-                         "host_window: audio=direct-queue format=%dHz mono S16 "
-                         "quantum=%u\n",
+                         "host_window: audio=direct-queue driver=%s "
+                         "device=%s format=%dHz mono S16 quantum=%u\n",
+                         SDL_GetCurrentAudioDriver()
+                             ? SDL_GetCurrentAudioDriver() : "(unknown)",
+                         audio_device_name ? audio_device_name : "(default)",
                          got.freq, static_cast<unsigned>(got.samples));
+            if (const char* probe = std::getenv("GBARECOMP_AUDIO_PROBE");
+                probe && *probe && *probe != '0') {
+                const int devices = SDL_GetNumAudioDevices(0);
+                for (int i = 0; i < devices; ++i) {
+                    std::fprintf(stderr,
+                                 "host_window: audio_device[%d]=%s\n", i,
+                                 SDL_GetAudioDeviceName(i, 0));
+                }
+            }
             std::fflush(stderr);
             // SDL devices start paused. push_audio_samples starts playback
             // after roughly four video frames have been queued.
@@ -1111,8 +1293,14 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
 
     if (b->audio_direct) {
         const Uint32 queued_before = SDL_GetQueuedAudioSize(b->audio_dev);
-        if (b->audio_direct_started && queued_before == 0)
+        if (b->audio_direct_started && queued_before == 0) {
             ++b->audio_direct_underruns;
+            // A reset, loading hitch, or other long producer stall exhausted
+            // the queue. Pause and build a fresh cushion instead of repeatedly
+            // restarting the device on one tiny block (audible as crackle).
+            b->audio_direct_started = false;
+            SDL_PauseAudioDevice(b->audio_dev, 1);
+        }
         b->audio_direct_min_bytes =
             std::min(b->audio_direct_min_bytes, queued_before);
 
@@ -1134,7 +1322,7 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
         ++b->audio_direct_pushes;
         b->audio_direct_samples += count;
 
-        constexpr Uint32 kDirectPrerollBytes = 8192;  // 62.5 ms at 65536 Hz S16
+        constexpr Uint32 kDirectPrerollBytes = 16384;  // 125 ms at 65536 Hz S16
         if (!b->audio_direct_started &&
             queued_after >= kDirectPrerollBytes) {
             b->audio_direct_started = true;
@@ -1146,22 +1334,46 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
             const char* e = std::getenv("GBARECOMP_AUDIO_PROBE");
             s_direct_probe = (e && *e && *e != '0') ? 1 : 0;
         }
+        if (s_direct_probe) {
+            for (std::size_t i = 0; i < count; ++i) {
+                const int sample = samples[i];
+                if (sample != 0) ++b->audio_direct_probe_nonzero;
+                b->audio_direct_probe_peak =
+                    std::max(b->audio_direct_probe_peak, std::abs(sample));
+                b->audio_direct_probe_square_sum +=
+                    static_cast<long double>(sample) * sample;
+            }
+            b->audio_direct_probe_samples += count;
+        }
         if (s_direct_probe && (b->audio_direct_pushes % 120ULL) == 0ULL) {
             const double bytes_per_ms =
                 static_cast<double>(b->audio_direct_rate) *
                 sizeof(int16_t) / 1000.0;
             const double audio_secs =
                 static_cast<double>(b->audio_direct_samples) / 65536.0;
+            const double rms = b->audio_direct_probe_samples
+                ? std::sqrt(static_cast<double>(
+                      b->audio_direct_probe_square_sum /
+                      b->audio_direct_probe_samples))
+                : 0.0;
             std::fprintf(
                 stderr,
                 "[gba-audio-probe] direct pushes=%llu audio=%.1fs "
-                "queue=%.1fms min=%.1fms max=%.1fms underrun=%llu\n",
+                "queue=%.1fms min=%.1fms max=%.1fms underrun=%llu "
+                "block_nonzero=%zu/%zu rms=%.1f peak=%d\n",
                 static_cast<unsigned long long>(b->audio_direct_pushes),
                 audio_secs, queued_after / bytes_per_ms,
                 b->audio_direct_min_bytes / bytes_per_ms,
                 b->audio_direct_max_bytes / bytes_per_ms,
-                static_cast<unsigned long long>(b->audio_direct_underruns));
+                static_cast<unsigned long long>(b->audio_direct_underruns),
+                static_cast<std::size_t>(b->audio_direct_probe_nonzero),
+                static_cast<std::size_t>(b->audio_direct_probe_samples),
+                rms, b->audio_direct_probe_peak);
             std::fflush(stderr);
+            b->audio_direct_probe_samples = 0;
+            b->audio_direct_probe_nonzero = 0;
+            b->audio_direct_probe_square_sum = 0.0;
+            b->audio_direct_probe_peak = 0;
             b->audio_direct_min_bytes = queued_after;
             b->audio_direct_max_bytes = queued_after;
         }
@@ -1223,6 +1435,7 @@ void HostWindow::close() {
 #if defined(GBARECOMP_RUNTIME_UI)
     runtime_imgui_shutdown(b);
 #endif
+    destroy_sharp_texture(b);
     if (b->texture)   SDL_DestroyTexture(b->texture);
     if (b->renderer)  SDL_DestroyRenderer(b->renderer);
     if (b->window)    SDL_DestroyWindow(b->window);
@@ -1247,7 +1460,13 @@ bool HostWindow::set_surface_size(int base_w, int base_h) {
                      SDL_GetError());
         return false;
     }
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_SetTextureScaleMode(
+        replacement,
+        b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
     SDL_DestroyTexture(b->texture);
+    destroy_sharp_texture(b);
     b->texture = replacement;
     b->base_w = base_w;
     b->base_h = base_h;
@@ -1298,7 +1517,40 @@ void HostWindow::present(const uint8_t* rgb888) {
         rgb888 = b->graded_fb.data();
     }
     SDL_UpdateTexture(b->texture, nullptr, rgb888, b->base_w * 3);
+    SDL_SetRenderDrawColor(b->renderer, 7, 11, 20, 255);
     SDL_RenderClear(b->renderer);
+#if defined(__ANDROID__)
+    int drawable_w = 0;
+    int drawable_h = 0;
+    if (SDL_GetRendererOutputSize(
+            b->renderer, &drawable_w, &drawable_h) != 0 ||
+        drawable_w <= 0 || drawable_h <= 0) {
+        SDL_GetWindowSize(b->window, &drawable_w, &drawable_h);
+    }
+    // Reserve roughly one fifth of the display on each side. Prefer an exact
+    // integer multiple so pixel art stays crisp and symmetric.
+    const int width_limited_scale =
+        static_cast<int>((drawable_w * 0.62f) / b->base_w);
+    const int height_limited_scale =
+        static_cast<int>((drawable_h * 0.90f) / b->base_h);
+    const int integer_scale =
+        std::max(1, std::min(width_limited_scale, height_limited_scale));
+    int game_w = b->base_w * integer_scale;
+    int game_h = b->base_h * integer_scale;
+    if (game_w > drawable_w || game_h > drawable_h) {
+        const float scale = std::min(
+            static_cast<float>(drawable_w) / b->base_w,
+            static_cast<float>(drawable_h) / b->base_h);
+        game_w = std::max(1, static_cast<int>(b->base_w * scale));
+        game_h = std::max(1, static_cast<int>(b->base_h * scale));
+    }
+    const SDL_Rect destination{
+        (drawable_w - game_w) / 2,
+        (drawable_h - game_h) / 2,
+        game_w,
+        game_h};
+    SDL_RenderCopy(b->renderer, b->texture, nullptr, &destination);
+#else
     if (!b->expanded_view && !b->resize_driven_view) {
         SDL_RenderCopy(b->renderer, b->texture, nullptr, nullptr);
     } else {
@@ -1320,9 +1572,36 @@ void HostWindow::present(const uint8_t* rgb888) {
         if (layout.width > 0 && layout.height > 0) {
             const SDL_Rect destination = {
                 layout.x, layout.y, layout.width, layout.height};
-            SDL_RenderCopy(b->renderer, b->texture, nullptr, &destination);
+            bool sharp_presented = false;
+            const int sharp_factor = b->sharp_filter
+                ? compute_sharp_prescale_factor(
+                      layout, b->base_w, b->base_h)
+                : 0;
+            if (sharp_factor > 0 &&
+                ensure_sharp_texture(b, sharp_factor) &&
+                SDL_SetRenderTarget(b->renderer, b->sharp_texture) == 0) {
+                const bool prescaled =
+                    SDL_RenderCopy(
+                        b->renderer, b->texture, nullptr, nullptr) == 0;
+                const bool restored =
+                    SDL_SetRenderTarget(b->renderer, nullptr) == 0;
+                if (prescaled && restored) {
+                    sharp_presented =
+                        SDL_RenderCopy(
+                            b->renderer, b->sharp_texture, nullptr,
+                            &destination) == 0;
+                }
+            }
+            if (!sharp_presented) {
+                // Exact integer scales and unsupported render-target backends
+                // retain the crisp nearest path.
+                SDL_SetRenderTarget(b->renderer, nullptr);
+                SDL_RenderCopy(
+                    b->renderer, b->texture, nullptr, &destination);
+            }
         }
     }
+#endif
     render_touch_controls(b);
 #if defined(GBARECOMP_RUNTIME_UI)
     runtime_imgui_render(b);
@@ -1447,6 +1726,10 @@ int HostWindow::window_scale() const {
 void HostWindow::set_linear_filter(bool enabled) {
     if (!open_ || !impl_) return;
     auto* b = static_cast<Backend*>(impl_);
+    if (enabled && b->sharp_filter) {
+        b->sharp_filter = false;
+        destroy_sharp_texture(b);
+    }
     b->linear_filter = enabled;
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     SDL_SetTextureScaleMode(b->texture,
@@ -1499,6 +1782,11 @@ bool HostWindow::fps_readout() const {
     return static_cast<const Backend*>(impl_)->fps_readout;
 }
 
+void HostWindow::service_events() {
+    if (!open_ || !impl_) return;
+    SDL_PumpEvents();
+}
+
 HostWindow::Events HostWindow::pump() {
     Events ev{};
     if (!open_) { ev.quit = true; return ev; }
@@ -1507,6 +1795,32 @@ HostWindow::Events HostWindow::pump() {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
 #if defined(GBARECOMP_RUNTIME_UI)
+        const bool finger_event =
+            e.type == SDL_FINGERDOWN || e.type == SDL_FINGERMOTION ||
+            e.type == SDL_FINGERUP;
+        const bool mouse_event =
+            e.type == SDL_MOUSEMOTION || e.type == SDL_MOUSEBUTTONDOWN ||
+            e.type == SDL_MOUSEBUTTONUP;
+        const Uint32 event_now = SDL_GetTicks();
+        const bool suppress_opening_touch =
+            b->runtime_ui_suppressed_touch_releases > 0 ||
+            (b->runtime_ui_suppress_touch_until != 0 &&
+             !SDL_TICKS_PASSED(event_now,
+                               b->runtime_ui_suppress_touch_until));
+        if (finger_event && suppress_opening_touch) {
+            if (e.type == SDL_FINGERDOWN) {
+                ++b->runtime_ui_suppressed_touch_releases;
+            } else if (e.type == SDL_FINGERUP) {
+                --b->runtime_ui_suppressed_touch_releases;
+                if (b->runtime_ui_suppressed_touch_releases <= 0) {
+                    b->runtime_ui_suppressed_touch_releases = 0;
+                    // SDL may follow FINGERUP with a synthetic mouse release.
+                    b->runtime_ui_suppress_touch_until = event_now + 250;
+                }
+            }
+            continue;
+        }
+        if (mouse_event && suppress_opening_touch) continue;
         if (b->runtime_imgui_ready) {
             ImGui::SetCurrentContext(b->runtime_imgui_context);
             ImGui_ImplSDL2_ProcessEvent(&e);
@@ -1603,7 +1917,17 @@ HostWindow::Events HostWindow::pump() {
                 now - touch.started_at < 650) {
                 continue;
             }
+            int active_fingers = 0;
+            for (const auto& active_touch : b->touches)
+                if (active_touch.active) ++active_fingers;
             recomp_runtime_ui_open(b->runtime_ui);
+            b->runtime_ui_suppressed_touch_releases =
+                std::max(1, active_fingers);
+            b->runtime_ui_suppress_touch_until = 0;
+            if (b->runtime_imgui_ready) {
+                ImGui::SetCurrentContext(b->runtime_imgui_context);
+                ImGui::GetIO().ClearInputMouse();
+            }
             clear_touches(b);
             break;
         }
@@ -1662,11 +1986,28 @@ HostWindow::Events HostWindow::pump() {
     ev.gyro_delta_x = ev.mouse_gyro_active ? mouse_x : 0;
 #if SDL_VERSION_ATLEAST(2, 0, 14)
     if (b->device_gyro) {
+#if defined(__ANDROID__)
+        // SDL normally updates sensors from SDL_PumpEvents(), but Android's
+        // native sensor queue can remain unread after an Activity transition
+        // even though SDL_SensorOpen() succeeded and SensorService registered
+        // the client. Poll the sensor backend at the point of use so the value
+        // below cannot depend on unrelated window/touch event traffic.
+        SDL_SensorUpdate();
+#endif
         float rate[3] = {};
         if (SDL_SensorGetData(b->device_gyro, rate, 3) == 0) {
             constexpr float kDeviceDriftDeadzone = 0.025f;
             ev.gyro_rate_z =
                 std::abs(rate[2]) >= kDeviceDriftDeadzone ? rate[2] : 0.0f;
+            if (ev.gyro_rate_z != 0.0f &&
+                !b->device_gyro_motion_logged) {
+                std::fprintf(stderr,
+                             "host_window: device gyro input active "
+                             "z=%.3f rad/s\n",
+                             static_cast<double>(ev.gyro_rate_z));
+                std::fflush(stderr);
+                b->device_gyro_motion_logged = true;
+            }
         }
     }
     if (b->controller && b->controller_gyro) {
@@ -1709,7 +2050,8 @@ bool HostWindow::is_available() { return false; }
 
 bool HostWindow::open(int /*scale*/, int /*base_w*/, int /*base_h*/,
                       const char* /*title*/, const char* /*screen*/,
-                      bool /*linear_filter*/, bool /*resize_driven_view*/) {
+                      bool /*linear_filter*/, bool /*sharp_filter*/,
+                      bool /*resize_driven_view*/) {
     std::fprintf(stderr,
                  "host_window: built without SDL2; --window unavailable\n");
     return false;
@@ -1747,6 +2089,8 @@ bool HostWindow::fps_readout() const { return false; }
 
 void HostWindow::push_audio_samples(const int16_t* /*samples*/,
                                     std::size_t /*count*/) {}
+
+void HostWindow::service_events() {}
 
 HostWindow::Events HostWindow::pump() {
     Events ev{};

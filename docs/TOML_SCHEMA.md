@@ -267,7 +267,9 @@ Format semantics:
 
 - `abs32` — `uint32_t` per entry; value is the target address.
 - `abs16` — `uint16_t` per entry; value is the target address. Rare on GBA outside small ranges.
-- `pcrel_thumb` — `int32_t` per entry; target = `entry_address + value`, decoded as THUMB.
+- `pcrel_thumb` — `int32_t` per entry; target =
+  `(entry_address + value) & ~1`, decoded as THUMB. The low interworking
+  bit is normalized out of the instruction address.
 - `pcrel_arm` — `int32_t` per entry; target = `entry_address + value`, decoded as ARM.
 
 `entries_mode` semantics:

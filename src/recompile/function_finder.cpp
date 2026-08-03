@@ -104,10 +104,12 @@ void FunctionFinder::add_exclude(uint32_t addr,
 
 bool FunctionFinder::map_addr_to_source(uint32_t addr,
                                          uint32_t* source) const {
-    if (addr_in_rom(addr)) {
-        *source = addr;
-        return true;
-    }
+    // Explicit fixed mappings take precedence even when their runtime address
+    // lies in the nominal ROM window. Matrix Memory movie carts power on with
+    // physical 0x00000200..0x000011FF paged over virtual
+    // 0x08001000..0x08001FFF, so the bytes stored at the runtime file offset
+    // are not the instructions the CPU sees. Ordinary RAM code copies are
+    // unchanged by this ordering.
     for (const auto& cc : code_copies_) {
         if (addr >= cc.runtime_start &&
             addr - cc.runtime_start < cc.size) {
@@ -116,6 +118,10 @@ bool FunctionFinder::map_addr_to_source(uint32_t addr,
             *source = mapped;
             return true;
         }
+    }
+    if (addr_in_rom(addr)) {
+        *source = addr;
+        return true;
     }
     return false;
 }

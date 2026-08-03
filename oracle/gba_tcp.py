@@ -101,6 +101,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=19842)
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--oracle", action="store_true",
+                    help="Use the mGBA oracle command names/key semantics")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("keys"); p.add_argument("spec")
@@ -138,14 +140,22 @@ def main():
 
     if args.cmd == "keys":
         v = keyinput_from(args.spec)
-        print(json.dumps(c.call(cmd="set_keyinput", value=v)))
+        if args.oracle:
+            print(json.dumps(c.call(cmd="emu_set_keys", keys=(~v) & 0x03FF)))
+        else:
+            print(json.dumps(c.call(cmd="set_keyinput", value=v)))
     elif args.cmd == "step":
         if args.keys is not None:
-            c.call(cmd="set_keyinput", value=keyinput_from(args.keys))
+            v = keyinput_from(args.keys)
+            if args.oracle:
+                c.call(cmd="emu_set_keys", keys=(~v) & 0x03FF)
+            else:
+                c.call(cmd="set_keyinput", value=v)
         for i in range(args.n):
             t0 = time.time()
             try:
-                r = c.call(cmd="step", timeout=args.timeout)
+                r = c.call(cmd="emu_step" if args.oracle else "step",
+                           timeout=args.timeout)
             except socket.timeout:
                 print(json.dumps({"HANG": True, "at_step": i, "elapsed_s":
                                   round(time.time() - t0, 2),
@@ -160,17 +170,19 @@ def main():
             if not r.get("ok", True):
                 print(json.dumps({"step_failed": i, "resp": r})); return
             if args.shot_every and (i + 1) % args.shot_every == 0:
-                s = c.call(cmd="screenshot")
+                s = c.call(cmd="emu_screenshot" if args.oracle
+                           else "screenshot")
                 write_png(f"{args.shot_dir}/step_{i+1:05d}.png",
                           bytes.fromhex(s["data"]))
         print(json.dumps({"ok": True, "stepped": args.n}))
     elif args.cmd == "shot":
-        s = c.call(cmd="screenshot")
+        s = c.call(cmd="emu_screenshot" if args.oracle else "screenshot")
         write_png(args.path, bytes.fromhex(s["data"]))
         print(json.dumps({"ok": True, "path": args.path, "w": s.get("w"),
                           "h": s.get("h")}))
     elif args.cmd == "regs":
-        print(json.dumps(c.call(cmd="get_registers"), indent=0))
+        print(json.dumps(c.call(cmd="emu_registers" if args.oracle
+                                else "registers"), indent=0))
     elif args.cmd == "sym":
         print(json.dumps(c.call(cmd="symbol", addr=args.addr)))
     elif args.cmd == "misses":

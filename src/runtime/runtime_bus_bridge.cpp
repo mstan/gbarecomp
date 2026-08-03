@@ -59,6 +59,10 @@ extern "C" unsigned long long g_runtime_vblank_starts = 0;
 // the env var is set. Dumped to stderr at exit.
 extern "C" unsigned long long g_prof_scanline_ns = 0;
 extern "C" unsigned long long g_prof_scanline_count = 0;
+// Native event service is deliberately separate from frame presentation and
+// guest input. It keeps a window responsive while one emulated frame spends a
+// long time in translated software-rendering or decode code.
+std::function<void()> g_host_service_hook;
 static const bool g_phase_prof = [] {
     const char* e = std::getenv("GBARECOMP_PHASE_PROF");
     bool on = (e != nullptr) && !(e[0] == '0' && e[1] == '\0');
@@ -390,6 +394,19 @@ static inline bool is_idle_safe_read(uint32_t addr) {
     return false;  // MMIO, palette, VRAM, OAM, save/flash, open-bus, unmapped
 }
 
+static inline uint32_t apply_bus_read_override(uint32_t addr, uint32_t width,
+                                               uint32_t value) {
+    uint32_t overridden = value;
+    if (g_runtime_bus_read_override &&
+        g_runtime_bus_read_override(g_cpu.R[15], addr, width, value,
+                                    &overridden)) {
+        if (width == 1u) return overridden & 0xFFu;
+        if (width == 2u) return overridden & 0xFFFFu;
+        return overridden;
+    }
+    return value;
+}
+
 extern "C" uint32_t bus_read_u32(uint32_t addr) {
     if (is_io_addr(addr)) runtime_mmio_catch_up();
     if (!is_idle_safe_read(addr)) ++g_idle_disturb_epoch;
@@ -398,6 +415,7 @@ extern "C" uint32_t bus_read_u32(uint32_t addr) {
     uint32_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read32(addr)
         : 0u;
+    v = apply_bus_read_override(addr, 4u, v);
     gbarecomp::trace_unmapped_read(addr, v, 4u);
     return v;
 }
@@ -410,6 +428,7 @@ extern "C" uint16_t bus_read_u16(uint32_t addr) {
     uint16_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read16(addr)
         : uint16_t{0};
+    v = static_cast<uint16_t>(apply_bus_read_override(addr, 2u, v));
     gbarecomp::trace_unmapped_read(addr, v, 2u);
     return v;
 }
@@ -422,6 +441,7 @@ extern "C" uint8_t bus_read_u8(uint32_t addr) {
     uint8_t v = gbarecomp::g_active_bus
         ? gbarecomp::g_active_bus->read8(addr)
         : uint8_t{0};
+    v = static_cast<uint8_t>(apply_bus_read_override(addr, 1u, v));
     gbarecomp::trace_unmapped_read(addr, v, 1u);
     return v;
 }
@@ -664,6 +684,22 @@ extern "C" void runtime_tick(uint32_t cycles) {
     auto* ppu = gbarecomp::g_active_ppu;
     if (!bus || !ppu || cycles == 0) return;
 
+    // Some software renderers execute millions of guest instructions before
+    // reaching a GBA frame boundary. Downsample the wall-clock check so native
+    // window messages keep flowing without putting a clock read on every guest
+    // instruction.
+    if (g_host_service_hook) {
+        static uint32_t service_tick_divider = 0;
+        if ((++service_tick_divider & 0x3FFFu) == 0) {
+            static auto last_service = std::chrono::steady_clock::now();
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_service >= std::chrono::milliseconds(8)) {
+                g_host_service_hook();
+                last_service = now;
+            }
+        }
+    }
+
     cyc_probe("tick", cycles);
     g_runtime_cycles += cycles;
     // Lazy device catch-up: advance the master clock every instruction (cheap),
@@ -861,6 +897,10 @@ void runtime_set_frame_present_hook(std::function<bool()> h) {
     g_frame_present_quit = false;
 }
 
+void runtime_set_host_service_hook(std::function<void()> h) {
+    g_host_service_hook = std::move(h);
+}
+
 extern "C" bool runtime_should_yield(void) {
     auto* bus = gbarecomp::g_active_bus;
 
@@ -875,6 +915,19 @@ extern "C" bool runtime_should_yield(void) {
     // BIOS. See gba_bus.cpp prefetch_word / the open-bus read paths.
     if (bus && g_cpu.R[15] < 0x00004000u)
         bus->latch_bios_prefetch(g_cpu.R[15], (g_cpu.cpsr & CPSR_T_BIT) != 0);
+
+    // Generated direct calls can enter mutable/self-modifying code without
+    // crossing runtime_dispatch. Unwind stale AOT at its per-instruction
+    // prologue; the outer execution loop will re-enter this PC through the
+    // live interpreter. Do not re-trigger while the interpreter itself checks
+    // the ordinary halt/frame/debug yield conditions below.
+    if (!g_runtime_force_interp_step_active &&
+        g_runtime_force_interp_hook &&
+        g_runtime_force_interp_hook(
+            g_cpu.R[15] & ~1u,
+            (g_cpu.cpsr & CPSR_T_BIT) != 0 ? 1 : 0)) {
+        return true;
+    }
 
     // Present-in-place quit: fully unwind the guest to the runner once requested.
     if (g_frame_present_quit) return true;

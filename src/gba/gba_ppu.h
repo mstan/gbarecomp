@@ -143,6 +143,12 @@ public:
                          const uint8_t* oam,
                          const uint8_t* pal);
 
+    // The affine reference registers have an internal scanline accumulator.
+    // Any write to BG2X/Y or BG3X/Y reloads that accumulator immediately;
+    // games may DMA new references every HBlank. GbaIo calls this after the
+    // backing register byte/halfword is committed.
+    void note_affine_reference_write(unsigned bg, bool y_axis);
+
     // Latch the just-finished visible frame. The BIOS mutates OAM/PAL
     // during VBlank; screenshots must therefore use the frame captured
     // at VBlank start, not whatever live memory contains later.
@@ -176,6 +182,16 @@ private:
     std::array<uint8_t, kMaxFramebufferBytes> latched_fb_{};
     bool has_latched_fb_ = false;
 
+    struct AffineLineState {
+        int32_t x = 0;
+        int32_t y = 0;
+        bool valid_x = false;
+        bool valid_y = false;
+        bool reload_x = false;
+        bool reload_y = false;
+    };
+    std::array<AffineLineState, 2> affine_line_{};
+
     // View-area margins (present-time host state; NOT serialized — see above).
     uint32_t extra_left_   = 0;
     uint32_t extra_right_  = 0;
@@ -204,6 +220,11 @@ extern "C" int (*g_ws_bg_x_provider)(int bg, int output_x, int screen_y,
 // Bitmask of regular BG layers that may use g_ws_bg_x_provider. Defaults to
 // all layers; game adapters can narrow it to avoid per-pixel callback traffic.
 extern "C" unsigned g_ws_bg_x_provider_layers;
+// Optional enhancement for affine backgrounds in expanded rendering. The
+// global switch is presentation configuration; the provider lets a game
+// authorize only known-safe layers and scenes.
+extern "C" int g_ws_affine_filter_enabled;
+extern "C" int (*g_ws_affine_filter_provider)(int bg, int screen_y);
 // Per-game policy for self-sufficient authored margin providers. Off keeps the
 // established fail-closed window/savestate behavior. On lets provider-sourced
 // regular BG margins continue independently beside native HUD/dialog windows.

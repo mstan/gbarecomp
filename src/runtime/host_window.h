@@ -38,12 +38,13 @@ public:
     // `screen` is the per-game color model from [video].screen in game.toml
     // (raw|unlit|frontlit|backlit|classic), or nullptr for none. The
     // GBARECOMP_SCREEN env var, when set, overrides it.
-    // `linear_filter` selects linear (vs nearest) texture scaling — the
-    // launcher's "Linear filtering" toggle; default preserves the historical
-    // nearest look.
+    // `linear_filter` selects ordinary linear scaling. `sharp_filter` uses a
+    // GPU integer prescale followed by a small fractional linear pass and
+    // takes precedence when both are requested.
     bool open(int scale = 3, int base_w = 240, int base_h = 160,
               const char* title = "gbarecomp", const char* screen = nullptr,
-              bool linear_filter = false, bool resize_driven_view = false);
+              bool linear_filter = false, bool sharp_filter = false,
+              bool resize_driven_view = false);
     void close();
     bool is_open() const { return open_; }
 
@@ -99,6 +100,10 @@ public:
     // output queue. Backend converts to the host device's format.
     // No-op if audio init failed or this build has no SDL2.
     void push_audio_samples(const int16_t* samples, std::size_t count);
+
+    // Service the native window-system queue without consuming input events.
+    // Long guest frames use this to remain responsive between presentations.
+    void service_events();
 
     struct Events {
         bool     quit = false;

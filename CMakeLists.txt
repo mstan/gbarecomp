@@ -199,6 +199,7 @@ add_library(gbarecomp_recompile_core STATIC
     src/recompile/function_finder.cpp
     src/recompile/emit_function.cpp
     src/recompile/codegen_shards.cpp
+    src/recompile/dispatch_table_entries.cpp
 )
 target_include_directories(gbarecomp_recompile_core PUBLIC src/recompile)
 target_link_libraries(gbarecomp_recompile_core PUBLIC gbarecomp_armv4t)
@@ -211,6 +212,7 @@ set_property(TARGET gbarecomp_recompile_core PROPERTY POSITION_INDEPENDENT_CODE 
 add_library(gbarecomp_gba STATIC
     src/gba/gba_memory.cpp
     src/gba/gba_bus.cpp
+    src/gba/gba_matrix_memory.cpp
     src/gba/gba_io.cpp
     src/gba/gba_irq.cpp
     src/gba/gba_dma.cpp
@@ -592,6 +594,10 @@ add_executable(codegen_shards_tests tests/recompile/codegen_shards_test.cpp)
 target_link_libraries(codegen_shards_tests PRIVATE gbarecomp_recompile_core)
 add_test(NAME codegen_shards_tests COMMAND codegen_shards_tests)
 
+add_executable(audio_drc_tests tests/runtime/audio_drc_test.cpp)
+target_include_directories(audio_drc_tests PRIVATE src/runtime)
+add_test(NAME audio_drc_tests COMMAND audio_drc_tests)
+
 # Self-heal proposal clustering — pure logic, links only the standalone
 # clustering TU (no runtime/bus/overlay dependencies).
 add_executable(selfheal_cluster_test
@@ -614,10 +620,7 @@ add_test(NAME thumb_tests COMMAND thumb_tests)
 
 add_gbarecomp_runtime_stack_test(bus_tests tests/bus/test_main.cpp)
 add_gbarecomp_runtime_stack_test(dma_tests tests/dma/test_main.cpp)
-
-add_executable(timer_tests tests/timers/test_main.cpp)
-target_link_libraries(timer_tests PRIVATE gbarecomp_gba)
-add_test(NAME timer_tests COMMAND timer_tests)
+add_gbarecomp_runtime_stack_test(timer_tests tests/timers/test_main.cpp)
 
 add_executable(gpio_tests tests/gpio/test_main.cpp)
 target_link_libraries(gpio_tests PRIVATE gbarecomp_gba)

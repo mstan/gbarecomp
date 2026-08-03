@@ -28,6 +28,9 @@ const uint8_t* bus_data();
 // function run. Reset by bus_reset(); compared by the runner against
 // the interpreter's per-instruction cycle count.
 extern uint64_t g_ticked_cycles;
+// Packed CPSR observed by the first runtime_tick call. Exchange branches must
+// publish their new T bit before the tick can deliver an IRQ.
+extern uint32_t g_cpsr_at_first_tick;
 
 extern uint32_t g_last_dispatch_target;
 extern bool     g_dispatch_called;

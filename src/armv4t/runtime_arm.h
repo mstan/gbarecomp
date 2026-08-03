@@ -52,12 +52,31 @@ typedef int (*RuntimeThumbAluImmediateOverride)(uint32_t instruction_pc,
                                                 uint32_t* out_value);
 extern RuntimeThumbAluImmediateOverride g_runtime_thumb_alu_imm_override;
 
+// Optional game-owned override for mapped bus reads. This is intended for
+// narrow, exact-PC enhancement patches whose guest-visible data must remain
+// unmodified for every other consumer.
+typedef int (*RuntimeBusReadOverride)(uint32_t instruction_pc,
+                                     uint32_t address,
+                                     uint32_t width,
+                                     uint32_t original_value,
+                                     uint32_t* out_value);
+extern RuntimeBusReadOverride g_runtime_bus_read_override;
+
 // Optional game-owned canonicalizer for position-independent code copied to
 // transient RAM addresses (notably routines executed from a moving stack
 // frame). It runs before the fixed dispatch table and returns non-zero after
 // dispatching a byte-verified target. nullptr preserves normal dispatch.
 typedef int (*RuntimeRamDispatchHook)(uint32_t pc, int thumb);
 extern RuntimeRamDispatchHook g_runtime_ram_dispatch_hook;
+
+// Optional game/runtime predicate for executable regions whose bytes can change
+// underneath a static dispatch entry (self-modifying RAM, banked cartridge
+// apertures). A non-zero result selects the reference interpreter instead of
+// entering stale AOT, including when a generated direct call reaches the
+// mutable region without passing through runtime_dispatch first.
+typedef int (*RuntimeForceInterpHook)(uint32_t pc, int thumb);
+extern RuntimeForceInterpHook g_runtime_force_interp_hook;
+extern int g_runtime_force_interp_step_active;
 
 // Only exact PCs opted in by the recompiler config call this helper. The
 // universal/default generated path keeps the compile-time operand and emits no

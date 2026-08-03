@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "arm_ir.h"
+#include "runtime_arm.h"
 #include "stubs.h"
 
 namespace {
@@ -52,6 +53,7 @@ void bus_reset(uint32_t base, uint32_t size) {
     g_last_swi_imm = 0;
     g_swi_called = false;
     g_ticked_cycles = 0;
+    g_cpsr_at_first_tick = UINT32_MAX;
     g_unimplemented_called = false;
     if (g_unimplemented_op) {
         std::free(reinterpret_cast<void*>(
@@ -89,6 +91,7 @@ const uint8_t* bus_data() {
 
 // Cycle accounting recorder (see stubs.h).
 uint64_t g_ticked_cycles        = 0;
+uint32_t g_cpsr_at_first_tick   = UINT32_MAX;
 
 // Dispatch / SWI recorders.
 uint32_t g_last_dispatch_target = 0;
@@ -145,6 +148,9 @@ extern "C" unsigned long long g_runtime_cycles = 0;
 extern "C" int g_force_interp = 0;
 
 extern "C" void runtime_force_interp_step(void) {}
+extern "C" int runtime_bridge_interpret(uint32_t, bool, uint32_t, uint64_t) {
+    return 0;
+}
 
 // ── Bus accessors used by generated test functions ─────────────────
 
@@ -225,6 +231,8 @@ extern "C" void runtime_tick(uint32_t cycles) {
     // total cycle cost against the interpreter's per-instruction count.
     // (No PPU/audio/IRQ side effects here — production runners link the
     // real runtime_tick from runtime_bus_bridge.cpp for those.)
+    if (codegen_test::g_cpsr_at_first_tick == UINT32_MAX)
+        codegen_test::g_cpsr_at_first_tick = g_cpu.cpsr;
     codegen_test::g_ticked_cycles += cycles;
 }
 
