@@ -391,14 +391,24 @@ endif()
 # tools — small CLI utilities. Each is a separate executable.
 # ─────────────────────────────────────────────────────────────────────────────
 function(target_link_gbarecomp_runtime_stack target_name)
-    if(MINGW OR MSYS)
+    # The four archives are mutually recursive, so a single-pass linker needs an
+    # explicit group. The gate is the LINKER, not the platform: this used to test
+    # MINGW OR MSYS, which left native Linux -- GNU ld, but neither of those --
+    # taking the plain-list branch and failing to link the test executables:
+    #
+    #   runtime_arm.cpp: undefined reference to `overlay_try_dispatch'
+    #   runtime_arm.cpp: undefined reference to `kBiosDispatchTable'
+    #
+    # Apple's ld64 and MSVC resolve archive cycles without help (and ld64 rejects
+    # --start-group outright), so they take the plain list.
+    if(APPLE OR MSVC)
+        target_link_libraries(${target_name} PRIVATE
+            gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
+    else()
         target_link_libraries(${target_name} PRIVATE
             -Wl,--start-group
             gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug
             -Wl,--end-group)
-    else()
-        target_link_libraries(${target_name} PRIVATE
-            gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
     endif()
 endfunction()
 
