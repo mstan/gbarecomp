@@ -12,13 +12,17 @@ statically.
 
 Projects built on GBARecomp already ship with **adaptive widescreen, versioned
 mods, GBA screen color profiles, save states, host-synchronized RTC, modern
-motion controls, Android support, and cartridge-specific hardware such as the
-WarioWare gyro and Boktai solar sensor.**
+motion controls, Android support, and cartridge-specific hardware such as
+gyroscopes and solar sensors.**
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/assets/games/dragon-ball-z-buus-fury-adaptive.webp" alt="Dragon Ball Z: Buu's Fury running in adaptive widescreen" width="100%"><br><sub><b>Dragon Ball Z: Buu's Fury — Adaptive Widescreen</b></sub></td>
-    <td width="50%"><img src="docs/assets/games/dragon-ball-z-legacy-of-goku-ii-adaptive.webp" alt="Dragon Ball Z: The Legacy of Goku II running in adaptive widescreen" width="100%"><br><sub><b>Dragon Ball Z: The Legacy of Goku II — Adaptive Widescreen</b></sub></td>
+    <td width="38%"><img src="docs/assets/games/minish-cap-native.webp" alt="The Legend of Zelda: The Minish Cap at its native 240 by 160 view" width="100%"></td>
+    <td width="62%"><img src="docs/assets/games/minish-cap-adaptive.webp" alt="The Legend of Zelda: The Minish Cap showing a wider adaptive view of the same scene" width="100%"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>The Minish Cap — faithful 240×160</b></sub></td>
+    <td align="center"><sub><b>The Minish Cap — Adaptive Widescreen</b></sub></td>
   </tr>
 </table>
 
@@ -115,6 +119,11 @@ interfaces so the recompiled game still talks to them through its own driver.
 | **Matrix Memory mapper** | The 64 MiB *Shrek* GBA Video Movie Pak pages data beyond the normal cartridge window through its original mapper, allowing the complete film to play through the native runtime. |
 | **Save hardware** | SRAM, EEPROM, Flash, and 1 Mbit Flash are modeled, with ordinary cartridge saves and separate save-state slots. |
 
+<p align="center">
+  <img src="docs/assets/games/warioware-twisted.webp" alt="WarioWare: Twisted! running through GBARecomp with gyroscope support" width="70%">
+  <br><sub><b>WarioWare: Twisted!</b> — one game consuming GBARecomp's controller and phone gyroscope support.</sub>
+</p>
+
 ## Android
 
 The runtime supports Android through the SDL application boundary. The first
@@ -164,11 +173,6 @@ verification, or the faithful Raw output.
     <td><img src="docs/assets/games/mega-man-zero-opening.webp" alt="Mega Man Zero opening mission running natively through GBARecomp" width="100%"><br><sub><b>Mega Man Zero — opening mission</b></sub></td>
     <td><img src="docs/assets/games/mega-man-zero-gameplay.webp" alt="Mega Man Zero gameplay running natively through GBARecomp" width="100%"><br><sub><b>Mega Man Zero — gameplay</b></sub></td>
   </tr>
-</table>
-
-<table>
-  <tr><td><img src="docs/assets/games/shrek-title.webp" alt="Shrek GBA Video Movie Pak running through GBARecomp" width="100%"></td></tr>
-  <tr><td align="center"><sub><b>Shrek Movie — the 64 MiB GBA Video Movie Pak, recompiled.</b></sub></td></tr>
 </table>
 
 ## Use the released CLI
@@ -257,24 +261,25 @@ and ships its own ROM-free release. These are experimental preservation and
 research previews, not finished commercial ports. Back up important saves and
 consult each project for its validated revision and current limitations.
 
-| Game | Repository | Latest build | Highlights |
-|---|---|---|---|
-| *Dragon Ball Z: The Legacy of Goku* | [DragonBallZLegacyOfGokuRecomp](https://github.com/mstan/DragonBallZLegacyOfGokuRecomp) | [v0.0.1](https://github.com/mstan/DragonBallZLegacyOfGokuRecomp/releases/tag/v0.0.1) | Optional Adaptive Widescreen through 480×160. |
-| *Dragon Ball Z: The Legacy of Goku II* | [DragonBallZLegacyofGokuIIRecomp](https://github.com/mstan/DragonBallZLegacyofGokuIIRecomp) | [v0.0.1](https://github.com/mstan/DragonBallZLegacyofGokuIIRecomp/releases/tag/v0.0.1) | Optional Adaptive Widescreen with widened field planes and actor visibility. |
-| *Dragon Ball Z: Buu's Fury* | [DragonBallZBuusFuryRecomp](https://github.com/mstan/DragonBallZBuusFuryRecomp) | [v0.0.1](https://github.com/mstan/DragonBallZBuusFuryRecomp/releases/tag/v0.0.1) | Optional Adaptive Widescreen with authored field continuation. |
-| *Mario Kart: Super Circuit* | [MarioKartSuperCircuitRecomp](https://github.com/mstan/MarioKartSuperCircuitRecomp) | [v0.0.1](https://github.com/mstan/MarioKartSuperCircuitRecomp/releases/tag/v0.0.1) | Optional Adaptive Widescreen and 60 FPS track-rendering mods. |
-| *WarioWare: Twisted!* | [WarioWareTwistedRecomp](https://github.com/mstan/WarioWareTwistedRecomp) | [Windows v0.0.1](https://github.com/mstan/WarioWareTwistedRecomp/releases/tag/v0.0.1) · [Android v0.0.1](https://github.com/mstan/WarioWareTwistedRecomp/releases/tag/android-v0.0.1) | Controller/phone gyro; Windows and experimental Android arm64 builds. |
-| *Super Mario Advance 2: Super Mario World* | [SuperMarioAdvance2Recomp](https://github.com/mstan/SuperMarioAdvance2Recomp) | [v0.0.1](https://github.com/mstan/SuperMarioAdvance2Recomp/releases/tag/v0.0.1) | Optional scene-aware Adaptive Widescreen. |
-| *Super Mario Advance 4: Super Mario Bros. 3* | [SuperMarioAdvance4Recomp](https://github.com/mstan/SuperMarioAdvance4Recomp) | [v0.0.1](https://github.com/mstan/SuperMarioAdvance4Recomp/releases/tag/v0.0.1) | Native gameplay, launcher, controllers, and save states. |
-| *Shrek Movie* (GBA Video) | [ShrekGBAVideoRecomp](https://github.com/mstan/ShrekGBAVideoRecomp) | [v0.0.1](https://github.com/mstan/ShrekGBAVideoRecomp/releases/tag/v0.0.1) | Complete movie playback; 64 MiB Matrix Memory mapper. |
-| *Pokémon FireRed* / *Pokémon LeafGreen* | [FireRedLeafGreenRecomp](https://github.com/mstan/FireRedLeafGreenRecomp) | [v0.0.3](https://github.com/mstan/FireRedLeafGreenRecomp/releases/tag/v0.0.3) | Two verified native targets in one repository. |
-| *Pokémon Ruby* / *Pokémon Sapphire* | [RubySapphireRecomp](https://github.com/mstan/RubySapphireRecomp) | [v0.0.3](https://github.com/mstan/RubySapphireRecomp/releases/tag/v0.0.3) | Two native targets; Flash1M, RTC, and optional host-clock mod integration. |
-| *Pokémon Emerald* | [EmeraldRecomp](https://github.com/mstan/EmeraldRecomp) | [v0.0.3](https://github.com/mstan/EmeraldRecomp/releases/tag/v0.0.3) | Flash1M, RTC, native gameplay, and persistent coverage healing. |
-| *The Legend of Zelda: The Minish Cap* | [MinishCapRecomp](https://github.com/mstan/MinishCapRecomp) | [v0.0.4](https://github.com/mstan/MinishCapRecomp/releases/tag/v0.0.4) | Original target; optional Adaptive Widescreen with room-aware margins. |
-| *Mega Man Zero* | [MegaManZeroRecomp](https://github.com/mstan/MegaManZeroRecomp) | [v0.0.3](https://github.com/mstan/MegaManZeroRecomp/releases/tag/v0.0.3) | Static-first gameplay and experimental fixed/adaptive extended views. |
+| Game | Repository | Highlights |
+|---|---|---|
+| *Dragon Ball Z: The Legacy of Goku* | [DragonBallZLegacyOfGokuRecomp](https://github.com/mstan/DragonBallZLegacyOfGokuRecomp) | Optional Adaptive Widescreen through 480×160. |
+| *Dragon Ball Z: The Legacy of Goku II* | [DragonBallZLegacyofGokuIIRecomp](https://github.com/mstan/DragonBallZLegacyofGokuIIRecomp) | Optional Adaptive Widescreen with widened field planes and actor visibility. |
+| *Dragon Ball Z: Buu's Fury* | [DragonBallZBuusFuryRecomp](https://github.com/mstan/DragonBallZBuusFuryRecomp) | Optional Adaptive Widescreen with authored field continuation. |
+| *Mario Kart: Super Circuit* | [MarioKartSuperCircuitRecomp](https://github.com/mstan/MarioKartSuperCircuitRecomp) | Optional Adaptive Widescreen and 60 FPS track-rendering mods. |
+| *WarioWare: Twisted!* | [WarioWareTwistedRecomp](https://github.com/mstan/WarioWareTwistedRecomp) | Uses GBARecomp's controller and phone gyroscope support; Windows and experimental Android arm64 builds. |
+| *Super Mario Advance 2: Super Mario World* | [SuperMarioAdvance2Recomp](https://github.com/mstan/SuperMarioAdvance2Recomp) | Optional scene-aware Adaptive Widescreen. |
+| *Super Mario Advance 4: Super Mario Bros. 3* | [SuperMarioAdvance4Recomp](https://github.com/mstan/SuperMarioAdvance4Recomp) | Native gameplay, launcher, controllers, and save states. |
+| *Shrek Movie* (GBA Video) | [ShrekGBAVideoRecomp](https://github.com/mstan/ShrekGBAVideoRecomp) | Complete movie playback; 64 MiB Matrix Memory mapper. |
+| *Pokémon FireRed* / *Pokémon LeafGreen* | [FireRedLeafGreenRecomp](https://github.com/mstan/FireRedLeafGreenRecomp) | Two verified native targets in one repository. |
+| *Pokémon Ruby* / *Pokémon Sapphire* | [RubySapphireRecomp](https://github.com/mstan/RubySapphireRecomp) | Two native targets; Flash1M, RTC, and optional host-clock mod integration. |
+| *Pokémon Emerald* | [EmeraldRecomp](https://github.com/mstan/EmeraldRecomp) | Flash1M, RTC, native gameplay, and persistent coverage healing. |
+| *The Legend of Zelda: The Minish Cap* | [MinishCapRecomp](https://github.com/mstan/MinishCapRecomp) | Original target; optional Adaptive Widescreen with room-aware margins. |
+| *Mega Man Zero* | [MegaManZeroRecomp](https://github.com/mstan/MegaManZeroRecomp) | Static-first gameplay and experimental fixed/adaptive extended views. |
 
-Bringing up another title? Start with [`PRINCIPLES.md`](PRINCIPLES.md), the
-architecture notes, and a nearby game project with similar cartridge hardware.
+Want to contribute to an existing title or bring up a new one? Start with
+[`PRINCIPLES.md`](PRINCIPLES.md), the architecture notes, and a nearby game
+project with similar cartridge hardware.
 
 ## License
 
