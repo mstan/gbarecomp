@@ -1027,6 +1027,11 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         // intended driver explicit when a global SDL config changed it.
         SDL_SetHintWithPriority("SDL_JOYSTICK_HIDAPI_PS5", "1",
                                 SDL_HINT_DEFAULT);
+        // Bluetooth DualSense controllers start in basic-report mode.
+        // Enhanced reports carry gyro/accelerometer data (and rumble), so
+        // request them before initializing the controller subsystem.
+        SDL_SetHintWithPriority("SDL_JOYSTICK_HIDAPI_PS5_RUMBLE", "1",
+                                SDL_HINT_DEFAULT);
         if (SDL_InitSubSystem(controller_flags) != 0) {
             std::fprintf(stderr,
                          "host_window: SDL controller/sensor init failed: %s\n",
