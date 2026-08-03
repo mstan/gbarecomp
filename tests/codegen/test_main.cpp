@@ -292,6 +292,19 @@ bool run_case(const TestCase& tc, std::size_t idx) {
         note(d, "cycles: interp=%u recomp=%llu", interp_cycles,
              static_cast<unsigned long long>(codegen_test::g_ticked_cycles));
     }
+    // runtime_tick can synchronously deliver an IRQ. BX must therefore expose
+    // the destination instruction-set mode before ticking, not merely before
+    // dispatching the destination.
+    if (ins.op == armv4t::IrOp::BX &&
+        codegen_test::g_cpsr_at_first_tick != UINT32_MAX) {
+        constexpr uint32_t kT = 1u << 5;
+        if ((codegen_test::g_cpsr_at_first_tick & kT) !=
+            (cpu_interp.cpsr.t ? kT : 0u)) {
+            note(d, "BX mode at tick: expected T=%u, observed cpsr=0x%08X",
+                 cpu_interp.cpsr.t ? 1u : 0u,
+                 codegen_test::g_cpsr_at_first_tick);
+        }
+    }
 
     if (d.failed) {
         std::printf("FAIL [%zu] %s\n    %s\n",
