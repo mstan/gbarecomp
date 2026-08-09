@@ -1,4 +1,5 @@
 #include "mod_runtime.h"
+#include "mod_function_hooks.h"
 
 #include "../gba/crc32.h"
 #include "../gba/sha1.h"
@@ -1753,6 +1754,10 @@ void mod_runtime_activate_plugins() {
     Runtime& runtime = state();
     if (!runtime.initialized) return;
     runtime.adaptive_view_enabled = false;
+    // Registration alone must never alter guest behavior. Every activation
+    // pass starts from stock entry-hook state; selected trusted plugins opt in
+    // again from their activation callback.
+    gba_mod_disable_all_function_hooks();
     for (GBAModActivationCallback callback : reset_callbacks())
         if (callback) callback();
     for (const ResolvedPlugin& plugin : runtime.committed.plugins)

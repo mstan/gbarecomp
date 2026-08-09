@@ -269,6 +269,9 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/overlay_emit.cpp
     src/runtime/overlay_loader.cpp
     src/runtime/overlay_compile.cpp
+    # Trusted function-entry hooks are always linked: opted-in generated code
+    # must work even when the package catalog itself is disabled.
+    src/runtime/mod_function_hooks.cpp
     src/runtime/host_platform.cpp
     src/runtime/host_window.cpp
     src/runtime/color_lut.cpp
@@ -557,10 +560,11 @@ if(GBARECOMP_ENABLE_MODS)
     add_executable(mod_runtime_tests
         tests/mod_runtime/test_main.cpp
         src/runtime/mod_runtime.cpp
+        src/runtime/mod_function_hooks.cpp
         src/gba/crc32.cpp
         src/gba/sha1.cpp)
     target_include_directories(mod_runtime_tests PRIVATE
-        src/runtime src/gba)
+        src/runtime src/gba src/armv4t)
     add_test(NAME mod_runtime_tests COMMAND mod_runtime_tests)
 endif()
 
@@ -583,6 +587,15 @@ add_test(NAME function_finder_tests COMMAND function_finder_tests)
 add_executable(codegen_shards_tests tests/recompile/codegen_shards_test.cpp)
 target_link_libraries(codegen_shards_tests PRIVATE gbarecomp_recompile_core)
 add_test(NAME codegen_shards_tests COMMAND codegen_shards_tests)
+
+add_executable(recompile_config_tests
+    tests/recompile/config_test.cpp
+    tools/gba_recompile/config.cpp)
+target_include_directories(recompile_config_tests PRIVATE
+    tools/gba_recompile src/recompile src/armv4t
+    "${GBARECOMP_TOMLPP_INCLUDE_DIR}")
+target_link_libraries(recompile_config_tests PRIVATE gbarecomp_gba)
+add_test(NAME recompile_config_tests COMMAND recompile_config_tests)
 
 add_executable(audio_drc_tests tests/runtime/audio_drc_test.cpp)
 target_include_directories(audio_drc_tests PRIVATE src/runtime)

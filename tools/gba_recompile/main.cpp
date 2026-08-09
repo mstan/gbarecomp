@@ -618,7 +618,8 @@ void write_body(const std::string& dir,
                 const OutputNames& names,
                 uint32_t shard_count,
                 const std::unordered_set<uint32_t>*
-                    alu_immediate_override_pcs) {
+                    alu_immediate_override_pcs,
+                const std::unordered_set<uint64_t>* mod_function_hook_keys) {
     std::unordered_map<uint64_t, std::string> name_by_key;
     for (const auto& fn : funcs) {
         uint64_t key = (static_cast<uint64_t>(fn.addr) << 1u) |
@@ -682,7 +683,8 @@ void write_body(const std::string& dir,
             fn.has_indirect_transfer ? "  indirect" : "",
             fn.name.c_str());
         emit_function_body(f, fn, rom, rom_size, rom_base, name_by_key,
-                           alu_immediate_override_pcs);
+                           alu_immediate_override_pcs,
+                           mod_function_hook_keys);
         std::fprintf(f, "}\n\n");
         }
         std::fclose(f);
@@ -849,6 +851,32 @@ bool validate_alu_immediate_override_sites(
                 entry.addr, armv4t::format_ir(ins).c_str());
             return false;
         }
+    }
+    return true;
+}
+
+bool audit_mod_function_hooks(const Config& cfg,
+                              const std::vector<Function>& funcs,
+                              std::unordered_set<uint64_t>* matched) {
+    for (const auto& hook : cfg.mod_function_hooks) {
+        const uint64_t key = (static_cast<uint64_t>(hook.addr) << 1u) |
+            (hook.mode == CpuMode::Thumb ? 1u : 0u);
+        const auto found = std::find_if(funcs.begin(), funcs.end(),
+            [&](const Function& fn) {
+                return fn.addr == hook.addr && fn.mode == hook.mode;
+            });
+        if (found == funcs.end()) {
+            std::fprintf(stderr,
+                "ERROR: [[mod_function_hook]] "
+                "addr=0x%08X mode=%s matched no emitted function\n",
+                hook.addr, hook.mode == CpuMode::Thumb ? "thumb" : "arm");
+            return false;
+        }
+        matched->insert(key);
+    }
+    if (!cfg.mod_function_hooks.empty()) {
+        std::printf("[gba_recompile] mod function hooks: %zu declared, %zu matched\n",
+                    cfg.mod_function_hooks.size(), matched->size());
     }
     return true;
 }
@@ -1256,6 +1284,7 @@ int main(int argc, char** argv) {
                         ? " (adaptive)" : "");
     }
     std::unordered_set<uint32_t> alu_immediate_override_pcs;
+    std::unordered_set<uint64_t> mod_function_hook_keys;
     if (have_cfg) {
         for (const auto& entry : cfg.thumb_alu_immediate_overrides) {
             alu_immediate_override_pcs.insert(entry.addr);
@@ -1263,11 +1292,17 @@ int main(int argc, char** argv) {
         for (const auto& entry : cfg.alu_immediate_overrides) {
             alu_immediate_override_pcs.insert(entry.addr);
         }
+        if (!audit_mod_function_hooks(cfg, emit_funcs,
+                                      &mod_function_hook_keys)) {
+            return 1;
+        }
     }
     write_body(cli.out_dir, emit_funcs, rom.data(), rom.size(), effective_rom_base,
                names, codegen_shards,
                alu_immediate_override_pcs.empty()
-                   ? nullptr : &alu_immediate_override_pcs);
+                   ? nullptr : &alu_immediate_override_pcs,
+               mod_function_hook_keys.empty()
+                   ? nullptr : &mod_function_hook_keys);
     write_dispatch_table(cli.out_dir, emit_funcs, names);
     std::printf("==> wrote %s/{%s, %s%s, %s}\n",
                 cli.out_dir.c_str(),

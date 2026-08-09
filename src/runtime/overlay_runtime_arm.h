@@ -58,6 +58,10 @@ static inline void arm_set_nzcv_sbc(uint32_t a, uint32_t b, uint32_t ci, uint32_
 
 // ── Dispatch / call-return ──
 static inline void runtime_dispatch(uint32_t pc) { g_ovl->runtime_dispatch(pc); }
+static inline int gba_mod_function_entry(uint32_t pc, int thumb,
+                                         ArmCpuState* cpu) {
+    return g_ovl->gba_mod_function_entry(pc, thumb, cpu);
+}
 static inline void runtime_dispatch_with_exchange(uint32_t pc) { g_ovl->runtime_dispatch_with_exchange(pc); }
 static inline void runtime_call_push_return(uint32_t pc) { g_ovl->runtime_call_push_return(pc); }
 static inline int  runtime_call_should_return(uint32_t pc) { return g_ovl->runtime_call_should_return(pc); }

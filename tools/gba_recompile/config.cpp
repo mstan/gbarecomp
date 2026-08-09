@@ -255,6 +255,51 @@ bool parse_alu_immediate_overrides(
     return true;
 }
 
+bool parse_mod_function_hooks(const toml::array& arr,
+                              std::vector<ConfigModFunctionHook>& out) {
+    for (std::size_t i = 0; i < arr.size(); ++i) {
+        const auto* t = arr[i].as_table();
+        if (!t) {
+            std::fprintf(stderr,
+                "%s[[mod_function_hook]] entry %zu is not a table\n",
+                kAbortHeader, i);
+            return false;
+        }
+        ConfigModFunctionHook entry;
+        bool ok = true;
+        std::string err;
+        entry.addr = get_u32_field(*t, "addr", true, ok, err);
+        const std::string mode_s =
+            get_string_field(*t, "mode", true, ok, err);
+        entry.note = get_string_field(*t, "note", false, ok, err);
+        if (!ok || !parse_mode(mode_s, entry.mode)) {
+            std::fprintf(stderr,
+                "%s[[mod_function_hook]] entry %zu: addr and mode "
+                "(arm or thumb) are required\n", kAbortHeader, i);
+            return false;
+        }
+        const uint32_t align = entry.mode == CpuMode::Thumb ? 2u : 4u;
+        if ((entry.addr % align) != 0) {
+            std::fprintf(stderr,
+                "%s[[mod_function_hook]] entry %zu: 0x%08X is not %s "
+                "instruction-aligned\n", kAbortHeader, i, entry.addr,
+                entry.mode == CpuMode::Thumb ? "THUMB" : "ARM");
+            return false;
+        }
+        for (const auto& prior : out) {
+            if (prior.addr == entry.addr && prior.mode == entry.mode) {
+                std::fprintf(stderr,
+                    "%sduplicate [[mod_function_hook]] at 0x%08X (%s)\n",
+                    kAbortHeader, entry.addr,
+                    entry.mode == CpuMode::Thumb ? "thumb" : "arm");
+                return false;
+            }
+        }
+        out.push_back(std::move(entry));
+    }
+    return true;
+}
+
 bool parse_data_ranges(const toml::array& arr,
                        std::vector<ConfigDataRange>& out) {
     for (std::size_t i = 0; i < arr.size(); ++i) {
@@ -571,6 +616,56 @@ bool validate_cross_section(const Config& cfg) {
             }
         }
     }
+    for (const auto& hook : cfg.mod_function_hooks) {
+        const std::uint64_t program_start = cfg.program.load_address;
+        const std::uint64_t program_end =
+            program_start + static_cast<std::uint64_t>(cfg.program.size);
+        const uint32_t width = hook.mode == CpuMode::Thumb ? 2u : 4u;
+        bool in_code_image = hook.addr >= program_start &&
+            static_cast<std::uint64_t>(hook.addr) + width <= program_end;
+        for (const auto& cc : cfg.code_copies) {
+            const std::uint64_t copy_start = cc.runtime_start;
+            const std::uint64_t copy_end = copy_start + cc.size;
+            in_code_image = in_code_image ||
+                (hook.addr >= copy_start &&
+                 static_cast<std::uint64_t>(hook.addr) + width <= copy_end);
+        }
+        if (!in_code_image) {
+            std::fprintf(stderr,
+                "%s[[mod_function_hook]] 0x%08X is outside the program "
+                "image and declared [[code_copy]] spans\n",
+                kAbortHeader, hook.addr);
+            return false;
+        }
+        for (const auto& dr : cfg.data_ranges) {
+            if (hook.addr >= dr.start && hook.addr < dr.end) {
+                std::fprintf(stderr,
+                    "%s[[mod_function_hook]] 0x%08X falls inside "
+                    "[[data_range]] [0x%08X,0x%08X)\n", kAbortHeader,
+                    hook.addr, dr.start, dr.end);
+                return false;
+            }
+        }
+        for (const auto& ex : cfg.exclude_funcs) {
+            if (ex.addr == hook.addr) {
+                std::fprintf(stderr,
+                    "%s[[mod_function_hook]] 0x%08X is also an "
+                    "[[exclude_func]] address\n", kAbortHeader, hook.addr);
+                return false;
+            }
+        }
+        for (const auto& ef : cfg.extra_funcs) {
+            if (ef.addr == hook.addr && ef.mode != hook.mode) {
+                std::fprintf(stderr,
+                    "%s[[mod_function_hook]] 0x%08X mode=%s conflicts "
+                    "with [[extra_func]] mode=%s at the same address\n",
+                    kAbortHeader, hook.addr,
+                    hook.mode == CpuMode::Thumb ? "thumb" : "arm",
+                    ef.mode == CpuMode::Thumb ? "thumb" : "arm");
+                return false;
+            }
+        }
+    }
     // jump_table table bytes overlapping a data_range is also wrong
     // (the table bytes are AUTO-excluded, declaring them as data
     // is harmless but suggests confusion — accept silently for now).
@@ -705,6 +800,12 @@ bool load_config(const std::string& path, Config& out) {
                 *imm, out.alu_immediate_overrides)) return false;
     }
 
+    // [[mod_function_hook]]
+    if (auto hooks = tbl["mod_function_hook"].as_array()) {
+        if (!parse_mod_function_hooks(*hooks, out.mod_function_hooks))
+            return false;
+    }
+
     // [[data_range]]
     if (auto dr = tbl["data_range"].as_array()) {
         if (!parse_data_ranges(*dr, out.data_ranges)) return false;
@@ -794,6 +895,8 @@ void print_config_summary(const Config& cfg) {
                 cfg.thumb_alu_immediate_overrides.size());
     std::printf("  ALU immediate hooks:   %zu\n",
                 cfg.alu_immediate_overrides.size());
+    std::printf("  mod function hooks:    %zu\n",
+                cfg.mod_function_hooks.size());
     std::printf("  data_range entries:    %zu\n", cfg.data_ranges.size());
     std::printf("  code_copy entries:     %zu\n", cfg.code_copies.size());
     std::printf("  jump_table entries:    %zu\n", cfg.jump_tables.size());

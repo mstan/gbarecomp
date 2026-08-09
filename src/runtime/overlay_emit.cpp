@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "overlay_abi.h"      // GBA_OVERLAY_ABI_VERSION
 #include "function_finder.h"  // FunctionFinder, FunctionSeed, Function, CpuMode
@@ -40,8 +41,14 @@ std::string emit_overlay_c(uint32_t pc, bool thumb,
     // cross-DLL direct calls (all inter-function flow routes back through the
     // host dispatcher).
     std::unordered_map<uint64_t, std::string> empty_names;
+    // A healed function was absent from the static corpus. Its exact entry
+    // receives the same replacement guard; the registry remains trusted and
+    // disabled until a plugin explicitly enables a matching callback.
+    const std::unordered_set<uint64_t> hook_key = {
+        (static_cast<uint64_t>(target->addr) << 1u) |
+        (target->mode == CpuMode::Thumb ? 1u : 0u)};
     std::string body = emit_function_body_str(*target, bytes, size, base,
-                                              empty_names);
+                                              empty_names, nullptr, &hook_key);
 
     char hdr[160];
     std::string out;

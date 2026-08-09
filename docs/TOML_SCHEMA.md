@@ -75,6 +75,11 @@ note  = "Observed interruptible hot function"
 addr = 0x08002010                # exact THUMB ALU-immediate instruction PC
 note = "Opt-in game enhancement constant"
 
+[[mod_function_hook]]
+addr = 0x08003000                 # exact guest subroutine entry
+mode = "thumb"                   # arm | thumb
+note = "Trusted mod replacement seam"
+
 [[data_range]]
 start = 0x000001A0
 end   = 0x000001C0              # [start, end) — exclusive upper bound
@@ -183,6 +188,32 @@ per-game allowlist, so an opted-in site must be present in the static corpus.
 | `0x100 thumb`   | (nothing)         | One entry from finder. |
 | (nothing)       | `0x100 thumb`     | One entry from manual. |
 | `0x100 thumb`   | `0x100 arm`       | **Error** — mode mismatch. Hand-resolve. |
+
+### `[[mod_function_hook]]` (zero or more)
+
+Declares one reviewed ARM or THUMB function entry that generated code may hand
+to a trusted native mod callback. Codegen emits the guard only when the exact
+`addr` + `mode` pair matches an emitted function root:
+
+```cpp
+if (gba_mod_function_entry(0x08003000u, 1, &g_cpu)) return;
+```
+
+Callbacks start disabled, may decline a call, and on handling one must author
+the post-call `ArmCpuState` (including the caller return PC). The original body
+then does not execute. Badly targeted entries are rejected structurally
+(alignment, image/copy span, data-range, or exclude-function conflict). An
+otherwise valid declaration that matches no static root is a hard codegen
+error, preventing address drift from silently disabling a mod. Self-healed
+and force-interpreted dynamic code use the separately trusted registration
+allowlist described in `MOD_PACKAGES.md`; static ROM roots always require this
+TOML declaration.
+
+| key | type | required | meaning |
+|-----|------|----------|---------|
+| `addr` | int hex | yes | Exact function entry PC. ARM must be word-aligned; THUMB halfword-aligned. |
+| `mode` | string | yes | `"arm"` or `"thumb"`; part of the allowlist identity. |
+| `note` | string | no | Free-form review documentation. |
 
 ### `[[data_range]]` (zero or more)
 

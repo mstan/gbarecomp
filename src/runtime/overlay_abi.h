@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-#define GBA_OVERLAY_ABI_VERSION 3u
+#define GBA_OVERLAY_ABI_VERSION 4u
 
 typedef struct GbaOverlayCallbacks {
     uint32_t abi_version;  // must equal GBA_OVERLAY_ABI_VERSION
@@ -94,6 +94,11 @@ typedef struct GbaOverlayCallbacks {
     // host's g_runtime_fn_entry_hook through this pointer (NULL hook = skipped).
     void (**runtime_fn_entry_hook)(uint32_t entry_pc);  // &g_runtime_fn_entry_hook
     void (*runtime_idle_backedge)(uint32_t header_pc);
+
+    // ABI v4: handling function-entry hook used by generic Stage-2 overlay
+    // bodies. The callback receives and mutates the shared cpu pointer above.
+    int (*gba_mod_function_entry)(uint32_t entry_pc, int thumb,
+                                  ArmCpuState* cpu);
 } GbaOverlayCallbacks;
 
 // Exported by every overlay DLL:

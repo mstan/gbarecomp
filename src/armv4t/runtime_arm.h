@@ -273,6 +273,12 @@ uint32_t runtime_current_pc(void);
 // function entry and is byte-identical to the un-hooked guest state.
 extern void (*g_runtime_fn_entry_hook)(uint32_t entry_pc);
 
+// Trusted mod replacement hook. Unlike g_runtime_fn_entry_hook (which is
+// observability-only), a non-zero result means the callback authored g_cpu's
+// post-call state and the generated body must return immediately. Only reviewed
+// [[mod_function_hook]] entries emit this call.
+int gba_mod_function_entry(uint32_t entry_pc, int thumb, ArmCpuState* cpu);
+
 // ── Mid-function alias resume PC ───────────────────────────────────────
 // Set by a thin per-alias dispatch wrapper (generated) to the alternate
 // entry PC immediately before it tail-calls the host function; the host's

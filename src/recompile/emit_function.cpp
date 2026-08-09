@@ -46,7 +46,8 @@ std::string emit_function_body_str(
     uint32_t rom_base,
     const std::unordered_map<uint64_t, std::string>& func_names_by_key,
     const std::unordered_set<uint32_t>*
-        alu_immediate_override_pcs) {
+        alu_immediate_override_pcs,
+    const std::unordered_set<uint64_t>* mod_function_hook_keys) {
     std::string out;
 
     const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
@@ -314,6 +315,19 @@ std::string emit_function_body_str(
         appendf(out, "        }\n    }\n");
     }
 
+    // Reviewed mod replacement hook. Resume aliases deliberately skip it: an
+    // IRQ/SWI resume is not a fresh guest call. A handled callback owns the
+    // complete guest call and leaves g_cpu in its return-to-caller state.
+    const uint64_t mod_hook_key =
+        (static_cast<uint64_t>(fn.addr) << 1u) |
+        (fn.mode == CpuMode::Thumb ? 1u : 0u);
+    if (mod_function_hook_keys &&
+        mod_function_hook_keys->count(mod_hook_key) != 0) {
+        appendf(out,
+            "    if (gba_mod_function_entry(0x%08Xu, %du, &g_cpu)) return;\n",
+            fn.addr, fn.mode == CpuMode::Thumb ? 1 : 0);
+    }
+
     // General function-entry hook (debug observability; see runtime_arm.h).
     // Fires before the first instruction while R0..R3 still hold the AAPCS
     // arguments. nullptr (default) = one not-taken branch, guest-state
@@ -396,10 +410,12 @@ void emit_function_body(
     std::size_t rom_size, uint32_t rom_base,
     const std::unordered_map<uint64_t, std::string>& func_names_by_key,
     const std::unordered_set<uint32_t>*
-        alu_immediate_override_pcs) {
+        alu_immediate_override_pcs,
+    const std::unordered_set<uint64_t>* mod_function_hook_keys) {
     std::string body = emit_function_body_str(fn, rom, rom_size, rom_base,
                                               func_names_by_key,
-                                              alu_immediate_override_pcs);
+                                              alu_immediate_override_pcs,
+                                              mod_function_hook_keys);
     std::fwrite(body.data(), 1, body.size(), f);
 }
 

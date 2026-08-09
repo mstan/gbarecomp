@@ -114,6 +114,45 @@ GBA_MOD_CONSTRUCTOR(register_display_mods) {
 }
 ```
 
+### Trusted function-entry hooks
+
+For a reviewed `[[mod_function_hook]]` in the recompiler TOML, a plugin may
+replace that guest call without permanently patching ROM bytes:
+
+```cpp
+#include "mod_function_hooks.h"
+
+static int replace_draw(uint32_t addr, int thumb, ArmCpuState* cpu) {
+    (void)addr; (void)thumb;
+    cpu->R[0] = 1;                 // callback-authored guest result
+    cpu->R[15] = cpu->R[14] & ~1u; // return to the guest caller
+    return 1;                      // handled: skip original body
+}
+
+static void activate_replace_draw() {
+    gba_mod_set_function_hook_enabled("example.replace-draw", 1);
+}
+
+GBA_MOD_CONSTRUCTOR(register_replace_draw) {
+    gba_mod_register_function_entry_plugin("example.replace-draw",
+        0x08003000u, 1, replace_draw);
+    gba_mod_register_activation_plugin("example.replace-draw",
+        activate_replace_draw);
+}
+```
+
+Registration starts disabled, and `mod_runtime_activate_plugins()` disables
+all entry hooks before it runs reset/activation callbacks. Returning `0` from a
+callback declines that invocation, discards any callback CPU writes, and
+permits another matching trusted callback or the original guest body. Static
+ROM functions require an exact `[[mod_function_hook]]` TOML allowlist entry;
+the generated-code audit fails if that entry drifts from an emitted root.
+Interpreter fallback and self-healed dynamic overlays have no static TOML
+corpus, so their narrow allowlist is the trusted, statically linked registry
+itself (`id`, aligned address, mode, callback). The same guard is used in all
+three paths; callbacks must therefore set the complete desired CPU state,
+especially R15.
+
 On Play, the runtime verifies the selected stock ROM, resolves and persists the
 feature state, runs reset callbacks, and activates the committed plugins. A
 game that moves widescreen from generic Display settings into Mods should keep

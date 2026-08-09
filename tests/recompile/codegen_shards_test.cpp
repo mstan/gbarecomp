@@ -1,9 +1,13 @@
 #include "codegen_shards.h"
 #include "dispatch_table_entries.h"
+#include "emit_function.h"
 #include "function_finder.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace {
 
@@ -62,6 +66,27 @@ int main() {
         !entries[5].resume) {
         std::fprintf(stderr,
                      "overlapping ARM/Thumb dispatch ordering is incorrect\n");
+        ok = false;
+    }
+
+    // Config-fed entry allowlists must produce a handling guard only at the
+    // reviewed ARM/THUMB root; the default emitter remains hook-free.
+    gbarecomp::Function hooked{};
+    hooked.addr = 0x08003000u;
+    hooked.end_addr = 0x08003004u;
+    hooked.mode = gbarecomp::CpuMode::Arm;
+    const uint8_t rom[] = {0x00u, 0x00u, 0xA0u, 0xE1u};  // MOV r0,r0
+    const std::unordered_map<uint64_t, std::string> names;
+    const std::unordered_set<uint64_t> hooks = {
+        static_cast<uint64_t>(hooked.addr) << 1u};
+    const std::string guarded = gbarecomp::emit_function_body_str(
+        hooked, rom, sizeof(rom), hooked.addr, names, nullptr, &hooks);
+    const std::string stock = gbarecomp::emit_function_body_str(
+        hooked, rom, sizeof(rom), hooked.addr, names);
+    if (guarded.find("gba_mod_function_entry(0x08003000u, 0u, &g_cpu)") ==
+            std::string::npos ||
+        stock.find("gba_mod_function_entry") != std::string::npos) {
+        std::fprintf(stderr, "mod function-hook codegen allowlist is incorrect\n");
         ok = false;
     }
     return ok ? 0 : 1;

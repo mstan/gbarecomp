@@ -1,4 +1,5 @@
 #include "mod_runtime.h"
+#include "mod_function_hooks.h"
 #include "sha1.h"
 
 #include <chrono>
@@ -13,6 +14,26 @@ namespace fs = std::filesystem;
 namespace {
 
 bool g_active = false;
+int g_declines = 0;
+int g_handles = 0;
+
+int decline_entry(uint32_t, int, ArmCpuState*) {
+    ++g_declines;
+    return 0;
+}
+
+int mutate_then_decline_entry(uint32_t, int, ArmCpuState* cpu) {
+    ++g_declines;
+    cpu->R[1] = 0xBAD0BAD0u;
+    return 0;
+}
+
+int handle_entry(uint32_t addr, int thumb, ArmCpuState* cpu) {
+    ++g_handles;
+    cpu->R[0] = 0xC0DEC0DEu;
+    cpu->R[15] = cpu->R[14] & ~1u;
+    return addr == 0x08003000u && thumb == 1;
+}
 
 int fail(const std::string& message) {
     std::cerr << "FAIL: " << message << "\n";
@@ -38,6 +59,46 @@ bool write_text(const fs::path& path, const std::string& text) {
 }  // namespace
 
 int main() {
+    // The low-level registry is always available, independent of the package
+    // catalog. Registration is inert, decline falls through, and a handler
+    // owns the callback-authored CPU state.
+    ArmCpuState hook_cpu{};
+    hook_cpu.R[14] = 0x08001235u;
+    hook_cpu.R[1] = 0x11223344u;
+    if (gba_mod_register_function_entry_plugin("test.hook.bad-thumb",
+                                                0x08003001u, 1,
+                                                decline_entry) ||
+        gba_mod_register_function_entry_plugin("test.hook.bad-arm",
+                                                0x08003002u, 0,
+                                                decline_entry) ||
+        !gba_mod_register_function_entry_plugin("test.hook.decline",
+                                                 0x08003000u, 1,
+                                                 mutate_then_decline_entry) ||
+        !gba_mod_register_function_entry_plugin("test.hook.handle",
+                                                 0x08003000u, 1,
+                                                 handle_entry) ||
+        gba_mod_function_entry(0x08003000u, 1, &hook_cpu) ||
+        g_declines != 0 || g_handles != 0) {
+        return fail("function hook registration was not disabled by default");
+    }
+    if (!gba_mod_set_function_hook_enabled("test.hook.decline", 1) ||
+        gba_mod_function_entry(0x08003000u, 1, &hook_cpu) ||
+        g_declines != 1 || g_handles != 0 || hook_cpu.R[1] != 0x11223344u) {
+        return fail("declining function hook did not fall through");
+    }
+    if (!gba_mod_set_function_hook_enabled("test.hook.handle", 1) ||
+        !gba_mod_function_entry(0x08003000u, 1, &hook_cpu) ||
+        g_declines != 2 || g_handles != 1 ||
+        hook_cpu.R[0] != 0xC0DEC0DEu || hook_cpu.R[15] != 0x08001234u ||
+        gba_mod_function_hook_hits() != 1u) {
+        return fail("handled function hook did not own guest CPU state");
+    }
+    gba_mod_disable_all_function_hooks();
+    if (gba_mod_function_hook_enabled("test.hook.handle") ||
+        gba_mod_function_entry(0x08003000u, 1, &hook_cpu)) {
+        return fail("disable-all did not restore stock hook behavior");
+    }
+
     const auto nonce = std::chrono::steady_clock::now()
                            .time_since_epoch().count();
     const fs::path sandbox = fs::temp_directory_path() /
