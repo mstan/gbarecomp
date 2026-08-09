@@ -29,9 +29,10 @@ extern "C" int gba_mod_register_function_entry_plugin(
     if (!id || !*id || !cb || (thumb != 0 && thumb != 1) ||
         (thumb ? (addr & 1u) != 0 : (addr & 3u) != 0)) return 0;
     for (int i = 0; i < g_count; ++i) {
-        if (std::strcmp(g_hooks[i].id, id) != 0) continue;
-        return g_hooks[i].addr == addr && g_hooks[i].thumb == thumb &&
-               g_hooks[i].callback == cb;
+        const FunctionHook& existing = g_hooks[i];
+        if (std::strcmp(existing.id, id) == 0 && existing.addr == addr &&
+            existing.thumb == thumb && existing.callback == cb)
+            return 1;  // Idempotent registration of this exact hook.
     }
     if (g_count == kMaxFunctionHooks) return 0;
     FunctionHook& hook = g_hooks[g_count++];
@@ -45,17 +46,18 @@ extern "C" int gba_mod_register_function_entry_plugin(
 
 extern "C" int gba_mod_set_function_hook_enabled(const char* id, int enabled) {
     if (!id) return 0;
+    int found = 0;
     for (int i = 0; i < g_count; ++i) {
         if (std::strcmp(g_hooks[i].id, id) != 0) continue;
+        found = 1;
         const int want = enabled ? 1 : 0;
         if (g_hooks[i].enabled.exchange(want, std::memory_order_acq_rel) !=
             want) {
             if (want) g_active.fetch_add(1, std::memory_order_release);
             else g_active.fetch_sub(1, std::memory_order_release);
         }
-        return 1;
     }
-    return 0;
+    return found;
 }
 
 extern "C" void gba_mod_disable_all_function_hooks(void) {
@@ -68,7 +70,7 @@ extern "C" int gba_mod_function_hook_enabled(const char* id) {
     if (!id) return 0;
     for (int i = 0; i < g_count; ++i)
         if (std::strcmp(g_hooks[i].id, id) == 0)
-            return g_hooks[i].enabled.load(std::memory_order_acquire);
+            if (g_hooks[i].enabled.load(std::memory_order_acquire)) return 1;
     return 0;
 }
 

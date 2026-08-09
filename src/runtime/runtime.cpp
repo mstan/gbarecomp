@@ -41,6 +41,7 @@
 #endif
 #include "../gba/sha1.h"
 #include "snapshot.h"
+#include "mod_state.h"
 #include "tcp_debug_server.h"
 #ifdef GBA_COSIM
 #include "cosim.h"           // cosim_init() — first-divergence oracle TCP server
@@ -1922,6 +1923,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         sc.taken          = &taken;
         sc.cycles_elapsed = &cycles_elapsed;
         sc.vblank_count   = &vblank_count;
+        sc.mod_state      = &debug::global_mod_state_registry();
         return sc;
     };
     auto do_savestate_save = [&](const std::string& path,

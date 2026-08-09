@@ -11,6 +11,46 @@ The default is `OFF`. Opting in also enables recomp-ui's Mods surface, which
 still remains hidden unless the game supplies a catalog through
 `RunOptions::mod_game_id`.
 
+## Trusted native mod state
+
+Package selection remains `mods/state.toml`; it is not save data. Trusted
+game-linked providers that need mutable native state register at startup with
+`gbarecomp::debug::register_mod_state_provider` into the bounded process-wide
+`ModStateRegistry`. Each provider has a stable ID (copied by the registry),
+schema number, and a non-mutating preflight callback. Registration closes on
+the first save/load operation, so the catalog cannot change mid-session. A save state with an
+active registry includes a tagged `MODS` section containing its exact catalog
+and provider payloads. Loading validates that complete section before any CPU,
+memory, or device state is restored, so a missing provider or catalog/schema
+mismatch leaves guest state untouched.
+
+The snapshot container remains version 2. This is deliberate compatibility
+policy: v2 snapshots made before `MODS` continue to load when the runtime has
+an empty mod-state catalog. Once a game registers native providers, old v2
+snapshots without `MODS` are rejected rather than guessing native state.
+
+The original v1 seven-section container is also accepted for an empty catalog,
+after complete container framing (exactly `CPU0`, `BUS0`, `IO_0`, `AUD0`,
+`SAV0`, `PPU0`, and `META`, with no trailing bytes). A game with any registered
+provider rejects v1 before guest restoration because v1 has no `MODS` identity
+or migration record. New compatibility must be an explicit migration; loaders
+must not infer provider payloads or hard-code historical section lengths.
+
+For durable per-slot native state, use `write_mod_state_slot` and
+`read_mod_state_slot` with a directory owned by the game. They never use guest
+save padding or `state.toml`. Slot keys are canonical lower-case ASCII and
+path-like keys are rejected. The on-disk envelope has an exact identity string
+(normally ROM plus catalog identity), CRC32, same-directory `.tmp` replacement,
+and `.bak` recovery after an interrupted/corrupt primary write.
+Drive-relative directory spellings such as `F:slot` are rejected before any
+directory is created; callers must use either a normal relative directory or a
+fully rooted drive path such as `F:/game/mod-state`.
+
+Provider `restore` receives only payloads that its matching `preflight`
+accepted. It must be deterministic, consume the full payload, and cannot
+report a recoverable error; a violation aborts rather than continuing after a
+partially restored guest world.
+
 ## Product and trust model
 
 - A **package** is an installation, update, provenance, and trust boundary.
@@ -159,6 +199,25 @@ const char* zelda_rom = gba_mod_required_asset_path(
 The returned path is runtime-owned and stays valid until the next mod-runtime
 initialize or commit cycle. Plugins must open it themselves; the mod runtime
 does not expose or retain asset bytes.
+
+### Trusted foreign presentation data
+
+An enabled, committed plugin may publish immutable presentation data without
+letting the PPU call game code. `gba_mod_publish_foreign_background()` accepts
+a stable native 240x160 BGR555 buffer. `gba_mod_publish_foreign_obj_focus()`
+accepts a `GbaForeignObjFocusTransform` from `foreign_obj_focus.h`: a bounded
+source Link-feet anchor, destination virtual anchor, and inclusive source
+radii. The PPU translates only visible OBJs whose decoded origin or bounding
+box center is inside that rectangle; every other OBJ is preserved exactly.
+There is no hide-unfocused mode in ABI v1.
+
+Both endpoints are authorized only for the currently committed plugin ID and
+are cleared before each activation callback, on PPU reset, and on savestate
+load. The descriptor is neither guest state nor snapshot state. A game adapter
+derives the source feet anchor from its source-mapped player position minus
+guest scroll, keeps the descriptor immutable while published, and may
+double-buffer descriptors before publishing the new address. The PPU performs
+no callback, allocation, guest write, or OAM mutation for either endpoint.
 
 ### Trusted function-entry hooks
 

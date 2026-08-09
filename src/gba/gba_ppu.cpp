@@ -1,6 +1,7 @@
 // gba_ppu.cpp — see gba_ppu.h.
 
 #include "gba_ppu.h"
+#include "foreign_presentation_internal.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -37,6 +38,29 @@ extern "C" int (*g_ws_obj_x_provider)(int, int*) = nullptr;
 extern "C" int (*g_ws_obj_attr_x_provider)(int, std::uint16_t,
                                             std::uint16_t, std::uint16_t,
                                             int*) = nullptr;
+namespace {
+
+// These pointers have no C linkage and are deliberately not declared by the
+// public PPU header. Only the engine-internal seam below can publish them.
+const std::uint16_t* g_foreign_background = nullptr;
+const GbaForeignObjFocusTransform* g_foreign_obj_focus = nullptr;
+
+}  // namespace
+
+namespace foreign_presentation_internal {
+
+void set_background(const std::uint16_t* pixels) { g_foreign_background = pixels; }
+const std::uint16_t* background() { return g_foreign_background; }
+void set_obj_focus(const GbaForeignObjFocusTransform* focus) {
+    g_foreign_obj_focus = focus;
+}
+const GbaForeignObjFocusTransform* obj_focus() { return g_foreign_obj_focus; }
+void clear() {
+    g_foreign_background = nullptr;
+    g_foreign_obj_focus = nullptr;
+}
+
+}  // namespace foreign_presentation_internal
 
 GbaPpu::GbaPpu()  = default;
 GbaPpu::~GbaPpu() = default;
@@ -70,6 +94,9 @@ void GbaPpu::serialize(gbarecomp::debug::SnapshotWriter& w) const {
 }
 
 void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
+    // Foreign presentation is intentionally not save-state data.  A selected
+    // trusted mod must explicitly republish a newly valid buffer after load.
+    foreign_presentation_internal::clear();
     scanline_        = r.u32();
     dot_in_scanline_ = r.u32();
     cycle_in_dot_    = r.u32();
@@ -119,6 +146,7 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
 }
 
 void GbaPpu::reset() {
+    foreign_presentation_internal::clear();
     scanline_ = 0;
     dot_in_scanline_ = 0;
     cycle_in_dot_ = 0;
@@ -221,6 +249,47 @@ constexpr int kSpriteWH[3][4][2] = {
     // vertical
     {{8, 16}, {8, 32}, {16, 32}, {32, 64}},
 };
+
+// Keep the descriptor bounded to the visible native PPU domain. This limits
+// the trusted presentation input without imposing game-specific coordinates.
+bool valid_foreign_obj_focus(const GbaForeignObjFocusTransform* focus) {
+    return focus &&
+           focus->abi_version == GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION &&
+           focus->source_radius_x <= GbaPpu::kScreenWidth &&
+           focus->source_radius_y <= GbaPpu::kScreenHeight &&
+           (focus->flags & ~GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED) == 0;
+}
+
+bool focus_contains(const GbaForeignObjFocusTransform& focus, int x, int y) {
+    const int min_x = static_cast<int>(focus.source_link_feet_x) -
+                      static_cast<int>(focus.source_radius_x);
+    const int max_x = static_cast<int>(focus.source_link_feet_x) +
+                      static_cast<int>(focus.source_radius_x);
+    const int min_y = static_cast<int>(focus.source_link_feet_y) -
+                      static_cast<int>(focus.source_radius_y);
+    const int max_y = static_cast<int>(focus.source_link_feet_y) +
+                      static_cast<int>(focus.source_radius_y);
+    return x >= min_x && x <= max_x && y >= min_y && y <= max_y;
+}
+
+// Presentation-only translation. It reads a trusted immutable descriptor and
+// operates on decoded local coordinates; guest OAM and memory stay untouched.
+void apply_foreign_obj_focus(int* sx, int* sy, int width, int height) {
+    const GbaForeignObjFocusTransform* focus =
+        foreign_presentation_internal::obj_focus();
+    if (!sx || !sy || width <= 0 || height <= 0 ||
+        !valid_foreign_obj_focus(focus)) {
+        return;
+    }
+    if (!focus_contains(*focus, *sx, *sy) &&
+        !focus_contains(*focus, *sx + width / 2, *sy + height / 2)) {
+        return;
+    }
+    *sx += static_cast<int>(focus->destination_link_feet_x) -
+           static_cast<int>(focus->source_link_feet_x);
+    *sy += static_cast<int>(focus->destination_link_feet_y) -
+           static_cast<int>(focus->source_link_feet_y);
+}
 
 // Convert 16-bit GBA color (0BBBBBGGGGGRRRRR) to 24-bit RGB888.
 inline void to_rgb888(uint16_t c, uint8_t* out) {
@@ -784,6 +853,32 @@ void render_scanline_internal(uint8_t* rgb,
         render_bitmap_bg();
     }
 
+    // The foreign background is consumed as immutable data, never through a
+    // mod callback.  It replaces all native guest BG/backdrop candidates at
+    // the last safe point before OBJ composition.  A deliberately back-most
+    // key keeps every guest OBJ visible while preserving authentic OBJ order,
+    // OBJ-window masking, and the normal BLDCNT effects pipeline.  Treat it
+    // as BG2 for color-effect target bits so authored fades still apply.
+    if (const uint16_t* foreign = foreign_presentation_internal::background()) {
+        for (uint32_t x = 0; x < kScreenWidth; ++x) {
+            // The provider is a BG2 replacement, not a window bypass. A
+            // native window that suppresses BG2 reveals the guest candidate
+            // already composed at that pixel; OBJ masking stays unchanged.
+            if (!layer_enabled(x, 2)) continue;
+            PixelCandidate cand;
+            cand.color = foreign[y * GbaPpu::kScreenWidth + x];
+            to_rgb888(cand.color, cand.rgb);
+            cand.key = 0x10000;
+            cand.layer = 2;
+            cand.target1 = blend_enabled(x) &&
+                ((first_targets & (1u << 2)) != 0);
+            cand.target2 = (second_targets & (1u << 2)) != 0;
+            cand.valid = true;
+            top[x] = cand;
+            second[x] = PixelCandidate{};
+        }
+    }
+
     if (dispcnt & 0x1000u) {
         constexpr uint32_t obj_tile_base = 0x10000u;
         bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
@@ -863,6 +958,7 @@ void render_scanline_internal(uint8_t* rgb,
             if (rot_scale) {
                 int bw = disable_or_double ? sw * 2 : sw;
                 int bh = disable_or_double ? sh * 2 : sh;
+                apply_foreign_obj_focus(&sx, &sy, bw, bh);
                 int j = static_cast<int>(y) - sy;
                 if (j < 0 || j >= bh) continue;
                 int affine_group = (attr1 >> 9) & 0x1Fu;
@@ -886,6 +982,7 @@ void render_scanline_internal(uint8_t* rgb,
                 }
                 continue;
             }
+            apply_foreign_obj_focus(&sx, &sy, sw, sh);
             int line = static_cast<int>(y) - sy;
             if (line < 0 || line >= sh) continue;
             bool hflip = (attr1 & 0x1000u) != 0;
@@ -1400,6 +1497,8 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                     sx -= 0x200;
                 }
             };
+            const bool obj_focus_active =
+                valid_foreign_obj_focus(foreign_presentation_internal::obj_focus());
             bool color256 = (attr0 & 0x2000u) != 0;
             uint32_t tile_num = attr2 & 0x3FFu;
             if (bg_mode >= 3 && tile_num < 512u) continue;
@@ -1455,9 +1554,16 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             if (rot_scale) {
                 int bw = disable_or_double ? sw * 2 : sw;
                 int bh = disable_or_double ? sh * 2 : sh;
+                // Preserve the existing callback timing exactly while focus
+                // is inactive. When active, resolve the game-owned widened X
+                // first, then apply pure data-only focus before clipping.
+                if (obj_focus_active) {
+                    resolve_sx();
+                    apply_foreign_obj_focus(&sx, &sy, bw, bh);
+                }
                 int j = static_cast<int>(y) - sy;
                 if (j < 0 || j >= bh) continue;
-                resolve_sx();
+                if (!obj_focus_active) resolve_sx();
                 int affine_group = (attr1 >> 9) & 0x1Fu;
                 const uint8_t* ag = oam + affine_group * 0x20u;
                 int32_t pa = read_s16(ag, 0x06);
@@ -1479,9 +1585,13 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                 }
                 continue;
             }
+            if (obj_focus_active) {
+                resolve_sx();
+                apply_foreign_obj_focus(&sx, &sy, sw, sh);
+            }
             int line = static_cast<int>(y) - sy;
             if (line < 0 || line >= sh) continue;
-            resolve_sx();
+            if (!obj_focus_active) resolve_sx();
             bool hflip = (attr1 & 0x1000u) != 0;
             bool vflip = (attr1 & 0x2000u) != 0;
             int ty = line >> 3;

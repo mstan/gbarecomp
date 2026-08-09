@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "../gba/foreign_obj_focus.h"
 
 #ifdef __cplusplus
 #include <filesystem>
@@ -48,6 +49,23 @@ int gba_mod_register_reset_callback(GBAModActivationCallback callback);
 // game's RunOptions capability gate remains authoritative.
 int gba_mod_set_adaptive_view_enabled(int enabled);
 int gba_mod_adaptive_view_enabled(void);
+
+// Publish an immutable native-sized BGR555 foreign background for a plugin
+// that is present in the currently committed, hash-validated feature set.
+// The pointer is consumed only by the PPU compositor; nullptr is rejected so
+// clearing cannot accidentally become authorization. Activation passes clear
+// the presentation endpoint before callbacks run.
+int gba_mod_publish_foreign_background(const char* plugin_id,
+                                       const uint16_t* pixels);
+void gba_mod_clear_foreign_background(void);
+
+// Publish a stable, immutable foreign OBJ focus descriptor. The selected
+// plugin is authorized exactly as it is for the foreign background. A null,
+// incompatible, or out-of-bounds descriptor is rejected; clearing is a
+// separate explicit operation and is performed automatically on reactivation.
+int gba_mod_publish_foreign_obj_focus(const char* plugin_id,
+                                      const GbaForeignObjFocusTransform* focus);
+void gba_mod_clear_foreign_obj_focus(void);
 
 // Trusted game plugins use this after their package has committed. It returns
 // null for disabled, wrong-target, uncommitted, missing, or stale assets.

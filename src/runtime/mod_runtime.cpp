@@ -3,7 +3,9 @@
 #include "asset_picker.h"
 
 #include "../gba/crc32.h"
+#include "../gba/foreign_presentation_internal.h"
 #include "../gba/mod_audio.h"
+#include "../gba/gba_ppu.h"
 #include "../gba/sha1.h"
 
 #if defined(GBARECOMP_MOD_UI)
@@ -2029,6 +2031,10 @@ void mod_runtime_activate_plugins() {
     Runtime& runtime = state();
     if (!runtime.initialized) return;
     runtime.adaptive_view_enabled = false;
+    // Presentation belongs to the currently committed plugin set. Clear the
+    // old immutable buffer before reset callbacks so disabling/recommitting a
+    // package can never leave a stale foreign frame on screen.
+    gba::foreign_presentation_internal::clear();
     // Registration alone must never alter guest behavior. Every activation
     // pass starts from stock entry-hook state; selected trusted plugins opt in
     // again from their activation callback.
@@ -2089,6 +2095,46 @@ extern "C" int gba_mod_set_adaptive_view_enabled(int enabled) {
 
 extern "C" int gba_mod_adaptive_view_enabled(void) {
     return gbarecomp::state().adaptive_view_enabled ? 1 : 0;
+}
+
+extern "C" int gba_mod_publish_foreign_background(const char* plugin_id,
+                                                    const uint16_t* pixels) {
+    if (!plugin_id || !pixels || !gbarecomp::valid_id(plugin_id)) return 0;
+    const auto& plugins = gbarecomp::state().committed.plugins;
+    const auto found = std::find_if(plugins.begin(), plugins.end(),
+        [plugin_id](const gbarecomp::ResolvedPlugin& plugin) {
+            return plugin.id == plugin_id;
+        });
+    if (found == plugins.end()) return 0;
+    gba::foreign_presentation_internal::set_background(pixels);
+    return 1;
+}
+
+extern "C" void gba_mod_clear_foreign_background(void) {
+    gba::foreign_presentation_internal::set_background(nullptr);
+}
+
+extern "C" int gba_mod_publish_foreign_obj_focus(
+    const char* plugin_id, const GbaForeignObjFocusTransform* focus) {
+    if (!plugin_id || !focus || !gbarecomp::valid_id(plugin_id) ||
+        focus->abi_version != GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION ||
+        focus->source_radius_x > gba::GbaPpu::kScreenWidth ||
+        focus->source_radius_y > gba::GbaPpu::kScreenHeight ||
+        (focus->flags & ~GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED) != 0) {
+        return 0;
+    }
+    const auto& plugins = gbarecomp::state().committed.plugins;
+    const auto found = std::find_if(plugins.begin(), plugins.end(),
+        [plugin_id](const gbarecomp::ResolvedPlugin& plugin) {
+            return plugin.id == plugin_id;
+        });
+    if (found == plugins.end()) return 0;
+    gba::foreign_presentation_internal::set_obj_focus(focus);
+    return 1;
+}
+
+extern "C" void gba_mod_clear_foreign_obj_focus(void) {
+    gba::foreign_presentation_internal::set_obj_focus(nullptr);
 }
 
 extern "C" const char* gba_mod_required_asset_path(

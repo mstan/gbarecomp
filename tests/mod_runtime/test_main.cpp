@@ -1,6 +1,7 @@
 #include "mod_runtime.h"
 #include "mod_function_hooks.h"
 #include "asset_picker.h"
+#include "foreign_presentation_internal.h"
 #include "mod_audio.h"
 #include "sha1.h"
 
@@ -18,6 +19,7 @@ namespace {
 bool g_active = false;
 int g_declines = 0;
 int g_handles = 0;
+bool g_reset_saw_foreign_presentation_clear = false;
 
 int decline_entry(uint32_t, int, ArmCpuState*) {
     ++g_declines;
@@ -43,6 +45,9 @@ int fail(const std::string& message) {
 }
 
 void reset_view() {
+    g_reset_saw_foreign_presentation_clear =
+        gba::foreign_presentation_internal::background() == nullptr &&
+        gba::foreign_presentation_internal::obj_focus() == nullptr;
     g_active = false;
     (void)gba_mod_set_adaptive_view_enabled(0);
 }
@@ -100,6 +105,25 @@ int main() {
         gba_mod_function_entry(0x08003000u, 1, &hook_cpu)) {
         return fail("disable-all did not restore stock hook behavior");
     }
+    // One selected trusted plugin may own several source-proven hook points
+    // (for example a RAM code-copy lifecycle seam plus a player-state gate).
+    // Registration must remain idempotent per exact tuple, not per plugin ID.
+    if (!gba_mod_register_function_entry_plugin("test.hook.multi",
+                                                 0x08003010u, 1,
+                                                 decline_entry) ||
+        !gba_mod_register_function_entry_plugin("test.hook.multi",
+                                                 0x03000020u, 0,
+                                                 decline_entry) ||
+        !gba_mod_set_function_hook_enabled("test.hook.multi", 1)) {
+        return fail("plugin could not register and enable multiple hook points");
+    }
+    const int declines_before_multi = g_declines;
+    if (gba_mod_function_entry(0x08003010u, 1, &hook_cpu) ||
+        gba_mod_function_entry(0x03000020u, 0, &hook_cpu) ||
+        g_declines != declines_before_multi + 2) {
+        return fail("multi-hook plugin did not observe both entry points");
+    }
+    gba_mod_disable_all_function_hooks();
 
     const auto nonce = std::chrono::steady_clock::now()
                            .time_since_epoch().count();
@@ -181,6 +205,31 @@ int main() {
             "test.adaptive-view", activate_view)) {
         return fail("could not register trusted plugin");
     }
+    // Registration does not authorize a presentation source. In particular,
+    // an ID that will later be selected cannot publish before its feature and
+    // external asset have passed commit validation.
+    const std::uint16_t foreign_pixels[] = {0x001F, 0x03E0};
+    const std::uint16_t replacement_pixels[] = {0x7C00, 0x7FFF};
+    const GbaForeignObjFocusTransform foreign_focus{
+        GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION,
+        48, 64, 72, 88,
+        32, 32,
+        GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED,
+    };
+    GbaForeignObjFocusTransform invalid_focus = foreign_focus;
+    invalid_focus.source_radius_x = 241;  // Native PPU width is 240.
+    GbaForeignObjFocusTransform invalid_flags = foreign_focus;
+    invalid_flags.flags = 0x80000000u;
+    gba_mod_clear_foreign_background();
+    gba_mod_clear_foreign_obj_focus();
+    if (gba_mod_publish_foreign_background("test.adaptive-view", foreign_pixels) ||
+        gba_mod_publish_foreign_background("test.wrong-plugin", foreign_pixels) ||
+        gba_mod_publish_foreign_obj_focus("test.adaptive-view", &foreign_focus) ||
+        gba_mod_publish_foreign_obj_focus("test.wrong-plugin", &foreign_focus) ||
+        gba::foreign_presentation_internal::background() != nullptr ||
+        gba::foreign_presentation_internal::obj_focus() != nullptr) {
+        return fail("uncommitted or unknown plugin published foreign presentation");
+    }
     // A source may be registered before the package selection is known, but
     // activation must reset it to its inert disabled state before a selected
     // plugin can deliberately enable/play it.
@@ -252,6 +301,40 @@ int main() {
         fs::exists(package / "zelda1.nes"))
         return fail("required asset was not exposed as an external validated path");
 
+    // Only the committed plugin can replace the PPU-owned presentation
+    // pointer. Its address is not copied or transformed by the runtime.
+    if (!gba_mod_publish_foreign_background("test.adaptive-view", foreign_pixels) ||
+        gba::foreign_presentation_internal::background() != foreign_pixels ||
+        gba_mod_publish_foreign_background("test.wrong-plugin", replacement_pixels) ||
+        gba::foreign_presentation_internal::background() != foreign_pixels ||
+        !gba_mod_publish_foreign_obj_focus("test.adaptive-view", &foreign_focus) ||
+        gba::foreign_presentation_internal::obj_focus() != &foreign_focus ||
+        gba_mod_publish_foreign_obj_focus("test.wrong-plugin", &invalid_focus) ||
+        gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_focus) ||
+        gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_flags) ||
+        gba::foreign_presentation_internal::obj_focus() != &foreign_focus) {
+        return fail("foreign presentation publication was not plugin-authorized or stable");
+    }
+    gba_mod_clear_foreign_background();
+    gba_mod_clear_foreign_obj_focus();
+    if (gba::foreign_presentation_internal::background() != nullptr ||
+        gba::foreign_presentation_internal::obj_focus() != nullptr)
+        return fail("explicit foreign presentation clear left a stale pointer");
+
+    // Every activation pass clears the old provider before reset callbacks.
+    // The activation callback deliberately does not republish, so null must
+    // remain until a selected plugin explicitly supplies a fresh buffer.
+    if (!gba_mod_publish_foreign_background("test.adaptive-view", foreign_pixels) ||
+        !gba_mod_publish_foreign_obj_focus("test.adaptive-view", &foreign_focus))
+        return fail("committed plugin could not republish foreign presentation");
+    g_reset_saw_foreign_presentation_clear = false;
+    gbarecomp::mod_runtime_activate_plugins();
+    if (!g_reset_saw_foreign_presentation_clear ||
+        gba::foreign_presentation_internal::background() != nullptr ||
+        gba::foreign_presentation_internal::obj_focus() != nullptr) {
+        return fail("reactivation did not clear foreign presentation before callbacks");
+    }
+
     gbarecomp::AssetSpec strict_asset;
     strict_asset.display_name = "test required asset";
     strict_asset.expected_size = foreign_asset.size();
@@ -270,14 +353,34 @@ int main() {
         gbarecomp::mod_runtime_commit(rom_path, &error))
         return fail("stale wrong-hash asset was accepted or remained published");
 
+    // The failed plan deliberately cleared the old committed catalog. Restore
+    // the selected, asset-validated plan so we can model its old provider
+    // while the following commit disables that feature.
+    if (!write_state(true, false, foreign_asset_path) ||
+        !gbarecomp::mod_runtime_initialize(
+            mods, "test-game", sha1, &error) ||
+        !gbarecomp::mod_runtime_commit(rom_path, &error)) {
+        return fail("could not restore selected plan before disable: " + error);
+    }
+    // Stage the old selected provider before the new, disabled feature plan
+    // replaces the committed plugin set.
+    if (!gba_mod_publish_foreign_background("test.adaptive-view", foreign_pixels) ||
+        !gba_mod_publish_foreign_obj_focus("test.adaptive-view", &foreign_focus))
+        return fail("previously committed plugin could not stage stale presentation");
     if (!write_state(false, false, foreign_asset_path) ||
         !gbarecomp::mod_runtime_initialize(
             mods, "test-game", sha1, &error) ||
         !gbarecomp::mod_runtime_commit(rom_path, &error)) {
         return fail("disabled plan failed: " + error);
     }
+    // Disabling the selected feature has the same pre-callback clearing
+    // contract, even if the previously selected plugin left a stable pointer.
+    g_reset_saw_foreign_presentation_clear = false;
     gbarecomp::mod_runtime_activate_plugins();
-    if (g_active || gba_mod_adaptive_view_enabled())
+    if (!g_reset_saw_foreign_presentation_clear ||
+        gba::foreign_presentation_internal::background() != nullptr ||
+        gba::foreign_presentation_internal::obj_focus() != nullptr ||
+        g_active || gba_mod_adaptive_view_enabled())
         return fail("disabled plugin did not restore native view");
     if (gba_mod_required_asset_path("test.adaptive-view", "zelda1-rom"))
         return fail("disabled package exposed a required asset");

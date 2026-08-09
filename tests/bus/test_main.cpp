@@ -5,12 +5,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
 #include "gba_rom_header.h"
 #include "gba_bus.h"
 #include "gba_save.h"
+#include "gba_ppu.h"
+#include "mod_state.h"
 #include "snapshot.h"
 
 namespace {
@@ -184,6 +188,168 @@ void test_sram_controller_and_snapshot() {
     check_eq("sram_persist", "prefix", restored.sram_read(2), 0x30u);
     check_eq("sram_persist", "fill", restored.sram_read(3), 0xFFu);
     check_bool("sram_persist", "load_clean", restored.dirty(), false);
+}
+
+struct SnapshotModValue { uint32_t value = 0; int restores = 0; };
+bool snapshot_mod_save(void* user, gbarecomp::debug::SnapshotWriter& out, std::string*) {
+    out.u32(static_cast<SnapshotModValue*>(user)->value);
+    return true;
+}
+bool snapshot_mod_preflight(void*, gbarecomp::debug::SnapshotReader& in, std::string*) {
+    (void)in.u32();
+    return in.ok() && in.remaining() == 0;
+}
+void snapshot_mod_restore(void* user, gbarecomp::debug::SnapshotReader& in) {
+    auto* state = static_cast<SnapshotModValue*>(user);
+    state->value = in.u32();
+    ++state->restores;
+}
+
+void test_snapshot_mods_preflight_before_guest_restore() {
+    namespace debug = gbarecomp::debug;
+    gba::GbaBus bus;
+    gba::GbaPpu ppu;
+    SnapshotModValue saved_value{0x1234u};
+    debug::ModStateRegistry saved_catalog;
+    const debug::ModStateProvider saved_provider = {
+        "test.snapshot", 1, &saved_value,
+        snapshot_mod_save, snapshot_mod_preflight, snapshot_mod_restore};
+    std::string error;
+    check_bool("snapshot_mods", "register saved", saved_catalog.register_provider(saved_provider, &error), true);
+    const auto path = std::filesystem::temp_directory_path() / "gbarecomp-snapshot-mods-test.gbas";
+    debug::SnapshotContext save_context;
+    save_context.bus = &bus;
+    save_context.ppu = &ppu;
+    save_context.rom_sha1 = "0123456789012345678901234567890123456789";
+    save_context.mod_state = &saved_catalog;
+    bus.write8(0x02000000u, 0x11);
+    check_bool("snapshot_mods", "save", debug::save_state(path.string().c_str(), save_context, &error), true);
+
+    SnapshotModValue mismatch_value{0x7777u};
+    debug::ModStateRegistry mismatch_catalog;
+    const debug::ModStateProvider mismatch_provider = {
+        "test.snapshot", 2, &mismatch_value,
+        snapshot_mod_save, snapshot_mod_preflight, snapshot_mod_restore};
+    check_bool("snapshot_mods", "register mismatch", mismatch_catalog.register_provider(mismatch_provider, &error), true);
+    debug::SnapshotContext load_context = save_context;
+    load_context.mod_state = &mismatch_catalog;
+    bus.write8(0x02000000u, 0xAA);
+    check_bool("snapshot_mods", "schema mismatch rejected", debug::load_state(path.string().c_str(), load_context, &error), false);
+    check_eq("snapshot_mods", "guest untouched", bus.read8(0x02000000u), 0xAAu);
+    check_eq("snapshot_mods", "provider not restored", mismatch_value.restores, 0);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+void patch_snapshot_version(const std::filesystem::path& path, uint32_t version) {
+    const char bytes[4] = {
+        static_cast<char>(version & 0xffu),
+        static_cast<char>((version >> 8) & 0xffu),
+        static_cast<char>((version >> 16) & 0xffu),
+        static_cast<char>((version >> 24) & 0xffu),
+    };
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    file.seekp(4);
+    file.write(bytes, sizeof(bytes));
+}
+
+void test_legacy_v1_snapshot_empty_catalog_only() {
+    namespace debug = gbarecomp::debug;
+    gba::GbaBus bus;
+    gba::GbaPpu ppu;
+    debug::ModStateRegistry empty_catalog;
+    std::string error;
+    const auto v2_path = std::filesystem::temp_directory_path() / "gbarecomp-legacy-v1-source.gbas";
+    const auto v1_path = std::filesystem::temp_directory_path() / "gbarecomp-legacy-v1-state.gbas";
+    const auto malformed_path = std::filesystem::temp_directory_path() / "gbarecomp-legacy-v1-malformed.gbas";
+    std::error_code ec;
+    std::filesystem::remove(v2_path, ec);
+    std::filesystem::remove(v1_path, ec);
+    std::filesystem::remove(malformed_path, ec);
+
+    debug::SnapshotContext context;
+    context.bus = &bus;
+    context.ppu = &ppu;
+    context.rom_sha1 = "0123456789012345678901234567890123456789";
+    context.mod_state = &empty_catalog;
+    bus.write8(0x02000000u, 0x11);
+    check_bool("snapshot_legacy_v1", "write v2 source",
+               debug::save_state(v2_path.string().c_str(), context, &error), true);
+    std::filesystem::copy_file(v2_path, v1_path, std::filesystem::copy_options::overwrite_existing, ec);
+    patch_snapshot_version(v1_path, 1);
+
+    // v1 has the original seven guest sections and no native MODS identity;
+    // an empty catalog may restore it exactly.
+    bus.write8(0x02000000u, 0xaa);
+    error.clear();
+    check_bool("snapshot_legacy_v1", "empty catalog loads",
+               debug::load_state(v1_path.string().c_str(), context, &error), true);
+    check_eq("snapshot_legacy_v1", "guest restored", bus.read8(0x02000000u), 0x11u);
+
+    SnapshotModValue provider_value{0x7777u};
+    debug::ModStateRegistry catalog;
+    const debug::ModStateProvider provider = {
+        "test.legacy", 1, &provider_value,
+        snapshot_mod_save, snapshot_mod_preflight, snapshot_mod_restore};
+    check_bool("snapshot_legacy_v1", "register provider",
+               catalog.register_provider(provider, &error), true);
+    debug::SnapshotContext provider_context = context;
+    provider_context.mod_state = &catalog;
+    bus.write8(0x02000000u, 0xbb);
+    error.clear();
+    check_bool("snapshot_legacy_v1", "provider catalog rejected",
+               debug::load_state(v1_path.string().c_str(), provider_context, &error), false);
+    check_bool("snapshot_legacy_v1", "rejection names migration",
+               error.find("no MODS migration") != std::string::npos, true);
+    check_eq("snapshot_legacy_v1", "provider rejection leaves guest", bus.read8(0x02000000u), 0xbbu);
+    check_eq("snapshot_legacy_v1", "provider not restored", provider_value.restores, 0);
+
+    // The legacy branch frames every declared section and consumes the entire
+    // container before guest restoration; an unframed tail is never ignored.
+    std::filesystem::copy_file(v1_path, malformed_path, std::filesystem::copy_options::overwrite_existing, ec);
+    { std::ofstream malformed(malformed_path, std::ios::binary | std::ios::app); malformed.put('\0'); }
+    bus.write8(0x02000000u, 0xcc);
+    error.clear();
+    check_bool("snapshot_legacy_v1", "trailing data rejected",
+               debug::load_state(malformed_path.string().c_str(), context, &error), false);
+    check_eq("snapshot_legacy_v1", "malformed leaves guest", bus.read8(0x02000000u), 0xccu);
+
+    std::filesystem::remove(v2_path, ec);
+    std::filesystem::remove(v1_path, ec);
+    std::filesystem::remove(malformed_path, ec);
+}
+
+void test_v2_trailing_container_rejects_before_guest_mutation() {
+    namespace debug = gbarecomp::debug;
+    gba::GbaBus bus;
+    gba::GbaPpu ppu;
+    debug::ModStateRegistry empty_catalog;
+    debug::SnapshotContext context;
+    context.bus = &bus;
+    context.ppu = &ppu;
+    context.rom_sha1 = "0123456789012345678901234567890123456789";
+    context.mod_state = &empty_catalog;
+    std::string error;
+    std::error_code ec;
+    const auto path = std::filesystem::temp_directory_path() /
+        "gbarecomp-v2-trailing-container.gbas";
+    std::filesystem::remove(path, ec);
+
+    bus.write8(0x02000000u, 0x11);
+    check_bool("snapshot_v2_trailing", "write source",
+               debug::save_state(path.string().c_str(), context, &error), true);
+    { std::ofstream malformed(path, std::ios::binary | std::ios::app); malformed.put('\0'); }
+
+    // The structural framing gate must run before CPU/BUS/PPU deserialization.
+    bus.write8(0x02000000u, 0xA5);
+    error.clear();
+    check_bool("snapshot_v2_trailing", "trailing data rejected",
+               debug::load_state(path.string().c_str(), context, &error), false);
+    check_bool("snapshot_v2_trailing", "error identifies trailing data",
+               error.find("trailing container data") != std::string::npos, true);
+    check_eq("snapshot_v2_trailing", "guest remains untouched",
+             bus.read8(0x02000000u), 0xA5u);
+    std::filesystem::remove(path, ec);
 }
 
 void test_sram_bus_width_and_region_mirroring() {
@@ -374,6 +540,9 @@ int main() {
     test_no_save_signature();
     test_sram_signature();
     test_sram_controller_and_snapshot();
+    test_snapshot_mods_preflight_before_guest_restore();
+    test_legacy_v1_snapshot_empty_catalog_only();
+    test_v2_trailing_container_rejects_before_guest_mutation();
     test_sram_bus_width_and_region_mirroring();
     test_bios_undocumented_io_write();
     test_bios_window_writes_are_ignored();

@@ -369,6 +369,7 @@ add_library(gbarecomp_debug STATIC
     src/debug/tcp_debug_server.cpp
     src/debug/trace_ring.cpp
     src/debug/snapshot.cpp
+    src/debug/mod_state.cpp
     src/debug/ws_provenance.cpp
     src/debug/ws_sidecar.cpp
     # First-divergence co-sim engine + full-state hash. Empty TUs unless
@@ -560,6 +561,10 @@ enable_testing()
 if(GBARECOMP_ENABLE_MODS)
     add_executable(mod_runtime_tests
         tests/mod_runtime/test_main.cpp
+        # The runtime's foreign-background publication API owns only the
+        # pointer lifetime.  Keep this unit target independent of the full
+        # PPU by providing its otherwise PPU-owned storage symbol.
+        tests/mod_runtime/ppu_provider_stub.cpp
         src/runtime/mod_runtime.cpp
         src/runtime/mod_function_hooks.cpp
         src/runtime/asset_picker.cpp
@@ -580,6 +585,11 @@ add_executable(mod_audio_tests
     src/gba/mod_audio.cpp)
 target_include_directories(mod_audio_tests PRIVATE src/gba)
 add_test(NAME mod_audio_tests COMMAND mod_audio_tests)
+
+add_executable(mod_state_tests tests/mod_state/test_main.cpp)
+target_include_directories(mod_state_tests PRIVATE src/debug)
+target_link_libraries(mod_state_tests PRIVATE gbarecomp_debug)
+add_test(NAME mod_state_tests COMMAND mod_state_tests)
 
 add_test(NAME runtime_monolith_guard
     COMMAND ${CMAKE_COMMAND}
@@ -655,7 +665,7 @@ target_include_directories(ppu_smoke_tests PRIVATE src/runtime src/debug)
 target_link_libraries(ppu_smoke_tests PRIVATE gbarecomp_gba)
 if(MSVC)
     target_link_options(ppu_smoke_tests PRIVATE /STACK:16777216)
-elseif(MINGW OR WIN32)
+elseif(MINGW OR WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "MSYS")
     target_link_options(ppu_smoke_tests PRIVATE -Wl,--stack,16777216)
 endif()
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)

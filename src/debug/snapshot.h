@@ -31,9 +31,12 @@ class GbaPpu;
 
 namespace gbarecomp::debug {
 
-// Bump when any subsystem's serialized layout changes. load_state
-// refuses a blob whose version != kSnapshotVersion (savestates are
-// debug-loop artifacts; we don't migrate old formats).
+class ModStateRegistry;
+
+// New snapshots use v2.  The loader also recognizes the original v1
+// seven-section container only when no trusted native providers are registered;
+// it has no MODS identity to migrate or validate.  Other old layouts remain
+// rejected rather than guessed.
 constexpr uint32_t kSnapshotVersion = 2;
 
 // ── SnapshotWriter ─────────────────────────────────────────────────
@@ -119,6 +122,10 @@ struct SnapshotContext {
     uint64_t* taken          = nullptr;
     uint64_t* cycles_elapsed = nullptr;
     uint64_t* vblank_count   = nullptr;
+
+    // Optional trusted native state.  A non-empty catalog emits a MODS section
+    // and is preflighted before any guest state is touched during load.
+    const ModStateRegistry* mod_state = nullptr;
 };
 
 // Serialize the full machine state to `path`. MUST be called only at a

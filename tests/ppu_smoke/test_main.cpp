@@ -1,4 +1,5 @@
 #include "gba_ppu.h"
+#include "foreign_presentation_internal.h"
 #include "snapshot.h"
 #include "view_config.h"
 
@@ -8,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <vector>
 
@@ -35,6 +37,18 @@ void expect_pixel(const uint8_t* actual,
                  "%s: expected RGB(%u,%u,%u), got RGB(%u,%u,%u)\n",
                  label, r, g, b, actual[0], actual[1], actual[2]);
     std::exit(1);
+}
+
+// Manual visual QA only: leave normal tests hermetic, but let CI/developers
+// request the deterministic focus fixture as a portable screenshot artifact.
+void dump_focus_screenshot_if_requested(const uint8_t* rgb) {
+    const char* path = std::getenv("GBARECOMP_PPU_FOCUS_SCREENSHOT");
+    if (!path || !*path) return;
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) return;
+    file << "P6\n240 160\n255\n";
+    file.write(reinterpret_cast<const char*>(rgb),
+               gba::GbaPpu::kFramebufferBytes);
 }
 
 struct Fixture {
@@ -812,6 +826,240 @@ void test_bitmap_mode_wide_center_and_margins() {
                  "mode 4 wide right margin");
 }
 
+void test_trusted_foreign_background_keeps_guest_objects_and_resets() {
+    Fixture f;
+    disable_all_objects(f);
+    std::array<uint16_t, gba::GbaPpu::kScreenWidth * gba::GbaPpu::kScreenHeight>
+        foreign{};
+    const GbaForeignObjFocusTransform focus{
+        GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION,
+        0, 0, 8, 8,
+        8, 8,
+        GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED,
+    };
+    foreign.fill(0x001F);  // Red foreign terrain.
+
+    // Stock backdrop is blue, which gives a byte-for-byte inactive baseline.
+    store16(&f.pal[0], 0x7C00);
+    f.ppu.render(f.rgb.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    const auto stock = f.rgb;
+
+    // A normal priority-3 OBJ remains above the foreign background.  Its tile
+    // is green in OBJ palette bank zero and appears at the top-left.
+    std::fill_n(f.vram.begin() + 0x10000, 32, static_cast<uint8_t>(0x11));
+    store16(&f.pal[0x202], 0x03E0);
+    store16(&f.oam[0], 0x0000);
+    store16(&f.oam[2], 0x0000);
+    store16(&f.oam[4], 0x0C00);  // Tile 0, OBJ priority 3.
+    gba::foreign_presentation_internal::set_background(foreign.data());
+    f.ppu.render(f.rgb.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 0, 255, 0,
+                 "foreign background keeps guest OBJ");
+    expect_pixel(&f.rgb[8 * 3], 255, 0, 0,
+                 "foreign background replaces guest backdrop");
+
+    // The normal semitransparent-OBJ path still blends against the foreign
+    // BG2 replacement when the game's BLDCNT names BG2 as second target.
+    store16(&f.oam[0], 0x0400);  // OBJ mode 1 = semitransparent.
+    store16(&f.io[0x50], 0x0440);  // Alpha, BG2 second target.
+    store16(&f.io[0x52], 0x0808);  // Equal OBJ/foreign blend.
+    f.ppu.render(f.rgb.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 132, 123, 0,
+                 "foreign background is semitransparent OBJ target");
+
+    // BG2 follows the guest window mask; this is a replacement, not a window
+    // bypass. The one-pixel WIN0 disables BG2 and reveals stock backdrop.
+    store16(&f.io[0x40], 0x0001);  // WIN0 x=[0,1)
+    store16(&f.io[0x44], 0x00A0);  // WIN0 y=[0,160)
+    store16(&f.io[0x48], 0x0010);  // WIN0: OBJ only, no BG2.
+    store16(&f.io[0x4A], 0x0004);  // Outside: BG2.
+    disable_all_objects(f);
+    f.ppu.render(f.rgb.data(), 0x3000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 0, 0, 255,
+                 "foreign background honors BG2 window mask");
+
+    // Reset and clearing the provider both return to the literal stock path;
+    // neither stale host presentation nor a callback survives reset.
+    gbarecomp::debug::SnapshotWriter writer;
+    f.ppu.serialize(writer);
+    gbarecomp::debug::SnapshotReader reader(writer.buffer().data(),
+                                              writer.buffer().size());
+    gba::foreign_presentation_internal::set_obj_focus(&focus);
+    f.ppu.deserialize(reader);
+    if (gba::foreign_presentation_internal::background() != nullptr ||
+        gba::foreign_presentation_internal::obj_focus() != nullptr) {
+        std::fprintf(stderr, "foreign presentation survived PPU savestate load\n");
+        std::exit(1);
+    }
+    gba::foreign_presentation_internal::set_background(foreign.data());
+    gba::foreign_presentation_internal::set_obj_focus(&focus);
+    f.ppu.reset();
+    if (gba::foreign_presentation_internal::background() != nullptr ||
+        gba::foreign_presentation_internal::obj_focus() != nullptr) {
+        std::fprintf(stderr, "foreign presentation survived PPU reset\n");
+        std::exit(1);
+    }
+    disable_all_objects(f);
+    f.ppu.render(f.rgb.data(), 0x0000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    if (std::memcmp(f.rgb.data(), stock.data(), stock.size()) != 0) {
+        std::fprintf(stderr, "inactive foreign background changed stock PPU output\n");
+        std::exit(1);
+    }
+}
+
+void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
+    // Normal OBJ origin matching, unrelated OBJ preservation, and inactive
+    // byte identity use the same native composition path.
+    Fixture f;
+    disable_all_objects(f);
+    store16(&f.pal[0], 0x7C00);       // Blue backdrop.
+    store16(&f.pal[0x202], 0x001F);   // OBJ palette 1 red.
+    store16(&f.pal[0x204], 0x03E0);   // OBJ palette 2 green.
+    std::fill_n(f.vram.begin() + 0x10000, 32, static_cast<uint8_t>(0x11));
+    std::fill_n(f.vram.begin() + 0x10020, 32, static_cast<uint8_t>(0x22));
+    store16(&f.oam[0], 20);
+    store16(&f.oam[2], 20);
+    store16(&f.oam[4], 0);
+    store16(&f.oam[8], 20);
+    store16(&f.oam[10], 80);
+    store16(&f.oam[12], 1);
+    // 32x32 OBJ whose origin is outside the focus rectangle but whose center
+    // is inside it, exercising the Link-body association fallback.
+    store16(&f.oam[16], 4);
+    store16(&f.oam[18], 0x8000 | 4);
+    store16(&f.oam[20], 1);
+    f.ppu.render(f.rgb.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    const auto stock = f.rgb;
+
+    const GbaForeignObjFocusTransform focus{
+        GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION,
+        20, 20, 30, 28,
+        8, 8,
+        GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED,
+    };
+    gba::foreign_presentation_internal::set_obj_focus(&focus);
+    f.ppu.render(f.rgb.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    dump_focus_screenshot_if_requested(f.rgb.data());
+    expect_pixel(&f.rgb[(20 * 240 + 20) * 3], 0, 0, 255,
+                 "focused normal OBJ leaves source location");
+    expect_pixel(&f.rgb[(28 * 240 + 30) * 3], 255, 0, 0,
+                 "focused normal OBJ reaches destination");
+    expect_pixel(&f.rgb[(4 * 240 + 4) * 3], 0, 0, 255,
+                 "focused center-match OBJ leaves source location");
+    expect_pixel(&f.rgb[(12 * 240 + 14) * 3], 0, 255, 0,
+                 "focused center-match OBJ reaches destination");
+    for (int y = 20; y < 28; ++y) {
+        if (std::memcmp(&f.rgb[(y * 240 + 80) * 3],
+                        &stock[(y * 240 + 80) * 3], 8 * 3) != 0) {
+            std::fprintf(stderr, "unfocused OBJ changed during focus transform\n");
+            std::exit(1);
+        }
+    }
+    gba::foreign_presentation_internal::set_obj_focus(nullptr);
+    f.ppu.render(f.rgb.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    if (std::memcmp(f.rgb.data(), stock.data(), stock.size()) != 0) {
+        std::fprintf(stderr, "inactive OBJ focus changed stock PPU output\n");
+        std::exit(1);
+    }
+    // The PPU independently validates the immutable descriptor. A corrupted
+    // pointer that bypassed publication fails closed to the stock result.
+    GbaForeignObjFocusTransform malformed_focus = focus;
+    malformed_focus.flags = 0x80000000u;
+    gba::foreign_presentation_internal::set_obj_focus(&malformed_focus);
+    f.ppu.render(f.rgb.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    if (std::memcmp(f.rgb.data(), stock.data(), stock.size()) != 0) {
+        std::fprintf(stderr, "malformed OBJ focus did not fail closed\n");
+        std::exit(1);
+    }
+    gba::foreign_presentation_internal::set_obj_focus(nullptr);
+
+    // Affine and semi-transparent modes use the same translated decoded
+    // coordinates before their established PPU paths, not a special blit.
+    Fixture affine;
+    disable_all_objects(affine);
+    store16(&affine.pal[0], 0x7C00);
+    store16(&affine.pal[0x202], 0x001F);
+    std::fill_n(affine.vram.begin() + 0x10000, 32,
+                static_cast<uint8_t>(0x11));
+    // Matrix group zero is stored in the interleaved entries 0..3. OBJ 4 uses
+    // it while those entries remain disabled.
+    store16(&affine.oam[6], 0x0100);
+    store16(&affine.oam[14], 0);
+    store16(&affine.oam[22], 0);
+    store16(&affine.oam[30], 0x0100);
+    store16(&affine.oam[32], 0x0100 | 40);  // Affine OBJ at (20,40).
+    store16(&affine.oam[34], 20);
+    store16(&affine.oam[36], 0);
+    const GbaForeignObjFocusTransform affine_focus{
+        GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION,
+        20, 40, 30, 50,
+        8, 8,
+        0,
+    };
+    gba::foreign_presentation_internal::set_obj_focus(&affine_focus);
+    affine.ppu.render(affine.rgb.data(), 0x1000, affine.io.data(),
+                      affine.vram.data(), affine.oam.data(), affine.pal.data());
+    expect_pixel(&affine.rgb[(50 * 240 + 30) * 3], 255, 0, 0,
+                 "focused affine OBJ reaches destination");
+
+    Fixture translucent;
+    disable_all_objects(translucent);
+    store16(&translucent.pal[0], 0x7C00);
+    store16(&translucent.pal[0x202], 0x001F);
+    std::fill_n(translucent.vram.begin() + 0x10000, 32,
+                static_cast<uint8_t>(0x11));
+    store16(&translucent.oam[0], 0x0400 | 60);  // Mode 1 at (20,60).
+    store16(&translucent.oam[2], 20);
+    store16(&translucent.oam[4], 0);
+    store16(&translucent.io[0x50], 0x2000);  // Backdrop is second target.
+    store16(&translucent.io[0x52], 0x0808);
+    const GbaForeignObjFocusTransform translucent_focus{
+        GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION,
+        20, 60, 30, 70,
+        8, 8,
+        0,
+    };
+    gba::foreign_presentation_internal::set_obj_focus(&translucent_focus);
+    translucent.ppu.render(translucent.rgb.data(), 0x1000,
+                            translucent.io.data(), translucent.vram.data(),
+                            translucent.oam.data(), translucent.pal.data());
+    expect_pixel(&translucent.rgb[(70 * 240 + 30) * 3], 132, 0, 132,
+                 "focused semitransparent OBJ blends at destination");
+
+    // Signed OAM wrap happens before focus; a clipped (-4,-4) OBJ can become
+    // visible at (0,0) without mutating the wrapped guest OAM value.
+    Fixture wrapped;
+    disable_all_objects(wrapped);
+    store16(&wrapped.pal[0], 0x7C00);
+    store16(&wrapped.pal[0x202], 0x001F);
+    std::fill_n(wrapped.vram.begin() + 0x10000, 32,
+                static_cast<uint8_t>(0x11));
+    store16(&wrapped.oam[0], 0x00FC);
+    store16(&wrapped.oam[2], 0x01FC);
+    store16(&wrapped.oam[4], 0);
+    const GbaForeignObjFocusTransform wrapped_focus{
+        GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION,
+        0, 0, 4, 4,
+        8, 8,
+        0,
+    };
+    gba::foreign_presentation_internal::set_obj_focus(&wrapped_focus);
+    wrapped.ppu.render(wrapped.rgb.data(), 0x1000, wrapped.io.data(),
+                       wrapped.vram.data(), wrapped.oam.data(), wrapped.pal.data());
+    expect_pixel(&wrapped.rgb[(4 * 240 + 4) * 3], 255, 0, 0,
+                 "focused wrapped OBJ reaches unclipped destination");
+    gba::foreign_presentation_internal::set_obj_focus(nullptr);
+}
+
 void test_affine_reference_reload_overrides_scanline_accumulation() {
     Fixture f;
     disable_all_objects(f);
@@ -972,6 +1220,8 @@ int main() {
     test_bitmap_mode5_bounds_and_page_flip();
     test_bitmap_mode_obj_compositing_and_obj_window();
     test_bitmap_mode_wide_center_and_margins();
+    test_trusted_foreign_background_keeps_guest_objects_and_resets();
+    test_trusted_foreign_obj_focus_transforms_only_matching_objects();
     test_affine_reference_reload_overrides_scanline_accumulation();
     test_wide_affine_filter_is_selective_and_bilinear();
     test_latched_frame_immune_to_in_progress_scanlines();
