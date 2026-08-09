@@ -44,6 +44,7 @@ namespace {
 // public PPU header. Only the engine-internal seam below can publish them.
 const std::uint16_t* g_foreign_background = nullptr;
 const GbaForeignObjFocusTransform* g_foreign_obj_focus = nullptr;
+const GbaForeignScreenOverlay* g_foreign_screen_overlay = nullptr;
 
 }  // namespace
 
@@ -55,9 +56,14 @@ void set_obj_focus(const GbaForeignObjFocusTransform* focus) {
     g_foreign_obj_focus = focus;
 }
 const GbaForeignObjFocusTransform* obj_focus() { return g_foreign_obj_focus; }
+void set_screen_overlay(const GbaForeignScreenOverlay* overlay) {
+    g_foreign_screen_overlay = overlay;
+}
+const GbaForeignScreenOverlay* screen_overlay() { return g_foreign_screen_overlay; }
 void clear() {
     g_foreign_background = nullptr;
     g_foreign_obj_focus = nullptr;
+    g_foreign_screen_overlay = nullptr;
 }
 
 }  // namespace foreign_presentation_internal
@@ -310,6 +316,22 @@ bool valid_foreign_obj_focus(const GbaForeignObjFocusTransform* focus) {
               (focus->source_aux_obj_tile_base < 1024u &&
                static_cast<unsigned>(focus->source_aux_obj_tile_base) +
                    static_cast<unsigned>(focus->source_aux_obj_tile_count) <= 1024u))));
+}
+
+// Keep the portal/effect input small enough to be independently reviewable
+// and to bound all per-scanline pointer arithmetic. Pointer lifetime remains
+// owned by the trusted publishing plugin, just as it does for the existing
+// foreign background/focus descriptors.
+bool valid_foreign_screen_overlay(const GbaForeignScreenOverlay* overlay) {
+    return overlay &&
+           overlay->abi_version == GBA_FOREIGN_SCREEN_OVERLAY_ABI_VERSION &&
+           overlay->pixels && overlay->alpha_q4 &&
+           overlay->width != 0 && overlay->height != 0 &&
+           overlay->width <= GBA_FOREIGN_SCREEN_OVERLAY_MAX_WIDTH &&
+           overlay->height <= GBA_FOREIGN_SCREEN_OVERLAY_MAX_HEIGHT &&
+           overlay->stride >= overlay->width &&
+           overlay->stride <= GBA_FOREIGN_SCREEN_OVERLAY_MAX_WIDTH &&
+           overlay->reserved16 == 0 && overlay->reserved32 == 0;
 }
 
 bool focus_contains(const GbaForeignObjFocusTransform& focus, int x, int y) {
@@ -1029,6 +1051,56 @@ void render_scanline_internal(uint8_t* rgb,
         render_bitmap_bg();
     }
 
+    // A bounded host-owned overlay is intentionally a native-world-only
+    // presentation layer. It is composed after every guest BG candidate has
+    // resolved but before the normal guest OBJ pass, so Link/HUD objects remain
+    // in front without any guest OAM/VRAM writes. It retains the synthetic
+    // BG2 identity for native WIN0/WIN1/OBJ-window and color-effect routing,
+    // so room-authored masks and fades still apply. A full foreign background
+    // is authoritative and therefore suppresses this overlay automatically.
+    if (foreign_presentation_internal::background() == nullptr) {
+        if (const auto* overlay = foreign_presentation_internal::screen_overlay();
+            valid_foreign_screen_overlay(overlay)) {
+            const int left = overlay->x;
+            const int top_y = overlay->y;
+            for (unsigned oy = 0; oy < overlay->height; ++oy) {
+                const int screen_y = top_y + static_cast<int>(oy);
+                if (screen_y != static_cast<int>(y)) continue;
+                for (unsigned ox = 0; ox < overlay->width; ++ox) {
+                    const int screen_x = left + static_cast<int>(ox);
+                    if (screen_x < 0 || screen_x >= static_cast<int>(kScreenWidth))
+                        continue;
+                    const unsigned x = static_cast<unsigned>(screen_x);
+                    // This is a native presentation layer, not a window
+                    // bypass. Honor the current BG2 mask at the output pixel.
+                    if (!layer_enabled(x, 2)) continue;
+                    const std::size_t source =
+                        static_cast<std::size_t>(oy) * overlay->stride + ox;
+                    const std::uint8_t alpha = overlay->alpha_q4[source];
+                    // A mutable/corrupt descriptor must fail closed at the
+                    // texel boundary as well as at publish time.
+                    if (alpha == 0 || alpha > 16) continue;
+                    const PixelCandidate old_top = top[x];
+                    PixelCandidate cand;
+                    cand.color = blend_alpha_gba555(overlay->pixels[source],
+                                                     old_top.color, alpha,
+                                                     16u - alpha);
+                    to_rgb888(cand.color, cand.rgb);
+                    // Same synthetic BG2 identity as a full foreign frame;
+                    // regular guest OBJ keys are always in front of 0x10000.
+                    cand.key = 0x10000;
+                    cand.layer = 2;
+                    cand.target1 = blend_enabled(x) &&
+                        ((first_targets & (1u << 2)) != 0);
+                    cand.target2 = (second_targets & (1u << 2)) != 0;
+                    cand.valid = true;
+                    top[x] = cand;
+                    second[x] = old_top;
+                }
+            }
+        }
+    }
+
     // The foreign background is consumed as immutable data, never through a
     // mod callback.  It replaces all native guest BG/backdrop candidates at
     // the last safe point before OBJ composition.  A deliberately back-most
@@ -1646,6 +1718,49 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
     } else if (bg_mode <= 5) {
         // Modes 6/7 are prohibited (GBATEK); leave them backdrop-only.
         render_bitmap_bg();
+    }
+
+    // Keep the bounded native-screen overlay in the centered hardware
+    // viewport when adaptive view expansion is active. It deliberately does
+    // not extend into either margin: its coordinates are still the canonical
+    // 240x160 GBA screen domain. As in the faithful path, it is synthetic BG2
+    // for window/effect handling, is below guest OBJ, and disappears whenever
+    // a full foreign background has been published.
+    if (foreign_presentation_internal::background() == nullptr) {
+        if (const auto* overlay = foreign_presentation_internal::screen_overlay();
+            valid_foreign_screen_overlay(overlay)) {
+            const int left = static_cast<int>(ox) + overlay->x;
+            const int top_y = overlay->y;
+            for (unsigned oy = 0; oy < overlay->height; ++oy) {
+                const int screen_y = top_y + static_cast<int>(oy);
+                if (screen_y != static_cast<int>(y)) continue;
+                for (unsigned ix = 0; ix < overlay->width; ++ix) {
+                    const int screen_x = left + static_cast<int>(ix);
+                    if (screen_x < 0 || screen_x >= static_cast<int>(out_w))
+                        continue;
+                    const unsigned x = static_cast<unsigned>(screen_x);
+                    if (!layer_enabled(x, 2)) continue;
+                    const std::size_t source =
+                        static_cast<std::size_t>(oy) * overlay->stride + ix;
+                    const std::uint8_t alpha = overlay->alpha_q4[source];
+                    if (alpha == 0 || alpha > 16) continue;
+                    const PixelCandidate old_top = top[x];
+                    PixelCandidate cand;
+                    cand.color = blend_alpha_gba555(overlay->pixels[source],
+                                                     old_top.color, alpha,
+                                                     16u - alpha);
+                    to_rgb888(cand.color, cand.rgb);
+                    cand.key = 0x10000;
+                    cand.layer = 2;
+                    cand.target1 = blend_enabled(x) &&
+                        ((first_targets & (1u << 2)) != 0);
+                    cand.target2 = (second_targets & (1u << 2)) != 0;
+                    cand.valid = true;
+                    top[x] = cand;
+                    second[x] = old_top;
+                }
+            }
+        }
     }
 
     if (dispcnt & 0x1000u) {

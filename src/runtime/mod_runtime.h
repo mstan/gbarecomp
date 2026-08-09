@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include "../gba/foreign_obj_focus.h"
+#include "../gba/foreign_screen_overlay.h"
 
 #ifdef __cplusplus
 #include <filesystem>
@@ -66,6 +67,13 @@ void gba_mod_clear_foreign_background(void);
 int gba_mod_publish_foreign_obj_focus(const char* plugin_id,
                                       const GbaForeignObjFocusTransform* focus);
 void gba_mod_clear_foreign_obj_focus(void);
+
+// Publish one bounded, immutable BGR555/Q4-alpha rectangle over native guest
+// backgrounds. Guest OBJ composition remains above it. This presentation is
+// automatically suppressed while a full foreign background is active.
+int gba_mod_publish_foreign_screen_overlay(
+    const char* plugin_id, const GbaForeignScreenOverlay* overlay);
+void gba_mod_clear_foreign_screen_overlay(void);
 
 // Trusted game plugins use this after their package has committed. It returns
 // null for disabled, wrong-target, uncommitted, missing, or stale assets.

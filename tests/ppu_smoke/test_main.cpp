@@ -831,6 +831,13 @@ void test_trusted_foreign_background_keeps_guest_objects_and_resets() {
     disable_all_objects(f);
     std::array<uint16_t, gba::GbaPpu::kScreenWidth * gba::GbaPpu::kScreenHeight>
         foreign{};
+    std::array<uint16_t, 1> overlay_pixels{0x001F};
+    std::array<uint8_t, 1> overlay_alpha{16};
+    const GbaForeignScreenOverlay overlay{
+        GBA_FOREIGN_SCREEN_OVERLAY_ABI_VERSION,
+        overlay_pixels.data(), overlay_alpha.data(),
+        0, 0, 1, 1, 1, 0, 0,
+    };
     const GbaForeignObjFocusTransform focus{
         GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION,
         0, 0, 8, 8,
@@ -893,17 +900,21 @@ void test_trusted_foreign_background_keeps_guest_objects_and_resets() {
     gbarecomp::debug::SnapshotReader reader(writer.buffer().data(),
                                               writer.buffer().size());
     gba::foreign_presentation_internal::set_obj_focus(&focus);
+    gba::foreign_presentation_internal::set_screen_overlay(&overlay);
     f.ppu.deserialize(reader);
     if (gba::foreign_presentation_internal::background() != nullptr ||
-        gba::foreign_presentation_internal::obj_focus() != nullptr) {
+        gba::foreign_presentation_internal::obj_focus() != nullptr ||
+        gba::foreign_presentation_internal::screen_overlay() != nullptr) {
         std::fprintf(stderr, "foreign presentation survived PPU savestate load\n");
         std::exit(1);
     }
     gba::foreign_presentation_internal::set_background(foreign.data());
     gba::foreign_presentation_internal::set_obj_focus(&focus);
+    gba::foreign_presentation_internal::set_screen_overlay(&overlay);
     f.ppu.reset();
     if (gba::foreign_presentation_internal::background() != nullptr ||
-        gba::foreign_presentation_internal::obj_focus() != nullptr) {
+        gba::foreign_presentation_internal::obj_focus() != nullptr ||
+        gba::foreign_presentation_internal::screen_overlay() != nullptr) {
         std::fprintf(stderr, "foreign presentation survived PPU reset\n");
         std::exit(1);
     }
@@ -914,6 +925,176 @@ void test_trusted_foreign_background_keeps_guest_objects_and_resets() {
         std::fprintf(stderr, "inactive foreign background changed stock PPU output\n");
         std::exit(1);
     }
+}
+
+void test_bounded_foreign_screen_overlay_composites_under_objects() {
+    Fixture f;
+    disable_all_objects(f);
+    // Native background/backdrop is blue. The overlay uses red at 50% alpha,
+    // then fully opaque red, and one transparent texel. This is deliberately
+    // independent of foreign-world art or a game-specific tile allocation.
+    store16(&f.pal[0], 0x7C00);
+    std::array<uint16_t, 12> pixels{};
+    std::array<uint8_t, 12> alpha{};
+    pixels.fill(0x001F);
+    alpha.fill(16);
+    alpha[0] = 0;
+    alpha[1] = 8;
+    const GbaForeignScreenOverlay overlay{
+        GBA_FOREIGN_SCREEN_OVERLAY_ABI_VERSION,
+        pixels.data(), alpha.data(),
+        10, 10, 4, 3, 4, 0, 0,
+    };
+    gba::foreign_presentation_internal::set_screen_overlay(&overlay);
+    f.ppu.render(f.rgb.data(), 0, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(10 * 240 + 10) * 3], 0, 0, 255,
+                 "transparent portal texel keeps native terrain");
+    expect_pixel(&f.rgb[(10 * 240 + 11) * 3], 132, 0, 132,
+                 "Q4 portal alpha mixes in native color domain");
+    expect_pixel(&f.rgb[(10 * 240 + 12) * 3], 255, 0, 0,
+                 "opaque portal texel covers native terrain");
+
+    // Native window masks apply to the synthetic BG2 identity: a room
+    // transition/window may hide the portal without it piercing the mask.
+    // WIN0 covers X=[12,13), Y=[10,11) and permits no layer there; WINOUT
+    // keeps normal native layers visible elsewhere.
+    store16(&f.io[0x40], 0x0C0D);
+    store16(&f.io[0x44], 0x0A0B);
+    store16(&f.io[0x48], 0x0000);
+    store16(&f.io[0x4A], 0x003F);
+    f.ppu.render(f.rgb.data(), 0x2000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(10 * 240 + 12) * 3], 0, 0, 255,
+                 "native WIN0 hides portal through BG2 mask");
+    // The same synthetic BG2 target identity enters the normal brightness
+    // pipeline; a black channel brightens to the expected native-domain value.
+    store16(&f.io[0x50], 0x0084);  // Brighten, BG2 first target.
+    store16(&f.io[0x54], 8);
+    f.ppu.render(f.rgb.data(), 0, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(10 * 240 + 12) * 3], 255, 132, 132,
+                 "native brightness effect applies to portal BG2 identity");
+    store16(&f.io[0x50], 0x0000);
+    store16(&f.io[0x54], 0);
+
+    // A normal guest OBJ must win even where the portal rectangle is opaque.
+    std::fill_n(f.vram.begin() + 0x10000, 32, static_cast<uint8_t>(0x11));
+    store16(&f.pal[0x202], 0x03E0);
+    store16(&f.oam[0], 10);
+    store16(&f.oam[2], 10);
+    store16(&f.oam[4], 0x0C00);  // tile zero, priority 3
+    f.ppu.render(f.rgb.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(10 * 240 + 12) * 3], 0, 255, 0,
+                 "guest OBJ draws above native portal overlay");
+
+    // Clipping is native-screen based, rather than relying on any game camera
+    // behavior. The first source column is clipped, source column one appears.
+    const GbaForeignScreenOverlay clipped{
+        GBA_FOREIGN_SCREEN_OVERLAY_ABI_VERSION,
+        pixels.data(), alpha.data(),
+        -1, 20, 4, 3, 4, 0, 0,
+    };
+    disable_all_objects(f);
+    gba::foreign_presentation_internal::set_screen_overlay(&clipped);
+    f.ppu.render(f.rgb.data(), 0, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(20 * 240 + 0) * 3], 132, 0, 132,
+                 "clipped portal source columns map safely");
+
+    // PPU-side validation is defensive too: direct/internal publication of a
+    // descriptor with nonzero reserved fields fails closed, and a later corrupt
+    // alpha texel cannot become an accidental opaque pixel.
+    GbaForeignScreenOverlay malformed = overlay;
+    malformed.reserved32 = 1;
+    gba::foreign_presentation_internal::set_screen_overlay(&malformed);
+    f.ppu.render(f.rgb.data(), 0, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(10 * 240 + 12) * 3], 0, 0, 255,
+                 "reserved overlay descriptor fails closed");
+    alpha[2] = 17;
+    gba::foreign_presentation_internal::set_screen_overlay(&overlay);
+    f.ppu.render(f.rgb.data(), 0, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(10 * 240 + 12) * 3], 0, 0, 255,
+                 "out-of-range Q4 alpha fails closed per texel");
+    alpha[2] = 16;
+
+    // Full foreign terrain owns the complete BG plane and suppresses a stale
+    // native-world overlay without relying on the plugin to clear it first.
+    std::array<uint16_t, gba::GbaPpu::kScreenWidth * gba::GbaPpu::kScreenHeight>
+        foreign{};
+    foreign.fill(0x03E0);
+    gba::foreign_presentation_internal::set_background(foreign.data());
+    gba::foreign_presentation_internal::set_screen_overlay(&overlay);
+    f.ppu.render(f.rgb.data(), 0, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(10 * 240 + 12) * 3], 0, 255, 0,
+                 "full foreign background suppresses native portal overlay");
+    gba::foreign_presentation_internal::clear();
+}
+
+void test_wide_foreign_screen_overlay_stays_in_native_viewport() {
+    Fixture f;
+    disable_all_objects(f);
+    constexpr uint32_t margin = 24;
+    f.ppu.set_view_margins(margin, margin, 0, 0);
+    std::vector<uint8_t> wide(gba::GbaPpu::kMaxFramebufferBytes, 0);
+    store16(&f.pal[0], 0x7C00);  // Native backdrop blue.
+
+    std::array<uint16_t, 4> pixels{};
+    std::array<uint8_t, 4> alpha{};
+    pixels.fill(0x001F);  // Red portal.
+    alpha.fill(16);
+    alpha[0] = 0;
+    const GbaForeignScreenOverlay overlay{
+        GBA_FOREIGN_SCREEN_OVERLAY_ABI_VERSION,
+        pixels.data(), alpha.data(),
+        10, 10, 4, 1, 4, 0, 0,
+    };
+    gba::foreign_presentation_internal::set_screen_overlay(&overlay);
+    f.ppu.render(wide.data(), 0, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&wide[(10 * (240 + margin * 2) + margin + 10) * 3],
+                 0, 0, 255,
+                 "wide transparent portal texel keeps centered native terrain");
+    expect_pixel(&wide[(10 * (240 + margin * 2) + margin + 12) * 3],
+                 255, 0, 0,
+                 "wide portal uses centered native screen coordinate");
+    expect_pixel(&wide[(10 * (240 + margin * 2) + margin - 1) * 3],
+                 0, 0, 255,
+                 "wide portal never appears in left margin");
+    expect_pixel(&wide[(10 * (240 + margin * 2) + margin + 240) * 3],
+                 0, 0, 255,
+                 "wide portal never appears in right margin");
+
+    // Guest OBJ coordinates are centered by the same margin and still win
+    // above the portal in the wide compositor.
+    std::fill_n(f.vram.begin() + 0x10000, 32, static_cast<uint8_t>(0x11));
+    store16(&f.pal[0x202], 0x03E0);
+    store16(&f.oam[0], 10);
+    store16(&f.oam[2], 10);
+    store16(&f.oam[4], 0x0C00);
+    f.ppu.render(wide.data(), 0x1000, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&wide[(10 * (240 + margin * 2) + margin + 12) * 3],
+                 0, 255, 0,
+                 "wide guest OBJ draws above centered portal overlay");
+
+    // Foreign terrain publication suppresses the overlay on the wide path
+    // too, even though the native backdrop remains the wide-path base.
+    std::array<uint16_t, gba::GbaPpu::kScreenWidth * gba::GbaPpu::kScreenHeight>
+        foreign{};
+    foreign.fill(0x03E0);
+    disable_all_objects(f);
+    gba::foreign_presentation_internal::set_background(foreign.data());
+    f.ppu.render(wide.data(), 0, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&wide[(10 * (240 + margin * 2) + margin + 12) * 3],
+                 0, 0, 255,
+                 "wide foreign background publication suppresses portal overlay");
+    gba::foreign_presentation_internal::clear();
 }
 
 void test_foreign_background_preserves_only_named_hud_bg_map_cells() {
@@ -1486,6 +1667,8 @@ int main() {
     test_bitmap_mode_obj_compositing_and_obj_window();
     test_bitmap_mode_wide_center_and_margins();
     test_trusted_foreign_background_keeps_guest_objects_and_resets();
+    test_bounded_foreign_screen_overlay_composites_under_objects();
+    test_wide_foreign_screen_overlay_stays_in_native_viewport();
     test_foreign_background_preserves_only_named_hud_bg_map_cells();
     test_trusted_foreign_obj_focus_transforms_only_matching_objects();
     test_affine_reference_reload_overrides_scanline_accumulation();

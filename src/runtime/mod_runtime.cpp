@@ -2179,6 +2179,40 @@ extern "C" void gba_mod_clear_foreign_obj_focus(void) {
     gba::foreign_presentation_internal::set_obj_focus(nullptr);
 }
 
+extern "C" int gba_mod_publish_foreign_screen_overlay(
+    const char* plugin_id, const GbaForeignScreenOverlay* overlay) {
+    if (!plugin_id || !overlay || !gbarecomp::valid_id(plugin_id) ||
+        overlay->abi_version != GBA_FOREIGN_SCREEN_OVERLAY_ABI_VERSION ||
+        !overlay->pixels || !overlay->alpha_q4 ||
+        overlay->width == 0 || overlay->height == 0 ||
+        overlay->width > GBA_FOREIGN_SCREEN_OVERLAY_MAX_WIDTH ||
+        overlay->height > GBA_FOREIGN_SCREEN_OVERLAY_MAX_HEIGHT ||
+        overlay->stride < overlay->width ||
+        overlay->stride > GBA_FOREIGN_SCREEN_OVERLAY_MAX_WIDTH ||
+        overlay->reserved16 != 0 ||
+        overlay->reserved32 != 0) {
+        return 0;
+    }
+    // Validate the complete bounded alpha plane at the authorization boundary.
+    // The PPU also skips a later corrupted texel so a plugin cannot turn a
+    // stale/mutable descriptor into an out-of-contract visible write.
+    for (std::uint32_t y = 0; y < overlay->height; ++y)
+        for (std::uint32_t x = 0; x < overlay->width; ++x)
+            if (overlay->alpha_q4[y * overlay->stride + x] > 16u) return 0;
+    const auto& plugins = gbarecomp::state().committed.plugins;
+    const auto found = std::find_if(plugins.begin(), plugins.end(),
+        [plugin_id](const gbarecomp::ResolvedPlugin& plugin) {
+            return plugin.id == plugin_id;
+        });
+    if (found == plugins.end()) return 0;
+    gba::foreign_presentation_internal::set_screen_overlay(overlay);
+    return 1;
+}
+
+extern "C" void gba_mod_clear_foreign_screen_overlay(void) {
+    gba::foreign_presentation_internal::set_screen_overlay(nullptr);
+}
+
 extern "C" const char* gba_mod_required_asset_path(
     const char* package_id, const char* asset_id) {
     if (!package_id || !asset_id) return nullptr;

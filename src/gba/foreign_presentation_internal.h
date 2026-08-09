@@ -8,6 +8,7 @@
 #include <cstdint>
 
 #include "foreign_obj_focus.h"
+#include "foreign_screen_overlay.h"
 
 namespace gba::foreign_presentation_internal {
 
@@ -15,6 +16,8 @@ void set_background(const std::uint16_t* pixels);
 const std::uint16_t* background();
 void set_obj_focus(const GbaForeignObjFocusTransform* focus);
 const GbaForeignObjFocusTransform* obj_focus();
+void set_screen_overlay(const GbaForeignScreenOverlay* overlay);
+const GbaForeignScreenOverlay* screen_overlay();
 void clear();
 
 }  // namespace gba::foreign_presentation_internal

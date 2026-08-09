@@ -47,7 +47,8 @@ int fail(const std::string& message) {
 void reset_view() {
     g_reset_saw_foreign_presentation_clear =
         gba::foreign_presentation_internal::background() == nullptr &&
-        gba::foreign_presentation_internal::obj_focus() == nullptr;
+        gba::foreign_presentation_internal::obj_focus() == nullptr &&
+        gba::foreign_presentation_internal::screen_overlay() == nullptr;
     g_active = false;
     (void)gba_mod_set_adaptive_view_enabled(0);
 }
@@ -210,6 +211,28 @@ int main() {
     // external asset have passed commit validation.
     const std::uint16_t foreign_pixels[] = {0x001F, 0x03E0};
     const std::uint16_t replacement_pixels[] = {0x7C00, 0x7FFF};
+    const std::uint16_t overlay_pixels[] = {0x001F, 0x03E0, 0x7C00, 0x7FFF};
+    std::array<std::uint8_t, 4> overlay_alpha{0, 8, 16, 4};
+    const GbaForeignScreenOverlay foreign_overlay{
+        GBA_FOREIGN_SCREEN_OVERLAY_ABI_VERSION,
+        overlay_pixels, overlay_alpha.data(),
+        -1, 8, 2, 2, 2, 0, 0,
+    };
+    GbaForeignScreenOverlay invalid_overlay_abi = foreign_overlay;
+    invalid_overlay_abi.abi_version++;
+    GbaForeignScreenOverlay invalid_overlay_stride = foreign_overlay;
+    invalid_overlay_stride.stride = 1;
+    GbaForeignScreenOverlay invalid_overlay_width = foreign_overlay;
+    invalid_overlay_width.width = GBA_FOREIGN_SCREEN_OVERLAY_MAX_WIDTH + 1;
+    GbaForeignScreenOverlay invalid_overlay_wide_stride = foreign_overlay;
+    invalid_overlay_wide_stride.stride =
+        GBA_FOREIGN_SCREEN_OVERLAY_MAX_WIDTH + 1;
+    GbaForeignScreenOverlay invalid_overlay_reserved = foreign_overlay;
+    invalid_overlay_reserved.reserved32 = 1;
+    auto invalid_overlay_alpha = overlay_alpha;
+    invalid_overlay_alpha[2] = 17;
+    GbaForeignScreenOverlay invalid_overlay_alpha_value = foreign_overlay;
+    invalid_overlay_alpha_value.alpha_q4 = invalid_overlay_alpha.data();
     const GbaForeignObjFocusTransform foreign_focus{
         GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION,
         48, 64, 72, 88,
@@ -261,12 +284,16 @@ int main() {
     origin_only_focus.hud_oam_mask_lo = UINT64_C(1) << 7;
     gba_mod_clear_foreign_background();
     gba_mod_clear_foreign_obj_focus();
+    gba_mod_clear_foreign_screen_overlay();
     if (gba_mod_publish_foreign_background("test.adaptive-view", foreign_pixels) ||
         gba_mod_publish_foreign_background("test.wrong-plugin", foreign_pixels) ||
         gba_mod_publish_foreign_obj_focus("test.adaptive-view", &foreign_focus) ||
         gba_mod_publish_foreign_obj_focus("test.wrong-plugin", &foreign_focus) ||
+        gba_mod_publish_foreign_screen_overlay("test.adaptive-view", &foreign_overlay) ||
+        gba_mod_publish_foreign_screen_overlay("test.wrong-plugin", &foreign_overlay) ||
         gba::foreign_presentation_internal::background() != nullptr ||
-        gba::foreign_presentation_internal::obj_focus() != nullptr) {
+        gba::foreign_presentation_internal::obj_focus() != nullptr ||
+        gba::foreign_presentation_internal::screen_overlay() != nullptr) {
         return fail("uncommitted or unknown plugin published foreign presentation");
     }
     // A source may be registered before the package selection is known, but
@@ -366,24 +393,45 @@ int main() {
         !gba_mod_publish_foreign_obj_focus("test.adaptive-view", &foreign_focus)) {
         return fail("committed plugin could not publish bounded origin-only focus");
     }
+    if (!gba_mod_publish_foreign_screen_overlay("test.adaptive-view", &foreign_overlay) ||
+        gba::foreign_presentation_internal::screen_overlay() != &foreign_overlay ||
+        gba_mod_publish_foreign_screen_overlay("test.wrong-plugin", &foreign_overlay) ||
+        gba_mod_publish_foreign_screen_overlay("test.adaptive-view", &invalid_overlay_abi) ||
+        gba_mod_publish_foreign_screen_overlay("test.adaptive-view", &invalid_overlay_stride) ||
+        gba_mod_publish_foreign_screen_overlay("test.adaptive-view", &invalid_overlay_width) ||
+        gba_mod_publish_foreign_screen_overlay("test.adaptive-view", &invalid_overlay_wide_stride) ||
+        gba_mod_publish_foreign_screen_overlay("test.adaptive-view", &invalid_overlay_reserved) ||
+        gba_mod_publish_foreign_screen_overlay("test.adaptive-view", &invalid_overlay_alpha_value) ||
+        gba::foreign_presentation_internal::screen_overlay() != &foreign_overlay) {
+        return fail("foreign screen overlay was not authorized, bounded, or stable");
+    }
     gba_mod_clear_foreign_background();
     gba_mod_clear_foreign_obj_focus();
+    gba_mod_clear_foreign_screen_overlay();
     if (gba::foreign_presentation_internal::background() != nullptr ||
-        gba::foreign_presentation_internal::obj_focus() != nullptr)
+        gba::foreign_presentation_internal::obj_focus() != nullptr ||
+        gba::foreign_presentation_internal::screen_overlay() != nullptr)
         return fail("explicit foreign presentation clear left a stale pointer");
 
     // Every activation pass clears the old provider before reset callbacks.
     // The activation callback deliberately does not republish, so null must
     // remain until a selected plugin explicitly supplies a fresh buffer.
     if (!gba_mod_publish_foreign_background("test.adaptive-view", foreign_pixels) ||
-        !gba_mod_publish_foreign_obj_focus("test.adaptive-view", &foreign_focus))
+        !gba_mod_publish_foreign_obj_focus("test.adaptive-view", &foreign_focus) ||
+        !gba_mod_publish_foreign_screen_overlay("test.adaptive-view", &foreign_overlay))
         return fail("committed plugin could not republish foreign presentation");
     g_reset_saw_foreign_presentation_clear = false;
     gbarecomp::mod_runtime_activate_plugins();
-    if (!g_reset_saw_foreign_presentation_clear ||
-        gba::foreign_presentation_internal::background() != nullptr ||
-        gba::foreign_presentation_internal::obj_focus() != nullptr) {
+    if (!g_reset_saw_foreign_presentation_clear) {
         return fail("reactivation did not clear foreign presentation before callbacks");
+    }
+    // Explicit activation-boundary lifetime check for the bounded native
+    // overlay. This must hold independently of the PPU reset/load tests.
+    if (gba::foreign_presentation_internal::screen_overlay() != nullptr)
+        return fail("plugin activation left a stale native screen overlay");
+    if (gba::foreign_presentation_internal::background() != nullptr ||
+        gba::foreign_presentation_internal::obj_focus() != nullptr) {
+        return fail("reactivation left stale foreign presentation");
     }
 
     gbarecomp::AssetSpec strict_asset;
