@@ -2120,7 +2120,19 @@ extern "C" int gba_mod_publish_foreign_obj_focus(
         focus->abi_version != GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION ||
         focus->source_radius_x > gba::GbaPpu::kScreenWidth ||
         focus->source_radius_y > gba::GbaPpu::kScreenHeight ||
-        (focus->flags & ~GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED) != 0) {
+        (focus->flags & ~(GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED |
+                          GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY |
+                          GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE |
+                          GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY)) != 0 ||
+        ((focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) != 0 &&
+         (focus->source_obj_tile_count == 0 ||
+          focus->source_obj_tile_base >= 1024u ||
+          static_cast<unsigned>(focus->source_obj_tile_base) +
+              static_cast<unsigned>(focus->source_obj_tile_count) > 1024u ||
+          (focus->source_aux_obj_tile_count != 0 &&
+           (focus->source_aux_obj_tile_base >= 1024u ||
+            static_cast<unsigned>(focus->source_aux_obj_tile_base) +
+                static_cast<unsigned>(focus->source_aux_obj_tile_count) > 1024u))))) {
         return 0;
     }
     const auto& plugins = gbarecomp::state().committed.plugins;

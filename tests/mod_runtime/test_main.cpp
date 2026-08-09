@@ -215,11 +215,18 @@ int main() {
         48, 64, 72, 88,
         32, 32,
         GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED,
+        0, 0,
+        0, 0,
     };
     GbaForeignObjFocusTransform invalid_focus = foreign_focus;
     invalid_focus.source_radius_x = 241;  // Native PPU width is 240.
     GbaForeignObjFocusTransform invalid_flags = foreign_focus;
     invalid_flags.flags = 0x80000000u;
+    GbaForeignObjFocusTransform origin_only_focus = foreign_focus;
+    origin_only_focus.flags |= GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY |
+        GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE;
+    origin_only_focus.source_obj_tile_base = 100;
+    origin_only_focus.source_obj_tile_count = 16;
     gba_mod_clear_foreign_background();
     gba_mod_clear_foreign_obj_focus();
     if (gba_mod_publish_foreign_background("test.adaptive-view", foreign_pixels) ||
@@ -314,6 +321,11 @@ int main() {
         gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_flags) ||
         gba::foreign_presentation_internal::obj_focus() != &foreign_focus) {
         return fail("foreign presentation publication was not plugin-authorized or stable");
+    }
+    if (!gba_mod_publish_foreign_obj_focus("test.adaptive-view", &origin_only_focus) ||
+        gba::foreign_presentation_internal::obj_focus() != &origin_only_focus ||
+        !gba_mod_publish_foreign_obj_focus("test.adaptive-view", &foreign_focus)) {
+        return fail("committed plugin could not publish bounded origin-only focus");
     }
     gba_mod_clear_foreign_background();
     gba_mod_clear_foreign_obj_focus();

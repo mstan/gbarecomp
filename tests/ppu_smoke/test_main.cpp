@@ -836,6 +836,8 @@ void test_trusted_foreign_background_keeps_guest_objects_and_resets() {
         0, 0, 8, 8,
         8, 8,
         GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED,
+        0, 0,
+        0, 0,
     };
     foreign.fill(0x001F);  // Red foreign terrain.
 
@@ -870,8 +872,9 @@ void test_trusted_foreign_background_keeps_guest_objects_and_resets() {
     expect_pixel(f.rgb.data(), 132, 123, 0,
                  "foreign background is semitransparent OBJ target");
 
-    // BG2 follows the guest window mask; this is a replacement, not a window
-    // bypass. The one-pixel WIN0 disables BG2 and reveals stock backdrop.
+    // A trusted foreign frame is opaque to stale native windows. The one-pixel
+    // WIN0 disables guest BG2, but must not reveal screen-fixed guest room
+    // tiles over a later foreign room; OBJ composition remains covered above.
     store16(&f.io[0x40], 0x0001);  // WIN0 x=[0,1)
     store16(&f.io[0x44], 0x00A0);  // WIN0 y=[0,160)
     store16(&f.io[0x48], 0x0010);  // WIN0: OBJ only, no BG2.
@@ -879,8 +882,8 @@ void test_trusted_foreign_background_keeps_guest_objects_and_resets() {
     disable_all_objects(f);
     f.ppu.render(f.rgb.data(), 0x3000, f.io.data(), f.vram.data(),
                  f.oam.data(), f.pal.data());
-    expect_pixel(f.rgb.data(), 0, 0, 255,
-                 "foreign background honors BG2 window mask");
+    expect_pixel(f.rgb.data(), 255, 0, 0,
+                 "foreign background ignores stale native BG2 window mask");
 
     // Reset and clearing the provider both return to the literal stock path;
     // neither stale host presentation nor a callback survives reset.
@@ -942,6 +945,8 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
         20, 20, 30, 28,
         8, 8,
         GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED,
+        0, 0,
+        0, 0,
     };
     gba::foreign_presentation_internal::set_obj_focus(&focus);
     f.ppu.render(f.rgb.data(), 0x1000, f.io.data(), f.vram.data(),
@@ -969,6 +974,56 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
         std::fprintf(stderr, "inactive OBJ focus changed stock PPU output\n");
         std::exit(1);
     }
+
+    // A source-mapped player body can require origin-only matching.  The
+    // 32x32 green room prop has its center at the Link source feet but an
+    // origin outside the bounded player-body rectangle, so it must stay put
+    // while the red player OBJ moves.  This models a doorway behind Link
+    // without hiding the prop or unrelated guest OBJ.
+    Fixture strict;
+    disable_all_objects(strict);
+    store16(&strict.pal[0], 0x7C00);
+    store16(&strict.pal[0x202], 0x001F);
+    store16(&strict.pal[0x204], 0x03E0);
+    std::fill_n(strict.vram.begin() + 0x10000, 32,
+                static_cast<uint8_t>(0x11));
+    std::fill_n(strict.vram.begin() + 0x10020, 32,
+                static_cast<uint8_t>(0x22));
+    std::fill_n(strict.vram.begin() + 0x10040, 32,
+                static_cast<uint8_t>(0x22));
+    store16(&strict.oam[0], 20);
+    store16(&strict.oam[2], 20);
+    store16(&strict.oam[4], 0);
+    store16(&strict.oam[8], 4);
+    store16(&strict.oam[10], 0x8000 | 4);  // 32x32 prop centered at (20,20).
+    store16(&strict.oam[12], 1);
+    store16(&strict.oam[16], 0x4000 | 28); // 16x8 source-player shadow.
+    store16(&strict.oam[18], 22);
+    store16(&strict.oam[20], 2);
+    const GbaForeignObjFocusTransform origin_only{
+        GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION,
+        20, 20, 60, 60,
+        8, 8,
+        GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED |
+            GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY |
+        GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE |
+            GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY,
+        0, 1,
+        2, 1,
+    };
+    gba::foreign_presentation_internal::set_obj_focus(&origin_only);
+    strict.ppu.render(strict.rgb.data(), 0x1000, strict.io.data(),
+                      strict.vram.data(), strict.oam.data(), strict.pal.data());
+    expect_pixel(&strict.rgb[(60 * 240 + 60) * 3], 255, 0, 0,
+                 "origin-only focus moves source player origin");
+    expect_pixel(&strict.rgb[(68 * 240 + 62) * 3], 0, 255, 0,
+                 "source focus moves the bounded player shadow allocation");
+    expect_pixel(&strict.rgb[(4 * 240 + 4) * 3], 0, 0, 255,
+                 "bounded source focus suppresses centered room prop");
+    expect_pixel(&strict.rgb[(44 * 240 + 44) * 3], 0, 0, 255,
+                 "origin-only focus does not translate centered room prop");
+    gba::foreign_presentation_internal::set_obj_focus(nullptr);
+
     // The PPU independently validates the immutable descriptor. A corrupted
     // pointer that bypassed publication fails closed to the stock result.
     GbaForeignObjFocusTransform malformed_focus = focus;
@@ -1004,6 +1059,8 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
         20, 40, 30, 50,
         8, 8,
         0,
+        0, 0,
+        0, 0,
     };
     gba::foreign_presentation_internal::set_obj_focus(&affine_focus);
     affine.ppu.render(affine.rgb.data(), 0x1000, affine.io.data(),
@@ -1027,6 +1084,8 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
         20, 60, 30, 70,
         8, 8,
         0,
+        0, 0,
+        0, 0,
     };
     gba::foreign_presentation_internal::set_obj_focus(&translucent_focus);
     translucent.ppu.render(translucent.rgb.data(), 0x1000,
@@ -1051,6 +1110,8 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
         0, 0, 4, 4,
         8, 8,
         0,
+        0, 0,
+        0, 0,
     };
     gba::foreign_presentation_internal::set_obj_focus(&wrapped_focus);
     wrapped.ppu.render(wrapped.rgb.data(), 0x1000, wrapped.io.data(),

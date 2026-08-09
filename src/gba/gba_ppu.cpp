@@ -257,7 +257,19 @@ bool valid_foreign_obj_focus(const GbaForeignObjFocusTransform* focus) {
            focus->abi_version == GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION &&
            focus->source_radius_x <= GbaPpu::kScreenWidth &&
            focus->source_radius_y <= GbaPpu::kScreenHeight &&
-           (focus->flags & ~GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED) == 0;
+           (focus->flags & ~(GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED |
+                             GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY |
+                             GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE |
+                             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY)) == 0 &&
+           ((focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) == 0 ||
+            (focus->source_obj_tile_count != 0 &&
+             focus->source_obj_tile_base < 1024u &&
+             static_cast<unsigned>(focus->source_obj_tile_base) +
+                 static_cast<unsigned>(focus->source_obj_tile_count) <= 1024u &&
+             (focus->source_aux_obj_tile_count == 0 ||
+              (focus->source_aux_obj_tile_base < 1024u &&
+               static_cast<unsigned>(focus->source_aux_obj_tile_base) +
+                   static_cast<unsigned>(focus->source_aux_obj_tile_count) <= 1024u))));
 }
 
 bool focus_contains(const GbaForeignObjFocusTransform& focus, int x, int y) {
@@ -274,21 +286,48 @@ bool focus_contains(const GbaForeignObjFocusTransform& focus, int x, int y) {
 
 // Presentation-only translation. It reads a trusted immutable descriptor and
 // operates on decoded local coordinates; guest OAM and memory stay untouched.
-void apply_foreign_obj_focus(int* sx, int* sy, int width, int height) {
+enum class ForeignObjFocusAction { kKeep, kTranslate, kSuppress };
+
+ForeignObjFocusAction apply_foreign_obj_focus(int* sx, int* sy, int width,
+                                              int height, uint32_t tile_num) {
     const GbaForeignObjFocusTransform* focus =
         foreign_presentation_internal::obj_focus();
     if (!sx || !sy || width <= 0 || height <= 0 ||
         !valid_foreign_obj_focus(focus)) {
-        return;
+        return ForeignObjFocusAction::kKeep;
     }
-    if (!focus_contains(*focus, *sx, *sy) &&
-        !focus_contains(*focus, *sx + width / 2, *sy + height / 2)) {
-        return;
+    const bool origin_matches = focus_contains(*focus, *sx, *sy);
+    const bool center_matches =
+        focus_contains(*focus, *sx + width / 2, *sy + height / 2);
+    const bool in_main_range =
+        tile_num >= focus->source_obj_tile_base &&
+        tile_num < static_cast<uint32_t>(focus->source_obj_tile_base) +
+                       focus->source_obj_tile_count;
+    const bool in_aux_range = focus->source_aux_obj_tile_count != 0 &&
+        tile_num >= focus->source_aux_obj_tile_base &&
+        tile_num < static_cast<uint32_t>(focus->source_aux_obj_tile_base) +
+                       focus->source_aux_obj_tile_count;
+    const bool tile_matches =
+        (focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) == 0 ||
+        in_main_range || in_aux_range;
+    if (!tile_matches) {
+        if ((focus->flags & GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY) != 0 &&
+            (origin_matches || center_matches) &&
+            (width >= 32 || height >= 32)) {
+            return ForeignObjFocusAction::kSuppress;
+        }
+        return ForeignObjFocusAction::kKeep;
+    }
+    if (!origin_matches &&
+        ((focus->flags & GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY) != 0 ||
+         !center_matches)) {
+        return ForeignObjFocusAction::kKeep;
     }
     *sx += static_cast<int>(focus->destination_link_feet_x) -
            static_cast<int>(focus->source_link_feet_x);
     *sy += static_cast<int>(focus->destination_link_feet_y) -
            static_cast<int>(focus->source_link_feet_y);
+    return ForeignObjFocusAction::kTranslate;
 }
 
 // Convert 16-bit GBA color (0BBBBBGGGGGRRRRR) to 24-bit RGB888.
@@ -859,12 +898,12 @@ void render_scanline_internal(uint8_t* rgb,
     // key keeps every guest OBJ visible while preserving authentic OBJ order,
     // OBJ-window masking, and the normal BLDCNT effects pipeline.  Treat it
     // as BG2 for color-effect target bits so authored fades still apply.
+    // Unlike a guest BG2, a committed foreign frame is intentionally opaque
+    // to native BG/window state: keeping a room-authored window mask here
+    // leaked screen-fixed house/door tiles over later foreign rooms. Guest
+    // OBJ composition (including the focused Link OBJ) still happens below.
     if (const uint16_t* foreign = foreign_presentation_internal::background()) {
         for (uint32_t x = 0; x < kScreenWidth; ++x) {
-            // The provider is a BG2 replacement, not a window bypass. A
-            // native window that suppresses BG2 reveals the guest candidate
-            // already composed at that pixel; OBJ masking stays unchanged.
-            if (!layer_enabled(x, 2)) continue;
             PixelCandidate cand;
             cand.color = foreign[y * GbaPpu::kScreenWidth + x];
             to_rgb888(cand.color, cand.rgb);
@@ -958,7 +997,8 @@ void render_scanline_internal(uint8_t* rgb,
             if (rot_scale) {
                 int bw = disable_or_double ? sw * 2 : sw;
                 int bh = disable_or_double ? sh * 2 : sh;
-                apply_foreign_obj_focus(&sx, &sy, bw, bh);
+                if (apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num) ==
+                    ForeignObjFocusAction::kSuppress) continue;
                 int j = static_cast<int>(y) - sy;
                 if (j < 0 || j >= bh) continue;
                 int affine_group = (attr1 >> 9) & 0x1Fu;
@@ -982,7 +1022,8 @@ void render_scanline_internal(uint8_t* rgb,
                 }
                 continue;
             }
-            apply_foreign_obj_focus(&sx, &sy, sw, sh);
+            if (apply_foreign_obj_focus(&sx, &sy, sw, sh, tile_num) ==
+                ForeignObjFocusAction::kSuppress) continue;
             int line = static_cast<int>(y) - sy;
             if (line < 0 || line >= sh) continue;
             bool hflip = (attr1 & 0x1000u) != 0;
@@ -1559,7 +1600,8 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                 // first, then apply pure data-only focus before clipping.
                 if (obj_focus_active) {
                     resolve_sx();
-                    apply_foreign_obj_focus(&sx, &sy, bw, bh);
+                    if (apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num) ==
+                        ForeignObjFocusAction::kSuppress) continue;
                 }
                 int j = static_cast<int>(y) - sy;
                 if (j < 0 || j >= bh) continue;
@@ -1587,7 +1629,8 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             }
             if (obj_focus_active) {
                 resolve_sx();
-                apply_foreign_obj_focus(&sx, &sy, sw, sh);
+                if (apply_foreign_obj_focus(&sx, &sy, sw, sh, tile_num) ==
+                    ForeignObjFocusAction::kSuppress) continue;
             }
             int line = static_cast<int>(y) - sy;
             if (line < 0 || line >= sh) continue;
