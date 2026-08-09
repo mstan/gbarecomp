@@ -48,6 +48,25 @@ struct RunOptions {
     std::uint16_t max_resize_view_width = 240;
     bool resize_driven_view = false;
 
+    // Host-window presentation policy, independent of extended guest view.
+    // When true the player may freely reshape a window while SDL keeps the
+    // native game image aspect-correct with letter/pillar boxing.
+    bool freely_resizable_window = false;
+
+    // Player-facing diagnostics. The counter reports actual presents per
+    // second in the native window title; games may ship it enabled while
+    // retaining the shared hotkey/menu toggle.
+    bool show_fps_by_default = false;
+
+    // Optional shared Assist Tools surface. Games opt into the menu and choose
+    // its resource bounds; the implementation remains engine-owned and
+    // reusable. Slot hotkeys continue to cover 1-9, while menus can reach 10.
+    bool expose_assist_tools = false;
+    bool assist_tools_enabled_by_default = true;
+    std::uint8_t save_state_slot_count = 9;
+    std::uint8_t rewind_history_seconds = 0;
+    std::uint8_t rewind_capture_interval_frames = 15;
+
     // Optional game-owned content initializer. Called exactly once, after the
     // first non-native view has been authorized and applied. For a fixed view
     // that is during startup; for resize-driven view it is deferred until the

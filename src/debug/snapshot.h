@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace gba {
@@ -56,6 +57,7 @@ public:
     }
 
     const std::vector<uint8_t>& buffer() const { return buf_; }
+    std::vector<uint8_t> take_buffer() { return std::move(buf_); }
     std::size_t size() const { return buf_.size(); }
 
 private:
@@ -132,8 +134,16 @@ struct SnapshotContext {
 // clean dispatch boundary. Returns false (with *err set) on I/O error.
 bool save_state(const char* path, const SnapshotContext& ctx, std::string* err);
 
+// In-memory variants used by bounded rewind histories. They use exactly the
+// same versioned, ROM-gated container as on-disk states, so there is only one
+// serializer to keep correct.
+bool save_state_bytes(std::vector<uint8_t>* out, const SnapshotContext& ctx,
+                      std::string* err);
+
 // Restore from `path`. Returns false (with *err set) on I/O error,
 // bad magic, version mismatch, ROM-hash mismatch, or truncation.
 bool load_state(const char* path, const SnapshotContext& ctx, std::string* err);
+bool load_state_bytes(const uint8_t* data, std::size_t size,
+                      const SnapshotContext& ctx, std::string* err);
 
 }  // namespace gbarecomp::debug

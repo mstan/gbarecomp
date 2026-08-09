@@ -334,6 +334,7 @@ struct Backend {
     int base_h = 160;   // logical surface height (160; vertical expansion deferred)
     bool expanded_view = false;  // native games retain the historical SDL path
     bool resize_driven_view = false;
+    bool freely_resizable_window = false;
     bool linear_filter = false;
     bool sharp_filter = false;
 
@@ -998,7 +999,8 @@ bool HostWindow::is_available() { return true; }
 
 bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
                       const char* screen, bool linear_filter, bool sharp_filter,
-                      bool resize_driven_view) {
+                      bool resize_driven_view,
+                      bool freely_resizable_window) {
     if (open_) return true;
     if (scale < 1) scale = 1;
     if (base_w < 1) base_w = 240;
@@ -1044,6 +1046,7 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     b->base_h = base_h;
     b->expanded_view = base_w != 240 || base_h != 160;
     b->resize_driven_view = resize_driven_view;
+    b->freely_resizable_window = freely_resizable_window;
     b->linear_filter = linear_filter && !sharp_filter;
     b->sharp_filter = sharp_filter;
     b->scale = scale;
@@ -1062,7 +1065,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     const int win_w = base_w * scale;
     const int win_h = base_h * scale;
     Uint32 window_flags = SDL_WINDOW_SHOWN |
-        ((b->expanded_view || b->resize_driven_view)
+        ((b->expanded_view || b->resize_driven_view ||
+          b->freely_resizable_window)
              ? static_cast<Uint32>(SDL_WINDOW_RESIZABLE) : Uint32{0});
 #if defined(__ANDROID__)
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
@@ -1757,7 +1761,10 @@ void HostWindow::set_resize_driven_view(bool enabled) {
     if (!open_ || !impl_) return;
     auto* b = static_cast<Backend*>(impl_);
     b->resize_driven_view = enabled;
-    SDL_SetWindowResizable(b->window, enabled || b->expanded_view ? SDL_TRUE : SDL_FALSE);
+    SDL_SetWindowResizable(
+        b->window,
+        enabled || b->expanded_view || b->freely_resizable_window
+            ? SDL_TRUE : SDL_FALSE);
 }
 
 #if defined(GBARECOMP_RUNTIME_UI)
@@ -2051,7 +2058,8 @@ bool HostWindow::is_available() { return false; }
 bool HostWindow::open(int /*scale*/, int /*base_w*/, int /*base_h*/,
                       const char* /*title*/, const char* /*screen*/,
                       bool /*linear_filter*/, bool /*sharp_filter*/,
-                      bool /*resize_driven_view*/) {
+                      bool /*resize_driven_view*/,
+                      bool /*freely_resizable_window*/) {
     std::fprintf(stderr,
                  "host_window: built without SDL2; --window unavailable\n");
     return false;

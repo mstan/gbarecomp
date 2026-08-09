@@ -105,7 +105,12 @@ void deserialize_meta(SnapshotReader& r, const SnapshotContext& ctx) {
 
 }  // namespace
 
-bool save_state(const char* path, const SnapshotContext& ctx, std::string* err) {
+bool save_state_bytes(std::vector<uint8_t>* out, const SnapshotContext& ctx,
+                      std::string* err) {
+    if (!out) {
+        if (err) *err = "snapshot: output buffer not provided";
+        return false;
+    }
     if (!ctx.bus || !ctx.ppu) {
         if (err) *err = "snapshot: bus/ppu not wired";
         return false;
@@ -141,13 +146,21 @@ bool save_state(const char* path, const SnapshotContext& ctx, std::string* err) 
         w.bytes(mods.buffer().data(), mods.size());
     }
 
+    *out = w.take_buffer();
+    return true;
+}
+
+bool save_state(const char* path, const SnapshotContext& ctx, std::string* err) {
+    std::vector<uint8_t> blob;
+    if (!save_state_bytes(&blob, ctx, err)) return false;
+
     std::ofstream f(path, std::ios::binary | std::ios::trunc);
     if (!f) {
         if (err) *err = std::string("snapshot: cannot open for write: ") + path;
         return false;
     }
-    f.write(reinterpret_cast<const char*>(w.buffer().data()),
-            static_cast<std::streamsize>(w.size()));
+    f.write(reinterpret_cast<const char*>(blob.data()),
+            static_cast<std::streamsize>(blob.size()));
     if (!f) {
         if (err) *err = std::string("snapshot: write failed: ") + path;
         return false;
@@ -155,32 +168,19 @@ bool save_state(const char* path, const SnapshotContext& ctx, std::string* err) 
     return true;
 }
 
-bool load_state(const char* path, const SnapshotContext& ctx, std::string* err) {
+bool load_state_bytes(const uint8_t* data, std::size_t size,
+                      const SnapshotContext& ctx, std::string* err) {
     if (!ctx.bus || !ctx.ppu) {
         if (err) *err = "snapshot: bus/ppu not wired";
         return false;
     }
 
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) {
-        if (err) *err = std::string("snapshot: cannot open for read: ") + path;
-        return false;
-    }
-    std::streamoff size = f.tellg();
-    if (size <= 0) {
-        if (err) *err = std::string("snapshot: empty/unreadable: ") + path;
-        return false;
-    }
-    std::vector<uint8_t> blob(static_cast<std::size_t>(size));
-    f.seekg(0, std::ios::beg);
-    f.read(reinterpret_cast<char*>(blob.data()),
-           static_cast<std::streamsize>(blob.size()));
-    if (!f) {
-        if (err) *err = std::string("snapshot: read failed: ") + path;
+    if (!data || size == 0) {
+        if (err) *err = "snapshot: empty/unreadable memory state";
         return false;
     }
 
-    SnapshotReader head(blob.data(), blob.size());
+    SnapshotReader head(data, size);
     char magic[4];
     head.bytes(magic, 4);
     if (std::memcmp(magic, kMagic, 4) != 0) {
@@ -223,9 +223,9 @@ bool load_state(const char* path, const SnapshotContext& ctx, std::string* err) 
     // Index sections by tag → (offset, len) within blob.
     struct Span { std::size_t off; std::size_t len; };
     std::unordered_map<uint32_t, Span> sections;
-    std::size_t cursor = blob.size() - head.remaining();
+    std::size_t cursor = size - head.remaining();
     for (uint32_t i = 0; i < section_count; ++i) {
-        SnapshotReader sr(blob.data() + cursor, blob.size() - cursor);
+        SnapshotReader sr(data + cursor, size - cursor);
         uint32_t tag = sr.u32();
         uint32_t len = sr.u32();
         if (!sr.ok()) {
@@ -233,7 +233,7 @@ bool load_state(const char* path, const SnapshotContext& ctx, std::string* err) 
             return false;
         }
         const std::size_t payload_off = cursor + 8;
-        if (len > blob.size() - payload_off) {
+        if (payload_off > size || len > size - payload_off) {
             if (err) *err = "snapshot: section overruns file";
             return false;
         }
@@ -246,7 +246,7 @@ bool load_state(const char* path, const SnapshotContext& ctx, std::string* err) 
     }
 
     const bool legacy_v1 = version == kLegacySnapshotVersion;
-    if (cursor != blob.size()) {
+    if (cursor != size) {
         if (err) *err = "snapshot: trailing container data";
         return false;
     }
@@ -294,7 +294,7 @@ bool load_state(const char* path, const SnapshotContext& ctx, std::string* err) 
         return false;
     }
     if (mods_it != sections.end()) {
-        SnapshotReader mods_reader(blob.data() + mods_it->second.off, mods_it->second.len);
+        SnapshotReader mods_reader(data + mods_it->second.off, mods_it->second.len);
         ModStateRegistry empty_catalog;
         const ModStateRegistry& catalog = ctx.mod_state ? *ctx.mod_state : empty_catalog;
         if (!catalog.preflight(mods_reader, err)) {
@@ -306,7 +306,7 @@ bool load_state(const char* path, const SnapshotContext& ctx, std::string* err) 
     auto reader_for = [&](uint32_t tag) -> SnapshotReader {
         auto it = sections.find(tag);
         const uint8_t* base = (it == sections.end())
-            ? nullptr : blob.data() + it->second.off;
+            ? nullptr : data + it->second.off;
         std::size_t len = (it == sections.end()) ? 0 : it->second.len;
         return SnapshotReader(base, len);
     };
@@ -322,7 +322,7 @@ bool load_state(const char* path, const SnapshotContext& ctx, std::string* err) 
         deserialize_meta(r, ctx);
     }
     if (mods_it != sections.end() && ctx.mod_state && ctx.mod_state->size() != 0) {
-        SnapshotReader mods_reader(blob.data() + mods_it->second.off, mods_it->second.len);
+        SnapshotReader mods_reader(data + mods_it->second.off, mods_it->second.len);
         // A matching payload was already preflighted above.  Restore is a
         // provider contract, not a recoverable error path: guest state is now
         // live, so continuing after a provider violation would be unsafe.
@@ -330,6 +330,28 @@ bool load_state(const char* path, const SnapshotContext& ctx, std::string* err) 
     }
 
     return true;
+}
+
+bool load_state(const char* path, const SnapshotContext& ctx, std::string* err) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) {
+        if (err) *err = std::string("snapshot: cannot open for read: ") + path;
+        return false;
+    }
+    const std::streamoff file_size = f.tellg();
+    if (file_size <= 0) {
+        if (err) *err = std::string("snapshot: empty/unreadable: ") + path;
+        return false;
+    }
+    std::vector<uint8_t> blob(static_cast<std::size_t>(file_size));
+    f.seekg(0, std::ios::beg);
+    f.read(reinterpret_cast<char*>(blob.data()),
+           static_cast<std::streamsize>(blob.size()));
+    if (!f) {
+        if (err) *err = std::string("snapshot: read failed: ") + path;
+        return false;
+    }
+    return load_state_bytes(blob.data(), blob.size(), ctx, err);
 }
 
 }  // namespace gbarecomp::debug

@@ -44,7 +44,8 @@ public:
     bool open(int scale = 3, int base_w = 240, int base_h = 160,
               const char* title = "gbarecomp", const char* screen = nullptr,
               bool linear_filter = false, bool sharp_filter = false,
-              bool resize_driven_view = false);
+              bool resize_driven_view = false,
+              bool freely_resizable_window = false);
     void close();
     bool is_open() const { return open_; }
 

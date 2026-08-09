@@ -63,6 +63,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -204,6 +205,9 @@ struct Args {
 // menu exists to replace.
 #define GBARECOMP_UI_KEY_STATE_SLOT "system.state_slot"
 #define GBARECOMP_UI_KEY_FPS        "display.fps_readout"
+#define GBARECOMP_UI_KEY_ASSIST_ENABLED "assist.enabled"
+#define GBARECOMP_UI_KEY_FAST_FORWARD   "assist.fast_forward"
+#define GBARECOMP_UI_KEY_REWIND          "assist.rewind"
 
 struct RuntimeUiContext {
     HostWindow* window = nullptr;
@@ -214,8 +218,13 @@ struct RuntimeUiContext {
     // Menu-driven state slots, drained by the main loop alongside the
     // equivalent hotkeys so both paths share one implementation.
     int state_slot = 1;
+    int state_slot_count = 9;
     int pending_save_slot = 0;
     int pending_load_slot = 0;
+    bool pending_rewind = false;
+    bool assist_tools_exposed = false;
+    bool assist_tools_enabled = true;
+    bool fast_forward_latched = false;
     // Game-supplied handlers for keys the engine does not own.
     const RunOptions* opts = nullptr;
 };
@@ -231,6 +240,10 @@ int runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int* out) {
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) *out = c->window->volume();
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_STATE_SLOT) == 0) *out = c->state_slot;
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FPS) == 0) *out = c->window->fps_readout();
+    else if (std::strcmp(item->key, GBARECOMP_UI_KEY_ASSIST_ENABLED) == 0)
+        *out = c->assist_tools_enabled;
+    else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FAST_FORWARD) == 0)
+        *out = c->fast_forward_latched;
 #if defined(RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY)
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY) == 0 &&
              c->gyro_sensitivity)
@@ -257,9 +270,14 @@ int runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int value) {
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0)
         c->window->set_volume(value);
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_STATE_SLOT) == 0)
-        c->state_slot = (value < 1) ? 1 : (value > 9 ? 9 : value);
+        c->state_slot = std::clamp(value, 1, c->state_slot_count);
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FPS) == 0)
         c->window->set_fps_readout(value != 0);
+    else if (std::strcmp(item->key, GBARECOMP_UI_KEY_ASSIST_ENABLED) == 0) {
+        c->assist_tools_enabled = value != 0;
+        if (!c->assist_tools_enabled) c->fast_forward_latched = false;
+    } else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FAST_FORWARD) == 0)
+        c->fast_forward_latched = value != 0;
 #if defined(RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY)
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY) == 0 &&
              c->gyro_sensitivity)
@@ -288,6 +306,11 @@ int runtime_ui_action(void* opaque, const RecompRuntimeUiItem* item) {
     }
     if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LOAD_STATE) == 0) {
         c->pending_load_slot = c->state_slot;
+        recomp_runtime_ui_close(c->ui);
+        return 1;
+    }
+    if (std::strcmp(item->key, GBARECOMP_UI_KEY_REWIND) == 0) {
+        c->pending_rewind = true;
         recomp_runtime_ui_close(c->ui);
         return 1;
     }
@@ -320,6 +343,13 @@ int runtime_ui_enabled(void* opaque, const RecompRuntimeUiItem* item) {
     if (!c || !item) return 1;
     if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_WINDOW_SCALE) == 0)
         return c->window->fullscreen() == 0;
+    if (c->assist_tools_exposed &&
+        std::strcmp(item->key, GBARECOMP_UI_KEY_ASSIST_ENABLED) != 0 &&
+        (std::strncmp(item->key, "assist.", 7) == 0 ||
+         std::strcmp(item->key, GBARECOMP_UI_KEY_STATE_SLOT) == 0 ||
+         std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_SAVE_STATE) == 0 ||
+         std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LOAD_STATE) == 0))
+        return c->assist_tools_enabled;
     if (c->opts && c->opts->ui_enabled) return c->opts->ui_enabled(item->key);
     return 1;
 }
@@ -1952,6 +1982,22 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         ++g_runtime_state_epoch;
         return true;
     };
+    auto do_savestate_save_bytes = [&](std::vector<uint8_t>& bytes,
+                                       std::string& e) -> bool {
+        return debug::save_state_bytes(&bytes, make_snapshot_ctx(), &e);
+    };
+    auto do_savestate_load_bytes = [&](const std::vector<uint8_t>& bytes,
+                                       std::string& e) -> bool {
+        if (!debug::load_state_bytes(bytes.data(), bytes.size(),
+                                     make_snapshot_ctx(), &e)) {
+            return false;
+        }
+        sync_frame_counter();
+        g_runtime_cycles = 0;
+        runtime_fp_reset();
+        ++g_runtime_state_epoch;
+        return true;
+    };
 
     // ── Differential-oracle WRAM trace (gbaref/snesref/mdref method) ──
     // GBARECOMP_WRAM_TRACE=path emits one JSONL record per changed work-RAM byte
@@ -2354,7 +2400,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                       runtime_title,
                       args.screen.empty() ? nullptr : args.screen.c_str(),
                       args.linear_filter, args.sharp_filter,
-                      resize_view_enabled)) {
+                      resize_view_enabled, opts.freely_resizable_window)) {
             gbarecomp::overlay_loader_shutdown();
             runtime_shutdown();
             return 1;
@@ -2372,9 +2418,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
         if (args.fullscreen) win.set_fullscreen(args.fullscreen);
         win.set_volume(args.volume);
+        win.set_fps_readout(opts.show_fps_by_default);
 #if defined(GBARECOMP_RUNTIME_UI)
         runtime_ui_context.window = &win;
         runtime_ui_context.gyro_sensitivity = &args.gyro_sensitivity;
+        runtime_ui_context.assist_tools_exposed = opts.expose_assist_tools;
+        runtime_ui_context.assist_tools_enabled =
+            opts.assist_tools_enabled_by_default;
+        runtime_ui_context.state_slot_count = std::clamp<int>(
+            opts.save_state_slot_count ? opts.save_state_slot_count : 9,
+            1, 10);
 #if defined(RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY)
         static const RecompRuntimeUiItem gyro_item{
             RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY,
@@ -2413,9 +2466,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             RECOMP_RUNTIME_UI_STANDARD_LINEAR_FILTER |
             RECOMP_RUNTIME_UI_STANDARD_AUDIO |
             RECOMP_RUNTIME_UI_STANDARD_VOLUME |
-            RECOMP_RUNTIME_UI_STANDARD_SAVE_STATE |
-            RECOMP_RUNTIME_UI_STANDARD_LOAD_STATE |
             RECOMP_RUNTIME_UI_STANDARD_RESUME;
+        if (!opts.expose_assist_tools) {
+            runtime_ui_config.features |=
+                RECOMP_RUNTIME_UI_STANDARD_SAVE_STATE |
+                RECOMP_RUNTIME_UI_STANDARD_LOAD_STATE;
+        }
         // INTEGER_SCALE is deliberately absent: HostWindow::adjust_scale only
         // ever produces integer scales (clamped 1..8), so there is no
         // fractional mode for a toggle to switch off. Offering one would
@@ -2447,15 +2503,64 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 #endif
         RecompRuntimeUiItem slot_item{};
         slot_item.key         = GBARECOMP_UI_KEY_STATE_SLOT;
-        slot_item.section     = "System";
+        slot_item.section     = opts.expose_assist_tools
+                                    ? "Assist Tools" : "System";
         slot_item.label       = "State slot";
         slot_item.description = "Slot used by Save state and Load state "
-                                "(same slots as F1-F9).";
+                                "(slots 1-9 also have function-key shortcuts).";
         slot_item.type        = RECOMP_RUNTIME_UI_INT;
         slot_item.minimum     = 1;
-        slot_item.maximum     = 9;
+        slot_item.maximum     = runtime_ui_context.state_slot_count;
         slot_item.step        = 1;
+        if (opts.expose_assist_tools) {
+            RecompRuntimeUiItem enabled_item{};
+            enabled_item.key         = GBARECOMP_UI_KEY_ASSIST_ENABLED;
+            enabled_item.section     = "Assist Tools";
+            enabled_item.label       = "Assist Tools";
+            enabled_item.description =
+                "Enable save states, fast-forward, and rewind.";
+            enabled_item.type        = RECOMP_RUNTIME_UI_BOOL;
+            runtime_ui_extras.push_back(enabled_item);
+        }
         runtime_ui_extras.push_back(slot_item);
+
+        if (opts.expose_assist_tools) {
+            RecompRuntimeUiItem save_item{};
+            save_item.key         = RECOMP_RUNTIME_UI_KEY_SAVE_STATE;
+            save_item.section     = "Assist Tools";
+            save_item.label       = "Save state";
+            save_item.description = "Save the current position to this slot.";
+            save_item.type        = RECOMP_RUNTIME_UI_ACTION;
+            runtime_ui_extras.push_back(save_item);
+
+            RecompRuntimeUiItem load_item{};
+            load_item.key         = RECOMP_RUNTIME_UI_KEY_LOAD_STATE;
+            load_item.section     = "Assist Tools";
+            load_item.label       = "Load state";
+            load_item.description = "Restore the selected state slot.";
+            load_item.type        = RECOMP_RUNTIME_UI_ACTION;
+            runtime_ui_extras.push_back(load_item);
+
+            RecompRuntimeUiItem fast_forward_item{};
+            fast_forward_item.key         = GBARECOMP_UI_KEY_FAST_FORWARD;
+            fast_forward_item.section     = "Assist Tools";
+            fast_forward_item.label       = "Fast-forward";
+            fast_forward_item.description =
+                "Run without the normal frame limiter until switched off.";
+            fast_forward_item.type        = RECOMP_RUNTIME_UI_BOOL;
+            runtime_ui_extras.push_back(fast_forward_item);
+
+            if (opts.rewind_history_seconds > 0) {
+                RecompRuntimeUiItem rewind_item{};
+                rewind_item.key         = GBARECOMP_UI_KEY_REWIND;
+                rewind_item.section     = "Assist Tools";
+                rewind_item.label       = "Rewind 1 second";
+                rewind_item.description =
+                    "Return to an earlier point kept in temporary memory.";
+                rewind_item.type        = RECOMP_RUNTIME_UI_ACTION;
+                runtime_ui_extras.push_back(rewind_item);
+            }
+        }
 
         RecompRuntimeUiItem fps_item{};
         fps_item.key         = GBARECOMP_UI_KEY_FPS;
@@ -2483,8 +2588,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         pacer.emplace();  // paces to the GBA's 59.7275 Hz
     }
 
-    // Host-window save-state slots: the ROM path with a .stateN
-    // extension (N = 1..9). Shift+Fn writes slot N, Fn restores it.
+    // Host-window save-state slots: the ROM path with a .stateN extension.
+    // Shift+F1..F9 writes slots 1..9 and F1..F9 restores them; a runtime menu
+    // may additionally expose slot 10 without changing the established
+    // function-key shortcut scheme.
     auto slot_path = [&](int slot) -> std::string {
         std::filesystem::path p(args.rom);
         p.replace_extension(".state" + std::to_string(slot));
@@ -2492,6 +2599,48 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     };
 
     uint64_t last_presented_frame = ppu.frame_count();
+
+    struct RewindPoint {
+        uint64_t frame = 0;
+        std::vector<uint8_t> state;
+    };
+    std::deque<RewindPoint> rewind_history;
+    const uint64_t rewind_interval = std::max<uint64_t>(
+        1, opts.rewind_capture_interval_frames);
+    const std::size_t rewind_capacity = opts.rewind_history_seconds == 0
+        ? 0
+        : static_cast<std::size_t>(
+              (static_cast<uint64_t>(opts.rewind_history_seconds) * 60u +
+               rewind_interval - 1u) / rewind_interval + 1u);
+    uint64_t next_rewind_capture_frame = ppu.frame_count();
+
+    auto assist_tools_enabled = [&]() -> bool {
+#if defined(GBARECOMP_RUNTIME_UI)
+        return !opts.expose_assist_tools ||
+               runtime_ui_context.assist_tools_enabled;
+#else
+        return true;
+#endif
+    };
+    auto capture_rewind_point = [&]() {
+        if (!rewind_capacity || !assist_tools_enabled()) return;
+        const uint64_t frame = ppu.frame_count();
+        if (frame < next_rewind_capture_frame) return;
+        RewindPoint point;
+        point.frame = frame;
+        std::string e;
+        if (!do_savestate_save_bytes(point.state, e)) {
+            std::fprintf(stderr,
+                         "[gbarecomp:runtime] rewind capture failed: %s\n",
+                         e.c_str());
+            next_rewind_capture_frame = frame + rewind_interval;
+            return;
+        }
+        rewind_history.push_back(std::move(point));
+        while (rewind_history.size() > rewind_capacity)
+            rewind_history.pop_front();
+        next_rewind_capture_frame = frame + rewind_interval;
+    };
 
     // Optional frame-indexed KEYINPUT trace. Interactive discovery records
     // every observed key-state change and flushes it immediately; strict
@@ -2594,6 +2743,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     auto pump_host_input = [&]() {
         if (!args.window) return;
+        capture_rewind_point();
         auto ev = win.pump();
         if (!input_replay_requested) bus.io().set_keyinput(ev.keyinput);
         if (bus.gyro().active()) {
@@ -2648,7 +2798,15 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                         step + 1, kSolarSteps[step]);
             std::fflush(stdout);
         }
-        if (pacer) pacer->set_uncapped(ev.fast_forward);
+        bool fast_forward_latched = false;
+#if defined(GBARECOMP_RUNTIME_UI)
+        fast_forward_latched = runtime_ui_context.fast_forward_latched;
+#endif
+        if (pacer) {
+            pacer->set_uncapped(
+                assist_tools_enabled() &&
+                (ev.fast_forward || fast_forward_latched));
+        }
         // System hotkeys (config.ini [KeyMap], rebindable in the launcher).
         if (ev.toggle_fullscreen) {
             // Toggle between windowed and the configured mode. A session
@@ -2681,6 +2839,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             runtime_ui_context.pending_load_slot = 0;
         }
 #endif
+        if (opts.expose_assist_tools && !assist_tools_enabled()) {
+            ev.save_slot = 0;
+            ev.load_slot = 0;
+        }
         if (ev.save_slot) {
             std::string path = slot_path(ev.save_slot);
             std::string e;
@@ -2709,12 +2871,52 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 // The load jumped guest time; realign the pacer so it
                 // doesn't burn the accumulated lag catching up.
                 if (pacer) pacer->reset();
+                rewind_history.clear();
+                next_rewind_capture_frame = ppu.frame_count();
             } else {
                 std::fprintf(stderr,
                              "[gbarecomp:runtime] savestate load (slot %d) "
                              "failed: %s\n", ev.load_slot, e.c_str());
             }
         }
+#if defined(GBARECOMP_RUNTIME_UI)
+        if (runtime_ui_context.pending_rewind) {
+            runtime_ui_context.pending_rewind = false;
+            const uint64_t current = ppu.frame_count();
+            const uint64_t target = current > 60 ? current - 60 : 0;
+            std::size_t target_index = rewind_history.size();
+            for (std::size_t i = rewind_history.size(); i > 0; --i) {
+                if (rewind_history[i - 1].frame <= target) {
+                    target_index = i - 1;
+                    break;
+                }
+            }
+            if (target_index == rewind_history.size()) {
+                std::fprintf(stderr,
+                             "[gbarecomp:runtime] rewind history is not "
+                             "ready yet\n");
+            } else {
+                std::string e;
+                if (do_savestate_load_bytes(
+                        rewind_history[target_index].state, e)) {
+                    while (rewind_history.size() > target_index + 1)
+                        rewind_history.pop_back();
+                    last_presented_frame = ppu.frame_count() - 1;
+                    next_rewind_capture_frame =
+                        ppu.frame_count() + rewind_interval;
+                    if (pacer) pacer->reset();
+                    std::printf("rewind_loaded frame=%llu\n",
+                                static_cast<unsigned long long>(
+                                    ppu.frame_count()));
+                    std::fflush(stdout);
+                } else {
+                    std::fprintf(stderr,
+                                 "[gbarecomp:runtime] rewind failed: %s\n",
+                                 e.c_str());
+                }
+            }
+        }
+#endif
     };
 
     if (args.window) {
