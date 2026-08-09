@@ -838,6 +838,7 @@ void test_trusted_foreign_background_keeps_guest_objects_and_resets() {
         GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED,
         0, 0,
         0, 0,
+        0, 0, 0,
     };
     foreign.fill(0x001F);  // Red foreign terrain.
 
@@ -947,6 +948,7 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
         GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED,
         0, 0,
         0, 0,
+        0, 0, 0,
     };
     gba::foreign_presentation_internal::set_obj_focus(&focus);
     f.ppu.render(f.rgb.data(), 0x1000, f.io.data(), f.vram.data(),
@@ -975,11 +977,12 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
         std::exit(1);
     }
 
-    // A source-mapped player body can require origin-only matching.  The
-    // 32x32 green room prop has its center at the Link source feet but an
-    // origin outside the bounded player-body rectangle, so it must stay put
-    // while the red player OBJ moves.  This models a doorway behind Link
-    // without hiding the prop or unrelated guest OBJ.
+    // Source-mapped player presentation uses a bounded native-playfield
+    // association. These values model the captured Minish house portal frame:
+    // Link source feet at (112,85), the visible 32x32 door at (103,48), and
+    // the production 32x40 focus radius. Its center is inside that rectangle
+    // even though its origin is high above Link; a distant HUD-like object is
+    // deliberately outside it.
     Fixture strict;
     disable_all_objects(strict);
     store16(&strict.pal[0], 0x7C00);
@@ -991,37 +994,149 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
                 static_cast<uint8_t>(0x22));
     std::fill_n(strict.vram.begin() + 0x10040, 32,
                 static_cast<uint8_t>(0x22));
-    store16(&strict.oam[0], 20);
-    store16(&strict.oam[2], 20);
+    std::fill_n(strict.vram.begin() + 0x10060, 32,
+                static_cast<uint8_t>(0x22));
+    std::fill_n(strict.vram.begin() + 0x10080, 32,
+                static_cast<uint8_t>(0x22));
+    std::fill_n(strict.vram.begin() + 0x100A0, 32,
+                static_cast<uint8_t>(0x22));
+    store16(&strict.oam[0], 85);
+    store16(&strict.oam[2], 112);
     store16(&strict.oam[4], 0);
-    store16(&strict.oam[8], 4);
-    store16(&strict.oam[10], 0x8000 | 4);  // 32x32 prop centered at (20,20).
-    store16(&strict.oam[12], 1);
-    store16(&strict.oam[16], 0x4000 | 28); // 16x8 source-player shadow.
-    store16(&strict.oam[18], 22);
+    store16(&strict.oam[8], 48);
+    store16(&strict.oam[10], 0x8000 | 103);  // 32x32 door at (103,48).
+    store16(&strict.oam[12], 0x0C01);  // Low-priority 32x32 room prop.
+    store16(&strict.oam[16], 0x4000 | 93); // 16x8 source-player shadow.
+    store16(&strict.oam[18], 114);
     store16(&strict.oam[20], 2);
+    // A small native playfield effect inside the source association must not
+    // stay frozen after the player moves. The distant tile is HUD-like and
+    // proves that this is not a blanket OBJ hide.
+    store16(&strict.oam[24], 85);
+    store16(&strict.oam[26], 140);
+    store16(&strict.oam[28], 0x0803);  // Native playfield priority 2.
+    store16(&strict.oam[32], 20);
+    store16(&strict.oam[34], 200);
+    store16(&strict.oam[36], 4);
+    // A second priority-2 native prop is intentionally farther than the
+    // 32x40 Link rectangle. It proves foreign presentation does not leave a
+    // visible room prop merely because the portal was entered farther away.
+    store16(&strict.oam[40], 120);
+    store16(&strict.oam[42], 10);
+    store16(&strict.oam[44], 0x0805);
     const GbaForeignObjFocusTransform origin_only{
         GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION,
-        20, 20, 60, 60,
-        8, 8,
+        112, 85, 160, 100,
+        32, 40,
         GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED |
             GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY |
-        GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE |
-            GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY,
+            GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE |
+            GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY |
+            GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NEARBY_NONMATCHING |
+            GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY,
         0, 1,
         2, 1,
+        0, 1, 0,
     };
     gba::foreign_presentation_internal::set_obj_focus(&origin_only);
     strict.ppu.render(strict.rgb.data(), 0x1000, strict.io.data(),
                       strict.vram.data(), strict.oam.data(), strict.pal.data());
-    expect_pixel(&strict.rgb[(60 * 240 + 60) * 3], 255, 0, 0,
+    expect_pixel(&strict.rgb[(100 * 240 + 160) * 3], 255, 0, 0,
                  "origin-only focus moves source player origin");
-    expect_pixel(&strict.rgb[(68 * 240 + 62) * 3], 0, 255, 0,
+    expect_pixel(&strict.rgb[(108 * 240 + 162) * 3], 0, 255, 0,
                  "source focus moves the bounded player shadow allocation");
-    expect_pixel(&strict.rgb[(4 * 240 + 4) * 3], 0, 0, 255,
-                 "bounded source focus suppresses centered room prop");
-    expect_pixel(&strict.rgb[(44 * 240 + 44) * 3], 0, 0, 255,
-                 "origin-only focus does not translate centered room prop");
+    expect_pixel(&strict.rgb[(48 * 240 + 103) * 3], 0, 0, 255,
+                 "bounded source focus suppresses observed house-door anchor");
+    expect_pixel(&strict.rgb[(63 * 240 + 151) * 3], 0, 0, 255,
+                 "house door is not translated to foreign destination");
+    expect_pixel(&strict.rgb[(85 * 240 + 140) * 3], 0, 0, 255,
+                 "bounded source focus suppresses small native playfield OBJ");
+    expect_pixel(&strict.rgb[(120 * 240 + 10) * 3], 0, 0, 255,
+                 "HUD-class focus suppresses distant native playfield OBJ");
+    expect_pixel(&strict.rgb[(20 * 240 + 200) * 3], 0, 255, 0,
+                 "bounded source focus preserves distant HUD-like OBJ");
+    gba::foreign_presentation_internal::set_obj_focus(nullptr);
+
+    // A source player is a composite of independent body and shadow OBJs.
+    // Scaling every matched component around one Link-feet anchor keeps the
+    // pieces contiguous: do not merely shrink them at their old origins.
+    Fixture scaled;
+    disable_all_objects(scaled);
+    store16(&scaled.pal[0], 0x7C00);       // Blue backdrop.
+    store16(&scaled.pal[0x202], 0x001F);   // Tile 0 pixel 0: red.
+    store16(&scaled.pal[0x204], 0x03E0);   // Tile 0 pixel 1: green.
+    store16(&scaled.pal[0x206], 0x7C00);   // Tile 0 pixel 2: blue.
+    store16(&scaled.pal[0x208], 0x7FFF);   // Tile 0 pixel 3: white.
+    store16(&scaled.pal[0x20A], 0x03FF);   // Tile 0 pixel 4: cyan.
+    store16(&scaled.pal[0x20C], 0x7C1F);   // Tile 0 pixel 5: magenta.
+    store16(&scaled.pal[0x20E], 0x7FE0);   // Tile 0 pixel 6: yellow.
+    store16(&scaled.pal[0x210], 0x4210);   // Tile 0 pixel 7: grey.
+    for (int row = 0; row < 8; ++row) {
+        for (int col = 0; col < 8; ++col) {
+            const std::size_t byte = 0x10000u + row * 4u + col / 2u;
+            scaled.vram[byte] |= static_cast<uint8_t>((col + 1) <<
+                ((col & 1) != 0 ? 4 : 0));
+        }
+    }
+    std::fill_n(scaled.vram.begin() + 0x10020, 32,
+                static_cast<uint8_t>(0x22));  // Green second body piece.
+    std::fill_n(scaled.vram.begin() + 0x10040, 64,
+                static_cast<uint8_t>(0x44));  // White 16x8 shadow.
+    store16(&scaled.oam[0], 20);              // 8x8 body left at (20,20).
+    store16(&scaled.oam[2], 20);
+    store16(&scaled.oam[4], 0);
+    store16(&scaled.oam[8], 20);              // 8x8 body right at (28,20).
+    store16(&scaled.oam[10], 28);
+    store16(&scaled.oam[12], 1);
+    store16(&scaled.oam[16], 0x4000 | 28);    // 16x8 shadow at (20,28).
+    store16(&scaled.oam[18], 20);
+    store16(&scaled.oam[20], 2);
+    const GbaForeignObjFocusTransform scaled_focus{
+        GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION,
+        20, 28, 100, 100,
+        16, 16,
+        GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED |
+            GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY |
+            GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE,
+        0, 2,
+        2, 1,
+        192, 1, 0,
+    };
+    gba::foreign_presentation_internal::set_obj_focus(&scaled_focus);
+    scaled.ppu.render(scaled.rgb.data(), 0x1000, scaled.io.data(),
+                      scaled.vram.data(), scaled.oam.data(), scaled.pal.data());
+    dump_focus_screenshot_if_requested(scaled.rgb.data());
+    // Pixel-center nearest-neighbor maps the 8px left tile to source columns
+    // 0,2,3,4,6,7. Its scaled 6px span is immediately followed by the second
+    // component's scaled span: no body gap or unscaled source residue.
+    expect_pixel(&scaled.rgb[(94 * 240 + 100) * 3], 255, 0, 0,
+                 "scaled composite samples first source pixel");
+    expect_pixel(&scaled.rgb[(94 * 240 + 101) * 3], 0, 0, 255,
+                 "scaled composite nearest-neighbor samples source pixel 2");
+    expect_pixel(&scaled.rgb[(94 * 240 + 102) * 3], 255, 255, 255,
+                 "scaled composite nearest-neighbor samples source pixel 3");
+    expect_pixel(&scaled.rgb[(94 * 240 + 105) * 3], 132, 132, 132,
+                 "scaled composite retains the right edge source pixel");
+    expect_pixel(&scaled.rgb[(94 * 240 + 106) * 3], 0, 255, 0,
+                 "scaled composite keeps second body piece contiguous");
+    expect_pixel(&scaled.rgb[(100 * 240 + 100) * 3], 255, 255, 255,
+                 "scaled source shadow follows the common feet anchor");
+    expect_pixel(&scaled.rgb[(100 * 240 + 111) * 3], 255, 255, 255,
+                 "scaled 16px shadow has a 12px nearest-neighbor span");
+    expect_pixel(&scaled.rgb[(94 * 240 + 112) * 3], 0, 0, 255,
+                 "scaled composite leaves pixels outside its new bounds alone");
+
+    // The same descriptor clips normally at the native PPU edge; clipping is
+    // still applied after the shared-anchor scale rather than mutating OAM.
+    GbaForeignObjFocusTransform clipped_focus = scaled_focus;
+    clipped_focus.destination_link_feet_x = -2;
+    gba::foreign_presentation_internal::set_obj_focus(&clipped_focus);
+    scaled.ppu.render(scaled.rgb.data(), 0x1000, scaled.io.data(),
+                      scaled.vram.data(), scaled.oam.data(), scaled.pal.data());
+    expect_pixel(&scaled.rgb[(94 * 240 + 0) * 3], 255, 255, 255,
+                 "scaled composite clips its negative left edge");
+    expect_pixel(&scaled.rgb[(94 * 240 + 4) * 3], 0, 255, 0,
+                 "scaled composite keeps the clipped second piece aligned");
     gba::foreign_presentation_internal::set_obj_focus(nullptr);
 
     // The PPU independently validates the immutable descriptor. A corrupted
@@ -1061,6 +1176,7 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
         0,
         0, 0,
         0, 0,
+        0, 0, 0,
     };
     gba::foreign_presentation_internal::set_obj_focus(&affine_focus);
     affine.ppu.render(affine.rgb.data(), 0x1000, affine.io.data(),
@@ -1083,9 +1199,10 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
         GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION,
         20, 60, 30, 70,
         8, 8,
-        0,
+        GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE,
+        0, 1,
         0, 0,
-        0, 0,
+        192, 0, 0,
     };
     gba::foreign_presentation_internal::set_obj_focus(&translucent_focus);
     translucent.ppu.render(translucent.rgb.data(), 0x1000,
@@ -1093,6 +1210,8 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
                             translucent.oam.data(), translucent.pal.data());
     expect_pixel(&translucent.rgb[(70 * 240 + 30) * 3], 132, 0, 132,
                  "focused semitransparent OBJ blends at destination");
+    expect_pixel(&translucent.rgb[(70 * 240 + 36) * 3], 0, 0, 255,
+                 "scaled semitransparent OBJ clips at its nearest-neighbor bounds");
 
     // Signed OAM wrap happens before focus; a clipped (-4,-4) OBJ can become
     // visible at (0,0) without mutating the wrapped guest OAM value.
@@ -1112,6 +1231,7 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
         0,
         0, 0,
         0, 0,
+        0, 0, 0,
     };
     gba::foreign_presentation_internal::set_obj_focus(&wrapped_focus);
     wrapped.ppu.render(wrapped.rgb.data(), 0x1000, wrapped.io.data(),

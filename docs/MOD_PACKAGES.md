@@ -206,10 +206,16 @@ An enabled, committed plugin may publish immutable presentation data without
 letting the PPU call game code. `gba_mod_publish_foreign_background()` accepts
 a stable native 240x160 BGR555 buffer. `gba_mod_publish_foreign_obj_focus()`
 accepts a `GbaForeignObjFocusTransform` from `foreign_obj_focus.h`: a bounded
-source Link-feet anchor, destination virtual anchor, and inclusive source
-radii. The PPU translates only visible OBJs whose decoded origin or bounding
-box center is inside that rectangle; every other OBJ is preserved exactly.
-There is no hide-unfocused mode in ABI v1.
+source Link-feet anchor, destination virtual anchor, inclusive source radii,
+and an optional bounded uniform Q8.8 scale. The PPU translates only visible
+OBJs whose decoded origin or bounding box center is inside that rectangle;
+when `SOURCE_TILE_RANGE` selects a source player allocation, it may also
+nearest-neighbor scale its non-affine body/shadow OBJs around the common feet
+anchor. Unfocused OBJs are preserved by default; a source-tile-bounded
+descriptor may explicitly suppress source-playfield OBJs, including the
+full-frame policy that retains only its declared HUD priority class. Terrain,
+guest OAM, and collision are never modified. Affine OBJs retain their
+guest-authored scale.
 
 Both endpoints are authorized only for the currently committed plugin ID and
 are cleared before each activation callback, on PPU reset, and on savestate

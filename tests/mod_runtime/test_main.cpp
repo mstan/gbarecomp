@@ -217,16 +217,33 @@ int main() {
         GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED,
         0, 0,
         0, 0,
+        0, 0, 0,
     };
     GbaForeignObjFocusTransform invalid_focus = foreign_focus;
     invalid_focus.source_radius_x = 241;  // Native PPU width is 240.
     GbaForeignObjFocusTransform invalid_flags = foreign_focus;
     invalid_flags.flags = 0x80000000u;
+    GbaForeignObjFocusTransform invalid_scale = foreign_focus;
+    invalid_scale.source_obj_scale_q8_8 =
+        GBA_FOREIGN_OBJ_FOCUS_SCALE_MIN_Q8_8 - 1;
+    GbaForeignObjFocusTransform invalid_unscoped_scale = foreign_focus;
+    invalid_unscoped_scale.source_obj_scale_q8_8 = 192;
+    GbaForeignObjFocusTransform invalid_reserved = foreign_focus;
+    invalid_reserved.reserved = 1;
+    GbaForeignObjFocusTransform invalid_hud_priority = foreign_focus;
+    invalid_hud_priority.hud_obj_priority_max = 4;
+    GbaForeignObjFocusTransform invalid_global_hud = foreign_focus;
+    invalid_global_hud.flags =
+        GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY;
     GbaForeignObjFocusTransform origin_only_focus = foreign_focus;
     origin_only_focus.flags |= GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY |
         GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE;
     origin_only_focus.source_obj_tile_base = 100;
     origin_only_focus.source_obj_tile_count = 16;
+    origin_only_focus.source_obj_scale_q8_8 = 192;
+    origin_only_focus.flags |=
+        GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY;
+    origin_only_focus.hud_obj_priority_max = 1;
     gba_mod_clear_foreign_background();
     gba_mod_clear_foreign_obj_focus();
     if (gba_mod_publish_foreign_background("test.adaptive-view", foreign_pixels) ||
@@ -319,6 +336,11 @@ int main() {
         gba_mod_publish_foreign_obj_focus("test.wrong-plugin", &invalid_focus) ||
         gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_focus) ||
         gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_flags) ||
+        gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_scale) ||
+        gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_unscoped_scale) ||
+        gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_reserved) ||
+        gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_hud_priority) ||
+        gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_global_hud) ||
         gba::foreign_presentation_internal::obj_focus() != &foreign_focus) {
         return fail("foreign presentation publication was not plugin-authorized or stable");
     }

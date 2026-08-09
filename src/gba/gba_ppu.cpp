@@ -257,10 +257,23 @@ bool valid_foreign_obj_focus(const GbaForeignObjFocusTransform* focus) {
            focus->abi_version == GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION &&
            focus->source_radius_x <= GbaPpu::kScreenWidth &&
            focus->source_radius_y <= GbaPpu::kScreenHeight &&
+           (focus->source_obj_scale_q8_8 == 0 ||
+            (focus->source_obj_scale_q8_8 >=
+                 GBA_FOREIGN_OBJ_FOCUS_SCALE_MIN_Q8_8 &&
+             focus->source_obj_scale_q8_8 <=
+                 GBA_FOREIGN_OBJ_FOCUS_SCALE_MAX_Q8_8 &&
+             (focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) != 0)) &&
+           focus->hud_obj_priority_max <= 3u &&
+           focus->reserved == 0 &&
            (focus->flags & ~(GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED |
                              GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY |
                              GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE |
-                             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY)) == 0 &&
+                             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY |
+                             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NEARBY_NONMATCHING |
+                             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY)) == 0 &&
+           ((focus->flags &
+             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY) == 0 ||
+            (focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) != 0) &&
            ((focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) == 0 ||
             (focus->source_obj_tile_count != 0 &&
              focus->source_obj_tile_base < 1024u &&
@@ -288,13 +301,44 @@ bool focus_contains(const GbaForeignObjFocusTransform& focus, int x, int y) {
 // operates on decoded local coordinates; guest OAM and memory stay untouched.
 enum class ForeignObjFocusAction { kKeep, kTranslate, kSuppress };
 
-ForeignObjFocusAction apply_foreign_obj_focus(int* sx, int* sy, int width,
-                                              int height, uint32_t tile_num) {
+struct ForeignObjFocusResult {
+    ForeignObjFocusAction action = ForeignObjFocusAction::kKeep;
+    int scale_q8_8 = GBA_FOREIGN_OBJ_FOCUS_SCALE_IDENTITY_Q8_8;
+};
+
+int round_scaled_offset(int offset, int scale_q8_8) {
+    const int scaled = offset * scale_q8_8;
+    return scaled >= 0 ?
+        (scaled + GBA_FOREIGN_OBJ_FOCUS_SCALE_IDENTITY_Q8_8 / 2) /
+            GBA_FOREIGN_OBJ_FOCUS_SCALE_IDENTITY_Q8_8 :
+        -((-scaled + GBA_FOREIGN_OBJ_FOCUS_SCALE_IDENTITY_Q8_8 / 2) /
+          GBA_FOREIGN_OBJ_FOCUS_SCALE_IDENTITY_Q8_8);
+}
+
+int scaled_extent(int extent, int scale_q8_8) {
+    const int scaled = (extent * scale_q8_8 +
+                        static_cast<int>(GBA_FOREIGN_OBJ_FOCUS_SCALE_IDENTITY_Q8_8) / 2) /
+                       static_cast<int>(GBA_FOREIGN_OBJ_FOCUS_SCALE_IDENTITY_Q8_8);
+    return std::max(1, scaled);
+}
+
+int nearest_source_pixel(int destination_pixel, int source_extent,
+                         int destination_extent) {
+    // Map pixel centers, rather than tile origins, so a nearest-neighbor
+    // downscale retains both edges of an 8x8 source tile.
+    return ((destination_pixel * 2 + 1) * source_extent) /
+           (destination_extent * 2);
+}
+
+ForeignObjFocusResult apply_foreign_obj_focus(int* sx, int* sy, int width,
+                                              int height, uint32_t tile_num,
+                                              bool scale_non_affine,
+                                              uint32_t obj_priority) {
     const GbaForeignObjFocusTransform* focus =
         foreign_presentation_internal::obj_focus();
     if (!sx || !sy || width <= 0 || height <= 0 ||
         !valid_foreign_obj_focus(focus)) {
-        return ForeignObjFocusAction::kKeep;
+        return {};
     }
     const bool origin_matches = focus_contains(*focus, *sx, *sy);
     const bool center_matches =
@@ -311,23 +355,46 @@ ForeignObjFocusAction apply_foreign_obj_focus(int* sx, int* sy, int width,
         (focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) == 0 ||
         in_main_range || in_aux_range;
     if (!tile_matches) {
-        if ((focus->flags & GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY) != 0 &&
-            (origin_matches || center_matches) &&
-            (width >= 32 || height >= 32)) {
-            return ForeignObjFocusAction::kSuppress;
+        if ((focus->flags &
+             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY) != 0) {
+            // The game captures HUD OAM in the explicitly configured priority
+            // class. Every other unallowlisted OBJ is native playfield state,
+            // so suppress it across the foreign frame, not just near Link.
+            if (obj_priority <= focus->hud_obj_priority_max) return {};
+            return {ForeignObjFocusAction::kSuppress};
         }
-        return ForeignObjFocusAction::kKeep;
+        const bool nearby = origin_matches || center_matches;
+        const bool suppress_any =
+            (focus->flags & GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NEARBY_NONMATCHING) != 0;
+        const bool suppress_large =
+            (focus->flags & GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY) != 0 &&
+            (width >= 32 || height >= 32);
+        if (nearby && (suppress_any || suppress_large)) {
+            return {ForeignObjFocusAction::kSuppress};
+        }
+        return {};
     }
     if (!origin_matches &&
         ((focus->flags & GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY) != 0 ||
          !center_matches)) {
-        return ForeignObjFocusAction::kKeep;
+        return {};
     }
-    *sx += static_cast<int>(focus->destination_link_feet_x) -
-           static_cast<int>(focus->source_link_feet_x);
-    *sy += static_cast<int>(focus->destination_link_feet_y) -
-           static_cast<int>(focus->source_link_feet_y);
-    return ForeignObjFocusAction::kTranslate;
+    // Scaling needs the same explicit, bounded source allocation that selects
+    // Link's composite body/shadow. A geometry-only focus may translate but
+    // cannot accidentally resample a nearby guest OBJ.
+    const bool has_bounded_source_tiles =
+        (focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) != 0;
+    const int scale_q8_8 =
+        scale_non_affine && has_bounded_source_tiles &&
+            focus->source_obj_scale_q8_8 != 0 ?
+        focus->source_obj_scale_q8_8 : GBA_FOREIGN_OBJ_FOCUS_SCALE_IDENTITY_Q8_8;
+    *sx = static_cast<int>(focus->destination_link_feet_x) +
+        round_scaled_offset(*sx - static_cast<int>(focus->source_link_feet_x),
+                            scale_q8_8);
+    *sy = static_cast<int>(focus->destination_link_feet_y) +
+        round_scaled_offset(*sy - static_cast<int>(focus->source_link_feet_y),
+                            scale_q8_8);
+    return {ForeignObjFocusAction::kTranslate, scale_q8_8};
 }
 
 // Convert 16-bit GBA color (0BBBBBGGGGGRRRRR) to 24-bit RGB888.
@@ -997,7 +1064,8 @@ void render_scanline_internal(uint8_t* rgb,
             if (rot_scale) {
                 int bw = disable_or_double ? sw * 2 : sw;
                 int bh = disable_or_double ? sh * 2 : sh;
-                if (apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num) ==
+                if (apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num,
+                                            false, (attr2 >> 10) & 3u).action ==
                     ForeignObjFocusAction::kSuppress) continue;
                 int j = static_cast<int>(y) - sy;
                 if (j < 0 || j >= bh) continue;
@@ -1022,23 +1090,28 @@ void render_scanline_internal(uint8_t* rgb,
                 }
                 continue;
             }
-            if (apply_foreign_obj_focus(&sx, &sy, sw, sh, tile_num) ==
-                ForeignObjFocusAction::kSuppress) continue;
+            const ForeignObjFocusResult focus_result =
+                apply_foreign_obj_focus(&sx, &sy, sw, sh, tile_num, true,
+                                        (attr2 >> 10) & 3u);
+            if (focus_result.action == ForeignObjFocusAction::kSuppress) continue;
+            const int draw_w = scaled_extent(sw, focus_result.scale_q8_8);
+            const int draw_h = scaled_extent(sh, focus_result.scale_q8_8);
             int line = static_cast<int>(y) - sy;
-            if (line < 0 || line >= sh) continue;
+            if (line < 0 || line >= draw_h) continue;
             bool hflip = (attr1 & 0x1000u) != 0;
             bool vflip = (attr1 & 0x2000u) != 0;
-            int ty = line >> 3;
-            int py = line & 7;
+            const int source_y = nearest_source_pixel(line, sh, draw_h);
+            int ty = source_y >> 3;
+            int py = source_y & 7;
             int src_ty = vflip ? (tiles_h - 1 - ty) : ty;
             int src_py = vflip ? (7 - py) : py;
-            for (int tx = 0; tx < tiles_w; ++tx) {
+            for (int dx = 0; dx < draw_w; ++dx) {
+                const int source_x = nearest_source_pixel(dx, sw, draw_w);
+                const int tx = source_x >> 3;
                 int src_tx = hflip ? (tiles_w - 1 - tx) : tx;
-                for (int px = 0; px < 8; ++px) {
-                    int src_px = hflip ? (7 - px) : px;
-                    emit_obj(src_tx * 8 + src_px, src_ty * 8 + src_py,
-                             sx + tx * 8 + px);
-                }
+                const int px = source_x & 7;
+                int src_px = hflip ? (7 - px) : px;
+                emit_obj(src_tx * 8 + src_px, src_ty * 8 + src_py, sx + dx);
             }
         }
     }
@@ -1600,7 +1673,8 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                 // first, then apply pure data-only focus before clipping.
                 if (obj_focus_active) {
                     resolve_sx();
-                    if (apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num) ==
+                    if (apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num,
+                                                false, (attr2 >> 10) & 3u).action ==
                         ForeignObjFocusAction::kSuppress) continue;
                 }
                 int j = static_cast<int>(y) - sy;
@@ -1627,27 +1701,34 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                 }
                 continue;
             }
+            ForeignObjFocusResult focus_result;
             if (obj_focus_active) {
                 resolve_sx();
-                if (apply_foreign_obj_focus(&sx, &sy, sw, sh, tile_num) ==
-                    ForeignObjFocusAction::kSuppress) continue;
+                focus_result =
+                    apply_foreign_obj_focus(&sx, &sy, sw, sh, tile_num, true,
+                                            (attr2 >> 10) & 3u);
+                if (focus_result.action == ForeignObjFocusAction::kSuppress) continue;
             }
+            const int draw_w = scaled_extent(sw, focus_result.scale_q8_8);
+            const int draw_h = scaled_extent(sh, focus_result.scale_q8_8);
             int line = static_cast<int>(y) - sy;
-            if (line < 0 || line >= sh) continue;
+            if (line < 0 || line >= draw_h) continue;
             if (!obj_focus_active) resolve_sx();
             bool hflip = (attr1 & 0x1000u) != 0;
             bool vflip = (attr1 & 0x2000u) != 0;
-            int ty = line >> 3;
-            int py = line & 7;
+            const int source_y = nearest_source_pixel(line, sh, draw_h);
+            int ty = source_y >> 3;
+            int py = source_y & 7;
             int src_ty = vflip ? (tiles_h - 1 - ty) : ty;
             int src_py = vflip ? (7 - py) : py;
-            for (int tx = 0; tx < tiles_w; ++tx) {
+            for (int dx = 0; dx < draw_w; ++dx) {
+                const int source_x = nearest_source_pixel(dx, sw, draw_w);
+                const int tx = source_x >> 3;
                 int src_tx = hflip ? (tiles_w - 1 - tx) : tx;
-                for (int px = 0; px < 8; ++px) {
-                    int src_px = hflip ? (7 - px) : px;
-                    emit_obj(src_tx * 8 + src_px, src_ty * 8 + src_py,
-                             sx + tx * 8 + px + static_cast<int>(ox));
-                }
+                const int px = source_x & 7;
+                int src_px = hflip ? (7 - px) : px;
+                emit_obj(src_tx * 8 + src_px, src_ty * 8 + src_py,
+                         sx + dx + static_cast<int>(ox));
             }
         }
     }

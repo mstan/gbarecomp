@@ -2120,10 +2120,21 @@ extern "C" int gba_mod_publish_foreign_obj_focus(
         focus->abi_version != GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION ||
         focus->source_radius_x > gba::GbaPpu::kScreenWidth ||
         focus->source_radius_y > gba::GbaPpu::kScreenHeight ||
+        (focus->source_obj_scale_q8_8 != 0 &&
+         (focus->source_obj_scale_q8_8 < GBA_FOREIGN_OBJ_FOCUS_SCALE_MIN_Q8_8 ||
+          focus->source_obj_scale_q8_8 > GBA_FOREIGN_OBJ_FOCUS_SCALE_MAX_Q8_8 ||
+          (focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) == 0)) ||
+        focus->hud_obj_priority_max > 3u ||
+        focus->reserved != 0 ||
         (focus->flags & ~(GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED |
                           GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY |
                           GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE |
-                          GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY)) != 0 ||
+                          GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY |
+                          GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NEARBY_NONMATCHING |
+                          GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY)) != 0 ||
+        ((focus->flags &
+          GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY) != 0 &&
+         (focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) == 0) ||
         ((focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) != 0 &&
          (focus->source_obj_tile_count == 0 ||
           focus->source_obj_tile_base >= 1024u ||

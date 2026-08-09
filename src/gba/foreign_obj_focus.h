@@ -9,12 +9,21 @@
 
 #include <stdint.h>
 
-#define GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION 3u
+#define GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION 5u
+
+// Q8.8 unit scale for source-tile-matched, non-affine OBJs.  A descriptor
+// scale of zero is deliberately an identity scale, so zero-initialized
+// descriptors remain safe while every non-identity request is bounded by the
+// trusted runtime.  The scale is applied around the Link-feet anchor, which
+// keeps independently decoded body, equipment, and shadow OBJs together.
+#define GBA_FOREIGN_OBJ_FOCUS_SCALE_IDENTITY_Q8_8 256u
+#define GBA_FOREIGN_OBJ_FOCUS_SCALE_MIN_Q8_8      128u
+#define GBA_FOREIGN_OBJ_FOCUS_SCALE_MAX_Q8_8      256u
 
 // `flags == 0` is the default and preserves every unfocused OBJ exactly. The
-// explicit bit is accepted for self-documenting callers.  v3 has no blanket
-// hide-unfocused mode: only a source-associated nearby large prop can be
-// suppressed, leaving HUD and unrelated guest objects composed normally.
+// explicit bit is accepted for self-documenting callers. The default has no
+// blanket hide mode; callers must explicitly opt into one of the bounded
+// source-associated suppression policies below.
 #define GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED 0x00000001u
 
 // Match only an OBJ origin, not its bounding-box center.  A source-mapped
@@ -32,6 +41,20 @@
 // when it also falls inside this focus rectangle.  This removes a frozen room
 // prop behind a translated player without touching HUD or distant guest OBJ.
 #define GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY 0x00000008u
+
+// Suppress any non-player OBJ that is geometrically associated with the
+// frozen source playfield.  SOURCE_TILE_RANGE still lets the player body and
+// optional player-item/shadow allocations through, while HUD and distant OBJ
+// retain normal composition.
+#define GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NEARBY_NONMATCHING 0x00000010u
+
+// Suppress every non-source-tile OBJ across the foreign frame, except the
+// explicitly classified HUD priority band. This is intentionally valid only
+// together with SOURCE_TILE_RANGE: the plugin must first identify the exact
+// player (and optional player-item/shadow) allocations it wishes to retain.
+// It prevents a native room prop from surviving merely because it is farther
+// from Link than the local association radius.
+#define GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY 0x00000020u
 
 typedef struct GbaForeignObjFocusTransform {
     uint32_t abi_version;
@@ -56,9 +79,19 @@ typedef struct GbaForeignObjFocusTransform {
     // Zero count disables it; when nonzero it uses the same in-bounds rule.
     uint16_t source_aux_obj_tile_base;
     uint16_t source_aux_obj_tile_count;
+    // Uniform source-tile OBJ scale in Q8.8. Zero means identity (1.0).  The
+    // PPU uses nearest-neighbor source sampling and never changes guest OAM,
+    // terrain, HUD, or collision coordinates. Affine OBJs are translated but
+    // retain their guest-authored affine transform.
+    uint16_t source_obj_scale_q8_8;
+    // The native HUD OAM capture uses priorities 0 and 1, while room/player
+    // playfield OBJ use priority 2. This bounded upper inclusive class is
+    // consulted only by SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY.
+    uint8_t hud_obj_priority_max;
+    uint8_t reserved;
 } GbaForeignObjFocusTransform;
 
 #if defined(__cplusplus)
-static_assert(sizeof(GbaForeignObjFocusTransform) == 28,
-              "foreign OBJ focus ABI must remain a fixed 28-byte descriptor");
+static_assert(sizeof(GbaForeignObjFocusTransform) == 32,
+              "foreign OBJ focus ABI must remain a fixed 32-byte descriptor");
 #endif
