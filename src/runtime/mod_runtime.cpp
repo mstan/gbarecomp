@@ -3,6 +3,7 @@
 #include "asset_picker.h"
 
 #include "../gba/crc32.h"
+#include "../gba/mod_audio.h"
 #include "../gba/sha1.h"
 
 #if defined(GBARECOMP_MOD_UI)
@@ -2032,6 +2033,9 @@ void mod_runtime_activate_plugins() {
     // pass starts from stock entry-hook state; selected trusted plugins opt in
     // again from their activation callback.
     gba_mod_disable_all_function_hooks();
+    // PCM registration is inert. Reset restores both its bounded voice pool
+    // and disabled-source state before the selected trusted plugin opts in.
+    gba_mod_audio_reset();
     for (GBAModActivationCallback callback : reset_callbacks())
         if (callback) callback();
     for (const ResolvedPlugin& plugin : runtime.committed.plugins)

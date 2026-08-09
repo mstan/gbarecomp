@@ -35,6 +35,7 @@
 #include "save_config.h"
 #include "self_heal.h"
 #include "overlay_loader.h"
+#include "../gba/mod_audio.h"
 #if defined(GBARECOMP_ENABLE_MODS)
 #include "mod_runtime.h"
 #endif
@@ -1932,6 +1933,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (!debug::load_state(path.c_str(), make_snapshot_ctx(), &e)) {
             return false;
         }
+        // Overlay cursors are host delivery state rather than emulated state.
+        // Discard them so a pre-load cue cannot continue or duplicate over the
+        // restored guest world. The host bridge's already-queued native audio
+        // remains an intentionally separate, future flush concern.
+        gba_mod_audio_stop_all();
         sync_frame_counter();  // realign vblank_count with restored PPU
         // Re-origin the fingerprint cycle clock + ring at the load point so the
         // recomp and interp oracle share a cycle origin for diff_cycle_trace.py.
@@ -2748,7 +2754,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 const uint64_t fp_t2 = FramePhaseRing::now_ns();
                 int16_t audio_buf[2048];
                 std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
-                if (n > 0) win.push_audio_samples(audio_buf, n);
+                if (n > 0) {
+                    gba_mod_audio_mix(audio_buf, n);
+                    win.push_audio_samples(audio_buf, n);
+                }
                 const uint64_t fp_t3 = FramePhaseRing::now_ns();
                 pump_host_input();
                 // Present-in-place can remain inside a single step_once() for
@@ -3119,7 +3128,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 const uint64_t fp_t2 = FramePhaseRing::now_ns();
                 int16_t audio_buf[2048];
                 std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
-                if (n > 0) win.push_audio_samples(audio_buf, n);
+                if (n > 0) {
+                    gba_mod_audio_mix(audio_buf, n);
+                    win.push_audio_samples(audio_buf, n);
+                }
                 const uint64_t fp_t3 = FramePhaseRing::now_ns();
                 pump_host_input();
                 const uint64_t fp_t4 = FramePhaseRing::now_ns();

@@ -219,6 +219,7 @@ add_library(gbarecomp_gba STATIC
     src/gba/gba_timers.cpp
     src/gba/gba_ppu.cpp
     src/gba/gba_audio.cpp
+    src/gba/mod_audio.cpp
     src/gba/gba_m4a.cpp
     src/gba/audio_shadow.cpp
     src/gba/mp2k_shadow.cpp
@@ -563,6 +564,7 @@ if(GBARECOMP_ENABLE_MODS)
         src/runtime/mod_function_hooks.cpp
         src/runtime/asset_picker.cpp
         src/runtime/host_platform.cpp
+        src/gba/mod_audio.cpp
         src/gba/crc32.cpp
         src/gba/sha1.cpp)
     target_include_directories(mod_runtime_tests PRIVATE
@@ -572,6 +574,12 @@ if(GBARECOMP_ENABLE_MODS)
     endif()
     add_test(NAME mod_runtime_tests COMMAND mod_runtime_tests)
 endif()
+
+add_executable(mod_audio_tests
+    tests/mod_audio/test_main.cpp
+    src/gba/mod_audio.cpp)
+target_include_directories(mod_audio_tests PRIVATE src/gba)
+add_test(NAME mod_audio_tests COMMAND mod_audio_tests)
 
 add_test(NAME runtime_monolith_guard
     COMMAND ${CMAKE_COMMAND}

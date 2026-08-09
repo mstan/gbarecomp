@@ -1,6 +1,7 @@
 #include "mod_runtime.h"
 #include "mod_function_hooks.h"
 #include "asset_picker.h"
+#include "mod_audio.h"
 #include "sha1.h"
 
 #include <chrono>
@@ -180,6 +181,17 @@ int main() {
             "test.adaptive-view", activate_view)) {
         return fail("could not register trusted plugin");
     }
+    // A source may be registered before the package selection is known, but
+    // activation must reset it to its inert disabled state before a selected
+    // plugin can deliberately enable/play it.
+    const int16_t pcm[] = {1000};
+    const GBAModAudioClip audio_clip = gba_mod_audio_register_pcm_s16_mono(
+        pcm, 1, GBA_MOD_AUDIO_SAMPLE_RATE);
+    if (audio_clip == GBA_MOD_AUDIO_CLIP_INVALID ||
+        !gba_mod_audio_set_enabled(audio_clip, 1) ||
+        !gba_mod_audio_play(audio_clip, 100, 1)) {
+        return fail("could not prepare trusted PCM source");
+    }
 
     const auto write_state = [&](bool asset_enabled, bool other_enabled,
                                  const fs::path& asset_path) {
@@ -232,6 +244,8 @@ int main() {
     gbarecomp::mod_runtime_activate_plugins();
     if (!g_active || !gba_mod_adaptive_view_enabled())
         return fail("enabled plugin did not activate");
+    if (gba_mod_audio_play(audio_clip, 100, 0))
+        return fail("activation did not reset PCM source to disabled");
     const char* resolved = gba_mod_required_asset_path(
         "test.adaptive-view", "zelda1-rom");
     if (!resolved || fs::path(resolved) != foreign_asset_path ||
