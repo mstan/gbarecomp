@@ -1,5 +1,6 @@
 #include "mod_runtime.h"
 #include "mod_function_hooks.h"
+#include "asset_picker.h"
 #include "sha1.h"
 
 #include <chrono>
@@ -107,6 +108,8 @@ int main() {
     const fs::path package = mods / "packages" /
         "test.adaptive-view" / "1.0.0";
     const fs::path rom_path = sandbox / "test.gba";
+    const fs::path foreign_asset_path = sandbox / "zelda1.nes";
+    const fs::path wrong_asset_path = sandbox / "wrong-zelda1.nes";
     std::error_code ec;
     fs::create_directories(package, ec);
     if (ec) return fail("could not create sandbox: " + ec.message());
@@ -121,6 +124,20 @@ int main() {
         if (!file) return fail("could not write test ROM");
     }
     const std::string sha1 = gba::sha1(rom.data(), rom.size()).hex();
+    const std::vector<unsigned char> foreign_asset = {
+        'z', 'e', 'l', 'd', 'a', '-', 'o', 'w', 'n', 'e', 'd'
+    };
+    {
+        std::ofstream file(foreign_asset_path,
+                           std::ios::binary | std::ios::trunc);
+        file.write(reinterpret_cast<const char*>(foreign_asset.data()),
+                   static_cast<std::streamsize>(foreign_asset.size()));
+        if (!file) return fail("could not write required foreign asset");
+    }
+    const std::string foreign_asset_sha1 =
+        gba::sha1(foreign_asset.data(), foreign_asset.size()).hex();
+    if (!write_text(wrong_asset_path, "wrong-owned"))
+        return fail("could not write wrong required foreign asset");
     const std::string manifest =
         "format_version = 1\n"
         "id = \"test.adaptive-view\"\n"
@@ -139,9 +156,22 @@ int main() {
         "name = \"Adaptive view\"\n"
         "group = \"Display\"\n"
         "default_enabled = false\n\n"
+        "[[feature]]\n"
+        "id = \"other-feature\"\n"
+        "name = \"Other feature\"\n"
+        "group = \"Display\"\n"
+        "default_enabled = false\n\n"
         "[[plugin]]\n"
         "feature = \"adaptive-view\"\n"
-        "id = \"test.adaptive-view\"\n";
+        "id = \"test.adaptive-view\"\n\n"
+        "[[asset]]\n"
+        "feature = \"adaptive-view\"\n"
+        "id = \"zelda1-rom\"\n"
+        "name = \"The Legend of Zelda ROM\"\n"
+        "sha1 = \"" + foreign_asset_sha1 + "\"\n"
+        "size = " + std::to_string(foreign_asset.size()) + "\n"
+        "extensions = [\"nes\"]\n"
+        "purpose = \"Used only by this trusted foreign-world feature.\"\n";
     if (!write_text(package / "manifest.toml", manifest))
         return fail("could not write manifest");
 
@@ -151,7 +181,8 @@ int main() {
         return fail("could not register trusted plugin");
     }
 
-    const auto write_state = [&](bool enabled) {
+    const auto write_state = [&](bool asset_enabled, bool other_enabled,
+                                 const fs::path& asset_path) {
         return write_text(
             mods / "state.toml",
             "format_version = 1\n\n"
@@ -161,21 +192,71 @@ int main() {
             "[[feature]]\n"
             "package_id = \"test.adaptive-view\"\n"
             "id = \"adaptive-view\"\n"
-            "enabled = " + std::string(enabled ? "true\n" : "false\n"));
+            "enabled = " + std::string(asset_enabled ? "true\n\n" : "false\n\n") +
+            "[[feature]]\n"
+            "package_id = \"test.adaptive-view\"\n"
+            "id = \"other-feature\"\n"
+            "enabled = " + std::string(other_enabled ? "true\n\n" : "false\n\n") +
+            "[[asset]]\n"
+            "package_id = \"test.adaptive-view\"\n"
+            "id = \"zelda1-rom\"\n"
+            "path = \"" + asset_path.generic_string() + "\"\n");
     };
 
     std::string error;
-    if (!write_state(true) ||
+    // An unrelated enabled feature must not require or expose this asset.
+    if (!write_state(false, true, {}) ||
         !gbarecomp::mod_runtime_initialize(
             mods, "test-game", sha1, &error) ||
         !gbarecomp::mod_runtime_commit(rom_path, &error)) {
-        return fail("enabled plan failed: " + error);
+        return fail("unrelated-feature plan failed: " + error);
+    }
+    gbarecomp::mod_runtime_activate_plugins();
+    if (g_active || gba_mod_adaptive_view_enabled() ||
+        gba_mod_required_asset_path("test.adaptive-view", "zelda1-rom"))
+        return fail("unrelated feature required or exposed a foreign asset");
+
+    // Headless/noninteractive commits must refuse an absent asset rather than
+    // trying to open a picker.
+    if (!write_state(true, false, {}) ||
+        !gbarecomp::mod_runtime_initialize(mods, "test-game", sha1, &error) ||
+        gbarecomp::mod_runtime_commit(rom_path, &error))
+        return fail("missing required asset did not fail noninteractive commit");
+
+    if (!write_state(true, false, foreign_asset_path) ||
+        !gbarecomp::mod_runtime_initialize(
+            mods, "test-game", sha1, &error) ||
+        !gbarecomp::mod_runtime_commit(rom_path, &error)) {
+        return fail("enabled asset plan failed: " + error);
     }
     gbarecomp::mod_runtime_activate_plugins();
     if (!g_active || !gba_mod_adaptive_view_enabled())
         return fail("enabled plugin did not activate");
+    const char* resolved = gba_mod_required_asset_path(
+        "test.adaptive-view", "zelda1-rom");
+    if (!resolved || fs::path(resolved) != foreign_asset_path ||
+        fs::exists(package / "zelda1.nes"))
+        return fail("required asset was not exposed as an external validated path");
 
-    if (!write_state(false) ||
+    gbarecomp::AssetSpec strict_asset;
+    strict_asset.display_name = "test required asset";
+    strict_asset.expected_size = foreign_asset.size();
+    strict_asset.expected_sha1 = foreign_asset_sha1.c_str();
+    strict_asset.hash_mismatch_is_error = true;
+    if (!gbarecomp::validate_asset_path(foreign_asset_path.string(),
+                                        strict_asset).ok ||
+        gbarecomp::validate_asset_path(wrong_asset_path.string(), strict_asset).ok)
+        return fail("strict required-asset size/hash validation failed");
+
+    // A remembered wrong-hash path is stale and cannot survive a fresh
+    // initialize or noninteractive commit.
+    if (!write_state(true, false, wrong_asset_path) ||
+        !gbarecomp::mod_runtime_initialize(mods, "test-game", sha1, &error) ||
+        gba_mod_required_asset_path("test.adaptive-view", "zelda1-rom") ||
+        gbarecomp::mod_runtime_commit(rom_path, &error))
+        return fail("stale wrong-hash asset was accepted or remained published");
+
+    if (!write_state(false, false, foreign_asset_path) ||
         !gbarecomp::mod_runtime_initialize(
             mods, "test-game", sha1, &error) ||
         !gbarecomp::mod_runtime_commit(rom_path, &error)) {
@@ -184,6 +265,8 @@ int main() {
     gbarecomp::mod_runtime_activate_plugins();
     if (g_active || gba_mod_adaptive_view_enabled())
         return fail("disabled plugin did not restore native view");
+    if (gba_mod_required_asset_path("test.adaptive-view", "zelda1-rom"))
+        return fail("disabled package exposed a required asset");
 
     const fs::path wrong_rom = sandbox / "wrong.gba";
     if (!write_text(wrong_rom, "wrong") ||
@@ -191,8 +274,65 @@ int main() {
         return fail("ROM identity guard accepted a mismatched image");
     }
 
+    const fs::path bad_package = mods / "packages" / "bad.asset" / "1.0.0";
+    const std::string bad_manifest_prefix =
+        "format_version = 1\n"
+        "id = \"bad.asset\"\n"
+        "version = \"1.0.0\"\n"
+        "name = \"Bad asset\"\n"
+        "resolver = \"declarative\"\n\n"
+        "[[target]]\n"
+        "game_id = \"test-game\"\n"
+        "rom_sha1 = \"" + sha1 + "\"\n\n"
+        "[[feature]]\n"
+        "id = \"known-feature\"\n"
+        "name = \"Known feature\"\n"
+        "default_enabled = false\n\n";
+    const std::string valid_asset =
+        "[[asset]]\n"
+        "feature = \"known-feature\"\n"
+        "id = \"owned-rom\"\n"
+        "name = \"Owned ROM\"\n"
+        "sha1 = \"" + foreign_asset_sha1 + "\"\n"
+        "size = " + std::to_string(foreign_asset.size()) + "\n"
+        "extensions = [\"nes\"]\n"
+        "purpose = \"Test asset.\"\n";
+    const auto rejects_bad_manifest = [&](const std::string& suffix) {
+        std::error_code local_ec;
+        fs::create_directories(bad_package, local_ec);
+        if (local_ec || !write_text(bad_package / "manifest.toml",
+                                    bad_manifest_prefix + suffix))
+            return false;
+        std::string bad_error;
+        const bool rejected = !gbarecomp::mod_runtime_initialize(
+            mods, "test-game", sha1, &bad_error);
+        fs::remove_all(mods / "packages" / "bad.asset", local_ec);
+        return rejected;
+    };
+    const std::string malformed_asset =
+        "[[asset]]\n"
+        "feature = \"known-feature\"\n"
+        "id = \"owned-rom\"\n"
+        "name = \"Owned ROM\"\n"
+        "sha1 = \"" + foreign_asset_sha1 + "\"\n"
+        "extensions = [\"nes\"]\n"
+        "purpose = \"Missing required size.\"\n";
+    const std::string unknown_feature_asset =
+        "[[asset]]\n"
+        "feature = \"not-a-feature\"\n"
+        "id = \"owned-rom\"\n"
+        "name = \"Owned ROM\"\n"
+        "sha1 = \"" + foreign_asset_sha1 + "\"\n"
+        "size = " + std::to_string(foreign_asset.size()) + "\n"
+        "extensions = [\"nes\"]\n"
+        "purpose = \"Unknown owner.\"\n";
+    if (!rejects_bad_manifest(malformed_asset) ||
+        !rejects_bad_manifest(valid_asset + valid_asset) ||
+        !rejects_bad_manifest(unknown_feature_asset))
+        return fail("malformed, duplicate, or unknown-owner asset manifest was accepted");
+
     fs::remove_all(sandbox, ec);
-    std::cout << "GBA mod runtime: target gate, persisted feature toggle, "
-                 "trusted activation, and reset passed\n";
+    std::cout << "GBA mod runtime: target gate, strict external asset, "
+                 "persisted feature toggle, trusted activation, and reset passed\n";
     return 0;
 }

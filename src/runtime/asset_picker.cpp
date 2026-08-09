@@ -164,6 +164,10 @@ AssetResult load_and_validate(const std::string& path,
         if (spec.expected_crc32 != 0) {
             w << "\n        expected " << hex32(spec.expected_crc32);
         }
+        if (spec.hash_mismatch_is_error) {
+            r.error = w.str();
+            return r;
+        }
         w << "\n\nThis is not the recompiled-against image. Behavior "
              "is undefined; proceeding anyway.";
         r.warning = w.str();
@@ -190,7 +194,7 @@ AssetResult resolve_asset(const std::string& argv_path,
         if (fs::exists(argv_path, ec) && !ec) {
             auto r = load_and_validate(argv_path, spec);
             if (r.ok) {
-                write_cache(cache, argv_path);
+                if (spec.persist_cache) write_cache(cache, argv_path);
                 return r;
             }
             // Wrong size or unreadable. Don't bother the user with a
@@ -203,7 +207,7 @@ AssetResult resolve_asset(const std::string& argv_path,
     }
 
     // 2. Cached path from a prior successful pick.
-    {
+    if (spec.persist_cache) {
         const std::string cached = read_cache(cache);
         if (!cached.empty()) {
             std::error_code ec;
@@ -234,7 +238,7 @@ AssetResult resolve_asset(const std::string& argv_path,
             show_dialog(spec.display_name, r.warning,
                         MB_OK | MB_ICONWARNING);
         }
-        write_cache(cache, picked);
+        if (spec.persist_cache) write_cache(cache, picked);
         return r;
     }
 #else
@@ -243,6 +247,24 @@ AssetResult resolve_asset(const std::string& argv_path,
               ": no path provided (use --bios / --rom on this platform).";
     return r;
 #endif
+}
+
+AssetResult validate_asset_path(const std::string& path,
+                                const AssetSpec& spec) {
+    if (path.empty()) {
+        AssetResult r;
+        r.error = std::string(spec.display_name) + ": no file selected.";
+        return r;
+    }
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec) || ec) {
+        AssetResult r;
+        r.path = path;
+        r.error = std::string(spec.display_name) +
+                  ": file is missing or is not a regular file.";
+        return r;
+    }
+    return load_and_validate(path, spec);
 }
 
 }  // namespace gbarecomp

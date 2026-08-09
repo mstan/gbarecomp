@@ -25,6 +25,12 @@ void mod_runtime_activate_plugins();
 
 const RecompLauncherCModProvider* mod_runtime_launcher_provider();
 
+// Returns the locally-selected, hash-verified path for an asset declared by
+// an enabled package after a successful commit. The pointer is owned by the
+// mod runtime and remains valid until its next initialize/commit cycle.
+const char* mod_runtime_required_asset_path(const std::string& package_id,
+                                            const std::string& asset_id);
+
 }  // namespace gbarecomp
 #endif
 
@@ -42,6 +48,11 @@ int gba_mod_register_reset_callback(GBAModActivationCallback callback);
 // game's RunOptions capability gate remains authoritative.
 int gba_mod_set_adaptive_view_enabled(int enabled);
 int gba_mod_adaptive_view_enabled(void);
+
+// Trusted game plugins use this after their package has committed. It returns
+// null for disabled, wrong-target, uncommitted, missing, or stale assets.
+const char* gba_mod_required_asset_path(const char* package_id,
+                                        const char* asset_id);
 
 int gba_mod_runtime_initialize_c(const char* root,
                                  const char* game_id,

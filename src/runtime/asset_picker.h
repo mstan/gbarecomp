@@ -1,8 +1,8 @@
 // asset_picker.h — Resolve user-supplied assets (BIOS, ROM, save) by
 // CLI path -> sidecar cache -> OS file dialog (Win32 only), validating
-// each with size + SHA-1 + CRC32. Hashes are WARN-and-try so the user
-// can boot with a region/revision we haven't catalogued yet, but a
-// wrong size hard-fails.
+// each with size + SHA-1 + CRC32. Stock ROM/BIOS hashes are WARN-and-try so
+// users can boot an uncatalogued revision; callers can request strict hash
+// failures for package-owned dependency declarations.
 //
 // Mirrors the psxrecomp / TombaRecomp pattern (CRC32 with warn) and
 // adds SHA-1 since the existing BIOS / ROM configs already carry it.
@@ -34,6 +34,14 @@ struct AssetSpec {
     const char* expected_sha1 = nullptr;
     // Expected CRC32 (IEEE 802.3). 0 = no check.
     std::uint32_t expected_crc32 = 0;
+    // Existing ROM/BIOS callers deliberately warn for an unknown revision.
+    // Package-declared foreign assets are different: their bytes are part of
+    // the feature contract, so a hash mismatch must reject the selection.
+    bool hash_mismatch_is_error = false;
+    // Most assets cache their picker result beside the executable. A mod
+    // asset instead persists its path in mods/state.toml; do not create a
+    // second sidecar for it.
+    bool persist_cache = true;
 };
 
 struct AssetResult {
@@ -58,5 +66,11 @@ struct AssetResult {
 AssetResult resolve_asset(const std::string& argv_path,
                           const AssetSpec& spec,
                           const std::string& argv0);
+
+// Validate one explicit path without consulting a cache or opening a picker.
+// Intended for pre-commit package validation. The returned bytes are only a
+// transient hashing buffer; callers must not persist or expose them.
+AssetResult validate_asset_path(const std::string& path,
+                                const AssetSpec& spec);
 
 }  // namespace gbarecomp

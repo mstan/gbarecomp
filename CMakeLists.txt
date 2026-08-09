@@ -561,10 +561,15 @@ if(GBARECOMP_ENABLE_MODS)
         tests/mod_runtime/test_main.cpp
         src/runtime/mod_runtime.cpp
         src/runtime/mod_function_hooks.cpp
+        src/runtime/asset_picker.cpp
+        src/runtime/host_platform.cpp
         src/gba/crc32.cpp
         src/gba/sha1.cpp)
     target_include_directories(mod_runtime_tests PRIVATE
         src/runtime src/gba src/armv4t)
+    if(WIN32 OR MSYS)
+        target_link_libraries(mod_runtime_tests PRIVATE comdlg32 user32 winmm)
+    endif()
     add_test(NAME mod_runtime_tests COMMAND mod_runtime_tests)
 endif()
 

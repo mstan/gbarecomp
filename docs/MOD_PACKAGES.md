@@ -68,6 +68,39 @@ feature = "adaptive-view"
 id = "example.adaptive-view"
 ```
 
+### User-owned required assets
+
+An enabled package may require a separately dumped, user-owned file without
+including it in the `.gbamod` archive. Add one `[[asset]]` record per exact
+source image:
+
+```toml
+[[asset]]
+feature = "adaptive-view"
+id = "zelda1-rom"
+name = "The Legend of Zelda ROM"
+sha1 = "0123456789abcdef0123456789abcdef01234567"
+size = 131088
+extensions = ["nes"]
+purpose = "Used by the trusted foreign-world feature; this file is not installed or redistributed."
+```
+
+`feature` names the owning manifest feature and is required. `id` is a
+package-scoped stable lowercase identifier. `sha1` and `size` are strict exact
+checks; SHA-1 is currently the supported content hash. Extensions are picker
+hints only and are lowercase alphanumeric suffixes without a dot. `purpose` is
+shown with missing-asset diagnostics. A package can declare the asset while
+disabled: it becomes required only when its owning feature is enabled and its
+game-ID/ROM-SHA-1 target matches. Unknown owners and duplicate asset IDs reject
+the manifest.
+
+The Mods provider resolves assets during its existing **Play/Commit** action.
+It refuses absent, stale, wrong-sized, or wrong-hash files and opens the normal
+file picker where available. Only the chosen local path is written to
+`mods/state.toml`; neither the file bytes nor a copy of the asset enters the
+package or repository. A stale remembered path is revalidated before every
+commit.
+
 The target combines a stable game ID with the same lowercase ROM SHA-1 used by
 the runtime's stock-image gate. Resolution fails before boot if an enabled
 feature targets another image, names a missing trusted plugin, or collides with
@@ -113,6 +146,19 @@ GBA_MOD_CONSTRUCTOR(register_display_mods) {
         "example.adaptive-view", enable_view);
 }
 ```
+
+A trusted plugin can retrieve a committed required asset path, but only after
+the package has passed its target and asset validation:
+
+```cpp
+const char* zelda_rom = gba_mod_required_asset_path(
+    "example.foreign-world", "zelda1-rom");
+// null means disabled, uncommitted, wrong target, or invalid/missing asset.
+```
+
+The returned path is runtime-owned and stays valid until the next mod-runtime
+initialize or commit cycle. Plugins must open it themselves; the mod runtime
+does not expose or retain asset bytes.
 
 ### Trusted function-entry hooks
 
