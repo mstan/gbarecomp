@@ -838,7 +838,7 @@ void test_trusted_foreign_background_keeps_guest_objects_and_resets() {
         GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED,
         0, 0,
         0, 0,
-        0, 0, 0,
+        0, 0, 0, 0,
     };
     foreign.fill(0x001F);  // Red foreign terrain.
 
@@ -914,6 +914,90 @@ void test_trusted_foreign_background_keeps_guest_objects_and_resets() {
         std::fprintf(stderr, "inactive foreign background changed stock PPU output\n");
         std::exit(1);
     }
+}
+
+void test_foreign_background_preserves_only_named_hud_bg_map_cells() {
+    Fixture f;
+    disable_all_objects(f);
+    std::array<uint16_t, gba::GbaPpu::kScreenWidth * gba::GbaPpu::kScreenHeight>
+        foreign{};
+    foreign.fill(0x7C00);  // Blue foreign terrain.
+
+    // BG0 map cell (1,1) contains one red, nontransparent texel. BG1 is a
+    // green room/playfield layer above it everywhere. The HUD declaration is
+    // in BG0 *map-cell* coordinates, after HOFS=8 maps that cell to x=0.
+    // Preserving the composed screen pixel would incorrectly preserve BG1.
+    const uint16_t dispcnt = 0x0300;  // mode 0, BG0 + BG1.
+    store16(&f.io[0x08], 0x0181);  // BG0: 256-color, map block 1, priority 1.
+    store16(&f.io[0x0A], 0x0280);  // BG1: 256-color, map block 2, priority 0.
+    store16(&f.io[0x10], 8);       // BG0 HOFS => output x0 is source tile x1.
+    store16(&f.io[0x14], 8);       // BG1 follows the same scroll.
+    f.vram[0] = 1;                 // BG0 tile 0: red only at texel (0,0).
+    std::fill_n(f.vram.begin() + 64, 64, static_cast<uint8_t>(2));
+    store16(&f.vram[0x800 + (1 * 32 + 1) * 2], 0);  // BG0 tile 0 at (1,1).
+    for (int tile_y = 0; tile_y < 32; ++tile_y) {
+        for (int tile_x = 0; tile_x < 32; ++tile_x) {
+            store16(&f.vram[0x1000 + (tile_y * 32 + tile_x) * 2], 1);
+        }
+    }
+    store16(&f.pal[2], 0x001F);  // Red BG0 HUD texel.
+    store16(&f.pal[4], 0x03E0);  // Green native room BG1.
+
+    const GbaForeignObjFocusTransform focus{
+        GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION,
+        0, 0, 0, 0,
+        0, 0,
+        GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED,
+        0, 0,
+        0, 0,
+        0, 0, 0, 0,
+        1, 1, 0,
+        1, 1, 1, 1,
+        0, 8, 8, 8,
+    };
+    gba::foreign_presentation_internal::set_background(foreign.data());
+    gba::foreign_presentation_internal::set_obj_focus(&focus);
+    f.ppu.render(f.rgb.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(8 * 240 + 0) * 3], 255, 0, 0,
+                 "foreign HUD map-cell keeps direct BG0 heart texel");
+    expect_pixel(&f.rgb[(8 * 240 + 1) * 3], 0, 0, 255,
+                 "transparent HUD BG0 texel exposes foreign terrain");
+    expect_pixel(&f.rgb[(8 * 240 + 8) * 3], 0, 0, 255,
+                 "unnamed native BG1 terrain cannot leak over foreign frame");
+
+    // The same BG0 map cell can wrap into a playfield output row when the
+    // guest changes VOFS after dialogue. Map-cell identity alone is therefore
+    // insufficient: the source-backed native HUD output rectangle must also
+    // match, otherwise the foreign terrain stays visible.
+    store16(&f.io[0x12], 128);
+    f.ppu.render(f.rgb.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(136 * 240 + 0) * 3], 0, 0, 255,
+                 "wrapped HUD map cell outside output bounds exposes foreign terrain");
+
+    // The inactive form is canonical: no stale map/output field may remain
+    // when count is zero. It fails closed rather than retaining a partial HUD
+    // policy from a prior descriptor publication.
+    GbaForeignObjFocusTransform dangling = focus;
+    dangling.hud_bg_map_rect_count = 0;
+    store16(&f.io[0x12], 0);
+    gba::foreign_presentation_internal::set_obj_focus(&dangling);
+    f.ppu.render(f.rgb.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(8 * 240 + 0) * 3], 0, 0, 255,
+                 "noncanonical inactive HUD policy fails closed");
+
+    // Descriptor bounds are part of the trusted presentation gate: malformed
+    // map coordinates retain no guest HUD pixels and cannot expose terrain.
+    GbaForeignObjFocusTransform malformed = focus;
+    malformed.hud_bg_map_tile_x = 64;
+    gba::foreign_presentation_internal::set_obj_focus(&malformed);
+    f.ppu.render(f.rgb.data(), dispcnt, f.io.data(), f.vram.data(),
+                 f.oam.data(), f.pal.data());
+    expect_pixel(&f.rgb[(8 * 240 + 0) * 3], 0, 0, 255,
+                 "malformed HUD map-cell policy fails closed to foreign terrain");
+    gba::foreign_presentation_internal::clear();
 }
 
 void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
@@ -1033,10 +1117,10 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
             GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE |
             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY |
             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NEARBY_NONMATCHING |
-            GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY,
+            GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_OAM,
         0, 1,
         2, 1,
-        0, 1, 0,
+        0, 0, UINT64_C(1) << 4, 0,
     };
     gba::foreign_presentation_internal::set_obj_focus(&origin_only);
     strict.ppu.render(strict.rgb.data(), 0x1000, strict.io.data(),
@@ -1100,7 +1184,7 @@ void test_trusted_foreign_obj_focus_transforms_only_matching_objects() {
             GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE,
         0, 2,
         2, 1,
-        192, 1, 0,
+        192, 0, 0, 0,
     };
     gba::foreign_presentation_internal::set_obj_focus(&scaled_focus);
     scaled.ppu.render(scaled.rgb.data(), 0x1000, scaled.io.data(),
@@ -1402,6 +1486,7 @@ int main() {
     test_bitmap_mode_obj_compositing_and_obj_window();
     test_bitmap_mode_wide_center_and_margins();
     test_trusted_foreign_background_keeps_guest_objects_and_resets();
+    test_foreign_background_preserves_only_named_hud_bg_map_cells();
     test_trusted_foreign_obj_focus_transforms_only_matching_objects();
     test_affine_reference_reload_overrides_scanline_accumulation();
     test_wide_affine_filter_is_selective_and_bilinear();

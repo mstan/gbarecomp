@@ -9,7 +9,8 @@
 
 #include <stdint.h>
 
-#define GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION 5u
+#define GBA_FOREIGN_OBJ_FOCUS_ABI_VERSION 9u
+#define GBA_FOREIGN_OBJ_FOCUS_MAX_HUD_BG_MAP_RECTS 1u
 
 // Q8.8 unit scale for source-tile-matched, non-affine OBJs.  A descriptor
 // scale of zero is deliberately an identity scale, so zero-initialized
@@ -48,13 +49,11 @@
 // retain normal composition.
 #define GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NEARBY_NONMATCHING 0x00000010u
 
-// Suppress every non-source-tile OBJ across the foreign frame, except the
-// explicitly classified HUD priority band. This is intentionally valid only
-// together with SOURCE_TILE_RANGE: the plugin must first identify the exact
-// player (and optional player-item/shadow) allocations it wishes to retain.
-// It prevents a native room prop from surviving merely because it is farther
-// from Link than the local association radius.
-#define GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY 0x00000020u
+// Suppress every non-source-tile OBJ across the foreign frame, except exact
+// live HUD OAM entries named in hud_oam_mask_{lo,hi}. This is intentionally
+// valid only with SOURCE_TILE_RANGE, so a plugin must identify player visual
+// allocations before it can hide native playfield OBJ globally.
+#define GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_OAM 0x00000020u
 
 typedef struct GbaForeignObjFocusTransform {
     uint32_t abi_version;
@@ -84,14 +83,34 @@ typedef struct GbaForeignObjFocusTransform {
     // terrain, HUD, or collision coordinates. Affine OBJs are translated but
     // retain their guest-authored affine transform.
     uint16_t source_obj_scale_q8_8;
-    // The native HUD OAM capture uses priorities 0 and 1, while room/player
-    // playfield OBJ use priority 2. This bounded upper inclusive class is
-    // consulted only by SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY.
-    uint8_t hud_obj_priority_max;
-    uint8_t reserved;
+    uint16_t reserved;
+    // Bit i authorizes only OAM entry i as a HUD exception. The plugin derives
+    // this read-only from active gHUD element metadata and the current OAM
+    // record; it is not a tile or priority-wide exemption.
+    uint64_t hud_oam_mask_lo;
+    uint64_t hud_oam_mask_hi;
+    // Optional bounded guest-BG HUD preservation over a foreign framebuffer.
+    // Each declared rectangle names *guest tiled-BG map cells*, not output
+    // pixels. The PPU intersects those cells with the bounded output rectangle
+    // below after live HOFS/VOFS and ring mapping, then retains only the named
+    // layer's nontransparent texels. This prevents a scrolled HUD cell from
+    // becoming a playfield leak, and prevents another native BG which happened
+    // to cover the same screen area from leaking through the foreign frame.
+    // bit 0 = BG0.
+    uint8_t hud_bg_layer_mask;
+    uint8_t hud_bg_map_rect_count;
+    uint16_t hud_bg_reserved;
+    uint16_t hud_bg_map_tile_x;
+    uint16_t hud_bg_map_tile_y;
+    uint16_t hud_bg_map_tile_width;
+    uint16_t hud_bg_map_tile_height;
+    uint16_t hud_bg_output_x;
+    uint16_t hud_bg_output_y;
+    uint16_t hud_bg_output_width;
+    uint16_t hud_bg_output_height;
 } GbaForeignObjFocusTransform;
 
 #if defined(__cplusplus)
-static_assert(sizeof(GbaForeignObjFocusTransform) == 32,
-              "foreign OBJ focus ABI must remain a fixed 32-byte descriptor");
+static_assert(sizeof(GbaForeignObjFocusTransform) == 72,
+              "foreign OBJ focus ABI must remain a fixed 72-byte descriptor");
 #endif

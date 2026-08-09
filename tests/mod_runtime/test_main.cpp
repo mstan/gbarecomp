@@ -217,7 +217,7 @@ int main() {
         GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED,
         0, 0,
         0, 0,
-        0, 0, 0,
+        0, 0, 0, 0,
     };
     GbaForeignObjFocusTransform invalid_focus = foreign_focus;
     invalid_focus.source_radius_x = 241;  // Native PPU width is 240.
@@ -230,11 +230,26 @@ int main() {
     invalid_unscoped_scale.source_obj_scale_q8_8 = 192;
     GbaForeignObjFocusTransform invalid_reserved = foreign_focus;
     invalid_reserved.reserved = 1;
-    GbaForeignObjFocusTransform invalid_hud_priority = foreign_focus;
-    invalid_hud_priority.hud_obj_priority_max = 4;
+    GbaForeignObjFocusTransform invalid_hud_bg_map = foreign_focus;
+    invalid_hud_bg_map.hud_bg_layer_mask = 1;
+    invalid_hud_bg_map.hud_bg_map_rect_count = 1;
+    invalid_hud_bg_map.hud_bg_map_tile_x = 64;
+    invalid_hud_bg_map.hud_bg_map_tile_y = 1;
+    invalid_hud_bg_map.hud_bg_map_tile_width = 1;
+    invalid_hud_bg_map.hud_bg_map_tile_height = 1;
+    invalid_hud_bg_map.hud_bg_output_width = 8;
+    invalid_hud_bg_map.hud_bg_output_height = 8;
+    GbaForeignObjFocusTransform invalid_inactive_hud_bg = foreign_focus;
+    invalid_inactive_hud_bg.hud_bg_layer_mask = 1;
+    GbaForeignObjFocusTransform invalid_layerless_hud_bg = foreign_focus;
+    invalid_layerless_hud_bg.hud_bg_map_rect_count = 1;
+    invalid_layerless_hud_bg.hud_bg_map_tile_width = 1;
+    invalid_layerless_hud_bg.hud_bg_map_tile_height = 1;
+    invalid_layerless_hud_bg.hud_bg_output_width = 8;
+    invalid_layerless_hud_bg.hud_bg_output_height = 8;
     GbaForeignObjFocusTransform invalid_global_hud = foreign_focus;
     invalid_global_hud.flags =
-        GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY;
+        GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_OAM;
     GbaForeignObjFocusTransform origin_only_focus = foreign_focus;
     origin_only_focus.flags |= GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY |
         GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE;
@@ -242,8 +257,8 @@ int main() {
     origin_only_focus.source_obj_tile_count = 16;
     origin_only_focus.source_obj_scale_q8_8 = 192;
     origin_only_focus.flags |=
-        GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY;
-    origin_only_focus.hud_obj_priority_max = 1;
+        GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_OAM;
+    origin_only_focus.hud_oam_mask_lo = UINT64_C(1) << 7;
     gba_mod_clear_foreign_background();
     gba_mod_clear_foreign_obj_focus();
     if (gba_mod_publish_foreign_background("test.adaptive-view", foreign_pixels) ||
@@ -339,7 +354,9 @@ int main() {
         gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_scale) ||
         gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_unscoped_scale) ||
         gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_reserved) ||
-        gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_hud_priority) ||
+        gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_hud_bg_map) ||
+        gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_inactive_hud_bg) ||
+        gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_layerless_hud_bg) ||
         gba_mod_publish_foreign_obj_focus("test.adaptive-view", &invalid_global_hud) ||
         gba::foreign_presentation_internal::obj_focus() != &foreign_focus) {
         return fail("foreign presentation publication was not plugin-authorized or stable");

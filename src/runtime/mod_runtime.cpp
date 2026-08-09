@@ -2124,16 +2124,35 @@ extern "C" int gba_mod_publish_foreign_obj_focus(
          (focus->source_obj_scale_q8_8 < GBA_FOREIGN_OBJ_FOCUS_SCALE_MIN_Q8_8 ||
           focus->source_obj_scale_q8_8 > GBA_FOREIGN_OBJ_FOCUS_SCALE_MAX_Q8_8 ||
           (focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) == 0)) ||
-        focus->hud_obj_priority_max > 3u ||
         focus->reserved != 0 ||
+         focus->hud_bg_layer_mask > 0x0fu ||
+         focus->hud_bg_map_rect_count > GBA_FOREIGN_OBJ_FOCUS_MAX_HUD_BG_MAP_RECTS ||
+         focus->hud_bg_reserved != 0 ||
+         ((focus->hud_bg_map_rect_count == 0 &&
+           (focus->hud_bg_layer_mask != 0 ||
+            focus->hud_bg_map_tile_x != 0 || focus->hud_bg_map_tile_y != 0 ||
+            focus->hud_bg_map_tile_width != 0 || focus->hud_bg_map_tile_height != 0 ||
+            focus->hud_bg_output_x != 0 || focus->hud_bg_output_y != 0 ||
+            focus->hud_bg_output_width != 0 || focus->hud_bg_output_height != 0)) ||
+          (focus->hud_bg_map_rect_count == 1 &&
+           (focus->hud_bg_layer_mask == 0 ||
+            focus->hud_bg_map_tile_width == 0 || focus->hud_bg_map_tile_height == 0 ||
+            focus->hud_bg_map_tile_x >= 64 || focus->hud_bg_map_tile_y >= 64 ||
+            static_cast<unsigned>(focus->hud_bg_map_tile_x) + focus->hud_bg_map_tile_width > 64 ||
+            static_cast<unsigned>(focus->hud_bg_map_tile_y) + focus->hud_bg_map_tile_height > 64 ||
+            focus->hud_bg_output_width == 0 || focus->hud_bg_output_height == 0 ||
+            focus->hud_bg_output_x >= gba::GbaPpu::kScreenWidth ||
+            focus->hud_bg_output_y >= gba::GbaPpu::kScreenHeight ||
+            static_cast<unsigned>(focus->hud_bg_output_x) + focus->hud_bg_output_width > gba::GbaPpu::kScreenWidth ||
+            static_cast<unsigned>(focus->hud_bg_output_y) + focus->hud_bg_output_height > gba::GbaPpu::kScreenHeight))) ||
         (focus->flags & ~(GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED |
                           GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY |
                           GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE |
                           GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY |
                           GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NEARBY_NONMATCHING |
-                          GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY)) != 0 ||
+                          GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_OAM)) != 0 ||
         ((focus->flags &
-          GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY) != 0 &&
+          GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_OAM) != 0 &&
          (focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) == 0) ||
         ((focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) != 0 &&
          (focus->source_obj_tile_count == 0 ||

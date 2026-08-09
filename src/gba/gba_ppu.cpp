@@ -263,16 +263,43 @@ bool valid_foreign_obj_focus(const GbaForeignObjFocusTransform* focus) {
              focus->source_obj_scale_q8_8 <=
                  GBA_FOREIGN_OBJ_FOCUS_SCALE_MAX_Q8_8 &&
              (focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) != 0)) &&
-           focus->hud_obj_priority_max <= 3u &&
            focus->reserved == 0 &&
+           focus->hud_bg_layer_mask <= 0x0fu &&
+           focus->hud_bg_map_rect_count <= GBA_FOREIGN_OBJ_FOCUS_MAX_HUD_BG_MAP_RECTS &&
+           focus->hud_bg_reserved == 0 &&
+           ((focus->hud_bg_map_rect_count == 0 &&
+             focus->hud_bg_layer_mask == 0 &&
+             focus->hud_bg_map_tile_x == 0 && focus->hud_bg_map_tile_y == 0 &&
+             focus->hud_bg_map_tile_width == 0 &&
+             focus->hud_bg_map_tile_height == 0 &&
+             focus->hud_bg_output_x == 0 && focus->hud_bg_output_y == 0 &&
+             focus->hud_bg_output_width == 0 &&
+             focus->hud_bg_output_height == 0) ||
+            (focus->hud_bg_map_rect_count == 1 &&
+             focus->hud_bg_layer_mask != 0 &&
+             focus->hud_bg_map_tile_width != 0 &&
+             focus->hud_bg_map_tile_height != 0 &&
+             focus->hud_bg_map_tile_x < 64 && focus->hud_bg_map_tile_y < 64 &&
+             static_cast<unsigned>(focus->hud_bg_map_tile_x) +
+                     focus->hud_bg_map_tile_width <= 64 &&
+             static_cast<unsigned>(focus->hud_bg_map_tile_y) +
+                     focus->hud_bg_map_tile_height <= 64 &&
+             focus->hud_bg_output_width != 0 &&
+             focus->hud_bg_output_height != 0 &&
+             focus->hud_bg_output_x < GbaPpu::kScreenWidth &&
+             focus->hud_bg_output_y < GbaPpu::kScreenHeight &&
+             static_cast<unsigned>(focus->hud_bg_output_x) +
+                     focus->hud_bg_output_width <= GbaPpu::kScreenWidth &&
+             static_cast<unsigned>(focus->hud_bg_output_y) +
+                     focus->hud_bg_output_height <= GbaPpu::kScreenHeight)) &&
            (focus->flags & ~(GBA_FOREIGN_OBJ_FOCUS_PRESERVE_UNFOCUSED |
                              GBA_FOREIGN_OBJ_FOCUS_ORIGIN_ONLY |
                              GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE |
                              GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_LARGE_NEARBY |
                              GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NEARBY_NONMATCHING |
-                             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY)) == 0 &&
+                             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_OAM)) == 0 &&
            ((focus->flags &
-             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY) == 0 ||
+             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_OAM) == 0 ||
             (focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) != 0) &&
            ((focus->flags & GBA_FOREIGN_OBJ_FOCUS_SOURCE_TILE_RANGE) == 0 ||
             (focus->source_obj_tile_count != 0 &&
@@ -295,6 +322,27 @@ bool focus_contains(const GbaForeignObjFocusTransform& focus, int x, int y) {
     const int max_y = static_cast<int>(focus.source_link_feet_y) +
                       static_cast<int>(focus.source_radius_y);
     return x >= min_x && x <= max_x && y >= min_y && y <= max_y;
+}
+
+bool foreign_hud_bg_map_contains(const GbaForeignObjFocusTransform* focus,
+                                 uint32_t layer, uint32_t tile_x,
+                                 uint32_t tile_y, uint32_t output_x,
+                                 uint32_t output_y) {
+    return valid_foreign_obj_focus(focus) &&
+           focus->hud_bg_map_rect_count != 0 && layer < 4 &&
+           (focus->hud_bg_layer_mask & (1u << layer)) != 0 &&
+           tile_x >= focus->hud_bg_map_tile_x &&
+           tile_y >= focus->hud_bg_map_tile_y &&
+           tile_x < static_cast<uint32_t>(focus->hud_bg_map_tile_x) +
+                        focus->hud_bg_map_tile_width &&
+           tile_y < static_cast<uint32_t>(focus->hud_bg_map_tile_y) +
+                        focus->hud_bg_map_tile_height &&
+           output_x >= focus->hud_bg_output_x &&
+           output_y >= focus->hud_bg_output_y &&
+           output_x < static_cast<uint32_t>(focus->hud_bg_output_x) +
+                          focus->hud_bg_output_width &&
+           output_y < static_cast<uint32_t>(focus->hud_bg_output_y) +
+                          focus->hud_bg_output_height;
 }
 
 // Presentation-only translation. It reads a trusted immutable descriptor and
@@ -333,7 +381,7 @@ int nearest_source_pixel(int destination_pixel, int source_extent,
 ForeignObjFocusResult apply_foreign_obj_focus(int* sx, int* sy, int width,
                                               int height, uint32_t tile_num,
                                               bool scale_non_affine,
-                                              uint32_t obj_priority) {
+                                              uint32_t oam_index) {
     const GbaForeignObjFocusTransform* focus =
         foreign_presentation_internal::obj_focus();
     if (!sx || !sy || width <= 0 || height <= 0 ||
@@ -356,11 +404,14 @@ ForeignObjFocusResult apply_foreign_obj_focus(int* sx, int* sy, int width,
         in_main_range || in_aux_range;
     if (!tile_matches) {
         if ((focus->flags &
-             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_PRIORITY) != 0) {
-            // The game captures HUD OAM in the explicitly configured priority
-            // class. Every other unallowlisted OBJ is native playfield state,
-            // so suppress it across the foreign frame, not just near Link.
-            if (obj_priority <= focus->hud_obj_priority_max) return {};
+             GBA_FOREIGN_OBJ_FOCUS_SUPPRESS_NONMATCHING_EXCEPT_HUD_OAM) != 0) {
+            // The plugin's exact bit is derived from current gHUD metadata and
+            // this OAM entry, so a playfield OBJ cannot survive by sharing a
+            // broad native priority class with a heart or button glyph.
+            const bool is_hud = oam_index < 64u
+                ? (focus->hud_oam_mask_lo & (UINT64_C(1) << oam_index)) != 0
+                : (focus->hud_oam_mask_hi & (UINT64_C(1) << (oam_index - 64u))) != 0;
+            if (is_hud) return {};
             return {ForeignObjFocusAction::kSuppress};
         }
         const bool nearby = origin_matches || center_matches;
@@ -717,6 +768,13 @@ void render_scanline_internal(uint8_t* rgb,
 
     PixelCandidate top[GbaPpu::kScreenWidth];
     PixelCandidate second[GbaPpu::kScreenWidth];
+    // This is deliberately a per-layer candidate, not a copy of `top`: a
+    // room BG with higher priority may cover the HUD's BG0 cells. Capturing
+    // only the explicitly declared source map cells keeps that room terrain
+    // out of the foreign frame.
+    PixelCandidate foreign_hud_bg[GbaPpu::kScreenWidth] = {};
+    const GbaForeignObjFocusTransform* foreign_focus =
+        foreign_presentation_internal::obj_focus();
     const uint16_t backdrop_color = load_u16_le(&pal[0]);
     uint8_t backdrop_rgb[3];
     to_rgb888(backdrop_color, backdrop_rgb);
@@ -815,6 +873,18 @@ void render_scanline_internal(uint8_t* rgb,
             if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
 
             const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
+            if (foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
+                                            tile_y, x, y)) {
+                PixelCandidate& hud = foreign_hud_bg[x];
+                hud.color = color;
+                to_rgb888(color, hud.rgb);
+                hud.key = static_cast<int>(bg_priority * 256u + 128u + layer);
+                hud.layer = static_cast<uint8_t>(layer);
+                hud.target1 = blend_enabled(x) &&
+                    ((first_targets & (1u << layer)) != 0);
+                hud.target2 = (second_targets & (1u << layer)) != 0;
+                hud.valid = true;
+            }
             submit(x, color,
                    static_cast<int>(bg_priority * 256u + 128u + layer),
                    static_cast<uint8_t>(layer),
@@ -971,6 +1041,11 @@ void render_scanline_internal(uint8_t* rgb,
     // OBJ composition (including the focused Link OBJ) still happens below.
     if (const uint16_t* foreign = foreign_presentation_internal::background()) {
         for (uint32_t x = 0; x < kScreenWidth; ++x) {
+            if (foreign_hud_bg[x].valid) {
+                top[x] = foreign_hud_bg[x];
+                second[x] = PixelCandidate{};
+                continue;
+            }
             PixelCandidate cand;
             cand.color = foreign[y * GbaPpu::kScreenWidth + x];
             to_rgb888(cand.color, cand.rgb);
@@ -1065,7 +1140,7 @@ void render_scanline_internal(uint8_t* rgb,
                 int bw = disable_or_double ? sw * 2 : sw;
                 int bh = disable_or_double ? sh * 2 : sh;
                 if (apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num,
-                                            false, (attr2 >> 10) & 3u).action ==
+                                            false, static_cast<uint32_t>(idx)).action ==
                     ForeignObjFocusAction::kSuppress) continue;
                 int j = static_cast<int>(y) - sy;
                 if (j < 0 || j >= bh) continue;
@@ -1092,7 +1167,7 @@ void render_scanline_internal(uint8_t* rgb,
             }
             const ForeignObjFocusResult focus_result =
                 apply_foreign_obj_focus(&sx, &sy, sw, sh, tile_num, true,
-                                        (attr2 >> 10) & 3u);
+                                        static_cast<uint32_t>(idx));
             if (focus_result.action == ForeignObjFocusAction::kSuppress) continue;
             const int draw_w = scaled_extent(sw, focus_result.scale_q8_8);
             const int draw_h = scaled_extent(sh, focus_result.scale_q8_8);
@@ -1674,7 +1749,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                 if (obj_focus_active) {
                     resolve_sx();
                     if (apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num,
-                                                false, (attr2 >> 10) & 3u).action ==
+                                                false, static_cast<uint32_t>(idx)).action ==
                         ForeignObjFocusAction::kSuppress) continue;
                 }
                 int j = static_cast<int>(y) - sy;
@@ -1706,7 +1781,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                 resolve_sx();
                 focus_result =
                     apply_foreign_obj_focus(&sx, &sy, sw, sh, tile_num, true,
-                                            (attr2 >> 10) & 3u);
+                                            static_cast<uint32_t>(idx));
                 if (focus_result.action == ForeignObjFocusAction::kSuppress) continue;
             }
             const int draw_w = scaled_extent(sw, focus_result.scale_q8_8);
