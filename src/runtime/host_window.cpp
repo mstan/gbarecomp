@@ -1121,25 +1121,26 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
 #if defined(__ANDROID__)
     b->fullscreen = 1;
 #endif
-    // The independent FramePacer still governs emulation at 59.7275 Hz
-    // (MC-HP-004) — vsync below only aligns scanout, in series after the
-    // pacer, and can never become the game clock.
-    // HP-002: EVERY path now requests a synchronized present. The cadence
-    // probe measured the legacy D3D9 blit returning in <1 ms despite
-    // vsync=yes (presents never sync to scanout → the tear band users see
-    // toward the bottom at native res). SDL2's D3D11 backend is a DXGI
-    // flip-model swapchain whose vsync genuinely blocks, and windowed VRR
-    // (G-Sync "windowed and full screen") can engage through it — so prefer
-    // it by default on Windows; SDL_RENDER_DRIVER in the environment still
-    // overrides. GBARECOMP_NO_VSYNC=1 restores the historical
-    // unsynchronized present for A/B.
+    // FramePacer is the sole emulation clock at the GBA's native 59.7275 Hz.
+    // Do not put a blocking monitor-VSync present in series with it by default:
+    // on a 165 Hz display that consumed a measured 4 ms median / 11 ms p95 of
+    // the frame budget, reducing a warm GBA workload to 47-49 FPS and forcing
+    // the audio bridge to stretch continuously. DWM still composites ordinary
+    // windowed presentation; users who prefer synchronized fullscreen output
+    // can opt in with GBARECOMP_VSYNC=1. GBARECOMP_NO_VSYNC remains the final
+    // override for existing launch scripts and A/B diagnostics.
 #if defined(_WIN32)
     SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER, "direct3d11",
                             SDL_HINT_DEFAULT);
 #endif
+    const char* vsync_env = std::getenv("GBARECOMP_VSYNC");
     const char* no_vsync_env = std::getenv("GBARECOMP_NO_VSYNC");
+    const bool vsync_requested =
+        vsync_env && *vsync_env && *vsync_env != '0';
+    const bool vsync_disabled =
+        no_vsync_env && *no_vsync_env && *no_vsync_env != '0';
     const bool want_vsync =
-        !(no_vsync_env && *no_vsync_env && *no_vsync_env != '0');
+        vsync_requested && !vsync_disabled;
     const Uint32 renderer_flags = SDL_RENDERER_ACCELERATED |
         (want_vsync ? static_cast<Uint32>(SDL_RENDERER_PRESENTVSYNC)
                     : Uint32{0});
