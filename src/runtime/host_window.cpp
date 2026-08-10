@@ -73,6 +73,30 @@ struct HotkeyBind {
     Uint16      mods = 0;             // required KMOD_CTRL/ALT/SHIFT bits
 };
 
+constexpr int assist_pad_axis(int code, bool positive) {
+    return 100 + code * 2 + (positive ? 1 : 0);
+}
+
+bool assist_pad_down(SDL_GameController* controller, int binding) {
+    if (!controller || !SDL_GameControllerGetAttached(controller)) return false;
+    if (binding > 0 && binding < 100) {
+        const int code = binding - 1;
+        return code >= 0 && code < SDL_CONTROLLER_BUTTON_MAX &&
+               SDL_GameControllerGetButton(
+                   controller, static_cast<SDL_GameControllerButton>(code));
+    }
+    if (binding >= 100) {
+        const int encoded = binding - 100;
+        const int code = encoded / 2;
+        const bool positive = (encoded & 1) != 0;
+        if (code < 0 || code >= SDL_CONTROLLER_AXIS_MAX) return false;
+        const Sint16 value = SDL_GameControllerGetAxis(
+            controller, static_cast<SDL_GameControllerAxis>(code));
+        return positive ? value >= 16000 : value <= -16000;
+    }
+    return false;
+}
+
 // ── MC-WS-002 present-cadence ring ───────────────────────────────────────
 // Always-on (Release too) ring recording EVERY SDL_RenderPresent from window
 // open: wall time blocked inside the call, entry-to-entry gap, and the DWM
@@ -343,6 +367,16 @@ struct Backend {
     // built-in defaults, overridden by keybinds.ini [player1].
     SDL_Scancode bind_sc[10] = {};      // indexed by GBA KEYINPUT bit
     HotkeyBind   hotkeys[HK_COUNT];     // [KeyMap] bindings
+    SDL_Scancode assist_key[2] = {
+        SDL_SCANCODE_1, SDL_SCANCODE_2
+    };                                  // Rewind, Fast-forward
+    int          assist_pad[2] = {
+        assist_pad_axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT, true),
+        assist_pad_axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT, true),
+    };
+    bool         assist_tools = true;
+    bool         assist_rewind_was_down = false;
+    Uint32       assist_rewind_repeat_at = 0;
     int          scale = 3;             // current integer window scale
     int          fullscreen = 0;        // 0 windowed, 1 borderless, 2 exclusive
     int          volume = 100;          // 0..100 gain on pushed samples
@@ -1634,9 +1668,11 @@ void HostWindow::present(const uint8_t* rgb888) {
     }
 }
 
-void HostWindow::load_input_config(const char* dir) {
+void HostWindow::load_input_config(const char* dir,
+                                   bool assist_tools_default) {
     if (!open_ || !impl_ || !dir) return;
     auto* b = static_cast<Backend*>(impl_);
+    b->assist_tools = assist_tools_default;
     const std::string base = std::string(dir) + "/";
 
     // keybinds.ini [player1] (recomp-ui generic format, scancode names).
@@ -1659,6 +1695,29 @@ void HostWindow::load_input_config(const char* dir) {
             return;
         }
     });
+
+    // Launcher-owned global Assist bindings. Numeric keyboard values are SDL
+    // scancodes; controller values use recomp-ui's portable button/axis
+    // encoding. Keeping these in [Launcher] lets the pre-boot menu and the
+    // runtime share one configuration file.
+    ini_scan_section((base + "config.ini").c_str(), "Launcher",
+                     [b](const char* key, const char* val) {
+        if (SDL_strcasecmp(key, "assist_tools") == 0)
+            b->assist_tools = std::atoi(val) != 0;
+        else if (SDL_strcasecmp(key, "assist_rewind_key") == 0)
+            b->assist_key[0] = static_cast<SDL_Scancode>(std::atoi(val));
+        else if (SDL_strcasecmp(key, "assist_fast_key") == 0)
+            b->assist_key[1] = static_cast<SDL_Scancode>(std::atoi(val));
+        else if (SDL_strcasecmp(key, "assist_rewind_pad") == 0)
+            b->assist_pad[0] = std::atoi(val);
+        else if (SDL_strcasecmp(key, "assist_fast_pad") == 0)
+            b->assist_pad[1] = std::atoi(val);
+    });
+}
+
+bool HostWindow::assist_tools_enabled() const {
+    if (!open_ || !impl_) return true;
+    return static_cast<const Backend*>(impl_)->assist_tools;
 }
 
 void HostWindow::set_fullscreen(int mode) {
@@ -2030,7 +2089,9 @@ HostWindow::Events HostWindow::pump() {
     }
 #endif
 
-    // Turbo is level-triggered: held = uncap the frame limiter (default Tab).
+    // Turbo is level-triggered: held = uncap the frame limiter. The historical
+    // [KeyMap] Turbo binding (default Tab) remains as a compatibility shortcut;
+    // the launcher-editable Assist binding is additive.
     ev.fast_forward = false;
     {
         const HotkeyBind& hb = b->hotkeys[HK_TURBO];
@@ -2041,6 +2102,25 @@ HostWindow::Events HostWindow::pump() {
                 ev.fast_forward = true;
         }
     }
+    // Always report the configured physical controls. The runtime owns the
+    // Assist gate, which lets its in-game menu enable or disable these actions
+    // immediately without HostWindow carrying a stale copy of that live state.
+    const SDL_Scancode fast_sc = b->assist_key[1];
+    if ((fast_sc > SDL_SCANCODE_UNKNOWN && fast_sc < SDL_NUM_SCANCODES &&
+         ks[fast_sc]) || assist_pad_down(b->controller, b->assist_pad[1]))
+        ev.fast_forward = true;
+
+    const SDL_Scancode rewind_sc = b->assist_key[0];
+    const bool rewind_down =
+        (rewind_sc > SDL_SCANCODE_UNKNOWN && rewind_sc < SDL_NUM_SCANCODES &&
+         ks[rewind_sc]) || assist_pad_down(b->controller, b->assist_pad[0]);
+    const Uint32 rewind_now = SDL_GetTicks();
+    ev.rewind = rewind_down &&
+        (!b->assist_rewind_was_down ||
+         SDL_TICKS_PASSED(rewind_now, b->assist_rewind_repeat_at));
+    if (ev.rewind) b->assist_rewind_repeat_at = rewind_now + 500;
+    if (!rewind_down) b->assist_rewind_repeat_at = 0;
+    b->assist_rewind_was_down = rewind_down;
     return ev;
 }
 
@@ -2077,7 +2157,8 @@ bool HostWindow::drawable_size(int* /*width*/, int* /*height*/) const {
 
 void HostWindow::present(const uint8_t* /*rgb888*/) {}
 
-void HostWindow::load_input_config(const char* /*dir*/) {}
+void HostWindow::load_input_config(const char* /*dir*/,
+                                   bool /*assist_tools_default*/) {}
 void HostWindow::set_fullscreen(int /*mode*/) {}
 int  HostWindow::fullscreen() const { return 0; }
 void HostWindow::adjust_scale(int /*delta*/) {}
@@ -2094,6 +2175,7 @@ void HostWindow::set_runtime_ui(RecompRuntimeUi* /*ui*/) {}
 #endif
 void HostWindow::set_fps_readout(bool /*on*/) {}
 bool HostWindow::fps_readout() const { return false; }
+bool HostWindow::assist_tools_enabled() const { return true; }
 
 void HostWindow::push_audio_samples(const int16_t* /*samples*/,
                                     std::size_t /*count*/) {}

@@ -67,7 +67,8 @@ public:
     //     WindowBigger, WindowSmaller, VolumeUp, VolumeDown, DisplayPerf.
     // Never called => built-in defaults for both. Safe to call when the
     // files don't exist.
-    void load_input_config(const char* dir);
+    void load_input_config(const char* dir,
+                           bool assist_tools_default = true);
 
     // Live window/audio controls (hotkey + launcher-driven). All no-ops when
     // the window isn't open or this build has no SDL2.
@@ -92,6 +93,7 @@ public:
 #endif
     void set_fps_readout(bool on);      // presents-per-second in the title bar
     bool fps_readout() const;
+    bool assist_tools_enabled() const;
 
     // Upload one base_w x base_h RGB888 frame (the dimensions passed to open())
     // and present.
@@ -127,6 +129,10 @@ public:
         // held (default Tab). Uncaps the frame limiter for as long as it's
         // down.
         bool     fast_forward = false;
+        // Repeating global Assist binding. It fires immediately, then every
+        // half-second while held so one-second rewind steps move backward at
+        // approximately normal speed.
+        bool     rewind = false;
         // Edge-triggered system hotkeys (config.ini [KeyMap] bindings; see
         // load_input_config). The caller owns the semantics: fullscreen and
         // window scale route back into this window, pause gates stepping in
