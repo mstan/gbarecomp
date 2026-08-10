@@ -35,6 +35,21 @@ GBAModAudioClip register_enabled(const int16_t* samples, uint32_t frames) {
     return clip;
 }
 
+struct StreamSource {
+    int16_t sample = 0;
+    size_t calls = 0;
+    size_t largest_request = 0;
+    bool invalid_count = false;
+};
+
+size_t pull_stream(void* context, int16_t* dst, size_t max_frames) {
+    auto* source = static_cast<StreamSource*>(context);
+    ++source->calls;
+    if (max_frames > source->largest_request) source->largest_request = max_frames;
+    for (size_t i = 0; i < max_frames; ++i) dst[i] = source->sample;
+    return source->invalid_count ? max_frames + 1 : max_frames;
+}
+
 void test_inactive_identity_and_bad_rate() {
     const int16_t pcm[] = {123, -456};
     std::array<int16_t, 3> dst = {7, -8, 9};
@@ -109,12 +124,22 @@ void test_saturation_and_replacement() {
     gba_mod_audio_stop_all();
 }
 
+void test_stream_rejects_untrusted_callers() {
+    StreamSource source{1000};
+    // Public callers have no authorization setter or plugin-ID escape hatch;
+    // successful registration is covered through mod_runtime_tests.
+    check(gba_mod_audio_stream_register_s16_mono(pull_stream, &source) ==
+              GBA_MOD_AUDIO_STREAM_INVALID,
+          "stream registration fails without activation authorization");
+}
+
 }  // namespace
 
 int main() {
     test_inactive_identity_and_bad_rate();
     test_one_shot_loop_and_stop_reset();
     test_saturation_and_replacement();
+    test_stream_rejects_untrusted_callers();
     if (failures) return 1;
     std::puts("GBA mod audio: bounded producer PCM mixer passed");
     return 0;

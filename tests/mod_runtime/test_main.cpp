@@ -20,6 +20,13 @@ bool g_active = false;
 int g_declines = 0;
 int g_handles = 0;
 bool g_reset_saw_foreign_presentation_clear = false;
+bool g_stream_registered_during_activation = false;
+bool g_stream_reregistered_in_place = false;
+int g_stream_pull_calls = 0;
+size_t g_stream_largest_request = 0;
+int16_t g_stream_sample = 1234;
+bool g_stream_invalid_count = false;
+GBAModAudioStream g_stream = GBA_MOD_AUDIO_STREAM_INVALID;
 
 int decline_entry(uint32_t, int, ArmCpuState*) {
     ++g_declines;
@@ -53,9 +60,24 @@ void reset_view() {
     (void)gba_mod_set_adaptive_view_enabled(0);
 }
 
+size_t activation_stream_pull(void*, int16_t* dst, size_t max_frames) {
+    ++g_stream_pull_calls;
+    if (max_frames > g_stream_largest_request)
+        g_stream_largest_request = max_frames;
+    for (size_t i = 0; i < max_frames; ++i) dst[i] = g_stream_sample;
+    return g_stream_invalid_count ? max_frames + 1 : max_frames;
+}
+
 void activate_view() {
     g_active = true;
     (void)gba_mod_set_adaptive_view_enabled(1);
+    g_stream = gba_mod_audio_stream_register_s16_mono(
+        activation_stream_pull, nullptr);
+    g_stream_registered_during_activation =
+        g_stream != GBA_MOD_AUDIO_STREAM_INVALID;
+    g_stream_reregistered_in_place =
+        gba_mod_audio_stream_register_s16_mono(activation_stream_pull, nullptr) ==
+        g_stream;
 }
 
 bool write_text(const fs::path& path, const std::string& text) {
@@ -307,6 +329,10 @@ int main() {
         !gba_mod_audio_play(audio_clip, 100, 1)) {
         return fail("could not prepare trusted PCM source");
     }
+    if (gba_mod_audio_stream_register_s16_mono(
+            activation_stream_pull, nullptr) != GBA_MOD_AUDIO_STREAM_INVALID) {
+        return fail("uncommitted plugin registered a stream source");
+    }
 
     const auto write_state = [&](bool asset_enabled, bool other_enabled,
                                  const fs::path& asset_path) {
@@ -357,8 +383,113 @@ int main() {
         return fail("enabled asset plan failed: " + error);
     }
     gbarecomp::mod_runtime_activate_plugins();
-    if (!g_active || !gba_mod_adaptive_view_enabled())
+    if (!g_active || !gba_mod_adaptive_view_enabled() ||
+        !g_stream_registered_during_activation || !g_stream_reregistered_in_place)
         return fail("enabled plugin did not activate");
+    if (!gba_mod_audio_stream_set_enabled(g_stream, 1) ||
+        !gba_mod_audio_stream_play(g_stream, 100) ||
+        !gba_mod_audio_stream_set_native_gain_percent(g_stream, 0)) {
+        return fail("selected plugin did not own authorized audio stream");
+    }
+    int16_t stream_mix[] = {99};
+    gba_mod_audio_mix(stream_mix, 1);
+    if (stream_mix[0] != 1234 || g_stream_pull_calls != 1)
+        return fail("authorized stream did not mute native producer PCM");
+
+    // Savestate loading does not rerun activation. It must stop pre-load
+    // delivery and restore native gain, while retaining the selected stream
+    // capability so the restored game event can explicitly resume it.
+    g_stream_pull_calls = 0;
+    gba_mod_audio_on_savestate_load();
+    int16_t post_load_silence[] = {99};
+    gba_mod_audio_mix(post_load_silence, 1);
+    if (post_load_silence[0] != 99 || g_stream_pull_calls != 0)
+        return fail("savestate boundary delivered stale stream audio or kept mute");
+    g_stream_sample = 2468;
+    if (!gba_mod_audio_stream_play(g_stream, 100))
+        return fail("savestate boundary retired the selected stream capability");
+    int16_t post_load_resumed[] = {0};
+    gba_mod_audio_mix(post_load_resumed, 1);
+    if (post_load_resumed[0] != 2468 || g_stream_pull_calls != 1)
+        return fail("retained stream did not resume explicitly after savestate load");
+
+    const GBAModAudioStream forged_stream = g_stream ^ UINT64_C(0x100000001);
+    if (gba_mod_audio_stream_set_enabled(UINT64_C(1), 1) ||
+        gba_mod_audio_stream_play(UINT64_C(2), 100) ||
+        gba_mod_audio_stream_stop(UINT64_C(1)) ||
+        gba_mod_audio_stream_set_native_gain_percent(UINT64_C(2), 0) ||
+        gba_mod_audio_stream_set_enabled(forged_stream, 1) ||
+        gba_mod_audio_stream_play(forged_stream, 100) ||
+        gba_mod_audio_stream_stop(forged_stream) ||
+        gba_mod_audio_stream_set_native_gain_percent(forged_stream, 0)) {
+        return fail("forged stream capability controlled native audio");
+    }
+
+    // The producer chunks callback requests; the trusted callback never sees
+    // more than the public hard bound even if a single mix is larger.
+    g_stream_pull_calls = 0;
+    g_stream_largest_request = 0;
+    if (!gba_mod_audio_stream_play(g_stream, 100))
+        return fail("could not restart authorized stream for bounds test");
+    std::vector<int16_t> long_stream_mix(2050);
+    gba_mod_audio_mix(long_stream_mix.data(), long_stream_mix.size());
+    if (g_stream_pull_calls != 3 ||
+        g_stream_largest_request != GBA_MOD_AUDIO_MAX_STREAM_CALLBACK_FRAMES)
+        return fail("stream callback request was not bounded and chunked");
+
+    if (!gba_mod_audio_stream_set_native_gain_percent(g_stream, 100))
+        return fail("could not restore native gain");
+    const int16_t fixed_sample[] = {100};
+    const GBAModAudioClip fixed_clip = gba_mod_audio_register_pcm_s16_mono(
+        fixed_sample, 1, GBA_MOD_AUDIO_SAMPLE_RATE);
+    if (fixed_clip == GBA_MOD_AUDIO_CLIP_INVALID ||
+        !gba_mod_audio_set_enabled(fixed_clip, 1))
+        return fail("could not prepare fixed voice isolation test");
+    for (unsigned i = 0; i < GBA_MOD_AUDIO_MAX_VOICES; ++i)
+        if (!gba_mod_audio_play(fixed_clip, 100, 1))
+            return fail("could not fill fixed voice pool");
+    g_stream_sample = 1000;
+    if (!gba_mod_audio_stream_play(g_stream, 100))
+        return fail("could not start dedicated stream beside fixed voices");
+    int16_t dedicated_mix[] = {0};
+    gba_mod_audio_mix(dedicated_mix, 1);
+    if (dedicated_mix[0] != 1800 || !gba_mod_audio_stream_stop(g_stream))
+        return fail("stream did not remain separate from eight fixed voices");
+    dedicated_mix[0] = 0;
+    gba_mod_audio_mix(dedicated_mix, 1);
+    if (dedicated_mix[0] != 800)
+        return fail("stream stop evicted a fixed voice");
+    gba_mod_audio_stop_all();
+
+    // Do not pre-clamp native plus fixed audio before applying an opposite
+    // sign stream contribution: all terms must reach the final saturation.
+    const int16_t positive_fixed[] = {30000};
+    const GBAModAudioClip positive_clip = gba_mod_audio_register_pcm_s16_mono(
+        positive_fixed, 1, GBA_MOD_AUDIO_SAMPLE_RATE);
+    if (positive_clip == GBA_MOD_AUDIO_CLIP_INVALID ||
+        !gba_mod_audio_set_enabled(positive_clip, 1) ||
+        !gba_mod_audio_play(positive_clip, 100, 1))
+        return fail("could not prepare one-clamp mix test");
+    g_stream_sample = -30000;
+    if (!gba_mod_audio_stream_play(g_stream, 100))
+        return fail("could not start opposite-sign stream");
+    int16_t opposite_sign_mix[] = {30000};
+    gba_mod_audio_mix(opposite_sign_mix, 1);
+    if (opposite_sign_mix[0] != 30000)
+        return fail("native fixed and stream audio was not clamped once");
+
+    gba_mod_audio_stop_all();
+    g_stream_invalid_count = true;
+    g_stream_pull_calls = 0;
+    if (!gba_mod_audio_stream_play(g_stream, 100))
+        return fail("could not start malformed callback test");
+    int16_t invalid_callback_mix[] = {11};
+    gba_mod_audio_mix(invalid_callback_mix, 1);
+    gba_mod_audio_mix(invalid_callback_mix, 1);
+    g_stream_invalid_count = false;
+    if (invalid_callback_mix[0] != 11 || g_stream_pull_calls != 1)
+        return fail("out-of-bounds stream callback did not fail closed");
+    const GBAModAudioStream first_activation_stream = g_stream;
     if (gba_mod_audio_play(audio_clip, 100, 0))
         return fail("activation did not reset PCM source to disabled");
     const char* resolved = gba_mod_required_asset_path(
@@ -425,6 +556,13 @@ int main() {
     if (!g_reset_saw_foreign_presentation_clear) {
         return fail("reactivation did not clear foreign presentation before callbacks");
     }
+    if (g_stream == first_activation_stream ||
+        gba_mod_audio_stream_set_enabled(first_activation_stream, 1) ||
+        gba_mod_audio_stream_play(first_activation_stream, 100) ||
+        gba_mod_audio_stream_stop(first_activation_stream) ||
+        gba_mod_audio_stream_set_native_gain_percent(first_activation_stream, 0)) {
+        return fail("reactivation left a stale stream capability live");
+    }
     // Explicit activation-boundary lifetime check for the bounded native
     // overlay. This must hold independently of the PPU reset/load tests.
     if (gba::foreign_presentation_internal::screen_overlay() != nullptr)
@@ -451,6 +589,11 @@ int main() {
         gba_mod_required_asset_path("test.adaptive-view", "zelda1-rom") ||
         gbarecomp::mod_runtime_commit(rom_path, &error))
         return fail("stale wrong-hash asset was accepted or remained published");
+    if (gba_mod_audio_stream_set_enabled(g_stream, 1) ||
+        gba_mod_audio_stream_play(g_stream, 100) ||
+        gba_mod_audio_stream_stop(g_stream) ||
+        gba_mod_audio_stream_set_native_gain_percent(g_stream, 0))
+        return fail("runtime reinitialization left a stream capability live");
 
     // The failed plan deliberately cleared the old committed catalog. Restore
     // the selected, asset-validated plan so we can model its old provider

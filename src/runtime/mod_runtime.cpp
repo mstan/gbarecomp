@@ -31,6 +31,14 @@
 #include <utility>
 #include <vector>
 
+// Deliberately declared in this implementation file only.  This is the
+// runtime-to-engine linkage used around a selected activation callback, not a
+// mod API or an authorization mechanism that plugins can include.
+namespace gbarecomp::mod_audio_engine_private {
+void begin_stream_activation();
+void end_stream_activation();
+}  // namespace gbarecomp::mod_audio_engine_private
+
 namespace fs = std::filesystem;
 
 namespace gbarecomp {
@@ -1912,6 +1920,10 @@ bool mod_runtime_initialize(const fs::path& root,
                             const std::string& game_id,
                             const std::string& rom_sha1,
                             std::string* error) {
+    // Reinitialization is an authorization boundary too.  A malformed or
+    // rejected new catalog cannot retain a prior plugin's producer callback or
+    // native-output policy while the runtime is deciding what is committed.
+    gba_mod_audio_reset();
     Runtime& runtime = state();
     runtime = {};
     // Keep this explicit: an initialize failure must never leave a prior
@@ -2044,8 +2056,18 @@ void mod_runtime_activate_plugins() {
     gba_mod_audio_reset();
     for (GBAModActivationCallback callback : reset_callbacks())
         if (callback) callback();
-    for (const ResolvedPlugin& plugin : runtime.committed.plugins)
-        if (plugin.callback) plugin.callback();
+    for (const ResolvedPlugin& plugin : runtime.committed.plugins) {
+        if (!plugin.callback) continue;
+        // No plugin-facing header exposes this gate. The local destructor
+        // closes it on every callback exit path.
+        gbarecomp::mod_audio_engine_private::begin_stream_activation();
+        struct CloseStreamActivation {
+            ~CloseStreamActivation() {
+                gbarecomp::mod_audio_engine_private::end_stream_activation();
+            }
+        } close_stream_activation;
+        plugin.callback();
+    }
 }
 
 const RecompLauncherCModProvider* mod_runtime_launcher_provider() {

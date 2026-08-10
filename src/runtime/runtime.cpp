@@ -1935,11 +1935,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (!debug::load_state(path.c_str(), make_snapshot_ctx(), &e)) {
             return false;
         }
-        // Overlay cursors are host delivery state rather than emulated state.
-        // Discard them so a pre-load cue cannot continue or duplicate over the
-        // restored guest world. The host bridge's already-queued native audio
-        // remains an intentionally separate, future flush concern.
-        gba_mod_audio_stop_all();
+        // Overlay cursors and active delivery are host state, not emulated
+        // state. Discard them so a pre-load cue cannot continue over the
+        // restored world, but retain the stream capability: loading does not
+        // rerun plugin activation, and the restored event must be able to
+        // explicitly restart its already-registered source. The host bridge's
+        // already-queued native audio remains a separate future flush concern.
+        gba_mod_audio_on_savestate_load();
         sync_frame_counter();  // realign vblank_count with restored PPU
         // Re-origin the fingerprint cycle clock + ring at the load point so the
         // recomp and interp oracle share a cycle origin for diff_cycle_trace.py.
