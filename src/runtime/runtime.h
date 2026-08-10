@@ -63,6 +63,7 @@ struct RunOptions {
     // reusable. Slot hotkeys continue to cover 1-9, while menus can reach 10.
     bool expose_assist_tools = false;
     bool assist_tools_enabled_by_default = true;
+    std::uint8_t assist_fast_forward_multiplier_default = 4;
     std::uint8_t save_state_slot_count = 9;
     std::uint8_t rewind_history_seconds = 0;
     std::uint8_t rewind_capture_interval_frames = 15;
