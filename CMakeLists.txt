@@ -563,6 +563,29 @@ endif()
 # ─────────────────────────────────────────────────────────────────────────────
 enable_testing()
 
+# Portable packaging generation is a Unix-only shell path. Register its smoke
+# test when the small validation toolchain is available, while keeping ordinary
+# engine builds independent of packaging-only host packages.
+if(UNIX)
+    find_program(GBARECOMP_BASH_EXECUTABLE bash)
+    find_program(GBARECOMP_DESKTOP_FILE_VALIDATE desktop-file-validate)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(GBARECOMP_BASH_EXECUTABLE AND GBARECOMP_DESKTOP_FILE_VALIDATE
+            AND Python3_Interpreter_FOUND)
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE} -c "import yaml"
+            RESULT_VARIABLE GBARECOMP_PYYAML_RESULT
+            OUTPUT_QUIET ERROR_QUIET)
+        if(GBARECOMP_PYYAML_RESULT EQUAL 0)
+            add_test(NAME packaging_generation_checks
+                COMMAND ${CMAKE_COMMAND} -E env
+                    PYTHON=${Python3_EXECUTABLE}
+                    ${GBARECOMP_BASH_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/packaging/tests/test_generation.sh)
+        endif()
+    endif()
+endif()
+
 if(GBARECOMP_ENABLE_MODS)
     add_executable(mod_runtime_tests
         tests/mod_runtime/test_main.cpp

@@ -81,3 +81,16 @@ redistribution. The launcher prompts for both on first run.
 
 Recompiled sources (`generated/`) are not committed anywhere in this ecosystem;
 regenerate them locally before packaging.
+
+## Generation checks
+
+Run the portable packaging smoke test on Linux with PyYAML and
+`desktop-file-validate` installed:
+
+```sh
+packaging/tests/test_generation.sh
+```
+
+It checks shell syntax, generates metadata from a source path containing `&`,
+parses both Flatpak YAML forms and the metainfo XML, validates the desktop entry,
+and confirms ROM/BIOS plus arbitrary `build-*` directories are excluded.

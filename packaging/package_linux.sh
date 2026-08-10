@@ -51,12 +51,29 @@ done
 
 [ -n "$TARGET" ] || { echo "--target is required" >&2; usage; exit 2; }
 APP_NAME="${APP_NAME:-$TARGET}"
+
+case "$APP_NAME" in
+    ""|[.-]*|*/*|*\\*|*$'\n'*|*$'\r'*)
+        echo "--name must be a visible filename component without slashes" >&2
+        exit 2
+        ;;
+esac
 [ "$(uname -s)" = "Linux" ] || { echo "package_linux.sh only runs on Linux" >&2; exit 1; }
 
-cd "$ROOT"
-BUILD_PATH="$ROOT/$BUILD_DIR"
+ROOT="$(cd -- "$ROOT" && pwd -P)"
+cd -- "$ROOT"
+case "$BUILD_DIR" in
+    /*) BUILD_PATH="$BUILD_DIR" ;;
+    *)  BUILD_PATH="$ROOT/$BUILD_DIR" ;;
+esac
 ARCH="$(uname -m)"
-OUT="$ROOT/release-stage/$APP_NAME-linux-$ARCH"
+mkdir -p -- "$ROOT/release-stage"
+RELEASE_STAGE="$(cd -- "$ROOT/release-stage" && pwd -P)"
+OUT="$RELEASE_STAGE/$APP_NAME-linux-$ARCH"
+case "$OUT" in
+    "$RELEASE_STAGE"/*) ;;
+    *) echo "refusing output outside release-stage: $OUT" >&2; exit 2 ;;
+esac
 
 echo "==> configure ($BUILD_DIR)"
 # $ORIGIN makes the executable search its own directory for the bundled .so
@@ -73,7 +90,7 @@ EXE="$BUILD_PATH/$TARGET"
 [ -x "$EXE" ] || { echo "built executable not found: $EXE" >&2; exit 1; }
 
 echo "==> stage $OUT"
-rm -rf "$OUT"; mkdir -p "$OUT"
+rm -rf -- "$OUT"; mkdir -p -- "$OUT"
 cp "$EXE" "$OUT/$TARGET"
 
 [ -d "$BUILD_PATH/assets" ] && cp -R "$BUILD_PATH/assets" "$OUT/assets" &&
@@ -162,7 +179,7 @@ else
 fi
 
 echo "==> tarball"
-( cd "$ROOT/release-stage" && tar -czf "$APP_NAME-linux-$ARCH.tar.gz" \
+( cd "$RELEASE_STAGE" && tar -czf "$APP_NAME-linux-$ARCH.tar.gz" -- \
     "$APP_NAME-linux-$ARCH" )
 echo "    release-stage/$APP_NAME-linux-$ARCH.tar.gz"
 

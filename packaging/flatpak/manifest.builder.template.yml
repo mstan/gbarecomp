@@ -6,7 +6,7 @@
 #
 # Differences from manifest.template.yml (the game):
 #   - Runtime must include the build toolchain (gcc, g++, CMake, Ninja), so we use
-#     the full org.freedesktop.Sdk 23.08 as the runtime itself, not a base platform.
+#     the full org.freedesktop.Sdk 25.08 as the runtime itself, not a base platform.
 #   - Command is BoktaiBuilder, not the game executable.
 #   - post-install stages the builder's window assets, not the game launcher's.
 #   - The sources are bundled: the builder copies them to a writable temp location
@@ -20,9 +20,9 @@
 
 id: '@APP_ID@'
 runtime: org.freedesktop.Sdk
-runtime-version: '23.08'
+runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
-sdk-version: '23.08'
+sdk-version: '25.08'
 command: '@TARGET@'
 
 finish-args:

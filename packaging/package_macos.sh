@@ -64,12 +64,33 @@ done
 
 [ -n "$TARGET" ] || { echo "--target is required" >&2; usage; exit 2; }
 APP_NAME="${APP_NAME:-$TARGET}"
+
+# APP_NAME becomes part of a directory that is recursively replaced below.
+# Keep it a single, visible path component and reject control characters.
+case "$APP_NAME" in
+    ""|[.-]*|*/*|*\\*|*$'\n'*|*$'\r'*)
+        echo "--name must be a visible filename component without slashes" >&2
+        exit 2
+        ;;
+esac
 [ "$(uname -s)" = "Darwin" ] || { echo "package_macos.sh only runs on macOS" >&2; exit 1; }
 
-cd "$ROOT"
-BUILD_PATH="$ROOT/$BUILD_DIR"
+# Canonicalize after resolving a possibly-relative --root. Keeping ROOT in its
+# original relative form after cd made paths such as game/game/build-release.
+ROOT="$(cd -- "$ROOT" && pwd -P)"
+cd -- "$ROOT"
+case "$BUILD_DIR" in
+    /*) BUILD_PATH="$BUILD_DIR" ;;
+    *)  BUILD_PATH="$ROOT/$BUILD_DIR" ;;
+esac
 ARCH="$(uname -m)"
-OUT="$ROOT/release-stage/$APP_NAME-macos-$ARCH"
+mkdir -p -- "$ROOT/release-stage"
+RELEASE_STAGE="$(cd -- "$ROOT/release-stage" && pwd -P)"
+OUT="$RELEASE_STAGE/$APP_NAME-macos-$ARCH"
+case "$OUT" in
+    "$RELEASE_STAGE"/*) ;;
+    *) echo "refusing output outside release-stage: $OUT" >&2; exit 2 ;;
+esac
 
 echo "==> configure ($BUILD_DIR)"
 cmake -S "$ROOT" -B "$BUILD_PATH" -DCMAKE_BUILD_TYPE=Release \
@@ -82,7 +103,7 @@ EXE="$BUILD_PATH/$TARGET"
 [ -x "$EXE" ] || { echo "built executable not found: $EXE" >&2; exit 1; }
 
 echo "==> stage $OUT"
-rm -rf "$OUT"; mkdir -p "$OUT"
+rm -rf -- "$OUT"; mkdir -p -- "$OUT"
 cp "$EXE" "$OUT/$TARGET"
 
 # recomp-ui stages launcher assets next to the built exe; the seam resolves them
@@ -119,8 +140,13 @@ relocate "$OUT/$TARGET"
 echo "==> resolve dlopen'd libraries"
 for lib in "$OUT"/*.dylib; do
     [ -f "$lib" ] || continue
-    strings "$lib" | grep -oE '@loader_path/lib[A-Za-z0-9._+-]*\.dylib' |
-        sed 's|@loader_path/||' | sort -u | while read -r want; do
+    # grep returns 1 for the ordinary no-match case. Capture it explicitly so
+    # pipefail does not abort packaging on a dylib that dlopens nothing.
+    wants="$(strings "$lib" 2>/dev/null |
+        grep -oE '@loader_path/lib[A-Za-z0-9._+-]*\.dylib' |
+        sed 's|@loader_path/||' | sort -u || true)"
+    [ -n "$wants" ] || continue
+    printf '%s\n' "$wants" | while read -r want; do
         [ -f "$OUT/$want" ] && continue
         found=""
         for p in "$(brew --prefix 2>/dev/null)/lib" /opt/homebrew/lib \
@@ -180,7 +206,7 @@ else
 fi
 
 echo "==> tarball"
-( cd "$ROOT/release-stage" && tar -czf "$APP_NAME-macos-$ARCH.tar.gz" \
+( cd "$RELEASE_STAGE" && tar -czf "$APP_NAME-macos-$ARCH.tar.gz" -- \
     "$APP_NAME-macos-$ARCH" )
 echo "    release-stage/$APP_NAME-macos-$ARCH.tar.gz"
 

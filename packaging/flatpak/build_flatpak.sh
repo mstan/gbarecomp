@@ -55,18 +55,66 @@ done
 APP_NAME="${APP_NAME:-$TARGET}"
 APP_ID="${APP_ID:-tech.recomp.$TARGET}"
 SUMMARY="${SUMMARY:-$APP_NAME, statically recompiled}"
-SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
+
+# TARGET is both a CMake target and the installed command; APP_ID is also used
+# as a filename. Reject path separators and metadata line injection up front.
+case "$TARGET" in
+    ""|[.-]*|*/*|*\\*|*$'\n'*|*$'\r'*)
+        echo "--target must be a command name without slashes" >&2; exit 2 ;;
+esac
+case "$APP_ID" in
+    ""|[.-]*|*/*|*\\*|*[!A-Za-z0-9._-]*)
+        echo "--id must contain only letters, digits, dots, underscores, and hyphens" >&2
+        exit 2
+        ;;
+esac
+case "$APP_NAME$SUMMARY" in
+    *$'\n'*|*$'\r'*)
+        echo "--name and --summary must each fit on one line" >&2; exit 2 ;;
+esac
+
+SOURCE_DIR="$(cd -- "$SOURCE_DIR" && pwd -P)"
+case "$SOURCE_DIR" in
+    *$'\n'*|*$'\r'*) echo "--source cannot contain a newline" >&2; exit 2 ;;
+esac
 
 OUT="$SOURCE_DIR/flatpak-build"
 mkdir -p "$OUT"
 
+yaml_content() {
+    # Templates quote substitutions as YAML single-quoted scalars. A literal
+    # apostrophe is represented by a doubled apostrophe; &, #, backslashes and
+    # other path characters then need no special handling.
+    printf '%s' "$1" | sed "s/'/''/g"
+}
+
 subst() {
-    sed -e "s|@APP_ID@|$APP_ID|g" \
-        -e "s|@APP_NAME@|$APP_NAME|g" \
-        -e "s|@TARGET@|$TARGET|g" \
-        -e "s|@SUMMARY@|$SUMMARY|g" \
-        -e "s|@SOURCE_DIR@|$SOURCE_DIR|g" \
-        -e "s|@SUPPORT_DIR@|$OUT|g"
+    GBAR_APP_ID="$(yaml_content "$APP_ID")" \
+    GBAR_APP_NAME="$(yaml_content "$APP_NAME")" \
+    GBAR_TARGET="$(yaml_content "$TARGET")" \
+    GBAR_SUMMARY="$(yaml_content "$SUMMARY")" \
+    GBAR_SOURCE_DIR="$(yaml_content "$SOURCE_DIR")" \
+    GBAR_SUPPORT_DIR="$(yaml_content "$OUT")" \
+    awk '
+        function literal_replace(text, needle, value, pos, result) {
+            result = ""
+            while ((pos = index(text, needle)) != 0) {
+                result = result substr(text, 1, pos - 1) value
+                text = substr(text, pos + length(needle))
+            }
+            return result text
+        }
+        {
+            line = $0
+            line = literal_replace(line, "@APP_ID@", ENVIRON["GBAR_APP_ID"])
+            line = literal_replace(line, "@APP_NAME@", ENVIRON["GBAR_APP_NAME"])
+            line = literal_replace(line, "@TARGET@", ENVIRON["GBAR_TARGET"])
+            line = literal_replace(line, "@SUMMARY@", ENVIRON["GBAR_SUMMARY"])
+            line = literal_replace(line, "@SOURCE_DIR@", ENVIRON["GBAR_SOURCE_DIR"])
+            line = literal_replace(line, "@SUPPORT_DIR@", ENVIRON["GBAR_SUPPORT_DIR"])
+            print line
+        }
+    '
 }
 
 # Build the source `skip:` list from what this tree actually contains, so the
@@ -88,7 +136,7 @@ SKIP_FILE="$(mktemp)"
 : > "$SKIP_FILE"
 
 add_skip() {   # relative path -> one YAML list entry
-    printf '          - %s\n' "$1" >> "$SKIP_FILE"
+    printf "          - '%s'\n" "$(yaml_content "$1")" >> "$SKIP_FILE"
 }
 
 while IFS= read -r p; do
@@ -99,8 +147,16 @@ $(cd "$SOURCE_DIR" && find . \( -name '*.gba' -o -name '*.agb' \
     -o -name 'gba_bios.bin' \) -not -path './.git/*' 2>/dev/null)
 EOF_ROMS
 
-for d in build build-ui build-release build-sub release-stage \
-         recomp_cache flatpak-build .flatpak-builder .git; do
+# Catch every real build-* directory, including project-specific names such as
+# build-pr-6 and build-cosim, at any depth in the source tree.
+while IFS= read -r p; do
+    [ -n "$p" ] && add_skip "${p#./}"
+done <<EOF_BUILDS
+$(cd "$SOURCE_DIR" && find . -type d \( -name build -o -name 'build-*' \) \
+    -not -path './.git/*' 2>/dev/null)
+EOF_BUILDS
+
+for d in release-stage recomp_cache flatpak-build .flatpak-builder .git; do
     if [ -e "$SOURCE_DIR/$d" ]; then add_skip "$d"; fi
 done
 
@@ -125,11 +181,14 @@ rm -f "$SKIP_FILE"
 echo "==> desktop entry"
 # Categories=Game;Emulator; is what Steam's "Add a Non-Steam Game" and the Deck's
 # application grid key off.
+desktop_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g'; }
+DESKTOP_APP_NAME="$(desktop_escape "$APP_NAME")"
+DESKTOP_SUMMARY="$(desktop_escape "$SUMMARY")"
 cat > "$OUT/$APP_ID.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
-Name=$APP_NAME
-Comment=$SUMMARY
+Name=$DESKTOP_APP_NAME
+Comment=$DESKTOP_SUMMARY
 Exec=$TARGET
 Icon=$APP_ID
 Categories=Game;Emulator;
@@ -137,12 +196,23 @@ Terminal=false
 DESKTOP
 
 echo "==> metainfo"
+xml_escape() {
+    printf '%s' "$1" | sed \
+        -e 's/&/\&amp;/g' \
+        -e 's/</\&lt;/g' \
+        -e 's/>/\&gt;/g' \
+        -e 's/"/\&quot;/g' \
+        -e "s/'/\&apos;/g"
+}
+XML_APP_ID="$(xml_escape "$APP_ID")"
+XML_APP_NAME="$(xml_escape "$APP_NAME")"
+XML_SUMMARY="$(xml_escape "$SUMMARY")"
 cat > "$OUT/$APP_ID.metainfo.xml" <<METAINFO
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>$APP_ID</id>
-  <name>$APP_NAME</name>
-  <summary>$SUMMARY</summary>
+  <id>$XML_APP_ID</id>
+  <name>$XML_APP_NAME</name>
+  <summary>$XML_SUMMARY</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>LicenseRef-proprietary</project_license>
   <description>
@@ -152,7 +222,7 @@ cat > "$OUT/$APP_ID.metainfo.xml" <<METAINFO
       BIOS, which the launcher prompts for on first run.
     </p>
   </description>
-  <launchable type="desktop-id">$APP_ID.desktop</launchable>
+  <launchable type="desktop-id">$XML_APP_ID.desktop</launchable>
   <content_rating type="oars-1.1"/>
 </component>
 METAINFO
@@ -196,8 +266,8 @@ else
 No flatpak-builder available. On a Steam Deck, in Desktop Mode:
 
     flatpak install -y --user flathub org.flatpak.Builder
-    flatpak install -y --user flathub org.freedesktop.Platform/x86_64/23.08 \
-                                      org.freedesktop.Sdk/x86_64/23.08
+    flatpak install -y --user flathub org.freedesktop.Platform/x86_64/25.08 \
+                                      org.freedesktop.Sdk/x86_64/25.08
 
 then re-run this script.
 MSG
