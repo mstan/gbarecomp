@@ -329,6 +329,11 @@ struct SeamConfig {
     int  aspect_index = 0;     // games with a launcher_aspect vocabulary only
     int  adaptive_view = 0;    // live drawable aspect; fixed aspect is retained
     float gyro_sensitivity = 1.00f;
+    int  assist_tools = -1;      // unset -> game's requested default
+    int  assist_rewind_key = 30; // SDL_SCANCODE_1
+    int  assist_fast_key = 31;   // SDL_SCANCODE_2
+    int  assist_rewind_pad = RECOMP_LAUNCHER_PAD_AXIS(4, 1); // left trigger
+    int  assist_fast_pad = RECOMP_LAUNCHER_PAD_AXIS(5, 1);   // right trigger
 };
 
 inline void seam_config_load(const std::string& path, SeamConfig* c) {
@@ -370,6 +375,11 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
         else if (key == "adaptive_view") c->adaptive_view = std::atoi(val.c_str());
         else if (key == "gyro_sensitivity")
             c->gyro_sensitivity = std::strtof(val.c_str(), nullptr);
+        else if (key == "assist_tools") c->assist_tools = std::atoi(val.c_str());
+        else if (key == "assist_rewind_key") c->assist_rewind_key = std::atoi(val.c_str());
+        else if (key == "assist_fast_key") c->assist_fast_key = std::atoi(val.c_str());
+        else if (key == "assist_rewind_pad") c->assist_rewind_pad = std::atoi(val.c_str());
+        else if (key == "assist_fast_pad") c->assist_fast_pad = std::atoi(val.c_str());
     }
     if (c->scale < 1) c->scale = 1;
     if (c->scale > 8) c->scale = 8;
@@ -381,6 +391,8 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
     if (c->fullscreen < 0 || c->fullscreen > 2) c->fullscreen = 0;
     if (c->gyro_sensitivity < 0.25f) c->gyro_sensitivity = 0.25f;
     if (c->gyro_sensitivity > 4.00f) c->gyro_sensitivity = 4.00f;
+    if (c->assist_tools > 1) c->assist_tools = 1;
+    if (c->assist_tools < -1) c->assist_tools = -1;
 }
 
 // Rewrite ONLY the [Launcher] section of config.ini, preserving every other
@@ -425,6 +437,11 @@ inline void seam_config_save(const std::string& path, const SeamConfig& c) {
     f << "aspect_index = " << c.aspect_index << "\n";
     f << "adaptive_view = " << c.adaptive_view << "\n";
     f << "gyro_sensitivity = " << c.gyro_sensitivity << "\n";
+    f << "assist_tools = " << c.assist_tools << "\n";
+    f << "assist_rewind_key = " << c.assist_rewind_key << "\n";
+    f << "assist_fast_key = " << c.assist_fast_key << "\n";
+    f << "assist_rewind_pad = " << c.assist_rewind_pad << "\n";
+    f << "assist_fast_pad = " << c.assist_fast_pad << "\n";
 }
 
 // ---- config.ini [Solar] ------------------------------------------------------
@@ -658,6 +675,8 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         cfg.sharp_filter = opts.launcher_default_sharp_filter ? 1 : 0;
     if (cfg.affine_filter < 0)
         cfg.affine_filter = opts.launcher_default_affine_filter ? 1 : 0;
+    if (cfg.assist_tools < 0)
+        cfg.assist_tools = opts.assist_tools_enabled_by_default ? 1 : 0;
     SeamSolar solar;
     if (opts.has_solar_sensor) seam_solar_load(config_path, &solar);
     if (cfg.skip_launcher && !force_launcher) {
@@ -738,6 +757,11 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     if (opts.has_solar_sensor) solar_in_launcher = push_solar_settings(ls, solar);
     ls.screen_kind   = cfg.screen_kind;
     ls.aspect_index  = cfg.aspect_index;
+    ls.assist_tools = cfg.assist_tools;
+    ls.assist_key_bind[0] = cfg.assist_rewind_key;
+    ls.assist_key_bind[1] = cfg.assist_fast_key;
+    ls.assist_pad_bind[0] = cfg.assist_rewind_pad;
+    ls.assist_pad_bind[1] = cfg.assist_fast_pad;
     gbarecomp_seam::set_gyro_sensitivity(ls, cfg.gyro_sensitivity);
     gbarecomp_seam::set_presentation_filters(
         ls, cfg.sharp_filter != 0, cfg.affine_filter != 0);
@@ -765,6 +789,25 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         opts.resize_driven_view && opts.max_resize_view_width > 240 ? 1 : 0;
     gi.config_path = config_path.c_str();
     gi.keybinds_path = keybinds_path.c_str();
+    static const char* const kAssistBindings[] = {
+        "Rewind", "Fast-forward"
+    };
+    static const int kAssistDefaultKeys[RECOMP_LAUNCHER_MAX_ASSIST_BINDINGS] = {
+        30, 31 /* SDL_SCANCODE_1, SDL_SCANCODE_2 */
+    };
+    static const int kAssistDefaultPads[RECOMP_LAUNCHER_MAX_ASSIST_BINDINGS] = {
+        RECOMP_LAUNCHER_PAD_AXIS(4, 1),
+        RECOMP_LAUNCHER_PAD_AXIS(5, 1),
+    };
+    gi.has_assist_tools = opts.expose_assist_tools ? 1 : 0;
+    gi.assist_tools_note =
+        "Rewind returns to a recent point kept in memory. Fast-forward runs "
+        "without the normal frame limiter. Keyboard and controller controls "
+        "can be changed below.";
+    gi.assist_binding_labels = kAssistBindings;
+    gi.assist_binding_count = opts.expose_assist_tools ? 2 : 0;
+    gi.assist_default_key_bind = kAssistDefaultKeys;
+    gi.assist_default_pad_bind = kAssistDefaultPads;
     gi.boxart_path = opts.launcher_boxart;   // NULL => default assets/img/boxart.tga
     gi.bios_verify = &gbarecomp_seam::verify_retail_gba_bios;
     gbarecomp_seam::set_has_gyro_controls(gi, opts.launcher_expose_gyro);
@@ -830,6 +873,11 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         std::clamp(gbarecomp_seam::get_gyro_sensitivity(
                        ls, cfg.gyro_sensitivity),
                    0.25f, 4.00f);
+    cfg.assist_tools = ls.assist_tools ? 1 : 0;
+    cfg.assist_rewind_key = ls.assist_key_bind[0];
+    cfg.assist_fast_key = ls.assist_key_bind[1];
+    cfg.assist_rewind_pad = ls.assist_pad_bind[0];
+    cfg.assist_fast_pad = ls.assist_pad_bind[1];
     seam_config_save(config_path, cfg);
     // Only rewrite [Solar] when this recomp-ui pin actually surfaced the panel;
     // otherwise the values never round-tripped through it and writing them back

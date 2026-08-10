@@ -2414,7 +2414,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 std::filesystem::path p(argv[0]);
                 if (p.has_parent_path()) exe_dir = p.parent_path().string();
             }
-            win.load_input_config(exe_dir.c_str());
+            win.load_input_config(exe_dir.c_str(),
+                                  opts.assist_tools_enabled_by_default);
         }
         if (args.fullscreen) win.set_fullscreen(args.fullscreen);
         win.set_volume(args.volume);
@@ -2424,7 +2425,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         runtime_ui_context.gyro_sensitivity = &args.gyro_sensitivity;
         runtime_ui_context.assist_tools_exposed = opts.expose_assist_tools;
         runtime_ui_context.assist_tools_enabled =
-            opts.assist_tools_enabled_by_default;
+            win.assist_tools_enabled();
         runtime_ui_context.state_slot_count = std::clamp<int>(
             opts.save_state_slot_count ? opts.save_state_slot_count : 9,
             1, 10);
@@ -2619,7 +2620,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         return !opts.expose_assist_tools ||
                runtime_ui_context.assist_tools_enabled;
 #else
-        return true;
+        return !opts.expose_assist_tools || win.assist_tools_enabled();
 #endif
     };
     auto capture_rewind_point = [&]() {
@@ -2879,9 +2880,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                              "failed: %s\n", ev.load_slot, e.c_str());
             }
         }
+        bool rewind_requested = ev.rewind;
 #if defined(GBARECOMP_RUNTIME_UI)
-        if (runtime_ui_context.pending_rewind) {
-            runtime_ui_context.pending_rewind = false;
+        rewind_requested = rewind_requested ||
+                           runtime_ui_context.pending_rewind;
+        runtime_ui_context.pending_rewind = false;
+#endif
+        if (rewind_requested && assist_tools_enabled()) {
             const uint64_t current = ppu.frame_count();
             const uint64_t target = current > 60 ? current - 60 : 0;
             std::size_t target_index = rewind_history.size();
@@ -2916,7 +2921,6 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 }
             }
         }
-#endif
     };
 
     if (args.window) {
