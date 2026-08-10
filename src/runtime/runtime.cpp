@@ -2769,10 +2769,124 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 input_replay_events[input_replay_index].keyinput);
     };
 
+    // Optional monotonic-pump Assist action script for automated validation.
+    // It exercises the same runtime save/load, fast-forward, and rewind paths
+    // as HostWindow input without depending on desktop focus or synthetic OS
+    // modifier state. Format:
+    //   GBARECOMP_ASSIST_SCRIPT="1:fast_on;600:fast_off;620:save1;"
+    //                           "700:load1;800:rewind"
+    // Pump indices never move backward when a state is loaded, so a script
+    // cannot accidentally replay earlier actions after a restore.
+    enum class AssistScriptAction {
+        FastOn,
+        FastOff,
+        Save,
+        Load,
+        Rewind,
+    };
+    struct AssistScriptEvent {
+        uint64_t pump = 0;
+        AssistScriptAction action = AssistScriptAction::FastOff;
+        int slot = 0;
+        std::string label;
+    };
+    std::vector<AssistScriptEvent> assist_script_events;
+    std::size_t assist_script_index = 0;
+    uint64_t assist_script_pump = 0;
+    bool assist_script_fast = false;
+    if (const char* env = std::getenv("GBARECOMP_ASSIST_SCRIPT");
+        env && env[0]) {
+        const std::string script(env);
+        std::size_t start = 0;
+        uint64_t previous_pump = 0;
+        while (start < script.size()) {
+            const std::size_t end = script.find(';', start);
+            const std::string token = script.substr(
+                start, end == std::string::npos ? std::string::npos
+                                                : end - start);
+            const std::size_t colon = token.find(':');
+            char* pump_end = nullptr;
+            const unsigned long long pump = colon == std::string::npos
+                ? 0 : std::strtoull(token.c_str(), &pump_end, 10);
+            const bool pump_valid =
+                colon != std::string::npos && pump > 0 &&
+                pump_end == token.c_str() + colon && pump >= previous_pump;
+            const std::string action = colon == std::string::npos
+                ? std::string{} : token.substr(colon + 1);
+            AssistScriptEvent event;
+            event.pump = static_cast<uint64_t>(pump);
+            event.label = action;
+            bool action_valid = true;
+            if (action == "fast_on") {
+                event.action = AssistScriptAction::FastOn;
+            } else if (action == "fast_off") {
+                event.action = AssistScriptAction::FastOff;
+            } else if (action == "rewind") {
+                event.action = AssistScriptAction::Rewind;
+            } else if (action.rfind("save", 0) == 0 ||
+                       action.rfind("load", 0) == 0) {
+                const bool save = action.rfind("save", 0) == 0;
+                const char* slot_text = action.c_str() + 4;
+                char* slot_end = nullptr;
+                const long slot = std::strtol(slot_text, &slot_end, 10);
+                action_valid = slot_end != slot_text && *slot_end == '\0' &&
+                               slot >= 1 && slot <= 10;
+                event.action = save ? AssistScriptAction::Save
+                                    : AssistScriptAction::Load;
+                event.slot = static_cast<int>(slot);
+            } else {
+                action_valid = false;
+            }
+            if (!pump_valid || !action_valid) {
+                std::fprintf(stderr,
+                             "[gbarecomp:runtime] invalid Assist script "
+                             "event: %s\n", token.c_str());
+                runtime_shutdown();
+                return 1;
+            }
+            assist_script_events.push_back(std::move(event));
+            previous_pump = static_cast<uint64_t>(pump);
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+        if (!args.quiet)
+            std::printf("assist_script=ENABLED events=%zu\n",
+                        assist_script_events.size());
+    }
+
     auto pump_host_input = [&]() {
         if (!args.window) return;
         capture_rewind_point();
         auto ev = win.pump();
+        ++assist_script_pump;
+        while (assist_script_index < assist_script_events.size() &&
+               assist_script_events[assist_script_index].pump <=
+                   assist_script_pump) {
+            const AssistScriptEvent& event =
+                assist_script_events[assist_script_index++];
+            switch (event.action) {
+                case AssistScriptAction::FastOn:
+                    assist_script_fast = true;
+                    break;
+                case AssistScriptAction::FastOff:
+                    assist_script_fast = false;
+                    break;
+                case AssistScriptAction::Save:
+                    ev.save_slot = event.slot;
+                    break;
+                case AssistScriptAction::Load:
+                    ev.load_slot = event.slot;
+                    break;
+                case AssistScriptAction::Rewind:
+                    ev.rewind = true;
+                    break;
+            }
+            std::printf("assist_script_event pump=%llu action=%s\n",
+                        static_cast<unsigned long long>(event.pump),
+                        event.label.c_str());
+            std::fflush(stdout);
+        }
+        ev.fast_forward = ev.fast_forward || assist_script_fast;
         if (!input_replay_requested) bus.io().set_keyinput(ev.keyinput);
         if (bus.gyro().active()) {
             // Mouse-drag is angular velocity, not absolute angle: moving while
