@@ -207,6 +207,7 @@ struct Args {
 #define GBARECOMP_UI_KEY_FPS        "display.fps_readout"
 #define GBARECOMP_UI_KEY_ASSIST_ENABLED "assist.enabled"
 #define GBARECOMP_UI_KEY_FAST_FORWARD   "assist.fast_forward"
+#define GBARECOMP_UI_KEY_FAST_FORWARD_SPEED "assist.fast_forward_speed"
 #define GBARECOMP_UI_KEY_REWIND          "assist.rewind"
 
 struct RuntimeUiContext {
@@ -225,6 +226,7 @@ struct RuntimeUiContext {
     bool assist_tools_exposed = false;
     bool assist_tools_enabled = true;
     bool fast_forward_latched = false;
+    int fast_forward_multiplier = 4;
     // Game-supplied handlers for keys the engine does not own.
     const RunOptions* opts = nullptr;
 };
@@ -244,6 +246,9 @@ int runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int* out) {
         *out = c->assist_tools_enabled;
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FAST_FORWARD) == 0)
         *out = c->fast_forward_latched;
+    else if (std::strcmp(item->key,
+                         GBARECOMP_UI_KEY_FAST_FORWARD_SPEED) == 0)
+        *out = c->fast_forward_multiplier;
 #if defined(RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY)
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY) == 0 &&
              c->gyro_sensitivity)
@@ -278,6 +283,9 @@ int runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int value) {
         if (!c->assist_tools_enabled) c->fast_forward_latched = false;
     } else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FAST_FORWARD) == 0)
         c->fast_forward_latched = value != 0;
+    else if (std::strcmp(item->key,
+                         GBARECOMP_UI_KEY_FAST_FORWARD_SPEED) == 0)
+        c->fast_forward_multiplier = std::clamp(value, 2, 10);
 #if defined(RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY)
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_GYRO_SENSITIVITY) == 0 &&
              c->gyro_sensitivity)
@@ -2415,7 +2423,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (p.has_parent_path()) exe_dir = p.parent_path().string();
             }
             win.load_input_config(exe_dir.c_str(),
-                                  opts.assist_tools_enabled_by_default);
+                                  opts.assist_tools_enabled_by_default,
+                                  opts.assist_fast_forward_multiplier_default);
         }
         if (args.fullscreen) win.set_fullscreen(args.fullscreen);
         win.set_volume(args.volume);
@@ -2426,6 +2435,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         runtime_ui_context.assist_tools_exposed = opts.expose_assist_tools;
         runtime_ui_context.assist_tools_enabled =
             win.assist_tools_enabled();
+        runtime_ui_context.fast_forward_multiplier =
+            win.fast_forward_multiplier();
         runtime_ui_context.state_slot_count = std::clamp<int>(
             opts.save_state_slot_count ? opts.save_state_slot_count : 9,
             1, 10);
@@ -2551,6 +2562,19 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             fast_forward_item.type        = RECOMP_RUNTIME_UI_BOOL;
             runtime_ui_extras.push_back(fast_forward_item);
 
+            RecompRuntimeUiItem fast_forward_speed_item{};
+            fast_forward_speed_item.key =
+                GBARECOMP_UI_KEY_FAST_FORWARD_SPEED;
+            fast_forward_speed_item.section = "Assist Tools";
+            fast_forward_speed_item.label = "Fast-forward speed";
+            fast_forward_speed_item.description =
+                "Target emulation multiplier while Fast-forward is active.";
+            fast_forward_speed_item.type = RECOMP_RUNTIME_UI_INT;
+            fast_forward_speed_item.minimum = 2;
+            fast_forward_speed_item.maximum = 10;
+            fast_forward_speed_item.step = 1;
+            runtime_ui_extras.push_back(fast_forward_speed_item);
+
             if (opts.rewind_history_seconds > 0) {
                 RecompRuntimeUiItem rewind_item{};
                 rewind_item.key         = GBARECOMP_UI_KEY_REWIND;
@@ -2623,6 +2647,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         return !opts.expose_assist_tools || win.assist_tools_enabled();
 #endif
     };
+    bool fast_forward_active = false;
+    int fast_forward_multiplier = std::clamp(
+        win.fast_forward_multiplier(), 2, 10);
     auto capture_rewind_point = [&]() {
         if (!rewind_capacity || !assist_tools_enabled()) return;
         const uint64_t frame = ppu.frame_count();
@@ -2802,12 +2829,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         bool fast_forward_latched = false;
 #if defined(GBARECOMP_RUNTIME_UI)
         fast_forward_latched = runtime_ui_context.fast_forward_latched;
+        fast_forward_multiplier = std::clamp(
+            runtime_ui_context.fast_forward_multiplier, 2, 10);
+#else
+        fast_forward_multiplier = std::clamp(
+            win.fast_forward_multiplier(), 2, 10);
 #endif
-        if (pacer) {
-            pacer->set_uncapped(
-                assist_tools_enabled() &&
-                (ev.fast_forward || fast_forward_latched));
-        }
+        fast_forward_active = assist_tools_enabled() &&
+                              (ev.fast_forward || fast_forward_latched);
         // System hotkeys (config.ini [KeyMap], rebindable in the launcher).
         if (ev.toggle_fullscreen) {
             // Toggle between windowed and the configured mode. A session
@@ -2950,21 +2979,26 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             uint64_t frame = ppu.frame_count();
             if (frame != last_presented_frame) {
                 const uint64_t fp_t0 = FramePhaseRing::now_ns();
-                const bool view_changed = sync_resize_driven_view();
-                if (ppu.has_latched_framebuffer() && !view_changed) {
-                    std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
-                                ppu.render_bytes());
-                } else {
-                    ppu.render(live_fb.data(), bus.io().read16(0x000),
-                               bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
-                               bus.pal_ptr());
+                const bool present_frame = !fast_forward_active ||
+                    (frame % static_cast<uint64_t>(
+                         fast_forward_multiplier) == 0);
+                if (present_frame) {
+                    const bool view_changed = sync_resize_driven_view();
+                    if (ppu.has_latched_framebuffer() && !view_changed) {
+                        std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
+                                    ppu.render_bytes());
+                    } else {
+                        ppu.render(live_fb.data(), bus.io().read16(0x000),
+                                   bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
+                                   bus.pal_ptr());
+                    }
                 }
                 const uint64_t fp_t1 = FramePhaseRing::now_ns();
-                win.present(live_fb.data());
+                if (present_frame) win.present(live_fb.data());
                 const uint64_t fp_t2 = FramePhaseRing::now_ns();
                 int16_t audio_buf[2048];
                 std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
-                if (n > 0) {
+                if (n > 0 && !fast_forward_active) {
                     gba_mod_audio_mix(audio_buf, n);
                     win.push_audio_samples(audio_buf, n);
                 }
@@ -2977,10 +3011,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (input_replay_requested) apply_input_replay();
                 const uint64_t fp_t4 = FramePhaseRing::now_ns();
                 last_presented_frame = frame;
-                ++frames_presented;
-                if (args.frames >= 0 && frames_presented >= args.frames)
-                    host_quit = true;
-                if (pacer) pacer->wait_for_next_frame();
+                if (present_frame) {
+                    ++frames_presented;
+                    if (args.frames >= 0 && frames_presented >= args.frames)
+                        host_quit = true;
+                    if (pacer) pacer->wait_for_next_frame();
+                }
                 frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3, fp_t4,
                                    FramePhaseRing::now_ns());
             }
@@ -3314,17 +3350,22 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             uint64_t frame = ppu.frame_count();
             if (frame != last_presented_frame) {
                 const uint64_t fp_t0 = FramePhaseRing::now_ns();
-                const bool view_changed = sync_resize_driven_view();
-                if (ppu.has_latched_framebuffer() && !view_changed) {
-                    std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
-                                ppu.render_bytes());
-                } else {
-                    ppu.render(live_fb.data(), bus.io().read16(0x000),
-                               bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
-                               bus.pal_ptr());
+                const bool present_frame = !fast_forward_active ||
+                    (frame % static_cast<uint64_t>(
+                         fast_forward_multiplier) == 0);
+                if (present_frame) {
+                    const bool view_changed = sync_resize_driven_view();
+                    if (ppu.has_latched_framebuffer() && !view_changed) {
+                        std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
+                                    ppu.render_bytes());
+                    } else {
+                        ppu.render(live_fb.data(), bus.io().read16(0x000),
+                                   bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
+                                   bus.pal_ptr());
+                    }
                 }
                 const uint64_t fp_t1 = FramePhaseRing::now_ns();
-                win.present(live_fb.data());
+                if (present_frame) win.present(live_fb.data());
                 // Framedump (capture runs only) is attributed to present_us.
                 if (framedump_dir && frame >= framedump_start &&
                     framedump_written < framedump_max) {
@@ -3338,7 +3379,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 const uint64_t fp_t2 = FramePhaseRing::now_ns();
                 int16_t audio_buf[2048];
                 std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
-                if (n > 0) {
+                if (n > 0 && !fast_forward_active) {
                     gba_mod_audio_mix(audio_buf, n);
                     win.push_audio_samples(audio_buf, n);
                 }
@@ -3347,13 +3388,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 const uint64_t fp_t4 = FramePhaseRing::now_ns();
                 dispatches_since_pump = 0;
                 last_presented_frame = frame;
-                ++frames_presented;
-                if (args.frames >= 0 && frames_presented >= args.frames) {
-                    host_quit = true;
+                if (present_frame) {
+                    ++frames_presented;
+                    if (args.frames >= 0 && frames_presented >= args.frames) {
+                        host_quit = true;
+                    }
+                    // Normal play presents/paces every frame. Fast-forward
+                    // runs N guest frames per one paced host presentation,
+                    // making its selected multiplier independent of monitor Hz.
+                    if (pacer) pacer->wait_for_next_frame();
                 }
-                // Pace to real GBA time. Decoupled from monitor vsync
-                // (MC-HP-004); hold Tab to uncap (fast-forward).
-                if (pacer) pacer->wait_for_next_frame();
                 frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3, fp_t4,
                                    FramePhaseRing::now_ns());
             }

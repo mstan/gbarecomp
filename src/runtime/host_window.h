@@ -68,7 +68,8 @@ public:
     // Never called => built-in defaults for both. Safe to call when the
     // files don't exist.
     void load_input_config(const char* dir,
-                           bool assist_tools_default = true);
+                           bool assist_tools_default = true,
+                           int fast_forward_multiplier_default = 4);
 
     // Live window/audio controls (hotkey + launcher-driven). All no-ops when
     // the window isn't open or this build has no SDL2.
@@ -94,6 +95,7 @@ public:
     void set_fps_readout(bool on);      // presents-per-second in the title bar
     bool fps_readout() const;
     bool assist_tools_enabled() const;
+    int  fast_forward_multiplier() const;
 
     // Upload one base_w x base_h RGB888 frame (the dimensions passed to open())
     // and present.

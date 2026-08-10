@@ -375,6 +375,7 @@ struct Backend {
         assist_pad_axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT, true),
     };
     bool         assist_tools = true;
+    int          assist_fast_forward_multiplier = 4;
     bool         assist_rewind_was_down = false;
     Uint32       assist_rewind_repeat_at = 0;
     int          scale = 3;             // current integer window scale
@@ -1669,10 +1670,13 @@ void HostWindow::present(const uint8_t* rgb888) {
 }
 
 void HostWindow::load_input_config(const char* dir,
-                                   bool assist_tools_default) {
+                                   bool assist_tools_default,
+                                   int fast_forward_multiplier_default) {
     if (!open_ || !impl_ || !dir) return;
     auto* b = static_cast<Backend*>(impl_);
     b->assist_tools = assist_tools_default;
+    b->assist_fast_forward_multiplier = std::clamp(
+        fast_forward_multiplier_default, 2, 10);
     const std::string base = std::string(dir) + "/";
 
     // keybinds.ini [player1] (recomp-ui generic format, scancode names).
@@ -1704,6 +1708,9 @@ void HostWindow::load_input_config(const char* dir,
                      [b](const char* key, const char* val) {
         if (SDL_strcasecmp(key, "assist_tools") == 0)
             b->assist_tools = std::atoi(val) != 0;
+        else if (SDL_strcasecmp(key, "assist_fast_forward_multiplier") == 0)
+            b->assist_fast_forward_multiplier = std::clamp(
+                std::atoi(val), 2, 10);
         else if (SDL_strcasecmp(key, "assist_rewind_key") == 0)
             b->assist_key[0] = static_cast<SDL_Scancode>(std::atoi(val));
         else if (SDL_strcasecmp(key, "assist_fast_key") == 0)
@@ -1718,6 +1725,12 @@ void HostWindow::load_input_config(const char* dir,
 bool HostWindow::assist_tools_enabled() const {
     if (!open_ || !impl_) return true;
     return static_cast<const Backend*>(impl_)->assist_tools;
+}
+
+int HostWindow::fast_forward_multiplier() const {
+    if (!open_ || !impl_) return 4;
+    return static_cast<const Backend*>(impl_)
+        ->assist_fast_forward_multiplier;
 }
 
 void HostWindow::set_fullscreen(int mode) {
@@ -2158,7 +2171,8 @@ bool HostWindow::drawable_size(int* /*width*/, int* /*height*/) const {
 void HostWindow::present(const uint8_t* /*rgb888*/) {}
 
 void HostWindow::load_input_config(const char* /*dir*/,
-                                   bool /*assist_tools_default*/) {}
+                                   bool /*assist_tools_default*/,
+                                   int /*fast_forward_multiplier_default*/) {}
 void HostWindow::set_fullscreen(int /*mode*/) {}
 int  HostWindow::fullscreen() const { return 0; }
 void HostWindow::adjust_scale(int /*delta*/) {}
@@ -2176,6 +2190,7 @@ void HostWindow::set_runtime_ui(RecompRuntimeUi* /*ui*/) {}
 void HostWindow::set_fps_readout(bool /*on*/) {}
 bool HostWindow::fps_readout() const { return false; }
 bool HostWindow::assist_tools_enabled() const { return true; }
+int HostWindow::fast_forward_multiplier() const { return 4; }
 
 void HostWindow::push_audio_samples(const int16_t* /*samples*/,
                                     std::size_t /*count*/) {}
