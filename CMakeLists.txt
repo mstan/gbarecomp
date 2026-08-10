@@ -396,14 +396,24 @@ endif()
 # tools — small CLI utilities. Each is a separate executable.
 # ─────────────────────────────────────────────────────────────────────────────
 function(target_link_gbarecomp_runtime_stack target_name)
-    if(MINGW OR MSYS)
+    # The four archives are mutually recursive, so a single-pass linker needs an
+    # explicit group. The gate is the LINKER, not the platform: this used to test
+    # MINGW OR MSYS, which left native Linux -- GNU ld, but neither of those --
+    # taking the plain-list branch and failing to link the test executables:
+    #
+    #   runtime_arm.cpp: undefined reference to `overlay_try_dispatch'
+    #   runtime_arm.cpp: undefined reference to `kBiosDispatchTable'
+    #
+    # Apple's ld64 and MSVC resolve archive cycles without help (and ld64 rejects
+    # --start-group outright), so they take the plain list.
+    if(APPLE OR MSVC)
+        target_link_libraries(${target_name} PRIVATE
+            gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
+    else()
         target_link_libraries(${target_name} PRIVATE
             -Wl,--start-group
             gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug
             -Wl,--end-group)
-    else()
-        target_link_libraries(${target_name} PRIVATE
-            gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
     endif()
 endfunction()
 
@@ -557,6 +567,29 @@ endif()
 # tests — per-subsystem. Run with ctest.
 # ─────────────────────────────────────────────────────────────────────────────
 enable_testing()
+
+# Portable packaging generation is a Unix-only shell path. Register its smoke
+# test when the small validation toolchain is available, while keeping ordinary
+# engine builds independent of packaging-only host packages.
+if(UNIX)
+    find_program(GBARECOMP_BASH_EXECUTABLE bash)
+    find_program(GBARECOMP_DESKTOP_FILE_VALIDATE desktop-file-validate)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(GBARECOMP_BASH_EXECUTABLE AND GBARECOMP_DESKTOP_FILE_VALIDATE
+            AND Python3_Interpreter_FOUND)
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE} -c "import yaml"
+            RESULT_VARIABLE GBARECOMP_PYYAML_RESULT
+            OUTPUT_QUIET ERROR_QUIET)
+        if(GBARECOMP_PYYAML_RESULT EQUAL 0)
+            add_test(NAME packaging_generation_checks
+                COMMAND ${CMAKE_COMMAND} -E env
+                    PYTHON=${Python3_EXECUTABLE}
+                    ${GBARECOMP_BASH_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/packaging/tests/test_generation.sh)
+        endif()
+    endif()
+endif()
 
 if(GBARECOMP_ENABLE_MODS)
     add_executable(mod_runtime_tests

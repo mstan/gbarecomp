@@ -180,6 +180,12 @@ def classify(rows: list[tuple[int, str, str]],
         if name in data_labels:
             continue
         mode = mode_by_name.get(name, "arm")  # default to ARM if unknown
+        # The disassembly calls the reset-vector entry `_start`, but generated
+        # functions are linked into an ordinary host executable. `_start` is
+        # glibc's process entry point, so retaining that source label makes
+        # every native Linux link fail with a duplicate definition.
+        if addr == 0 and name == "_start":
+            name = "bios_reset_vector"
         out.append(SymEntry(
             addr=addr,
             name=name,
@@ -207,7 +213,8 @@ INTRO_COMMAND_TABLE_STRIDE = 4
 # Manual function-entry additions.
 #
 # The disasm labels the whole exception vector table at 0x00000000
-# under a single `_start` symbol, but the runtime dispatches each
+# under a single `_start` source symbol (renamed to
+# `bios_reset_vector` on import), but the runtime dispatches each
 # vector slot separately:
 #   runtime_swi()      -> runtime_dispatch(0x00000008)   (SWI vector)
 #   IRQ entry path     -> runtime_dispatch(0x00000018)   (IRQ vector)
@@ -215,7 +222,7 @@ INTRO_COMMAND_TABLE_STRIDE = 4
 # declare them as separate `[[extra_func]]` entries so the
 # dispatch table has the addresses the runtime actually targets.
 #
-# 0x00000000 is already covered by the disasm's `_start` symbol;
+# 0x00000000 is already covered by the renamed reset-vector symbol;
 # we don't duplicate it.
 MANUAL_EXTRA_FUNCS: list[tuple[int, str, str, str]] = [
     # (addr, mode, name, note)
@@ -273,7 +280,7 @@ def emit_toml(out_path: pathlib.Path,
     lines.append("# only deliberately-named labels survive. Plus a hand-coded")
     lines.append("# tail of exception-vector slots (0x08 SWI, 0x18 IRQ) that the")
     lines.append("# runtime dispatches separately even though the disasm groups")
-    lines.append("# them under a single `_start` label.")
+    lines.append("# them under a single reset-vector label.")
     lines.append("")
 
     # Combined sorted list: disasm-derived entries + manual additions.

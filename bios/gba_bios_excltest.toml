@@ -23,12 +23,12 @@ md5  = "a860e8c0b6d573d191e4ec7db1b1e4f6"
 # only deliberately-named labels survive. Plus a hand-coded
 # tail of exception-vector slots (0x08 SWI, 0x18 IRQ) that the
 # runtime dispatches separately even though the disasm groups
-# them under a single `_start` label.
+# them under a single reset-vector label.
 
 [[extra_func]]
 addr = 0x00000000
 mode = "arm"
-name = "_start"
+name = "bios_reset_vector"
 
 [[extra_func]]
 addr = 0x00000008
@@ -507,4 +507,3 @@ format       = "abs32"
 entries_mode = "auto"  # bit 0 of entry encodes mode
 name         = "bios_intro_command_table"
 note         = "BIOS intro command handlers; opcodes 0xB1..0xCE"
-
