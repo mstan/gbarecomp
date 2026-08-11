@@ -63,6 +63,10 @@ extern "C" unsigned long long g_prof_scanline_count = 0;
 // guest input. It keeps a window responsive while one emulated frame spends a
 // long time in translated software-rendering or decode code.
 std::function<void()> g_host_service_hook;
+// Optional game-owned extended-view policy. It runs on the emulation thread at
+// the exact frame boundary, before scanline 0 of the next frame is composed.
+// Null preserves the established renderer path for every existing game.
+std::function<void()> g_frame_start_hook;
 static const bool g_phase_prof = [] {
     const char* e = std::getenv("GBARECOMP_PHASE_PROF");
     bool on = (e != nullptr) && !(e[0] == '0' && e[1] == '\0');
@@ -554,6 +558,9 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
             ++g_runtime_vblank_starts;
             bus->io().run_timed_dma(1);   // VBlank-timed DMA
         }
+        if (events.frame_completed && g_frame_start_hook) {
+            g_frame_start_hook();
+        }
         if (events.vblank_started && (ds & 0x0008u)) {
             bus->io().request_irq(gba::GbaIo::IrqVBlank);
         }
@@ -920,6 +927,10 @@ void runtime_set_frame_present_hook(std::function<bool()> h) {
 
 void runtime_set_host_service_hook(std::function<void()> h) {
     g_host_service_hook = std::move(h);
+}
+
+void runtime_set_frame_start_hook(std::function<void()> h) {
+    g_frame_start_hook = std::move(h);
 }
 
 extern "C" bool runtime_should_yield(void) {

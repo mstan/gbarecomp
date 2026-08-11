@@ -85,6 +85,7 @@ extern "C" unsigned long long g_runtime_irq_entries;
 // instead of unwinding the guest stack — see the windowed runner below.
 void runtime_set_frame_present_hook(std::function<bool()>);
 void runtime_set_host_service_hook(std::function<void()>);
+void runtime_set_frame_start_hook(std::function<void()>);
 
 #ifndef GBARECOMP_DEFAULT_GAME_CONFIG
 #define GBARECOMP_DEFAULT_GAME_CONFIG "game.toml"
@@ -757,7 +758,8 @@ void find_config_arg(int argc, char** argv, Args* args) {
             continue;
         }
         if ((s == "--bios" || s == "--rom" || s == "--bios-sha1" ||
-             s == "--rom-sha1" || s == "--steps" || s == "--frames" ||
+             s == "--rom-sha1" || s == "--rom-crc32" ||
+             s == "--steps" || s == "--frames" ||
              s == "--scale" || s == "--tcp" || s == "--dump-bmp" ||
              s == "--dump-png" || s == "--load-state" ||
              s == "--view-width" || s == "--widescreen" ||
@@ -851,6 +853,12 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             const char* v = need_value("--rom-sha1");
             if (!v) return false;
             args->rom_sha1 = lower_ascii(v);
+            continue;
+        }
+        if (s == "--rom-crc32") {
+            const char* v = need_value("--rom-crc32");
+            if (!v) return false;
+            args->rom_crc32 = parse_hex_u32(v);
             continue;
         }
         if (s == "--steps") {
@@ -2328,6 +2336,17 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     };
     FramePhaseRing frame_phase;
+    auto publish_extended_view_frame = [&]() {
+        if (!opts.extended_view_frame) return;
+        ExtendedViewFrameInfo info{};
+        info.frame_count = ppu.frame_count();
+        info.view_width = ppu.render_width();
+        info.extra_left = ppu.view_extra_left();
+        info.extra_right = ppu.view_extra_right();
+        info.io = bus.io().raw();
+        info.io_size = gba::GbaIo::kIoSize;
+        opts.extended_view_frame(&info);
+    };
     auto apply_runtime_view_width = [&](std::uint32_t target) -> bool {
         const ViewGeometry geometry = resolve_view_geometry(
             static_cast<int>(target),
@@ -2348,6 +2367,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             opts.extended_view_init(ppu.view_extra_left(), ppu.view_extra_right());
             extended_view_initialized = true;
         }
+        // A live resize can change the policy from native to authored margins
+        // midway through the host loop. Publish immediately so the fresh frame
+        // rendered below uses the new game's policy rather than the prior size.
+        publish_extended_view_frame();
         live_fb.assign(ppu.render_bytes(), 0);
         return true;
     };
@@ -3069,6 +3092,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     if (args.window) {
         runtime_set_host_service_hook([&]() { win.service_events(); });
     }
+    if (opts.extended_view_frame) {
+        runtime_set_frame_start_hook(publish_extended_view_frame);
+        publish_extended_view_frame();
+    }
 
     // Present-in-place (structural fix for frame-boundary resume dispatch-misses).
     // When windowed, register a hook so the per-VBlank frame-present yield presents
@@ -3551,6 +3578,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // pacer, live_fb, …) go out of scope at function return.
     runtime_set_frame_present_hook(nullptr);
     runtime_set_host_service_hook(nullptr);
+    runtime_set_frame_start_hook(nullptr);
     frame_phase.dump();  // HP-002: flush the phase ring (env-gated CSV)
     // HP-002: flush the always-on MMIO write ring (gba_io.cpp) to CSV.
     // GBARECOMP_MMIO_DUMP=<path>. Offline analysis derives the scanline of

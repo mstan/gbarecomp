@@ -347,6 +347,16 @@ if(EXISTS "${GBARECOMP_GENERATED_BIOS_DIR}/bios_recompiled.cpp")
         "${GBARECOMP_GENERATED_BIOS_DIR}/bios_recompiled.cpp")
     target_compile_definitions(gbarecomp_runtime PUBLIC
         GBARECOMP_HAVE_BIOS_RECOMP=1)
+    if(NOT WIN32)
+        # The recompiled BIOS reset vector is named `_start` after its crt0
+        # label. On ELF hosts that collides with the process entry symbol from
+        # Scrt1.o, so rename the guest symbol consistently across the
+        # generated BIOS translation units. PUBLIC keeps any dependent that
+        # includes bios_recompiled.h in agreement. Windows entry symbols
+        # differ, so the historical name is preserved there.
+        target_compile_definitions(gbarecomp_runtime PUBLIC
+            _start=gbarecomp_bios_reset_start)
+    endif()
     message(STATUS "gbarecomp: BIOS recompiled output present — linking")
 else()
     target_sources(gbarecomp_runtime PRIVATE

@@ -335,6 +335,8 @@ struct SeamConfig {
     int  assist_fast_key = 31;   // SDL_SCANCODE_2
     int  assist_rewind_pad = RECOMP_LAUNCHER_PAD_AXIS(4, 1); // left trigger
     int  assist_fast_pad = RECOMP_LAUNCHER_PAD_AXIS(5, 1);   // right trigger
+    int  rom_patch_enabled = 0;
+    std::string rom_patch_path;
 };
 
 inline void seam_config_load(const std::string& path, SeamConfig* c) {
@@ -383,6 +385,8 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
         else if (key == "assist_fast_key") c->assist_fast_key = std::atoi(val.c_str());
         else if (key == "assist_rewind_pad") c->assist_rewind_pad = std::atoi(val.c_str());
         else if (key == "assist_fast_pad") c->assist_fast_pad = std::atoi(val.c_str());
+        else if (key == "rom_patch_enabled") c->rom_patch_enabled = std::atoi(val.c_str());
+        else if (key == "rom_patch_path") c->rom_patch_path = val;
     }
     if (c->scale < 1) c->scale = 1;
     if (c->scale > 8) c->scale = 8;
@@ -396,6 +400,7 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
     if (c->gyro_sensitivity > 4.00f) c->gyro_sensitivity = 4.00f;
     if (c->assist_tools > 1) c->assist_tools = 1;
     if (c->assist_tools < -1) c->assist_tools = -1;
+    c->rom_patch_enabled = c->rom_patch_enabled && !c->rom_patch_path.empty();
 }
 
 // Rewrite ONLY the [Launcher] section of config.ini, preserving every other
@@ -447,6 +452,8 @@ inline void seam_config_save(const std::string& path, const SeamConfig& c) {
     f << "assist_fast_key = " << c.assist_fast_key << "\n";
     f << "assist_rewind_pad = " << c.assist_rewind_pad << "\n";
     f << "assist_fast_pad = " << c.assist_fast_pad << "\n";
+    f << "rom_patch_enabled = " << c.rom_patch_enabled << "\n";
+    f << "rom_patch_path = " << c.rom_patch_path << "\n";
 }
 
 // ---- config.ini [Solar] ------------------------------------------------------
@@ -688,7 +695,8 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
             opts.assist_fast_forward_multiplier_default, 2, 10);
     SeamSolar solar;
     if (opts.has_solar_sensor) seam_solar_load(config_path, &solar);
-    if (cfg.skip_launcher && !force_launcher) {
+    if (cfg.skip_launcher && !force_launcher &&
+        !(opts.launcher_enable_rom_patches && cfg.rom_patch_enabled)) {
         // Boot straight in, but still honor the persisted settings.
         seam_append_setting_args(args, cfg, opts);
         return 0;
@@ -773,10 +781,25 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     ls.assist_key_bind[1] = cfg.assist_fast_key;
     ls.assist_pad_bind[0] = cfg.assist_rewind_pad;
     ls.assist_pad_bind[1] = cfg.assist_fast_pad;
+    ls.rom_patch_enabled = cfg.rom_patch_enabled;
+    std::snprintf(ls.rom_patch_path, sizeof(ls.rom_patch_path), "%s",
+                  cfg.rom_patch_path.c_str());
     gbarecomp_seam::set_gyro_sensitivity(ls, cfg.gyro_sensitivity);
     gbarecomp_seam::set_presentation_filters(
         ls, cfg.sharp_filter != 0, cfg.affine_filter != 0);
     std::snprintf(ls.bios_path, sizeof(ls.bios_path), "%s", seed_bios.c_str());
+
+    std::string rom_patch_cache_dir;
+    if (opts.launcher_enable_rom_patches) {
+        const std::filesystem::path cache =
+            std::filesystem::path(dir) / "mods" / "rom-patches";
+        std::error_code cache_error;
+        std::filesystem::create_directories(cache, cache_error);
+        if (!cache_error) rom_patch_cache_dir = cache.string();
+        else std::fprintf(stderr,
+                          "[gbarecomp:launcher] patch cache unavailable: %s\n",
+                          cache_error.message().c_str());
+    }
 
     RecompLauncherCGameInfo gi;
     std::memset(&gi, 0, sizeof(gi));
@@ -788,8 +811,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     // CRC32 is dump-specific and would reject other valid dumps). CRC32, when
     // present, stays informational only.
     const char* sha1_one[1];
-    if (opts.builtin_rom_sha1 && opts.builtin_rom_sha1[0]) {
-        sha1_one[0] = opts.builtin_rom_sha1;
+    const char* launcher_source_sha1 = opts.launcher_source_rom_sha1
+        ? opts.launcher_source_rom_sha1 : opts.builtin_rom_sha1;
+    if (launcher_source_sha1 && launcher_source_sha1[0]) {
+        sha1_one[0] = launcher_source_sha1;
         gi.known_sha1_hex = sha1_one;
         gi.num_known_sha1 = 1;
     }
@@ -823,6 +848,11 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     gi.assist_fast_forward_max = 10;
     gi.boxart_path = opts.launcher_boxart;   // NULL => default assets/img/boxart.tga
     gi.bios_verify = &gbarecomp_seam::verify_retail_gba_bios;
+    gi.rom_patch_supported =
+        opts.launcher_enable_rom_patches && !rom_patch_cache_dir.empty();
+    gi.rom_patch_note = opts.launcher_rom_patch_note;
+    gi.rom_patch_cache_dir = rom_patch_cache_dir.c_str();
+    gi.rom_patch_required_sha1 = opts.launcher_required_patch_sha1;
     gbarecomp_seam::set_has_gyro_controls(gi, opts.launcher_expose_gyro);
     gbarecomp_seam::set_presentation_filter_caps(
         gi, opts.launcher_expose_sharp_filter,
@@ -893,6 +923,8 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     cfg.assist_fast_key = ls.assist_key_bind[1];
     cfg.assist_rewind_pad = ls.assist_pad_bind[0];
     cfg.assist_fast_pad = ls.assist_pad_bind[1];
+    cfg.rom_patch_enabled = ls.rom_patch_enabled ? 1 : 0;
+    cfg.rom_patch_path = ls.rom_patch_path;
     seam_config_save(config_path, cfg);
     // Only rewrite [Solar] when this recomp-ui pin actually surfaced the panel;
     // otherwise the values never round-tripped through it and writing them back
@@ -903,10 +935,20 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     if (picked_rom[0]) {
         args.push_back("--rom");
         args.push_back(picked_rom);
+        if (ls.rom_patch_enabled && ls.rom_patch_sha1[0]) {
+            args.push_back("--rom-sha1");
+            args.push_back(ls.rom_patch_sha1);
+            if (ls.rom_patch_crc32[0]) {
+                args.push_back("--rom-crc32");
+                args.push_back(ls.rom_patch_crc32);
+            }
+        }
         // Persist the pick NOW (not only after a successful boot) so the next
         // launch prefills instead of re-prompting — the whole point of the
         // launcher remembering. Mirrors the runtime asset picker's cache.
-        write_single_line(rom_cfg, picked_rom);
+        write_single_line(rom_cfg,
+            ls.rom_patch_source_path[0]
+                ? ls.rom_patch_source_path : picked_rom);
     }
     if (ls.bios_path[0]) {
         args.push_back("--bios");
