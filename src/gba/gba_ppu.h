@@ -243,5 +243,11 @@ extern "C" int (*g_ws_obj_attr_x_provider)(int oam_index,
                                             std::uint16_t attr1,
                                             std::uint16_t attr2,
                                             int* out_x);
+// Opt-in policy for expanded rendering: when nonzero, OBJ pixels are clipped
+// to the native 240px viewport so sprites the guest parked just off-screen
+// (signed 9-bit X idiom) never appear inside widescreen margins. The OBJ x
+// providers above run first and may re-place known-safe sprites. Default 0
+// keeps the established expanded-viewport OBJ test.
+extern "C" int g_ws_obj_native_clip;
 
 }  // namespace gba

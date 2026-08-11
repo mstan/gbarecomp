@@ -38,6 +38,15 @@ extern "C" int (*g_ws_obj_x_provider)(int, int*) = nullptr;
 extern "C" int (*g_ws_obj_attr_x_provider)(int, std::uint16_t,
                                             std::uint16_t, std::uint16_t,
                                             int*) = nullptr;
+// Opt-in OBJ margin policy: clip OBJ pixels to the native 240px viewport in
+// expanded rendering. Games routinely park sprites just past the visible edge
+// (signed 9-bit OAM X, or Y-wrapped); without this clip those parked sprites
+// become visible inside widescreen margins. Default off preserves each
+// established per-game behavior. g_ws_obj_attr_x_provider/g_ws_obj_x_provider
+// still run first, so a game can re-place known-safe HUD sprites and clip the
+// rest.
+extern "C" int g_ws_obj_native_clip = 0;
+
 namespace {
 
 // These pointers have no C linkage and are deliberately not declared by the
@@ -1479,6 +1488,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             // the provider below, so they cannot repeat.
             if (!layer_enabled(x, layer) && !authored_margin) continue;
             int sample_hx = hx;
+            bool remapped = false;
             if (g_ws_bg_x_provider &&
                 (g_ws_bg_x_provider_layers & (1u << layer))) {
                 int provided_hx = hx;
@@ -1486,8 +1496,19 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
                     static_cast<int>(layer), static_cast<int>(x),
                     static_cast<int>(y), &provided_hx);
                 if (action < 0) continue;
-                if (action > 0) sample_hx = provided_hx;
+                if (action > 0) { sample_hx = provided_hx; remapped = true; }
             }
+            // A remapped margin sample continues an authentic viewport
+            // column, so gate it by that column's own window control instead
+            // of the margin's WINOUT fallback. Otherwise reflected
+            // continuations vanish exactly when a guest window covers the
+            // scenery they mirror (e.g. battle arenas whose WINOUT drops the
+            // world layer behind HUD windows). Non-remapped margins keep the
+            // established WINOUT/fail-closed behavior.
+            if (remapped && (hx < 0 || hx >= static_cast<int>(kVanW)) &&
+                sample_hx >= 0 && sample_hx < static_cast<int>(kVanW) &&
+                (window_control_at_hx(sample_hx) & (1u << layer)) == 0)
+                continue;
             uint32_t tex_x = static_cast<uint32_t>(
                                  sample_hx + static_cast<int>(hofs)) &
                              (width_px - 1u);
@@ -1822,6 +1843,13 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             bool obj_target2 = (second_targets & (1u << 4)) != 0;
             auto emit_obj = [&](int tex_x, int tex_y, int screen_x) {
                 if (screen_x < 0 || screen_x >= static_cast<int>(out_w)) return;
+                // Opt-in policy: hardware-faithful OBJ placement only within
+                // the native viewport; margin columns never show sprites the
+                // guest believed were off-screen.
+                if (g_ws_obj_native_clip &&
+                    (screen_x < static_cast<int>(ox) ||
+                     screen_x >= static_cast<int>(ox) + static_cast<int>(kVanW)))
+                    return;
                 if (!layer_enabled(static_cast<uint32_t>(screen_x), 4)) return;
                 int tile_x_in_sprite = tex_x >> 3;
                 int tile_y_in_sprite = tex_y >> 3;
