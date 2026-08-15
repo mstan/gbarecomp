@@ -18,6 +18,20 @@
 
 set(GBARECOMP_CORE_DIR "@CMAKE_CURRENT_SOURCE_DIR@" CACHE PATH "")
 set(GBARECOMP_CORE_BIN_DIR "@CMAKE_CURRENT_BINARY_DIR@" CACHE PATH "")
+set(GBARECOMP_HOST_STACK_RESERVE_BYTES "16777216" CACHE STRING
+    "Host stack reserve for Windows game executables that link gbarecomp_runtime")
+
+function(gbarecomp_target_link_host_stack target_name scope)
+    if(MSVC)
+        target_link_options(${target_name} ${scope}
+            "/STACK:${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
+    elseif(CMAKE_EXECUTABLE_SUFFIX STREQUAL ".exe" AND
+           (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR
+            CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
+        target_link_options(${target_name} ${scope}
+            "LINKER:--stack,${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
+    endif()
+endfunction()
 
 function(gbarecomp_add_runtime_target target_name)
     cmake_parse_arguments(GR
@@ -96,9 +110,5 @@ function(gbarecomp_add_runtime_target target_name)
             GBARECOMP_DEFAULT_GAME_CONFIG="${GR_DEFAULT_GAME_CONFIG_PATH}")
     endif()
 
-    if(MSVC)
-        target_link_options(${target_name} PRIVATE /STACK:16777216)
-    elseif(MINGW OR WIN32)
-        target_link_options(${target_name} PRIVATE -Wl,--stack,16777216)
-    endif()
+    gbarecomp_target_link_host_stack(${target_name} PRIVATE)
 endfunction()

@@ -253,6 +253,21 @@ target_include_directories(gbarecomp_heal_gate PUBLIC src/runtime)
 target_link_libraries(gbarecomp_heal_gate PUBLIC gbarecomp_gba)
 set_property(TARGET gbarecomp_heal_gate PROPERTY POSITION_INDEPENDENT_CODE ON)
 
+set(GBARECOMP_HOST_STACK_RESERVE_BYTES "16777216" CACHE STRING
+    "Host stack reserve for Windows game executables that link gbarecomp_runtime")
+
+function(gbarecomp_target_link_host_stack target_name scope)
+    if(MSVC)
+        target_link_options(${target_name} ${scope}
+            "/STACK:${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
+    elseif(CMAKE_EXECUTABLE_SUFFIX STREQUAL ".exe" AND
+           (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR
+            CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
+        target_link_options(${target_name} ${scope}
+            "LINKER:--stack,${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
+    endif()
+endfunction()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # runtime — what game binaries link against. Dispatch, host glue.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -285,6 +300,7 @@ add_library(gbarecomp_runtime STATIC
     # BIOS dispatch/body selection is handled below. Clean checkouts use a
     # tracked empty stub; locally generated BIOS output is selected as a unit.
 )
+gbarecomp_target_link_host_stack(gbarecomp_runtime INTERFACE)
 if(GBARECOMP_ENABLE_MODS)
     target_sources(gbarecomp_runtime PRIVATE src/runtime/mod_runtime.cpp)
     target_compile_definitions(gbarecomp_runtime PUBLIC
