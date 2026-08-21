@@ -191,6 +191,36 @@ needs.
 - Treat the same way. Symbols and structure are fine; behavior is
   not.
 
+### jellees/mksc (Mario Kart: Super Circuit decomp)
+- Source: github.com/jellees/mksc, linked as a pinned submodule at
+  `MarioKartSuperCircuitRecomp/third_party/mksc`.
+- License: **the repository ships no LICENSE file.** So the posture
+  is stricter than usual: we consume only facts — names, addresses,
+  sizes, and the code/data split the linker itself produced — and we
+  never copy its source, comments, or data into this repository. The
+  submodule pins a URL and a commit rather than vendoring code.
+- Byte-exact: its `rom.sha1` is
+  `9d327c030c3e2d9007990518594f70c3340ac56f`, identical to
+  `MarioKartSuperCircuitRecomp/game.toml` `[identity].sha1`. The
+  import is gated on that hash.
+- Partly disassembly: at the pinned revision it knows 1,500 functions,
+  of which ~1,168 carry address-derived placeholder names
+  (`sub_8001ADC`). Placeholders are still useful (they mark real
+  boundaries) but carry no semantics.
+- **How to import:** build it in WSL via
+  `MarioKartSuperCircuitRecomp/tools/decomp/{provision.sh,build.sh}`,
+  then run the shared importer
+  `gbarecomp/tools/symbol_import/import_decomp_symbols.py`. See
+  `docs/SYMBOL_OVERLAY.md` for the full recipe — it applies to any GBA
+  decomp, not just this one.
+
+### Generic decomp symbol overlays
+Any decomp that reproduces a ROM byte-for-byte can name that game's
+recompilation. `docs/SYMBOL_OVERLAY.md` is the procedure; it keeps the
+decomp out of our build (only `readelf` and link-map text cross the
+boundary) and keeps generated symbol data out of the hand-authored
+`game.toml`.
+
 ### Ghidra mandate (Minish Cap)
 
 Per `ROADMAP.md` Phase 5: if zeldaret/tmc symbol import leaves

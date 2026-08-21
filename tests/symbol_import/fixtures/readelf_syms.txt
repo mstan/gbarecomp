@@ -1,0 +1,26 @@
+Symbol table '.symtab' contains 24 entries:
+   Num:    Value  Size Type    Bind   Vis      Ndx Name
+     0: 00000000     0 NOTYPE  LOCAL  DEFAULT  UND
+     1: 02000000     0 SECTION LOCAL  DEFAULT    1 ewram
+     2: 08000000     0 SECTION LOCAL  DEFAULT    3 .text
+     3: 00000000     0 FILE    LOCAL  DEFAULT  ABS crt0.o
+     4: 08000000     0 NOTYPE  LOCAL  DEFAULT    3 $a
+     5: 080000c0    24 FUNC    GLOBAL DEFAULT    3 start_vector
+     6: 080000d8     0 NOTYPE  LOCAL  DEFAULT    3 $d
+     7: 080000e0     0 NOTYPE  LOCAL  DEFAULT    3 $t
+     8: 080000e1    32 FUNC    LOCAL  DEFAULT    3 thumb_entry
+     9: 08000101    64 FUNC    GLOBAL DEFAULT    3 AgbMain
+    10: 08000110     0 NOTYPE  LOCAL  DEFAULT    3 _08000110
+    11: 08000141   128 FUNC    LOCAL  DEFAULT    3 sub_8000140
+    12: 080001c0     0 NOTYPE  LOCAL  DEFAULT    3 $d
+    13: 08002000     8 OBJECT  GLOBAL DEFAULT    3 gRomLookupTable
+    14: 08002100    16 FUNC    LOCAL  DEFAULT    3 func_inside_rodata
+    15: 03004f30    24 OBJECT  GLOBAL DEFAULT    2 gKeyBuf
+    16: 03005ca0     0 NOTYPE  LOCAL  DEFAULT  ABS gSoundInfo
+    17: 02004400     0 NOTYPE  LOCAL  DEFAULT  ABS title_sDriversBgMapBuf
+    18: 04000200     0 NOTYPE  LOCAL  DEFAULT  ABS REG_IE
+    19: 00000000     0 NOTYPE  LOCAL  DEFAULT  ABS INTR_VECTOR_ZERO_EQUATE
+    20: 00000000     0 NOTYPE  LOCAL  DEFAULT  ABS title.o
+    21: 03005ca0     0 NOTYPE  LOCAL  DEFAULT  ABS gSoundInfo
+    22: 0a000000     0 NOTYPE  LOCAL  DEFAULT  ABS OFF_THE_MEMORY_MAP
+    23: 00000000     0 NOTYPE  GLOBAL DEFAULT  UND undefined_import

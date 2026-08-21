@@ -883,18 +883,32 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         }
         uint32_t off = 0;
         const char* name = gba_symbol_lookup(static_cast<uint32_t>(addr), &off);
-        char buf[256];
+        // Also resolve against the imported data-symbol map, so one query
+        // answers "what code is here" and "what variable is here". The
+        // function fields keep their existing meaning; the data fields are
+        // additive and are null when no data map is linked (or the address
+        // falls in no symbol's extent).
+        uint32_t data_off = 0;
+        const char* data_name =
+            gba_data_symbol_lookup(static_cast<uint32_t>(addr), &data_off);
+        char namebuf[128], databuf[128];
         if (name) {
-            std::snprintf(buf, sizeof(buf),
-                          "{\"ok\":true,\"addr\":%llu,\"name\":\"%s\","
-                          "\"offset\":%u}",
-                          static_cast<unsigned long long>(addr), name, off);
+            std::snprintf(namebuf, sizeof(namebuf),
+                          "\"%s\",\"offset\":%u", name, off);
         } else {
-            std::snprintf(buf, sizeof(buf),
-                          "{\"ok\":true,\"addr\":%llu,\"name\":null,"
-                          "\"offset\":0}",
-                          static_cast<unsigned long long>(addr));
+            std::snprintf(namebuf, sizeof(namebuf), "null,\"offset\":0");
         }
+        if (data_name) {
+            std::snprintf(databuf, sizeof(databuf),
+                          "\"%s\",\"data_offset\":%u", data_name, data_off);
+        } else {
+            std::snprintf(databuf, sizeof(databuf), "null,\"data_offset\":0");
+        }
+        char buf[384];
+        std::snprintf(buf, sizeof(buf),
+                      "{\"ok\":true,\"addr\":%llu,\"name\":%s,"
+                      "\"data_name\":%s}",
+                      static_cast<unsigned long long>(addr), namebuf, databuf);
         out = buf;
         return;
     }

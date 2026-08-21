@@ -1,0 +1,5 @@
+# start	end	mode	name  (end = start+size-1; 0 = size unknown)
+0x080000C0	0x080000D7	arm	start_vector
+0x080000E0	0x080000FF	thumb	thumb_entry
+0x08000100	0x0800013F	thumb	AgbMain
+0x08000140	0x080001BF	thumb	sub_8000140

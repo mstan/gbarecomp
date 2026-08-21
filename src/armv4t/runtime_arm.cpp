@@ -182,10 +182,20 @@ extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc,
     if (kind == RUNTIME_TRACE_MEM_WRITE && addr == abort_mem_addr &&
         g_runtime_vblank_starts >= abort_min_vblank &&
         (abort_mem_value < 0 || value == static_cast<uint32_t>(abort_mem_value))) {
+        char pcbuf[96], databuf[96];
+        pcbuf[0] = databuf[0] = '\0';
+        uint32_t sym_off = 0;
+        if (const char* s = gba_symbol_lookup(pc, &sym_off)) {
+            std::snprintf(pcbuf, sizeof(pcbuf), " <%s+0x%X>", s, sym_off);
+        }
+        uint32_t data_off = 0;
+        if (const char* s = gba_data_symbol_lookup(addr, &data_off)) {
+            std::snprintf(databuf, sizeof(databuf), " <%s+0x%X>", s, data_off);
+        }
         std::fprintf(stderr,
-                     "runtime_trace: mem-write-addr abort pc=0x%08X "
-                     "addr=0x%08X value=0x%08X width=%u (vblanks=%llu)\n",
-                     pc, addr, value, aux,
+                     "runtime_trace: mem-write-addr abort pc=0x%08X%s "
+                     "addr=0x%08X%s value=0x%08X width=%u (vblanks=%llu)\n",
+                     pc, pcbuf, addr, databuf, value, aux,
                      static_cast<unsigned long long>(g_runtime_vblank_starts));
         runtime_trace_dump_recent(abort_dump_depth);
         std::abort();
@@ -268,14 +278,25 @@ extern "C" void runtime_trace_dump_recent(uint32_t max_entries) {
         if (sym) {
             std::snprintf(symbuf, sizeof(symbuf), " <%s+0x%X>", sym, off);
         }
+        // Annotate the memory operand too, when a data-symbol map is linked.
+        // For a watchpoint or hang dump the address a store touched is at
+        // least as informative as the PC that issued it.
+        char databuf[96];
+        databuf[0] = '\0';
+        uint32_t data_off = 0;
+        const char* data_sym = gba_data_symbol_lookup(e.addr, &data_off);
+        if (data_sym) {
+            std::snprintf(databuf, sizeof(databuf), " <%s+0x%X>",
+                          data_sym, data_off);
+        }
         std::fprintf(stderr,
                      "  #%u %-8s pc=0x%08X%s cpsr=0x%08X "
-                     "addr=0x%08X value=0x%08X aux=0x%X "
+                     "addr=0x%08X%s value=0x%08X aux=0x%X "
                      "r0=0x%08X r1=0x%08X r2=0x%08X r3=0x%08X "
                      "r4=0x%08X r5=0x%08X r12=0x%08X "
                      "sp=0x%08X lr=0x%08X\n",
                      e.seq, trace_kind_name(e.kind), e.pc, symbuf, e.cpsr,
-                     e.addr, e.value, e.aux, e.r0, e.r1, e.r2, e.r3,
+                     e.addr, databuf, e.value, e.aux, e.r0, e.r1, e.r2, e.r3,
                      e.r4, e.r5, e.r12, e.r13, e.r14);
     }
 }

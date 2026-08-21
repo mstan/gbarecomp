@@ -1,0 +1,6 @@
+# addr	region	size	name  (STT_OBJECT, plus absolute symbols landing in a GBA region)
+0x02004400	ewram	0x0	title_sDriversBgMapBuf
+0x03004F30	iwram	0x18	gKeyBuf
+0x03005CA0	iwram	0x0	gSoundInfo
+0x04000200	io	0x0	REG_IE
+0x08002000	rom	0x8	gRomLookupTable

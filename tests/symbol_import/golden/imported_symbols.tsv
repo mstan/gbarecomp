@@ -1,0 +1,5 @@
+# addr	mode	name  (STT_FUNC from a byte-matching decomp ELF; blank name = let the finder synthesise one)
+0x080000C0	arm	start_vector
+0x080000E0	thumb	thumb_entry
+0x08000100	thumb	AgbMain
+0x08000140	thumb	sub_8000140

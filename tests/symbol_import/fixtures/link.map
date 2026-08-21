@@ -1,0 +1,44 @@
+Archive member included to satisfy reference by file (symbol)
+
+Memory Configuration
+
+Name             Origin             Length             Attributes
+*default*        0x00000000         0xffffffff
+
+Linker script and memory map
+
+                0x02000000                . = 0x2000000
+
+ewram
+                0x02000000     0x32400
+ *(ewram)
+
+.bss
+                0x03000000      0x4fd8
+ .bss           0x00000000        0x0 crt0.o
+ .bss           0x03004f30       0x18 title.o
+
+.text           0x08000000    0x010000
+ crt0.o(.text)
+ .text          0x08000000       0xe0 crt0.o
+                0x080000c0                start_vector
+ .data          0x00000000        0x0 crt0.o
+ title.o(.text)
+ .text          0x080000e0      0x120 title.o
+                0x08000101                AgbMain
+                0x08000141                sub_8000140
+ .data          0x00000000        0x0 title.o
+ .ARM.attributes
+                0x00000000       0x14 title.o
+ asm/rodata08002000.o(.rodata)
+ .rodata        0x08002000     0x1000 asm/rodata08002000.o
+ .rodata        0x08003000      0x100 title.o
+ data/blob.o(.rodata*)
+ .rodata.a_very_long_blob_name
+                0x08003100      0x200 data/blob.o
+ .rodata        0x08003300        0x0 empty.o
+ .rodata        0x01000000       0x40 not_in_rom.o
+ .data          0x08003400       0x80 title.o
+
+/DISCARD/
+ *(*)

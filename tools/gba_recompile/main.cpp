@@ -13,10 +13,19 @@
 //   gba_recompile --rom <rom.gba>
 //                 --entry 0x080000C0
 //                 [--symbols <imported_symbols.tsv>]
+//                 [--data-symbols <imported_data_symbols.tsv>]
+//                 [--config <game.toml> [--config <overlay.toml> ...]]
 //                 [--out <out_dir>]
 //                 [--rom-base 0x08000000]
 //                 [--max-functions 4096]
 //                 [--codegen-shards N]
+//
+// --config is repeatable: the first is the base per-binary TOML, each
+// later one a supplemental overlay merged on top (the base wins every
+// conflict). --symbols names the generated functions; --data-symbols
+// names memory operands in runtime debug output. Both are produced by
+// tools/symbol_import/import_decomp_symbols.py — see
+// docs/SYMBOL_OVERLAY.md.
 //
 //   gba_recompile --bios <bios.bin>
 //                 [--out <out_dir>]
@@ -26,6 +35,9 @@
 //   <out_dir>/recompiled_NNN.cpp    sharded function bodies (2+ files)
 //   <out_dir>/recompiled.h          forward declarations
 //   <out_dir>/dispatch_table.cpp    kDispatchTable / kDispatchTableLen
+//   <out_dir>/symbol_map.cpp        PC -> function name (debug)
+//   <out_dir>/data_symbol_map.cpp   address -> data name (debug; only
+//                                   with --data-symbols)
 //
 // BIOS output (default --out = "src/runtime/generated_bios"):
 //   <out_dir>/bios_recompiled.cpp   function bodies
@@ -72,7 +84,12 @@ struct Cli {
     std::string rom_path;       // --rom (cart mode)
     std::string bios_path;      // --bios (BIOS mode); mutually exclusive
     std::string symbols_path;
-    std::string config_path;    // --config <path> (optional, per-binary TOML)
+    std::string data_symbols_path;  // --data-symbols <TSV> (debugger names)
+    // --config <path>, repeatable. The first is the base per-binary TOML;
+    // each later one is a supplemental overlay merged on top of it (see
+    // config.h load_config_overlay). Overlays let a generated symbol import
+    // compose with a hand-authored game.toml instead of replacing it.
+    std::vector<std::string> config_paths;
     std::string out_dir;
     std::string output_prefix;  // --output-prefix <identifier_prefix>
     uint32_t entry = 0x080000C0u;
@@ -87,7 +104,8 @@ struct Cli {
 void print_usage() {
     std::printf(
         "gba_recompile --rom <path> [--entry HEX] [--symbols TSV]\n"
-        "              [--config TOML] [--out DIR] [--rom-base HEX]\n"
+        "              [--data-symbols TSV] [--config TOML]...\n"
+        "              [--out DIR] [--rom-base HEX]\n"
         "              [--max-functions N] [--codegen-shards N]\n"
         "              [--output-prefix IDENTIFIER_PREFIX]\n"
         "\n"
@@ -107,6 +125,17 @@ void print_usage() {
         "  --config <TOML>  Per-binary configuration (manual function\n"
         "                   seeds, data-range exclusions, jump tables,\n"
         "                   identity hash). See docs/TOML_SCHEMA.md.\n"
+        "                   Repeatable: the FIRST is the base config and\n"
+        "                   each later one a supplemental overlay merged\n"
+        "                   on top. An overlay carries no [program]; its\n"
+        "                   [identity] must match the base. The base wins\n"
+        "                   every conflict, so a generated symbol import\n"
+        "                   never overrides reviewed hand-authored entries.\n"
+        "  --symbols <TSV>  addr/mode/name function seeds; a seed's name\n"
+        "                   becomes the generated C function name.\n"
+        "  --data-symbols   addr/region/size/name data symbols, emitted as\n"
+        "                   <out>/data_symbol_map.cpp so runtime debug\n"
+        "                   output can name memory operands too.\n"
         "  --output-prefix  Namespace generated filenames, function symbols,\n"
         "                   and dispatch-table symbols so multiple immutable\n"
         "                   code images can be linked into one executable.\n");
@@ -136,7 +165,12 @@ Cli parse_cli(int argc, char** argv) {
         }
         else if (a == "--entry")        parse_hex(next(), c.entry);
         else if (a == "--symbols")      c.symbols_path = next() ? argv[i] : "";
-        else if (a == "--config")       c.config_path  = next() ? argv[i] : "";
+        else if (a == "--config") {
+            const char* v = next();
+            if (v) c.config_paths.emplace_back(v);
+        }
+        else if (a == "--data-symbols") c.data_symbols_path =
+                                             next() ? argv[i] : "";
         else if (a == "--out")          c.out_dir      = next() ? argv[i] : "";
         else if (a == "--output-prefix")
             c.output_prefix = next() ? argv[i] : "";
@@ -260,6 +294,59 @@ std::vector<FunctionSeed> load_symbols(const std::string& path) {
         }
         CpuMode m = (mode_s == "arm") ? CpuMode::Arm : CpuMode::Thumb;
         out.push_back(FunctionSeed{addr, m, name_s});
+    }
+    return out;
+}
+
+// A data symbol: a named region of guest memory (a global, a buffer, an
+// MMIO register). Unlike a function seed this never influences discovery or
+// codegen — it exists only so runtime debug output can print
+// `<gKeyBuf+0x2>` instead of a bare address.
+struct DataSymbol {
+    uint32_t addr;
+    uint32_t size;     // 0 = extent unknown (an absolute symbol with no size)
+    std::string name;
+};
+
+// Parse the importer's data-symbol TSV:
+//   # comments...
+//   0x03004F30\tiwram\t0x18\tgKeyBuf
+// The region column is informational; the address already implies it.
+std::vector<DataSymbol> load_data_symbols(const std::string& path) {
+    std::vector<DataSymbol> out;
+    if (path.empty()) return out;
+    std::ifstream in(path);
+    if (!in) {
+        std::fprintf(stderr, "warn: data symbols file not readable: %s\n",
+                     path.c_str());
+        return out;
+    }
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        std::stringstream ss(line);
+        std::string addr_s, region_s, size_s, name_s;
+        if (!std::getline(ss, addr_s, '\t')) continue;
+        if (!std::getline(ss, region_s, '\t')) continue;
+        if (!std::getline(ss, size_s, '\t')) continue;
+        std::getline(ss, name_s, '\t');
+        if (name_s.empty()) continue;
+        if (addr_s.size() <= 2 || addr_s[0] != '0' ||
+            (addr_s[1] != 'x' && addr_s[1] != 'X')) {
+            continue;
+        }
+        const uint32_t addr = static_cast<uint32_t>(
+            std::strtoul(addr_s.c_str() + 2, nullptr, 16));
+        uint32_t size = 0;
+        if (size_s.size() > 2 && size_s[0] == '0' &&
+            (size_s[1] == 'x' || size_s[1] == 'X')) {
+            size = static_cast<uint32_t>(
+                std::strtoul(size_s.c_str() + 2, nullptr, 16));
+        } else {
+            size = static_cast<uint32_t>(std::strtoul(size_s.c_str(),
+                                                      nullptr, 10));
+        }
+        out.push_back(DataSymbol{addr, size, name_s});
     }
     return out;
 }
@@ -563,6 +650,80 @@ void write_symbol_map(const std::string& dir,
         "}  // namespace\n",
         cnt, sorted.size(), reg, tab, cnt);
     std::fclose(f);
+}
+
+// Emit a sorted address->name map of guest DATA symbols. This is the memory
+// counterpart of write_symbol_map(): it turns `addr=0x03004F32` in a trace
+// dump or watchpoint report into `addr=0x03004F32 <gKeyBuf+0x2>`.
+//
+// Entries carry their extent, because unlike a function map a nearest-below
+// lookup is not good enough here — guest memory is sparse, and the symbol
+// 700 KB below an address says nothing about it. The runtime resolver only
+// reports a hit inside the symbol's own bytes (see
+// src/armv4t/symbol_lookup.h).
+//
+// Cart-only: the BIOS has no imported data symbols.
+void write_data_symbol_map(const std::string& dir,
+                           const std::vector<DataSymbol>& syms,
+                           const std::string& output_prefix) {
+    const std::string path =
+        dir + "/" + output_prefix + "data_symbol_map.cpp";
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) {
+        std::fprintf(stderr, "cannot write %s\n", path.c_str());
+        return;
+    }
+    // Sort by address, then by descending size so a nested symbol never
+    // hides the enclosing one's start, and dedupe exact addresses (a decomp
+    // commonly declares several names for one address).
+    std::vector<const DataSymbol*> sorted;
+    sorted.reserve(syms.size());
+    for (const auto& s : syms) sorted.push_back(&s);
+    std::sort(sorted.begin(), sorted.end(),
+              [](const DataSymbol* a, const DataSymbol* b) {
+                  if (a->addr != b->addr) return a->addr < b->addr;
+                  return a->size > b->size;
+              });
+    sorted.erase(std::unique(sorted.begin(), sorted.end(),
+                             [](const DataSymbol* a, const DataSymbol* b) {
+                                 return a->addr == b->addr;
+                             }),
+                 sorted.end());
+    std::fprintf(f,
+        "// AUTO-GENERATED by gba_recompile. DO NOT EDIT.\n"
+        "// Address -> data-symbol map for the runtime debugger (trace\n"
+        "// dumps, watchpoint reports, TCP `symbol`). Sorted by address;\n"
+        "// each entry carries its extent so a lookup only resolves inside\n"
+        "// the symbol's own bytes. A static initializer registers the\n"
+        "// table with the resolver in src/armv4t/symbol_lookup.cpp\n"
+        "// (registration, not weak externs, because MinGW PE-COFF weak\n"
+        "// symbols are unreliable from archives).\n\n"
+        "#include <cstdint>\n\n"
+        "struct GbaDataSymbol { uint32_t addr; uint32_t size; "
+        "const char* name; };\n"
+        "extern \"C\" void gba_data_symbol_register_cart(\n"
+        "    const GbaDataSymbol* tab, unsigned count);\n\n"
+        "static const GbaDataSymbol kGbaDataSymbolMap[] = {\n");
+    for (const DataSymbol* s : sorted) {
+        std::fprintf(f, "    {0x%08Xu, 0x%Xu, \"%s\"},\n",
+                     s->addr, s->size, s->name.c_str());
+    }
+    std::fprintf(f,
+        "};\n"
+        "static const unsigned kGbaDataSymbolMapCount = %zu;\n\n"
+        "namespace {\n"
+        "struct GbaDataSymbolMapInstaller {\n"
+        "    GbaDataSymbolMapInstaller() {\n"
+        "        gba_data_symbol_register_cart(kGbaDataSymbolMap,\n"
+        "                                      kGbaDataSymbolMapCount);\n"
+        "    }\n"
+        "};\n"
+        "static GbaDataSymbolMapInstaller g_gba_data_symbol_map_installer;\n"
+        "}  // namespace\n",
+        sorted.size());
+    std::fclose(f);
+    std::printf("==> wrote %s (%zu data symbols)\n", path.c_str(),
+                sorted.size());
 }
 
 uint64_t stable_shard_hash(const Function& fn) {
@@ -910,14 +1071,24 @@ int main(int argc, char** argv) {
     // the no-config path and quick-spike overrides.
     Config cfg;
     bool have_cfg = false;
-    if (!cli.config_path.empty()) {
-        if (!gbarecomp::load_config(cli.config_path, cfg)) {
+    if (!cli.config_paths.empty()) {
+        // The first --config is the base: it owns [program] and [identity],
+        // and its hash is verified against the actual bytes before anything
+        // else runs. Later --config paths are supplemental overlays (a
+        // generated symbol import, typically) merged on top; the base wins
+        // every conflict. See config.h load_config_overlay.
+        if (!gbarecomp::load_config(cli.config_paths.front(), cfg)) {
             return 1;
         }
         if (!gbarecomp::verify_identity(cfg, rom.data(), rom.size())) {
             return 1;
         }
         gbarecomp::print_config_summary(cfg);
+        for (std::size_t i = 1; i < cli.config_paths.size(); ++i) {
+            if (!gbarecomp::load_config_overlay(cli.config_paths[i], cfg)) {
+                return 1;
+            }
+        }
         have_cfg = true;
     }
 
@@ -1256,6 +1427,15 @@ int main(int argc, char** argv) {
     if (cli.emit_symbol_map) {
         write_symbol_map(
             cli.out_dir, emit_funcs, cli.bios_mode, cli.output_prefix);
+        // The data-symbol map is cart-only and opt-in: it needs an imported
+        // symbol set, and the BIOS has none.
+        if (!cli.bios_mode && !cli.data_symbols_path.empty()) {
+            auto data_syms = load_data_symbols(cli.data_symbols_path);
+            std::printf("==> loaded %zu data symbols from %s\n",
+                        data_syms.size(), cli.data_symbols_path.c_str());
+            write_data_symbol_map(
+                cli.out_dir, data_syms, cli.output_prefix);
+        }
     }
     write_header(cli.out_dir, emit_funcs, names);
     uint32_t codegen_shards = cli.codegen_shards != 0

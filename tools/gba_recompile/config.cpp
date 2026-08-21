@@ -470,6 +470,44 @@ bool parse_exclude_funcs(const toml::array& arr,
     return true;
 }
 
+// Parse every supplemental array — the tables that describe the binary rather
+// than the program itself. Shared by load_config() and load_config_overlay():
+// a base config and an overlay accept exactly the same set, so the two can
+// never drift apart as tables are added.
+bool parse_supplemental_arrays(const toml::table& tbl, Config& out) {
+    if (auto ef = tbl.at_path("extra_func").as_array()) {
+        if (!parse_extra_funcs(*ef, out.extra_funcs)) return false;
+    }
+    if (auto rr = tbl.at_path("resume_range").as_array()) {
+        if (!parse_resume_ranges(*rr, out.resume_ranges)) return false;
+    }
+    if (auto imm = tbl.at_path("thumb_alu_immediate_override").as_array()) {
+        if (!parse_thumb_alu_immediate_overrides(
+                *imm, out.thumb_alu_immediate_overrides)) return false;
+    }
+    if (auto imm = tbl.at_path("alu_immediate_override").as_array()) {
+        if (!parse_alu_immediate_overrides(
+                *imm, out.alu_immediate_overrides)) return false;
+    }
+    if (auto hooks = tbl.at_path("mod_function_hook").as_array()) {
+        if (!parse_mod_function_hooks(*hooks, out.mod_function_hooks))
+            return false;
+    }
+    if (auto dr = tbl.at_path("data_range").as_array()) {
+        if (!parse_data_ranges(*dr, out.data_ranges)) return false;
+    }
+    if (auto cc = tbl.at_path("code_copy").as_array()) {
+        if (!parse_code_copies(*cc, out.code_copies)) return false;
+    }
+    if (auto jt = tbl.at_path("jump_table").as_array()) {
+        if (!parse_jump_tables(*jt, out.jump_tables)) return false;
+    }
+    if (auto ex = tbl.at_path("exclude_func").as_array()) {
+        if (!parse_exclude_funcs(*ex, out.exclude_funcs)) return false;
+    }
+    return true;
+}
+
 // Cross-section structural validation. See docs/TOML_SCHEMA.md
 // "Precedence and conflict resolution" step 2.
 bool validate_cross_section(const Config& cfg) {
@@ -778,55 +816,176 @@ bool load_config(const std::string& path, Config& out) {
         }
     }
 
-    // [[extra_func]]
-    if (auto ef = tbl["extra_func"].as_array()) {
-        if (!parse_extra_funcs(*ef, out.extra_funcs)) return false;
-    }
-
-    // [[resume_range]]
-    if (auto rr = tbl["resume_range"].as_array()) {
-        if (!parse_resume_ranges(*rr, out.resume_ranges)) return false;
-    }
-
-    // [[thumb_alu_immediate_override]]
-    if (auto imm = tbl["thumb_alu_immediate_override"].as_array()) {
-        if (!parse_thumb_alu_immediate_overrides(
-                *imm, out.thumb_alu_immediate_overrides)) return false;
-    }
-
-    // [[alu_immediate_override]] (ARM or THUMB)
-    if (auto imm = tbl["alu_immediate_override"].as_array()) {
-        if (!parse_alu_immediate_overrides(
-                *imm, out.alu_immediate_overrides)) return false;
-    }
-
-    // [[mod_function_hook]]
-    if (auto hooks = tbl["mod_function_hook"].as_array()) {
-        if (!parse_mod_function_hooks(*hooks, out.mod_function_hooks))
-            return false;
-    }
-
-    // [[data_range]]
-    if (auto dr = tbl["data_range"].as_array()) {
-        if (!parse_data_ranges(*dr, out.data_ranges)) return false;
-    }
-
-    // [[code_copy]]
-    if (auto cc = tbl["code_copy"].as_array()) {
-        if (!parse_code_copies(*cc, out.code_copies)) return false;
-    }
-
-    // [[jump_table]]
-    if (auto jt = tbl["jump_table"].as_array()) {
-        if (!parse_jump_tables(*jt, out.jump_tables)) return false;
-    }
-
-    // [[exclude_func]]
-    if (auto ex = tbl["exclude_func"].as_array()) {
-        if (!parse_exclude_funcs(*ex, out.exclude_funcs)) return false;
-    }
+    if (!parse_supplemental_arrays(tbl, out)) return false;
 
     if (!validate_cross_section(out)) return false;
+    return true;
+}
+
+bool load_config_overlay(const std::string& path, Config& base) {
+    toml::table tbl;
+    try {
+        tbl = toml::parse_file(path);
+    } catch (const toml::parse_error& e) {
+        std::fprintf(stderr, "%sparse error in overlay %s: %s\n",
+                     kAbortHeader, path.c_str(), e.what());
+        return false;
+    }
+
+    // An overlay describes bytes, never the program. Allowing [program] here
+    // would let a generated file silently redefine the load address, entry
+    // point or shard count that the hand-authored base config owns.
+    if (tbl.contains("program")) {
+        std::fprintf(stderr,
+            "%soverlay %s declares [program]; only the first --config may. "
+            "Overlays carry supplemental tables only.\n",
+            kAbortHeader, path.c_str());
+        return false;
+    }
+
+    // [identity] is optional in an overlay but must agree when present. This
+    // is the gate that keeps an imported symbol set bound to the exact binary
+    // it was derived from: a decomp's addresses mean nothing for another
+    // revision of the ROM.
+    if (auto id_node = tbl["identity"]; id_node.is_table()) {
+        const auto& t = *id_node.as_table();
+        bool ok = true;
+        std::string err;
+        const std::string sha1 = get_string_field(t, "sha1", true, ok, err);
+        if (!ok) {
+            std::fprintf(stderr, "%soverlay %s [identity]: %s\n",
+                         kAbortHeader, path.c_str(), err.c_str());
+            return false;
+        }
+        if (hex_lower(sha1) != hex_lower(base.identity.sha1)) {
+            std::fprintf(stderr,
+                "%soverlay %s was derived from a different binary:\n"
+                "  base config declares: %s\n"
+                "  overlay declares:     %s\n"
+                "Re-import the overlay from a build of THIS binary.\n",
+                kAbortHeader, path.c_str(),
+                hex_lower(base.identity.sha1).c_str(),
+                hex_lower(sha1).c_str());
+            return false;
+        }
+    }
+
+    // Parse into a scratch Config so the merge can count and report what it
+    // dropped instead of silently interleaving entries.
+    Config ov{};
+    ov.source_path = path;
+    if (!parse_supplemental_arrays(tbl, ov)) return false;
+
+    std::size_t added_funcs = 0;
+    std::size_t dropped_dup = 0, dropped_excluded = 0, dropped_in_data = 0;
+
+    // [[extra_func]]: the base wins every (addr, mode) conflict, so a
+    // hand-authored entry keeps its reviewed name and note. This mirrors the
+    // precedence the finder already applies downstream — seed_by_key is
+    // first-insert-wins and base seeds are added first.
+    for (auto& ef : ov.extra_funcs) {
+        bool skip = false;
+        for (const auto& have : base.extra_funcs) {
+            if (have.addr == ef.addr && have.mode == ef.mode) {
+                ++dropped_dup;
+                skip = true;
+                break;
+            }
+        }
+        if (skip) continue;
+        for (const auto& ex : base.exclude_funcs) {
+            if (ex.addr == ef.addr) {
+                // The base deliberately excluded this address. Warn rather
+                // than abort: the overlay is generated, the exclusion was
+                // reviewed, and validate_cross_section would otherwise turn
+                // every such pair into a build failure.
+                std::fprintf(stderr,
+                    "warn: overlay [[extra_func]] 0x%08X (%s) dropped — the "
+                    "base config excludes it: %s\n",
+                    ef.addr, ef.name.c_str(), ex.reason.c_str());
+                ++dropped_excluded;
+                skip = true;
+                break;
+            }
+        }
+        if (skip) continue;
+        for (const auto& dr : base.data_ranges) {
+            if (ef.addr >= dr.start && ef.addr < dr.end) {
+                std::fprintf(stderr,
+                    "warn: overlay [[extra_func]] 0x%08X (%s) dropped — the "
+                    "base config marks it as data [0x%08X,0x%08X)%s%s\n",
+                    ef.addr, ef.name.c_str(), dr.start, dr.end,
+                    dr.note.empty() ? "" : ": ", dr.note.c_str());
+                ++dropped_in_data;
+                skip = true;
+                break;
+            }
+        }
+        if (skip) continue;
+        base.extra_funcs.push_back(std::move(ef));
+        ++added_funcs;
+    }
+
+    // The remaining tables are keyed by address, so an exact duplicate is
+    // redundant rather than contradictory; keep the base's copy (with its
+    // note) and count the drop.
+    std::size_t dropped_other = 0;
+    for (auto& dr : ov.data_ranges) {
+        bool dup = false;
+        for (const auto& have : base.data_ranges) {
+            if (have.start == dr.start && have.end == dr.end) { dup = true; break; }
+        }
+        if (dup) { ++dropped_other; continue; }
+        base.data_ranges.push_back(std::move(dr));
+    }
+    for (auto& cc : ov.code_copies) {
+        bool dup = false;
+        for (const auto& have : base.code_copies) {
+            if (have.runtime_start == cc.runtime_start) { dup = true; break; }
+        }
+        if (dup) { ++dropped_other; continue; }
+        base.code_copies.push_back(std::move(cc));
+    }
+    for (auto& jt : ov.jump_tables) {
+        bool dup = false;
+        for (const auto& have : base.jump_tables) {
+            if (have.addr == jt.addr) { dup = true; break; }
+        }
+        if (dup) { ++dropped_other; continue; }
+        base.jump_tables.push_back(std::move(jt));
+    }
+    for (auto& ex : ov.exclude_funcs) {
+        bool dup = false;
+        for (const auto& have : base.exclude_funcs) {
+            if (have.addr == ex.addr) { dup = true; break; }
+        }
+        if (dup) { ++dropped_other; continue; }
+        base.exclude_funcs.push_back(std::move(ex));
+    }
+    for (auto& rr : ov.resume_ranges)  base.resume_ranges.push_back(std::move(rr));
+    for (auto& h  : ov.mod_function_hooks)
+        base.mod_function_hooks.push_back(std::move(h));
+    for (auto& i  : ov.thumb_alu_immediate_overrides)
+        base.thumb_alu_immediate_overrides.push_back(std::move(i));
+    for (auto& i  : ov.alu_immediate_overrides)
+        base.alu_immediate_overrides.push_back(std::move(i));
+
+    std::printf("[gba_recompile overlay: %s]\n", path.c_str());
+    std::printf("  extra_func:  +%zu (base wins %zu, excluded %zu, "
+                "in base data_range %zu)\n",
+                added_funcs, dropped_dup, dropped_excluded, dropped_in_data);
+    std::printf("  data_range:  +%zu   code_copy: +%zu   jump_table: +%zu\n",
+                ov.data_ranges.size(), ov.code_copies.size(),
+                ov.jump_tables.size());
+    if (dropped_other != 0) {
+        std::printf("  redundant duplicates dropped: %zu\n", dropped_other);
+    }
+
+    // Re-run the full structural check over the merged config. A base
+    // [[extra_func]] that lands inside an overlay [[data_range]] is a real
+    // contradiction between reviewed evidence and the decomp's own link
+    // layout, and it aborts here by design — resolve it, don't paper over it.
+    if (!validate_cross_section(base)) return false;
     return true;
 }
 
