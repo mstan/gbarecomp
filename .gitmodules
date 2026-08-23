@@ -1,0 +1,3 @@
+[submodule "external/arm-recomp-core"]
+	path = external/arm-recomp-core
+	url = ../arm-recomp-core.git
