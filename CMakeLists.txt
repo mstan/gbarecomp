@@ -211,16 +211,19 @@ function(gbarecomp_stage_mingw_runtime target_name)
     endforeach()
 endfunction()
 
+set(ARM_RECOMP_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/arm-recomp-core")
+include("${ARM_RECOMP_CORE_DIR}/cmake/ArmRecompCore.cmake")
+arm_recomp_core_sources(GBA_ARM_RECOMP_CORE_SOURCES armv4t_gba)
+arm_recomp_core_include_dirs(GBA_ARM_RECOMP_CORE_INCLUDE_DIRS armv4t_gba)
+
 add_library(gbarecomp_armv4t STATIC
-    src/armv4t/arm_decode.cpp
-    src/armv4t/thumb_decode.cpp
-    src/armv4t/arm_ir.cpp
-    src/armv4t/arm_codegen.cpp
+    ${GBA_ARM_RECOMP_CORE_SOURCES}
     src/armv4t/runtime_arm.cpp
     src/armv4t/symbol_lookup.cpp
-    src/armv4t/interpreter.cpp
 )
-target_include_directories(gbarecomp_armv4t PUBLIC src/armv4t)
+target_include_directories(gbarecomp_armv4t PUBLIC
+    src/armv4t
+    ${GBA_ARM_RECOMP_CORE_INCLUDE_DIRS})
 set_property(TARGET gbarecomp_armv4t PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 # ─────────────────────────────────────────────────────────────────────────────
