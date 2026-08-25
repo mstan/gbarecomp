@@ -12,6 +12,7 @@ import sys
 
 
 ARCHIVE = "gbarecomp-cli-windows-x86_64.zip"
+CORE_RUNTIME_TYPES = Path("external/arm-recomp-core/profiles/armv4t_gba/runtime_arm_types.h")
 
 
 def run(command: list[str], cwd: Path) -> None:
@@ -74,6 +75,9 @@ def main() -> int:
     header_stage.mkdir(parents=True)
     for name in ("runtime_arm.h", "runtime_arm_types.h"):
         shutil.copy2(root / "src" / "armv4t" / name, header_stage / name)
+    core_header_stage = build_root / CORE_RUNTIME_TYPES
+    core_header_stage.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(root / CORE_RUNTIME_TYPES, core_header_stage)
 
     run([cmake, "-S", str(root), "-B", str(core_build), "-A", "x64",
          "-DGBARECOMP_COMPILER_CACHE=OFF"], root)
@@ -96,6 +100,7 @@ def main() -> int:
         "--specpath", str(build_root),
         "--add-binary", f"{packaged_core}{separator}.",
         "--add-data", f"{header_stage}{separator}framework/include",
+        "--add-data", f"{core_header_stage}{separator}{CORE_RUNTIME_TYPES.parent.as_posix()}",
         str(root / "tools" / "cli.py"),
     ], root)
     package = dist / "gbarecomp"
@@ -116,6 +121,8 @@ def main() -> int:
         "\n"
         "Then run build.ps1 in the output folder to compile the generated "
         "static library.\n"
+        "If you see build\\Release\\gbarecomp_game.lib, the CLI step worked. "
+        "That file is not a playable .exe.\n"
         "A complete playable port still needs per-game configuration and "
         "runtime integration.\n"
         "\n"

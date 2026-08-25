@@ -180,6 +180,11 @@ verification, or the faithful Raw output.
 The CLI generates a recompilation project; it does not turn an arbitrary ROM
 into a finished playable port by itself.
 
+If you are on Windows and want step-by-step help, read
+[`docs/WINDOWS_GAME_SETUP.md`](docs/WINDOWS_GAME_SETUP.md). It explains what
+`gbarecomp_game.lib` means, why it is not a playable `.exe`, and what to do
+next.
+
 1. Open the [GBARecomp Releases](https://github.com/mstan/gbarecomp/releases)
    page.
 2. Download `gbarecomp-cli-windows-x86_64.zip` and extract the entire archive.
@@ -197,10 +202,11 @@ library compiles:
 
 ```powershell
 cd "C:\Projects\MyGameRecomp"
-.\build.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\build.ps1"
 ```
 
-A playable integration still needs verified function coverage, a host
+If this creates `build\Release\gbarecomp_game.lib`, the generated-library step
+worked. A playable integration still needs verified function coverage, a host
 application, cartridge configuration, and game-specific validation. Use one of
 the public game repositories below as a reference.
 

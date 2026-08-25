@@ -15,6 +15,7 @@ import time
 
 VERSION = "0.2.0"
 HEADERS = ("runtime_arm.h", "runtime_arm_types.h")
+CORE_RUNTIME_TYPES = Path("external/arm-recomp-core/profiles/armv4t_gba/runtime_arm_types.h")
 
 
 def resource_root() -> Path:
@@ -74,12 +75,19 @@ def run_core(command: list[str], cwd: Path, verbose: bool) -> int:
 def copy_framework(output: Path) -> None:
     destination = output / "framework" / "include"
     destination.mkdir(parents=True, exist_ok=True)
+    root = resource_root()
     source = header_root()
     for name in HEADERS:
         path = source / name
         if not path.is_file():
             raise FileNotFoundError(f"Required framework header is missing: {name}")
         shutil.copy2(path, destination / name)
+    core_types = root / CORE_RUNTIME_TYPES
+    if not core_types.is_file():
+        raise FileNotFoundError(f"Required framework header is missing: {CORE_RUNTIME_TYPES}")
+    core_destination = output / CORE_RUNTIME_TYPES
+    core_destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(core_types, core_destination)
 
 
 def write_project(output: Path, rom: Path, used_config: bool) -> None:
@@ -160,9 +168,10 @@ macOS or Linux:
 The build creates the `gbarecomp_game` static library. This confirms that the
 generated source compiles; it is not a complete playable port by itself.
 
-To make a playable port, add game-specific configuration and integrate this
-library with the GBARecomp runtime. Existing target repositories are useful
-starting points: https://github.com/mstan/gbarecomp
+If you expected a `.exe`, this step is still successful. To make a playable
+port, add game-specific configuration and integrate this library with the
+GBARecomp runtime. Existing target repositories are useful starting points:
+https://github.com/mstan/gbarecomp
 '''
     metadata = {
         "format": 1,
