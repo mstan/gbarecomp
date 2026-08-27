@@ -1,0 +1,13 @@
+# Golden files are compared BYTE-for-byte by the test suite
+# (tests/symbol_import/run_golden.py uses filecmp with shallow=False), and the
+# importer that produces them writes LF explicitly (newline="\n"). A checkout
+# that translates line endings therefore rewrites the goldens to CRLF while the
+# produced files stay LF, and the compare fails — on Windows, where
+# core.autocrlf defaults to true, symbol_import_golden fails for this reason
+# alone. Worse, the failure is near-silent: the test's diff uses splitlines(),
+# which normalises line endings, so it reports the files as differing while
+# printing no differences at all.
+#
+# Pin them so the bytes on disk match the bytes committed, whatever the
+# consumer's git config.
+tests/symbol_import/golden/* -text
