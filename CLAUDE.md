@@ -25,8 +25,10 @@ If you:
   (the ONLY permitted HLE is a verified, opt-in, present-time shadow
   that reverts loudly and never becomes the verify oracle — see
   PRINCIPLES.md "Verified-enhancement HLE is permitted")
-- stub a BIOS SWI, skip the BIOS intro, or otherwise bypass the
-  real BIOS execution path
+- stub a BIOS SWI or otherwise bypass the real BIOS execution path
+  as the CORRECTNESS path
+  (skipping the boot intro is NOT this — see PRINCIPLES.md
+  "The boot intro is a presentation choice, not a correctness one")
 - let a dispatch miss *silently* interpret forever — no log, no
   self-heal to static, no miss record (see PRINCIPLES.md "Honest
   self-healing"); the interpreter may bridge a miss ONLY if it is
@@ -89,8 +91,10 @@ See `PRINCIPLES.md`:
 - "Honest self-healing — interpreter may bridge, must heal to static + report"
 - "Coverage honesty is load-bearing"
 
-Every game's first render frames are BIOS frames, produced by
-recompiled BIOS code. We do not fast-forward or stub through them.
+When the BIOS intro runs, its render frames are BIOS frames produced by
+recompiled BIOS code — never fast-forwarded or stubbed through. Whether
+it runs at all is a separate, per-game presentation choice
+(`[bios].skip_intro`); skipping it changes no SWI semantics.
 
 If a BIOS PC is interpreted, it must be loud, self-heal to native, and
 seed the next build — never a silent, permanent interpreter path.

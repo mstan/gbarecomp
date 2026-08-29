@@ -61,9 +61,31 @@ bridged by the interpreter, recompiled on the fly, and reported loudly —
 never silently HLE'd or stubbed, with 100% recompiled BIOS coverage
 the goal by construction. Every game boot path on real hardware
 enters the BIOS at power-on, runs the Nintendo logo intro, then
-hands control to the cartridge at `0x08000000`. Our recompiled
-builds do the same thing — through recompiled code, from the very
-first PC.
+hands control to the cartridge at `0x08000000`. When our recompiled
+builds run that intro, they do it the same way — through recompiled
+code, from the very first PC.
+
+### The boot intro is a presentation choice, not a correctness one
+
+Whether the boot logo/chime *plays* is separate from whether the BIOS
+is faithfully executed. `bios_hle_boot_skip()` only synthesizes the
+documented post-boot handoff state (banked SPs, System mode, cleared
+low registers, zeroed user IRQ vector) and jumps to the cart entry. It
+consults no HLE state and changes no SWI semantics.
+
+So `[bios].skip_intro = true` is permitted and needs no HLE: SWI
+servicing stays pure LLE and the recompiled BIOS remains the oracle
+and the IRQ dispatcher. Players should not have to sit through the
+boot animation on every launch.
+
+What remains forbidden is bypassing the real BIOS as the CORRECTNESS
+path — stubbing SWIs, or making a game work by skipping BIOS code it
+actually depends on.
+
+Note that skipping the intro hands off at a different point in the
+frame, which shifts IRQ arrival relative to guest code. A title that
+enables it must re-run its strict-static gate and seed any newly
+reached interior resume points; the skip is not free of coverage work.
 
 - The BIOS image is the user's own dump (`bios/gba_bios.bin`); see
   `bios/README.md` for hash/policy.
