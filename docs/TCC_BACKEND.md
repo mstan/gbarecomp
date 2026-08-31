@@ -53,12 +53,17 @@ all compilation; the game thread never compiles (no audio stall).
 
 `GBARECOMP_HEAL_BACKEND = gcc | tcc | auto` (default **auto**).
 
-- `auto` → **gcc if a real g++/gcc/cc/clang is reachable on PATH** (a dev /
-  production box, `gcc_toolchain_available()`), else **tcc** (the bundled,
-  toolchain-free fallback).
+- `auto` → **bundled tcc first** when `<exe>/overlay_toolchain/tcc/tcc.exe`
+  exists, else **gcc if a real g++/gcc/cc/clang is reachable on PATH** (a dev
+  box, `gcc_toolchain_available()`), else **tcc** on PATH.
 - `gcc` / `tcc` force that producer.
 
 Resolved once at init and logged: `self_heal_recompile=ENABLED backend=… …`.
+
+`GBARECOMP_SELFHEAL_RECOMPILE_DEFAULT` is the build-time default for whether
+the tier is active at all. Games with validated full static coverage can build
+with it off; `GBARECOMP_SELFHEAL_RECOMPILE=1` still re-enables the TCC/GCC
+fallback for diagnostics.
 
 ---
 
@@ -143,7 +148,9 @@ tcc/tcc.exe`, and `overlay_include_flags()` compiles each healed function agains
 `<exe>/overlay_toolchain/include` whenever the baked dev `GBARECOMP_SRC_DIR` is
 absent (a shipped, source-less box). Both gcc and tcc use this resolution, so the
 shipped self-heal path is complete with **no system python or gcc**. A dev box
-needs nothing staged — `GBARECOMP_SRC_DIR` exists and `auto` resolves to g++.
+needs nothing staged — `GBARECOMP_SRC_DIR` exists and `auto` resolves to g++
+unless a release-style `overlay_toolchain/tcc/tcc.exe` is present beside the
+executable.
 
 ---
 

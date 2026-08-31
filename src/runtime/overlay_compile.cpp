@@ -78,16 +78,22 @@ std::string gxx_path() {
 // box with no g++. GBARECOMP_HEAL_TCC overrides; otherwise prefer the tcc the
 // release packager staged next to the exe (<exe_dir>/overlay_toolchain/tcc/
 // tcc.exe), falling back to a `tcc` on PATH for a dev box that has one.
-std::string tcc_path() {
-    if (const char* e = std::getenv("GBARECOMP_HEAL_TCC")) {
-        if (e[0]) return e;
-    }
+std::string bundled_tcc_path() {
     const std::string ed = exe_dir();
     if (!ed.empty()) {
         fs::path cand = fs::path(ed) / "overlay_toolchain" / "tcc" / "tcc.exe";
         std::error_code ec;
         if (fs::exists(cand, ec)) return cand.string();
     }
+    return "";
+}
+
+std::string tcc_path() {
+    if (const char* e = std::getenv("GBARECOMP_HEAL_TCC")) {
+        if (e[0]) return e;
+    }
+    const std::string bundled = bundled_tcc_path();
+    if (!bundled.empty()) return bundled;
     return "tcc";
 }
 
@@ -266,6 +272,10 @@ bool load_and_resolve(const std::string& dll, uint32_t pc,
 
 const char* heal_backend_name(HealBackend b) {
     return b == HealBackend::Tcc ? "tcc" : "gcc";
+}
+
+bool overlay_bundled_tcc_available() {
+    return !bundled_tcc_path().empty();
 }
 
 bool overlay_compile_one(const OverlayWorkItem& w,

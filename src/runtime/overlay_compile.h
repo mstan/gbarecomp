@@ -33,6 +33,10 @@ enum class HealBackend { Gcc, Tcc };
 
 const char* heal_backend_name(HealBackend b);
 
+// True when the release-bundled TinyCC executable is staged beside the running
+// program at <exe_dir>/overlay_toolchain/tcc/tcc.exe.
+bool overlay_bundled_tcc_available();
+
 // One unit of self-heal work: the entry PC + ISA, plus the contiguous code
 // image it lives in. `bytes[guest_addr - base]` is the byte at guest_addr;
 // the image is immutable for the run (cart ROM or a BIOS snapshot), so the

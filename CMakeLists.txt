@@ -81,6 +81,9 @@ set(GBARECOMP_MINGW_PREFIX_UNIX "/c/msys64/mingw64" CACHE PATH
 option(GBARECOMP_STATIC_RELEASE
     "Statically link SDL2 + the mingw C++ runtime into release exes"
     OFF)
+option(GBARECOMP_SELFHEAL_RECOMPILE_DEFAULT
+    "Enable runtime self-heal overlay compilation by default"
+    ON)
 
 # First-divergence co-simulation oracle (COSIM_ORACLE.md). When ON, compiles the
 # cosim full-state hash + cycle-keyed park/step TCP engine and arms the runtime_tick
@@ -414,7 +417,8 @@ endif()
 # worktree root even
 # when a game project (MinishCapRecomp) pulls us in via add_subdirectory.
 target_compile_definitions(gbarecomp_runtime PRIVATE
-    GBARECOMP_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    GBARECOMP_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    GBARECOMP_SELFHEAL_RECOMPILE_DEFAULT=$<BOOL:${GBARECOMP_SELFHEAL_RECOMPILE_DEFAULT}>)
 target_link_libraries(gbarecomp_runtime PUBLIC
     gbarecomp_gba gbarecomp_debug gbarecomp_recompile_core
     gbarecomp_heal_gate)

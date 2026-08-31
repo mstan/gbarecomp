@@ -11,7 +11,8 @@
 // the hot-path read in overlay_try_dispatch is lock-free. Only the work/ready
 // queues cross to the worker thread (mutex-protected).
 //
-// The whole feature is gated behind GBARECOMP_SELFHEAL_RECOMPILE: when unset,
+// The whole feature is gated behind GBARECOMP_SELFHEAL_RECOMPILE and the
+// build-time GBARECOMP_SELFHEAL_RECOMPILE_DEFAULT: when disabled,
 // overlay_loader_init no-ops, overlay_try_dispatch always returns 0, and the
 // runtime is a pure Stage-1 bridge (used as the A/B baseline for the GFP1 gate).
 //
