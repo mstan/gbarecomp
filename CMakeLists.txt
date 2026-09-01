@@ -302,6 +302,17 @@ function(gbarecomp_target_link_host_stack target_name scope)
         target_link_options(${target_name} ${scope}
             "/STACK:${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
     elseif(CMAKE_EXECUTABLE_SUFFIX STREQUAL ".exe" AND
+           (CMAKE_C_COMPILER_ID MATCHES "Clang" OR
+            CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
+        # Clang on Windows with lld-link: lld-link does not understand GNU
+        # --stack; use the Windows /STACK: form. The Clang driver only
+        # forwards to lld-link when the flag is prefixed with -Xlinker, so
+        # route through the LINKER: prefix (which CMake expands to
+        # "-Xlinker /STACK:<bytes>"). (MSVC and GNU ld keep their existing
+        # branches below.)
+        target_link_options(${target_name} ${scope}
+            "LINKER:/STACK:${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
+    elseif(CMAKE_EXECUTABLE_SUFFIX STREQUAL ".exe" AND
            (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR
             CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
         target_link_options(${target_name} ${scope}
@@ -481,7 +492,16 @@ function(target_link_gbarecomp_runtime_stack target_name)
     #
     # Apple's ld64 and MSVC resolve archive cycles without help (and ld64 rejects
     # --start-group outright), so they take the plain list.
-    if(APPLE OR MSVC)
+    # Apple's ld64, MSVC link.exe, and Clang on Windows (lld-link) all resolve
+    # archive cycles without help. ld64 and lld-link also reject --start-group
+    # outright, so they take the plain list. MinGW GNU ld and Linux GNU ld need
+    # the explicit group.
+    set(_is_windows_clang FALSE)
+    if(WIN32 AND (CMAKE_C_COMPILER_ID STREQUAL "Clang" OR
+                  CMAKE_CXX_COMPILER_ID STREQUAL "Clang"))
+        set(_is_windows_clang TRUE)
+    endif()
+    if(APPLE OR MSVC OR _is_windows_clang)
         target_link_libraries(${target_name} PRIVATE
             gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
     else()
@@ -805,11 +825,7 @@ add_test(NAME irq_tests COMMAND irq_tests)
 add_executable(ppu_smoke_tests tests/ppu_smoke/test_main.cpp)
 target_include_directories(ppu_smoke_tests PRIVATE src/runtime src/debug)
 target_link_libraries(ppu_smoke_tests PRIVATE gbarecomp_gba)
-if(MSVC)
-    target_link_options(ppu_smoke_tests PRIVATE /STACK:16777216)
-elseif(MINGW OR WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "MSYS")
-    target_link_options(ppu_smoke_tests PRIVATE -Wl,--stack,16777216)
-endif()
+gbarecomp_target_link_host_stack(ppu_smoke_tests PRIVATE)
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
 
 add_executable(save_config_tests
