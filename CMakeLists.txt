@@ -297,10 +297,31 @@ set_property(TARGET gbarecomp_heal_gate PROPERTY POSITION_INDEPENDENT_CODE ON)
 set(GBARECOMP_HOST_STACK_RESERVE_BYTES "16777216" CACHE STRING
     "Host stack reserve for Windows game executables that link gbarecomp_runtime")
 
+function(gbarecomp_compiler_uses_msvc_linker out_var)
+    if(MSVC OR
+       CMAKE_C_SIMULATE_ID STREQUAL "MSVC" OR
+       CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC" OR
+       CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR
+       CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        set(${out_var} TRUE PARENT_SCOPE)
+    else()
+        set(${out_var} FALSE PARENT_SCOPE)
+    endif()
+endfunction()
+
 function(gbarecomp_target_link_host_stack target_name scope)
-    if(MSVC)
+    gbarecomp_compiler_uses_msvc_linker(_gbarecomp_msvc_linker)
+    if(CMAKE_C_COMPILER_ID STREQUAL "MSVC" OR
+       CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
         target_link_options(${target_name} ${scope}
             "/STACK:${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
+    elseif(CMAKE_EXECUTABLE_SUFFIX STREQUAL ".exe" AND
+           _gbarecomp_msvc_linker)
+        # MSVC-style Clang/lld-link does not understand GNU --stack. Route
+        # through CMake's linker wrapper so the compiler driver forwards the
+        # Windows /STACK form to the linker.
+        target_link_options(${target_name} ${scope}
+            "LINKER:/STACK:${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
     elseif(CMAKE_EXECUTABLE_SUFFIX STREQUAL ".exe" AND
            (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR
             CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
@@ -479,9 +500,12 @@ function(target_link_gbarecomp_runtime_stack target_name)
     #   runtime_arm.cpp: undefined reference to `overlay_try_dispatch'
     #   runtime_arm.cpp: undefined reference to `kBiosDispatchTable'
     #
-    # Apple's ld64 and MSVC resolve archive cycles without help (and ld64 rejects
-    # --start-group outright), so they take the plain list.
-    if(APPLE OR MSVC)
+    # Apple's ld64 and MSVC-style linkers resolve archive cycles without help.
+    # ld64 and lld-link reject --start-group outright, so they take the plain
+    # list. GNU-style linkers, including MinGW Clang's GNU frontend, need the
+    # explicit group.
+    gbarecomp_compiler_uses_msvc_linker(_gbarecomp_msvc_linker)
+    if(APPLE OR _gbarecomp_msvc_linker)
         target_link_libraries(${target_name} PRIVATE
             gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
     else()
@@ -805,11 +829,7 @@ add_test(NAME irq_tests COMMAND irq_tests)
 add_executable(ppu_smoke_tests tests/ppu_smoke/test_main.cpp)
 target_include_directories(ppu_smoke_tests PRIVATE src/runtime src/debug)
 target_link_libraries(ppu_smoke_tests PRIVATE gbarecomp_gba)
-if(MSVC)
-    target_link_options(ppu_smoke_tests PRIVATE /STACK:16777216)
-elseif(MINGW OR WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "MSYS")
-    target_link_options(ppu_smoke_tests PRIVATE -Wl,--stack,16777216)
-endif()
+gbarecomp_target_link_host_stack(ppu_smoke_tests PRIVATE)
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
 
 add_executable(save_config_tests

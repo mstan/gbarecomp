@@ -21,10 +21,28 @@ set(GBARECOMP_CORE_BIN_DIR "@CMAKE_CURRENT_BINARY_DIR@" CACHE PATH "")
 set(GBARECOMP_HOST_STACK_RESERVE_BYTES "16777216" CACHE STRING
     "Host stack reserve for Windows game executables that link gbarecomp_runtime")
 
+function(gbarecomp_compiler_uses_msvc_linker out_var)
+    if(MSVC OR
+       CMAKE_C_SIMULATE_ID STREQUAL "MSVC" OR
+       CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC" OR
+       CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR
+       CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        set(${out_var} TRUE PARENT_SCOPE)
+    else()
+        set(${out_var} FALSE PARENT_SCOPE)
+    endif()
+endfunction()
+
 function(gbarecomp_target_link_host_stack target_name scope)
-    if(MSVC)
+    gbarecomp_compiler_uses_msvc_linker(_gbarecomp_msvc_linker)
+    if(CMAKE_C_COMPILER_ID STREQUAL "MSVC" OR
+       CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
         target_link_options(${target_name} ${scope}
             "/STACK:${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
+    elseif(CMAKE_EXECUTABLE_SUFFIX STREQUAL ".exe" AND
+           _gbarecomp_msvc_linker)
+        target_link_options(${target_name} ${scope}
+            "LINKER:/STACK:${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
     elseif(CMAKE_EXECUTABLE_SUFFIX STREQUAL ".exe" AND
            (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR
             CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
