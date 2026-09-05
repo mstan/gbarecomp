@@ -78,8 +78,18 @@ The final headless CTest run passed 29/29 tests, recorded in `.local/final-headl
 
 A separate `.local/build-release-sdl` configuration found SDL2 at `C:/msys64/mingw64` and compiled the SDL-backed runtime/`host_window.cpp` path. The SDL dummy host-window smoke was run with present-cadence off and on; the enabled run dumped 4 presents to `.local/present_cadence_smoke.csv`.
 
-`GBARECOMP_FRAME_PHASE=<path>` now gates allocation and timestamp capture, but frame-phase enabled mode has not yet been reported as a real-game smoke in this source pass.
+The MinishCap baseline-vs-current integration smoke in `.local/runtime-validation.md` built the existing generated MinishCap sources twice: once against baseline engine `425d941`, and once against this worktree. The first smoke ran 60 headless frames and matched the same `final_pc=0x08016e94`, `steps=115`, `cycles=9076584`, `ppu_frames=60`, `unmapped=0`, `io_unhandled=0`, three BIOS ARM fallback misses, and `2,289,244` interpreted instructions. The final `frame60.bmp`, EEPROM save, coverage JSON, and miss fragment were byte-identical by SHA-256.
+
+The stronger MinishCap smoke reused the same generated-game binaries and ran 1200 headless frames to the MinishCap title screen from fresh isolated directories `.local/minish-smoke-baseline-run-1200b` and `.local/minish-smoke-current-run-1200b`. Both runs used `GBARECOMP_SELFHEAL_RECOMPILE=0`, `GBARECOMP_RUNTIME_TRACE=0`, no input, final BMP dump, isolated EEPROM save output, and the existing HLE BIOS configuration with LLE/interpreter fallback. Recompiled BIOS output was absent in both builds, so this does not validate statically recompiled BIOS code.
+
+Both 1200-frame MinishCap runs exited 0 and matched the same guest-visible summary: `final_pc=0x08016e86`, `steps=1730`, `cycles=153932314`, `ppu_frames=1200`, `unmapped=0`, and `io_unhandled=0`. Both reported four fallback misses: BIOS ARM `0x00000008` x1192, BIOS ARM `0x00000018` x2398, BIOS ARM `0x00000138` x2398, and RAM ARM `0x030065A8` x795 near `gf_ram_sub_080ADA04`. Both reported `67,554,453` interpreted instructions with self-heal native compilation disabled. The final `frame1200.bmp`, `minishcap_usa.sav`, `recomp_coverage_BZME.json`, and `recomp_master_misses_BZME.toml.frag` outputs were byte-identical by SHA-256.
+
+These MinishCap runs are generated-game correctness smokes for no-input startup/title-screen paths, not full-game FPS results. They do not validate dynamic overlay load, healed native overlay execution, static recompiled BIOS execution, frame-phase enabled mode in a real game, or deeper gameplay ARM/Thumb cross-state transitions beyond what the 1200-frame headless sequence reaches.
+
+## Next opportunity
+
+A read-only baseline 64-bit PE inspection of the MinishCap build shows `.text` raw size at 37,401,600 bytes, about 35.67 MiB, and `SizeOfImage` at 42,692,608 bytes, about 40.72 MiB. This is not an Xbox measurement, not RSS, and not proof that source codegen alone accounts for every byte, but it is large enough to justify a follow-up pass on generated-code size, section layout, and cold instruction footprint for low-end targets.
 
 ## Remaining work
 
-Original Xbox-class performance is the target but remains unvalidated on target hardware. Real gameplay and baseline integration validation were still being attempted when this note was written, so this document should be treated as host-side source and microbenchmark evidence rather than a final platform performance report.
+Original Xbox-class performance is the target but remains unvalidated on target hardware. The current evidence covers host-side source changes, microbenchmarks, and MinishCap no-input startup correctness smokes through 1200 frames; it is not a final platform performance report.
