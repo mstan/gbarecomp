@@ -11,10 +11,10 @@
 #include "gba_ppu.h"
 #include "snapshot.h"
 
-// Always-on MMIO write-trace ring (Axis 4). File-local statics mirroring the
-// runtime_arm.cpp ring style; lazily allocated on the first write. The cycle and
-// pc stamps come from the recomp runtime globals (declared here to avoid pulling
-// the ArmCpuState layout into this lib).
+// Opt-in MMIO write-trace ring (Axis 4). File-local statics mirroring the
+// runtime_arm.cpp ring style; lazily allocated on the first captured write. The
+// cycle and pc stamps come from the recomp runtime globals (declared here to
+// avoid pulling the ArmCpuState layout into this lib).
 extern "C" unsigned long long g_runtime_cycles;
 extern "C" uint32_t runtime_current_pc(void);
 
@@ -24,7 +24,18 @@ MmioCapEntry* g_mmio_ring  = nullptr;
 uint64_t      g_mmio_write = 0;      // total committed writes (monotonic)
 bool          g_mmio_split = false;  // suppress nested write16 from write32
 
+bool mmio_cap_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GBARECOMP_MMIO_CAP");
+        if (value && *value && *value != '0') return true;
+        value = std::getenv("GBARECOMP_MMIO_DUMP");
+        return value && *value;
+    }();
+    return enabled;
+}
+
 inline void mmio_cap_record(uint32_t addr, uint32_t value, uint32_t size) {
+    if (!mmio_cap_enabled()) return;
     if (!g_mmio_ring) {
         g_mmio_ring = static_cast<MmioCapEntry*>(
             std::calloc(kMmioCapRingSize, sizeof(MmioCapEntry)));
@@ -40,14 +51,16 @@ inline void mmio_cap_record(uint32_t addr, uint32_t value, uint32_t size) {
 }
 }  // namespace
 
+bool gba_mmio_cap_enabled() { return mmio_cap_enabled(); }
 uint64_t gba_mmio_cap_total()  { return g_mmio_write; }
 uint64_t gba_mmio_cap_oldest() {
+    if (!mmio_cap_enabled()) return 0;
     return g_mmio_write > kMmioCapRingSize ? g_mmio_write - kMmioCapRingSize : 0;
 }
 std::size_t gba_mmio_cap_query(uint64_t start, std::size_t count,
                                MmioCapEntry* out, uint64_t& out_first) {
     out_first = start;
-    if (!g_mmio_ring || count == 0 || !out) return 0;
+    if (!mmio_cap_enabled() || !g_mmio_ring || count == 0 || !out) return 0;
     uint64_t oldest = gba_mmio_cap_oldest();
     uint64_t head   = g_mmio_write;
     if (start < oldest) start = oldest;

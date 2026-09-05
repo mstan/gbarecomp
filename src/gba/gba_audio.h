@@ -129,6 +129,8 @@ public:
         int8_t sample = 0;
     };
     static constexpr uint32_t kFifoTraceSize = 1024u;
+    // Opt-in FIFO timer trace, enabled by GBARECOMP_AUDIO_FIFO_TRACE=1.
+    static bool debug_fifo_trace_enabled();
     uint32_t debug_trace_count() const { return trace_count_; }
     FifoTrace debug_trace_entry(uint32_t index) const;
 
@@ -298,7 +300,7 @@ private:
     void cap_push(const CapSample& s);
     int16_t current_samples_[kMaxSamplesPerEvent] = {};
     uint32_t sample_index_ = 0;
-    FifoTrace trace_[kFifoTraceSize] = {};
+    std::vector<FifoTrace> trace_;
     uint32_t trace_write_ = 0;
     uint32_t trace_count_ = 0;
 

@@ -98,12 +98,11 @@ bool assist_pad_down(SDL_GameController* controller, int binding) {
 }
 
 // ── MC-WS-002 present-cadence ring ───────────────────────────────────────
-// Always-on (Release too) ring recording EVERY SDL_RenderPresent from window
-// open: wall time blocked inside the call, entry-to-entry gap, and the DWM
-// composition refresh counter (cRefresh) at exit — the scanout-side ruler
-// that delivered-content framedumps cannot see. The ring records
-// unconditionally (~24 B/present); GBARECOMP_PRESENT_CADENCE=1 adds a
-// periodic stderr summary and a full CSV dump at close
+// Opt-in ring recording EVERY SDL_RenderPresent from window open: wall time
+// blocked inside the call, entry-to-entry gap, and the DWM composition refresh
+// counter (cRefresh) at exit -- the scanout-side ruler delivered-content
+// framedumps cannot see. GBARECOMP_PRESENT_CADENCE=1 enables the ring,
+// periodic stderr summaries, and a full CSV dump at close
 // (GBARECOMP_PRESENT_CADENCE_DUMP=path overrides ./_present_cadence.csv).
 // Interpretation (tools/analyze_present_cadence.py automates this):
 //   block_us ≈ 0 on every present → vsync is NOT blocking (tear-prone);
@@ -133,10 +132,11 @@ struct PresentCadence {
 #endif
 
     void init() {
-        ring.resize(kCadenceRingSize);
-        qpc_freq = SDL_GetPerformanceFrequency();
         const char* e = std::getenv("GBARECOMP_PRESENT_CADENCE");
         verbose = e && *e && *e != '0';
+        if (!verbose) return;
+        ring.resize(kCadenceRingSize);
+        qpc_freq = SDL_GetPerformanceFrequency();
         const char* d = std::getenv("GBARECOMP_PRESENT_CADENCE_DUMP");
         dump_path = (d && *d) ? d : "_present_cadence.csv";
 #if defined(_WIN32)
@@ -148,7 +148,9 @@ struct PresentCadence {
 #endif
     }
 
-    // Query the always-on DWM composition clock: refresh counter now, and
+    bool active() const { return verbose; }
+
+    // Query the DWM composition clock: refresh counter now, and
     // (optionally) the compositor's nominal refresh rate in Hz.
     uint64_t dwm_refresh_now(double* rate_hz) {
 #if defined(_WIN32)
@@ -176,6 +178,7 @@ struct PresentCadence {
     }
 
     void record(uint64_t qpc0, uint64_t qpc1, bool fullscreen) {
+        if (!verbose) return;
         PresentSample s;
         s.qpc = qpc0;
         s.block_us = to_us(qpc1 - qpc0);
@@ -387,7 +390,7 @@ struct Backend {
     std::string  title;                 // base window title (readout restores it)
     Uint32       fps_window_start = 0;
     int          fps_presents = 0;
-    // MC-WS-002: always-on per-present timing/scanout ring (see above).
+    // MC-WS-002: opt-in per-present timing/scanout ring (see above).
     PresentCadence cadence;
 };
 
@@ -1647,10 +1650,14 @@ void HostWindow::present(const uint8_t* rgb888) {
     runtime_imgui_render(b);
 #endif
     // MC-WS-002: time the present itself (vsync blocks here — or doesn't)
-    // and stamp the DWM refresh counter into the always-on cadence ring.
-    const uint64_t cad_qpc0 = SDL_GetPerformanceCounter();
-    SDL_RenderPresent(b->renderer);
-    b->cadence.record(cad_qpc0, SDL_GetPerformanceCounter(), b->fullscreen);
+    // and stamp the DWM refresh counter into the cadence ring.
+    if (b->cadence.active()) {
+        const uint64_t cad_qpc0 = SDL_GetPerformanceCounter();
+        SDL_RenderPresent(b->renderer);
+        b->cadence.record(cad_qpc0, SDL_GetPerformanceCounter(), b->fullscreen);
+    } else {
+        SDL_RenderPresent(b->renderer);
+    }
 
     // FPS readout (DisplayPerf hotkey): presents/sec, refreshed twice a
     // second in the title bar; the base title is restored when toggled off.

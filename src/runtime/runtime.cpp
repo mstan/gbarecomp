@@ -2291,15 +2291,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     if (const char* e = std::getenv("GBARECOMP_FRAMEDUMP_COUNT"))
         framedump_max = std::atoi(e);
     // ── HP-002 frame-phase ring ─────────────────────────────────────────
-    // Always-on per-presented-frame breakdown of where wall time went
+    // Opt-in per-presented-frame breakdown of where wall time went
     // between consecutive presents: guest execution, view-sync + render/
     // latched-copy, SDL present, audio push (mutex shared with the SDL
     // callback), input pump, pacer wait, plus the game-thread overlay-
     // compile delta. Query instrument for the measured ~230 ms quasi-
     // periodic >25 ms present gaps (ISSUES.md HP-002): for any late frame
     // the dominant column names the culprit phase. GBARECOMP_FRAME_PHASE=
-    // <path> dumps the ring as CSV when the runner exits; recording is
-    // unconditional (~32 B/frame).
+    // <path> enables recording and dumps the ring as CSV when the runner exits.
     struct FramePhaseSample {
         uint64_t frame = 0;
         uint32_t guest_us = 0;    // guest resumed -> present block entered
@@ -2316,6 +2315,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         uint64_t total = 0;
         uint64_t prev_exit_ns = 0;
         unsigned long long prev_compile_ns = 0;
+        std::string dump_path;
+        FramePhaseRing() {
+            const char* p = std::getenv("GBARECOMP_FRAME_PHASE");
+            if (!p || !*p) return;
+            dump_path = p;
+            ring.resize(kSize);
+        }
+        bool active() const { return !dump_path.empty(); }
         static uint64_t now_ns() {
             return static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -2327,7 +2334,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
         void record(uint64_t frame, uint64_t t0, uint64_t t1, uint64_t t2,
                     uint64_t t3, uint64_t t4, uint64_t t5) {
-            if (ring.empty()) ring.resize(kSize);
+            if (!active()) return;
             FramePhaseSample s;
             s.frame = frame;
             s.guest_us = prev_exit_ns ? us(prev_exit_ns, t0) : 0;
@@ -2345,9 +2352,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             ++total;
         }
         void dump() const {
-            const char* p = std::getenv("GBARECOMP_FRAME_PHASE");
-            if (!p || !*p || total == 0) return;
-            std::FILE* f = std::fopen(p, "w");
+            if (!active() || total == 0) return;
+            std::FILE* f = std::fopen(dump_path.c_str(), "w");
             if (!f) return;
             std::fprintf(f, "frame,guest_us,render_us,present_us,audio_us,"
                             "pump_us,pacer_us,compile_us\n");
@@ -2361,7 +2367,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             }
             std::fclose(f);
             std::fprintf(stderr, "[frame-phase] dumped %llu frames -> %s\n",
-                         static_cast<unsigned long long>(n), p);
+                         static_cast<unsigned long long>(n), dump_path.c_str());
             std::fflush(stderr);
         }
     };
@@ -3149,7 +3155,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         runtime_set_frame_present_hook([&]() -> bool {
             uint64_t frame = ppu.frame_count();
             if (frame != last_presented_frame) {
-                const uint64_t fp_t0 = FramePhaseRing::now_ns();
+                const bool phase_active = frame_phase.active();
+                uint64_t fp_t0 = 0;
+                uint64_t fp_t1 = 0;
+                uint64_t fp_t2 = 0;
+                uint64_t fp_t3 = 0;
+                uint64_t fp_t4 = 0;
+                if (phase_active) fp_t0 = FramePhaseRing::now_ns();
                 const bool present_frame = !fast_forward_active ||
                     (frame % static_cast<uint64_t>(
                          fast_forward_multiplier) == 0);
@@ -3164,23 +3176,23 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                    bus.pal_ptr());
                     }
                 }
-                const uint64_t fp_t1 = FramePhaseRing::now_ns();
+                if (phase_active) fp_t1 = FramePhaseRing::now_ns();
                 if (present_frame) win.present(live_fb.data());
-                const uint64_t fp_t2 = FramePhaseRing::now_ns();
+                if (phase_active) fp_t2 = FramePhaseRing::now_ns();
                 int16_t audio_buf[2048];
                 std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
                 if (n > 0 && !fast_forward_active) {
                     gba_mod_audio_mix(audio_buf, n);
                     win.push_audio_samples(audio_buf, n);
                 }
-                const uint64_t fp_t3 = FramePhaseRing::now_ns();
+                if (phase_active) fp_t3 = FramePhaseRing::now_ns();
                 pump_host_input();
                 // Present-in-place can remain inside a single step_once() for
                 // the entire windowed session. Advance deterministic replays
                 // here as well as in the outer loop so windowed repros exercise
                 // the same frame-indexed input as headless acceptance runs.
                 if (input_replay_requested) apply_input_replay();
-                const uint64_t fp_t4 = FramePhaseRing::now_ns();
+                if (phase_active) fp_t4 = FramePhaseRing::now_ns();
                 last_presented_frame = frame;
                 if (present_frame) {
                     ++frames_presented;
@@ -3188,8 +3200,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                         host_quit = true;
                     if (pacer) pacer->wait_for_next_frame();
                 }
-                frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3, fp_t4,
-                                   FramePhaseRing::now_ns());
+                if (phase_active) {
+                    frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3,
+                                       fp_t4, FramePhaseRing::now_ns());
+                }
             }
             return host_quit;
         });
@@ -3520,7 +3534,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             }
             uint64_t frame = ppu.frame_count();
             if (frame != last_presented_frame) {
-                const uint64_t fp_t0 = FramePhaseRing::now_ns();
+                const bool phase_active = frame_phase.active();
+                uint64_t fp_t0 = 0;
+                uint64_t fp_t1 = 0;
+                uint64_t fp_t2 = 0;
+                uint64_t fp_t3 = 0;
+                uint64_t fp_t4 = 0;
+                if (phase_active) fp_t0 = FramePhaseRing::now_ns();
                 const bool present_frame = !fast_forward_active ||
                     (frame % static_cast<uint64_t>(
                          fast_forward_multiplier) == 0);
@@ -3535,7 +3555,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                    bus.pal_ptr());
                     }
                 }
-                const uint64_t fp_t1 = FramePhaseRing::now_ns();
+                if (phase_active) fp_t1 = FramePhaseRing::now_ns();
                 if (present_frame) win.present(live_fb.data());
                 // Framedump (capture runs only) is attributed to present_us.
                 if (framedump_dir && frame >= framedump_start &&
@@ -3547,16 +3567,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                               ppu.render_height());
                     if (++framedump_written >= framedump_max) host_quit = true;
                 }
-                const uint64_t fp_t2 = FramePhaseRing::now_ns();
+                if (phase_active) fp_t2 = FramePhaseRing::now_ns();
                 int16_t audio_buf[2048];
                 std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
                 if (n > 0 && !fast_forward_active) {
                     gba_mod_audio_mix(audio_buf, n);
                     win.push_audio_samples(audio_buf, n);
                 }
-                const uint64_t fp_t3 = FramePhaseRing::now_ns();
+                if (phase_active) fp_t3 = FramePhaseRing::now_ns();
                 pump_host_input();
-                const uint64_t fp_t4 = FramePhaseRing::now_ns();
+                if (phase_active) fp_t4 = FramePhaseRing::now_ns();
                 dispatches_since_pump = 0;
                 last_presented_frame = frame;
                 if (present_frame) {
@@ -3569,8 +3589,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     // making its selected multiplier independent of monitor Hz.
                     if (pacer) pacer->wait_for_next_frame();
                 }
-                frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3, fp_t4,
-                                   FramePhaseRing::now_ns());
+                if (phase_active) {
+                    frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3,
+                                       fp_t4, FramePhaseRing::now_ns());
+                }
             }
         }
         // Differential-oracle WRAM trace fires on frame advance in BOTH windowed
@@ -3610,8 +3632,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     runtime_set_host_service_hook(nullptr);
     runtime_set_frame_start_hook(nullptr);
     frame_phase.dump();  // HP-002: flush the phase ring (env-gated CSV)
-    // HP-002: flush the always-on MMIO write ring (gba_io.cpp) to CSV.
-    // GBARECOMP_MMIO_DUMP=<path>. Offline analysis derives the scanline of
+    // HP-002: flush the opt-in MMIO write ring (gba_io.cpp) to CSV.
+    // GBARECOMP_MMIO_DUMP=<path> arms capture. Offline analysis derives the scanline of
     // each write as (cycle % 280896) / 1232 — e.g. histogramming BG scroll
     // writes by VCOUNT to find mid-frame updates that shear the display.
     if (const char* mmio_dump = std::getenv("GBARECOMP_MMIO_DUMP")) {

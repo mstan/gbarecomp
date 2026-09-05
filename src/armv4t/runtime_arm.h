@@ -210,10 +210,15 @@ const uint32_t* runtime_call_stack_data(void);
 void            runtime_call_stack_restore(const uint32_t* entries,
                                            uint32_t depth);
 
-// Always-on structured execution trace. The RUNTIME_TRACE_* kind macros
+// Structured execution trace. The RUNTIME_TRACE_* kind macros
 // and RuntimeTraceEntry are defined in runtime_arm_types.h. This records
 // diagnostic state only; it never routes execution or substitutes for
-// missing codegen.
+// missing codegen. It is disabled by default for normal gameplay; set
+// GBARECOMP_RUNTIME_TRACE=1 or one of the trace/watchpoint env vars to arm it.
+extern unsigned g_runtime_trace_enabled;
+static inline int runtime_trace_enabled(void) {
+    return g_runtime_trace_enabled != 0u;
+}
 void runtime_trace_event(uint32_t kind, uint32_t pc, uint32_t addr,
                          uint32_t value, uint32_t aux);
 void runtime_trace_reset(void);

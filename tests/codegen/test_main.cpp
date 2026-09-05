@@ -27,10 +27,14 @@
 #include "bus.h"
 #include "cpu_state.h"
 #include "interpreter.h"
+#include "overlay_abi.h"
 #include "runtime_arm.h"
 #include "stubs.h"
 #include "test_cases.h"
 #include "thumb_decode.h"
+
+extern "C" int overlay_runtime_trace_gate_compile_smoke(
+    const GbaOverlayCallbacks* callbacks);
 
 namespace {
 
@@ -133,6 +137,210 @@ armv4t::Instr decode_one(const TestCase& tc) {
 // 64 KB window from 0 — every test case's working set fits.
 struct BusGeom { uint32_t base; uint32_t size; };
 BusGeom default_bus_geom() { return {0u, 64u * 1024u}; }
+
+void set_env_var(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+void unset_env_var(const char* name) {
+#ifdef _WIN32
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
+struct EnvSnapshot {
+    struct Entry {
+        const char* name;
+        bool present;
+        std::string value;
+    };
+    std::vector<Entry> entries;
+
+    explicit EnvSnapshot(const char* const* names, std::size_t count) {
+        entries.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            const char* value = std::getenv(names[i]);
+            entries.push_back({names[i], value != nullptr,
+                               value ? std::string(value) : std::string()});
+        }
+    }
+
+    ~EnvSnapshot() {
+        for (const Entry& e : entries) {
+            if (e.present) {
+                set_env_var(e.name, e.value.c_str());
+            } else {
+                unset_env_var(e.name);
+            }
+        }
+        runtime_trace_reset();
+    }
+};
+
+constexpr const char* kTraceEnvVars[] = {
+    "GBARECOMP_RUNTIME_TRACE",
+    "GBARECOMP_TRACE_ON_DISPATCH_MISS",
+    "GBARECOMP_ABORT_ON_BIOS_WRITE",
+    "GBARECOMP_ABORT_ON_MEM_WRITE_ADDR",
+    "GBARECOMP_ABORT_ON_MEM_READ_HIGH",
+    "GBARECOMP_ABORT_AFTER_BRANCHES",
+    "GBARECOMP_ABORT_ON_BRANCH_PC",
+};
+
+void clear_trace_env() {
+    for (const char* name : kTraceEnvVars) unset_env_var(name);
+}
+
+void seed_trace_state() {
+    std::memset(&g_cpu, 0, sizeof(g_cpu));
+    for (uint32_t i = 0; i < 16; ++i) {
+        g_cpu.R[i] = 0x10000000u + i * 0x1111111u;
+    }
+    g_cpu.cpsr = CPSR_N_BIT | CPSR_C_BIT | 0x1Fu;
+    g_runtime_cycles = 0x123456789ull;
+}
+
+bool cpu_and_cycles_match(const ArmCpuState& cpu_before,
+                          unsigned long long cycles_before) {
+    return std::memcmp(&g_cpu, &cpu_before, sizeof(g_cpu)) == 0 &&
+           g_runtime_cycles == cycles_before;
+}
+
+bool trace_event_preserves_guest_state(const char* label) {
+    ArmCpuState cpu_before = g_cpu;
+    unsigned long long cycles_before = g_runtime_cycles;
+    runtime_trace_event(RUNTIME_TRACE_BRANCH, 0x08000100u, 0x08000200u,
+                        0xA5A55A5Au, 0x1234u);
+    if (!cpu_and_cycles_match(cpu_before, cycles_before)) {
+        std::printf("FAIL runtime_trace_gate: %s mutated guest state\n",
+                    label);
+        return false;
+    }
+    return true;
+}
+
+bool expect_trace_state(const char* label, bool enabled) {
+    if ((g_runtime_trace_enabled != 0u) != enabled) {
+        std::printf("FAIL runtime_trace_gate: %s enabled=%u expected=%u\n",
+                    label, g_runtime_trace_enabled, enabled ? 1u : 0u);
+        return false;
+    }
+    return true;
+}
+
+bool expect_empty_trace(const char* label) {
+    RuntimeTraceEntry entries[1] = {};
+    uint32_t count = runtime_trace_copy_recent(entries, 1);
+    if (count != 0u) {
+        std::printf("FAIL runtime_trace_gate: %s copied %u entries\n",
+                    label, count);
+        return false;
+    }
+    return true;
+}
+
+bool run_runtime_trace_gate_cases() {
+    EnvSnapshot env(kTraceEnvVars,
+                    sizeof(kTraceEnvVars) / sizeof(kTraceEnvVars[0]));
+    clear_trace_env();
+
+    runtime_trace_reset();
+    if (!expect_trace_state("default env", false)) return false;
+    seed_trace_state();
+    if (!trace_event_preserves_guest_state("disabled trace")) return false;
+    if (!expect_empty_trace("disabled trace")) return false;
+
+    set_env_var("GBARECOMP_RUNTIME_TRACE", "");
+    runtime_trace_reset();
+    if (!expect_trace_state("empty runtime trace env", false)) return false;
+
+    set_env_var("GBARECOMP_RUNTIME_TRACE", "0");
+    runtime_trace_reset();
+    if (!expect_trace_state("runtime trace env 0", false)) return false;
+
+    set_env_var("GBARECOMP_RUNTIME_TRACE", "1");
+    runtime_trace_reset();
+    if (!expect_trace_state("runtime trace env 1", true)) return false;
+    seed_trace_state();
+    if (!trace_event_preserves_guest_state("enabled trace")) return false;
+    RuntimeTraceEntry entries[1] = {};
+    uint32_t count = runtime_trace_copy_recent(entries, 1);
+    if (count != 1u || entries[0].kind != RUNTIME_TRACE_BRANCH ||
+        entries[0].pc != 0x08000100u ||
+        entries[0].cycles != 0x123456789ull) {
+        std::printf("FAIL runtime_trace_gate: enabled trace entry mismatch "
+                    "count=%u kind=%u pc=0x%08X cycles=%llu\n",
+                    count, entries[0].kind, entries[0].pc,
+                    entries[0].cycles);
+        return false;
+    }
+
+    unset_env_var("GBARECOMP_RUNTIME_TRACE");
+    runtime_trace_reset();
+    if (!expect_trace_state("reset disables after env clear", false)) {
+        return false;
+    }
+    if (!expect_empty_trace("reset clears trace ring")) return false;
+
+    set_env_var("GBARECOMP_ABORT_AFTER_BRANCHES", "0");
+    runtime_trace_reset();
+    if (!expect_trace_state("numeric branch-count watchpoint", true)) {
+        return false;
+    }
+
+    unset_env_var("GBARECOMP_ABORT_AFTER_BRANCHES");
+    set_env_var("GBARECOMP_ABORT_ON_MEM_WRITE_ADDR", "0");
+    runtime_trace_reset();
+    if (!expect_trace_state("numeric mem-write watchpoint", true)) {
+        return false;
+    }
+
+    unset_env_var("GBARECOMP_ABORT_ON_MEM_WRITE_ADDR");
+    set_env_var("GBARECOMP_ABORT_ON_BRANCH_PC", "0");
+    runtime_trace_reset();
+    if (!expect_trace_state("numeric branch-PC watchpoint", true)) {
+        return false;
+    }
+
+    unset_env_var("GBARECOMP_ABORT_ON_BRANCH_PC");
+    set_env_var("GBARECOMP_ABORT_ON_BIOS_WRITE", "0");
+    runtime_trace_reset();
+    if (!expect_trace_state("existing BIOS watchpoint presence", true)) {
+        return false;
+    }
+
+    unset_env_var("GBARECOMP_ABORT_ON_BIOS_WRITE");
+    set_env_var("GBARECOMP_ABORT_ON_MEM_READ_HIGH", "0");
+    runtime_trace_reset();
+    if (!expect_trace_state("existing mem-read-high presence", true)) {
+        return false;
+    }
+
+    return true;
+}
+
+bool run_overlay_runtime_trace_gate_cases() {
+    unsigned trace_enabled = 0;
+    GbaOverlayCallbacks callbacks = {};
+    callbacks.runtime_trace_enabled = &trace_enabled;
+
+    if (overlay_runtime_trace_gate_compile_smoke(&callbacks) != 0) {
+        std::printf("FAIL overlay_runtime_trace_gate: disabled pointer read\n");
+        return false;
+    }
+    trace_enabled = 1;
+    if (overlay_runtime_trace_gate_compile_smoke(&callbacks) != 1) {
+        std::printf("FAIL overlay_runtime_trace_gate: enabled pointer read\n");
+        return false;
+    }
+    return true;
+}
 
 // ── Diff machinery ─────────────────────────────────────────────────
 
@@ -473,6 +681,8 @@ int main() {
     }
     if (!run_call_return_stack_cases()) ++failures;
     if (!run_thumb_alu_immediate_override_cases()) ++failures;
+    if (!run_runtime_trace_gate_cases()) ++failures;
+    if (!run_overlay_runtime_trace_gate_cases()) ++failures;
     if (failures) {
         std::printf("\ncodegen_tests: %d / %zu failed\n",
                     failures, kTestCasesCount);

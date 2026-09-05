@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-#define GBA_OVERLAY_ABI_VERSION 4u
+#define GBA_OVERLAY_ABI_VERSION 5u
 
 typedef struct GbaOverlayCallbacks {
     uint32_t abi_version;  // must equal GBA_OVERLAY_ABI_VERSION
@@ -99,6 +99,10 @@ typedef struct GbaOverlayCallbacks {
     // bodies. The callback receives and mutates the shared cpu pointer above.
     int (*gba_mod_function_entry)(uint32_t entry_pc, int thumb,
                                   ArmCpuState* cpu);
+
+    // ABI v5: generated bodies gate diagnostic trace calls before crossing the
+    // host callback boundary.
+    unsigned* runtime_trace_enabled;
 } GbaOverlayCallbacks;
 
 // Exported by every overlay DLL:

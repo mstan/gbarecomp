@@ -766,6 +766,18 @@ add_executable(audio_drc_tests tests/runtime/audio_drc_test.cpp)
 target_include_directories(audio_drc_tests PRIVATE src/runtime)
 add_test(NAME audio_drc_tests COMMAND audio_drc_tests)
 
+add_executable(color_lut_tests
+    tests/runtime/color_lut_test.cpp
+    src/runtime/color_lut.cpp)
+target_include_directories(color_lut_tests PRIVATE src/runtime)
+add_test(NAME color_lut_tests COMMAND color_lut_tests)
+
+add_executable(diagnostic_capture_tests tests/runtime/diagnostic_capture_test.cpp)
+target_include_directories(diagnostic_capture_tests PRIVATE src/gba src/runtime src/armv4t)
+target_link_libraries(diagnostic_capture_tests PRIVATE gbarecomp_gba)
+add_test(NAME diagnostic_capture_tests_disabled COMMAND diagnostic_capture_tests --disabled)
+add_test(NAME diagnostic_capture_tests_enabled COMMAND diagnostic_capture_tests --enabled)
+
 # Self-heal proposal clustering — pure logic, links only the standalone
 # clustering TU (no runtime/bus/overlay dependencies).
 add_executable(selfheal_cluster_test
@@ -881,11 +893,13 @@ add_custom_command(
 add_executable(codegen_tests
     tests/codegen/test_main.cpp
     tests/codegen/test_cases.cpp
+    tests/codegen/overlay_runtime_compile_smoke.cpp
     tests/codegen/stubs.cpp
     ${CODEGEN_TESTS_GENFILE}
 )
 target_include_directories(codegen_tests PRIVATE
     tests/codegen
+    src/runtime
     src/armv4t)
 target_link_libraries(codegen_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME codegen_tests COMMAND codegen_tests)

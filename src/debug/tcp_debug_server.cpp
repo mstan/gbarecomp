@@ -373,7 +373,9 @@ void cmd_audio_trace(gba::GbaBus& bus, std::string_view req,
         max_entries = gba::GbaAudio::kFifoTraceSize;
     }
     uint32_t start = available - static_cast<uint32_t>(max_entries);
-    out = "{\"ok\":true,\"entries\":[";
+    out = gba::GbaAudio::debug_fifo_trace_enabled()
+        ? "{\"ok\":true,\"enabled\":true,\"entries\":["
+        : "{\"ok\":true,\"enabled\":false,\"entries\":[";
     for (uint32_t i = 0; i < max_entries; ++i) {
         auto tr = bus.audio().debug_trace_entry(start + i);
         if (i) out += ",";
@@ -414,8 +416,10 @@ void cmd_runtime_trace(const TcpDebugServer::Context& ctx,
     uint32_t n = ctx.runtime_trace_copy(
         entries.data(), static_cast<uint32_t>(entries.size()));
 
-    char hdr[80];
-    std::snprintf(hdr, sizeof(hdr), "{\"ok\":true,\"count\":%u,\"entries\":[",
+    char hdr[104];
+    std::snprintf(hdr, sizeof(hdr),
+                  "{\"ok\":true,\"enabled\":%s,\"count\":%u,\"entries\":[",
+                  runtime_trace_enabled() ? "true" : "false",
                   static_cast<unsigned>(n));
     out = hdr;
     for (uint32_t i = 0; i < n; ++i) {
@@ -524,10 +528,12 @@ void cmd_irq_cap(std::string_view req, std::string& out) {
 }
 
 // ── MMIO write-trace ring query (Axis 4) ───────────────────────────────
-// {"cmd":"mmio_cap","count":C,"start":S?} -> {ok,total,oldest,first,count,
+// {"cmd":"mmio_cap","count":C,"start":S?} -> {ok,enabled,total,oldest,first,count,
 // entries:[{cycle,addr,value,size,pc}...]}. Non-destructive window query of the
-// always-on IO write-trace ring (gba_io.cpp). Default returns the most recent
-// `count` writes; `start` requests an absolute index window.
+// opt-in IO write-trace ring (gba_io.cpp). Default returns the most recent
+// `count` writes; `start` requests an absolute index window. enabled=false means
+// GBARECOMP_MMIO_CAP/GBARECOMP_MMIO_DUMP was not set, distinct from an enabled
+// ring with zero entries.
 void cmd_mmio_cap(std::string_view req, std::string& out) {
     uint64_t count = 4096, parsed = 0;
     if (extract_uint(req, "\"count\"", parsed) ||
@@ -546,10 +552,11 @@ void cmd_mmio_cap(std::string_view req, std::string& out) {
     std::vector<gba::MmioCapEntry> buf(static_cast<std::size_t>(count));
     uint64_t first = 0;
     std::size_t n = gba::gba_mmio_cap_query(start, buf.size(), buf.data(), first);
-    char hdr[176];
+    char hdr[200];
     std::snprintf(hdr, sizeof(hdr),
-                  "{\"ok\":true,\"total\":%llu,\"oldest\":%llu,\"first\":%llu,"
+                  "{\"ok\":true,\"enabled\":%s,\"total\":%llu,\"oldest\":%llu,\"first\":%llu,"
                   "\"count\":%llu,\"entries\":[",
+                  gba::gba_mmio_cap_enabled() ? "true" : "false",
                   static_cast<unsigned long long>(total),
                   static_cast<unsigned long long>(oldest),
                   static_cast<unsigned long long>(first),

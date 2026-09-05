@@ -6,7 +6,9 @@
 
 #include "color_lut.h"
 
+#include <cstddef>
 #include <cmath>
+#include <cstring>
 
 namespace gbarecomp::runtime {
 namespace {
@@ -175,19 +177,13 @@ bool screen_kind_from_name(std::string_view name, ScreenKind& out) {
 }
 
 ColorLut::ColorLut(const ColorSettings& settings) {
-    table_ = std::make_unique<std::array<std::array<uint8_t, 3>, 32768>>();
-    auto& table = *table_;
-
     if (settings.screen == ScreenKind::Raw) {
         passthrough_ = true;
-        for (int px = 0; px < 32768; ++px) {
-            uint8_t r = px & 31, g = (px >> 5) & 31, b = (px >> 10) & 31;
-            table[px] = {static_cast<uint8_t>(r << 3 | r >> 2),
-                         static_cast<uint8_t>(g << 3 | g >> 2),
-                         static_cast<uint8_t>(b << 3 | b >> 2)};
-        }
         return;
     }
+
+    table_ = std::make_unique<std::array<std::array<uint8_t, 3>, 32768>>();
+    auto& table = *table_;
     if (settings.screen == ScreenKind::Classic) {
         for (int px = 0; px < 32768; ++px)
             table[px] = classic_entry(static_cast<uint16_t>(px));
@@ -221,6 +217,11 @@ ColorLut::ColorLut(const ColorSettings& settings) {
 
 void ColorLut::map_rgb888(const uint8_t* src, uint8_t* dst,
                           int width, int height) const {
+    if (!table_) {
+        if (dst == src) return;
+        std::memmove(dst, src, static_cast<std::size_t>(width) * height * 3u);
+        return;
+    }
     const auto& table = *table_;
     const int n = width * height;
     for (int i = 0; i < n; ++i) {

@@ -39,11 +39,11 @@ class GbaPpu;
 class GbaIrq;
 class GbaAudio;
 
-// ── Always-on MMIO write-trace ring (Axis 4 — accuracy burndown) ──────
-// A non-destructive, always-on ring recording every committed IO-register
-// write {cycle, addr, value, size, pc} so the mmio_cap TCP probe can QUERY a
-// [start,count] window without arming (ring-buffer discipline). The tap lives
-// at the GbaIo::write8/16/32 commit path and is zero-effect on write behavior.
+// ── Opt-in MMIO write-trace ring (Axis 4 — accuracy burndown) ──────────
+// A non-destructive ring recording committed IO-register writes {cycle, addr,
+// value, size, pc} when GBARECOMP_MMIO_CAP=1 or GBARECOMP_MMIO_DUMP=<path> is
+// set. The tap lives at the GbaIo::write8/16/32 commit path and is zero-effect
+// on write behavior.
 // cycle = g_runtime_cycles and pc = recomp g_cpu.R[15] (both meaningful in the
 // recompiled runtime; under the bios_smoke interpreter only addr/value/size are
 // meaningful — it drives its own CPUState and does not tick g_runtime_cycles).
@@ -55,6 +55,7 @@ struct MmioCapEntry {
     uint32_t pc;
 };
 constexpr std::size_t kMmioCapRingSize = 1u << 18;  // 262144 writes
+bool        gba_mmio_cap_enabled();  // true when MMIO capture is armed
 uint64_t    gba_mmio_cap_total();    // total writes ever recorded (monotonic)
 uint64_t    gba_mmio_cap_oldest();   // earliest absolute index still retained
 std::size_t gba_mmio_cap_query(uint64_t start, std::size_t count,

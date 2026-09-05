@@ -100,11 +100,34 @@ const char* trace_kind_name(uint32_t kind) {
     }
 }
 
+bool env_flag_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    return value && value[0] != '\0' && value[0] != '0';
+}
+
+bool env_present(const char* name) {
+    return std::getenv(name) != nullptr;
+}
+
+bool trace_enabled_from_env() {
+    return env_flag_enabled("GBARECOMP_RUNTIME_TRACE") ||
+           env_present("GBARECOMP_TRACE_ON_DISPATCH_MISS") ||
+           env_present("GBARECOMP_ABORT_ON_BIOS_WRITE") ||
+           env_present("GBARECOMP_ABORT_ON_MEM_WRITE_ADDR") ||
+           env_present("GBARECOMP_ABORT_ON_MEM_READ_HIGH") ||
+           env_present("GBARECOMP_ABORT_AFTER_BRANCHES") ||
+           env_present("GBARECOMP_ABORT_ON_BRANCH_PC");
+}
+
 }  // namespace
+
+extern "C" unsigned g_runtime_trace_enabled =
+    trace_enabled_from_env() ? 1u : 0u;
 
 extern "C" void runtime_trace_event(uint32_t kind, uint32_t pc,
                                      uint32_t addr, uint32_t value,
                                      uint32_t aux) {
+    if (!g_runtime_trace_enabled) return;
     RuntimeTraceEntry& e = g_trace[g_trace_write];
     e.seq = ++g_trace_seq;
     e.cycles = g_runtime_cycles;
@@ -255,6 +278,7 @@ extern "C" void runtime_trace_reset(void) {
     g_trace_count = 0;
     g_trace_seq = 0;
     g_runtime_cycles = 0;  // cycle clock shares the machine-reset lifecycle
+    g_runtime_trace_enabled = trace_enabled_from_env() ? 1u : 0u;
     // Arm per-instruction fingerprinting for the whole run if requested, so the
     // ring is always-on from reset (no arm-then-run latency gap) and we query it
     // after the fact. Also settable via the TCP `insn_trace` command.
@@ -303,7 +327,7 @@ extern "C" void runtime_trace_dump_recent(uint32_t max_entries) {
 
 extern "C" uint32_t runtime_trace_copy_recent(RuntimeTraceEntry* out,
                                                uint32_t max_entries) {
-    if (!out || max_entries == 0) return 0;
+    if (!out || max_entries == 0 || !g_runtime_trace_enabled) return 0;
     if (max_entries > g_trace_count) max_entries = g_trace_count;
     uint32_t start = (g_trace_write + kTraceSize - max_entries) % kTraceSize;
     for (uint32_t i = 0; i < max_entries; ++i) {
@@ -795,7 +819,8 @@ constexpr uint32_t kBiosRegionEnd = 0x00004000u;
 extern "C" void runtime_dispatch(uint32_t target_pc) {
     // Strip THUMB bit; codegen handles the mode via cpsr_T already.
     uint32_t pc = target_pc & ~1u;
-    runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
+    if (runtime_trace_enabled())
+        runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
 
     bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
     // A generated caller may enter mutable code without returning through the
@@ -837,7 +862,9 @@ extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
     // Bit 0 of target indicates THUMB.
     if (target_pc & 1u) g_cpu.cpsr |= CPSR_T_BIT;
     else                g_cpu.cpsr &= ~CPSR_T_BIT;
-    runtime_trace_event(RUNTIME_TRACE_EXCHANGE, target_pc & ~1u, target_pc, 0, 0);
+    if (runtime_trace_enabled())
+        runtime_trace_event(RUNTIME_TRACE_EXCHANGE, target_pc & ~1u, target_pc,
+                            0, 0);
     runtime_dispatch(target_pc);
 }
 
@@ -860,7 +887,8 @@ extern "C" void runtime_call_push_return(uint32_t return_pc) {
         std::abort();
     }
     g_call_return_stack[g_call_return_depth++] = pc;
-    runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_call_return_depth, 1u);
+    if (runtime_trace_enabled())
+        runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_call_return_depth, 1u);
 }
 
 extern "C" int runtime_call_should_return(uint32_t target_pc) {
@@ -870,9 +898,11 @@ extern "C" int runtime_call_should_return(uint32_t target_pc) {
     for (uint32_t i = g_call_return_depth; i != g_call_return_floor; --i) {
         uint32_t slot = i - 1u;
         if (g_call_return_stack[slot] == pc) {
-            runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc,
-                                g_call_return_depth,
-                                (slot + 1u == g_call_return_depth) ? 2u : 5u);
+            if (runtime_trace_enabled()) {
+                runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc,
+                                    g_call_return_depth,
+                                    (slot + 1u == g_call_return_depth) ? 2u : 5u);
+            }
             g_call_return_depth = slot;
             return 1;
         }
@@ -880,7 +910,8 @@ extern "C" int runtime_call_should_return(uint32_t target_pc) {
     uint32_t top = g_call_return_depth != 0
         ? g_call_return_stack[g_call_return_depth - 1u]
         : 0xFFFFFFFFu;
-    runtime_trace_event(RUNTIME_TRACE_CALL, pc, top, g_call_return_depth, 3u);
+    if (runtime_trace_enabled())
+        runtime_trace_event(RUNTIME_TRACE_CALL, pc, top, g_call_return_depth, 3u);
     return 0;
 }
 
@@ -889,8 +920,9 @@ extern "C" void runtime_call_cancel_return(uint32_t return_pc) {
     // Never pop below the active IRQ floor (an interrupted mainline frame).
     if (g_call_return_depth > g_call_return_floor &&
         g_call_return_stack[g_call_return_depth - 1u] == pc) {
-        runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_call_return_depth,
-                            4u);
+        if (runtime_trace_enabled())
+            runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_call_return_depth,
+                                4u);
         --g_call_return_depth;
     }
 }
@@ -1141,7 +1173,9 @@ extern "C" void runtime_restore_cpsr_from_spsr(void) {
 extern "C" void runtime_swi(uint32_t swi_imm) {
     uint32_t return_address = g_cpu.R[15];
     uint32_t saved_cpsr     = g_cpu.cpsr;
-    runtime_trace_event(RUNTIME_TRACE_SWI, return_address, swi_imm, saved_cpsr, 0);
+    if (runtime_trace_enabled())
+        runtime_trace_event(RUNTIME_TRACE_SWI, return_address, swi_imm,
+                            saved_cpsr, 0);
     runtime_swi_log_record(swi_imm, return_address, g_cpu.R[0], g_cpu.R[1],
                            g_cpu.R[2], g_cpu.R[14], bus_read_u32(0x03007FF8u));
 
@@ -1255,8 +1289,9 @@ extern "C" void runtime_irq(uint32_t return_address) {
     // vectored and how deep — used to pin the MC-HP-002 IRQ storm. Reading
     // IE/IF is side-effect-free.
     uint32_t irq_src = bus_read_u16(0x04000200u) & bus_read_u16(0x04000202u);
-    runtime_trace_event(RUNTIME_TRACE_IRQ, return_address, irq_src, saved_cpsr,
-                        g_irq_nest_depth);
+    if (runtime_trace_enabled())
+        runtime_trace_event(RUNTIME_TRACE_IRQ, return_address, irq_src,
+                            saved_cpsr, g_irq_nest_depth);
     runtime_irq_log_record(irq_src, return_address, saved_cpsr);
 
     uint32_t new_cpsr =

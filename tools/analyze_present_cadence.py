@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Analyze a present-cadence CSV from the MC-WS-002 probe.
 
-The runtime's HostWindow keeps an always-on ring of every SDL_RenderPresent
+The runtime's HostWindow keeps an opt-in ring of every SDL_RenderPresent
 (wall time blocked inside the call, entry-to-entry gap, DWM composition
-refresh counter). Running the game with GBARECOMP_PRESENT_CADENCE=1 dumps the
-ring to a CSV at window close (default ./_present_cadence.csv, override with
-GBARECOMP_PRESENT_CADENCE_DUMP). This script reads that CSV and answers the
+refresh counter). Running the game with GBARECOMP_PRESENT_CADENCE=1 records and
+dumps the ring to a CSV at window close (default ./_present_cadence.csv,
+override with GBARECOMP_PRESENT_CADENCE_DUMP). This script reads that CSV and
+answers the
 questions that discriminate the MC-WS-002 tearing/judder mechanisms:
 
   1. Is vsync actually blocking?   (block_us ~ a refresh period vs ~0)

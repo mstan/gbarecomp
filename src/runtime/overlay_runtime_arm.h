@@ -28,6 +28,7 @@ extern const GbaOverlayCallbacks* g_ovl;
 #define g_runtime_cycles (*g_ovl->runtime_cycles)
 #define g_runtime_break_pc (*g_ovl->runtime_break_pc)
 #define g_runtime_fn_entry_hook (*g_ovl->runtime_fn_entry_hook)
+#define g_runtime_trace_enabled (*g_ovl->runtime_trace_enabled)
 
 // CPSR flag accessors (generated code uses cpsr_c for ADC/SBC carry-in).
 static inline uint32_t cpsr_n(void) { return (g_ovl->cpu->cpsr & CPSR_N_BIT) ? 1u : 0u; }
@@ -88,5 +89,6 @@ static inline void runtime_restore_cpsr_from_spsr(void) { g_ovl->runtime_restore
 
 // ── Instrumentation ──
 static inline void runtime_insn_fp(void) { g_ovl->runtime_insn_fp(); }
+static inline int runtime_trace_enabled(void) { return g_runtime_trace_enabled != 0u; }
 static inline void runtime_trace_event(uint32_t k, uint32_t pc, uint32_t a, uint32_t v, uint32_t aux) { g_ovl->runtime_trace_event(k, pc, a, v, aux); }
 static inline void runtime_unimplemented_op(const char* op, uint32_t pc) { g_ovl->runtime_unimplemented_op(op, pc); }

@@ -222,7 +222,7 @@ bool should_trace_unmapped_read(uint32_t addr) {
 }
 
 void trace_unmapped_read(uint32_t addr, uint32_t value, uint32_t width) {
-    if (should_trace_unmapped_read(addr)) {
+    if (runtime_trace_enabled() && should_trace_unmapped_read(addr)) {
         runtime_trace_event(RUNTIME_TRACE_MEM_READ, g_cpu.R[15], addr, value,
                             width);
     }
@@ -1026,11 +1026,11 @@ extern "C" bool runtime_should_yield(void) {
     // still ticks, so frame counters keep advancing — "no frames" is the
     // wrong signal; "no HALT" is the right one). If we go many seconds of
     // wall-clock with no HALT, snapshot the live M4A state ONCE and keep
-    // running (observation, not a fix). Disable with
-    // GBARECOMP_HANG_WATCHDOG=0; tune seconds with GBARECOMP_HANG_SECONDS.
+    // running (observation, not a fix). Enable with
+    // GBARECOMP_HANG_WATCHDOG=1; tune seconds with GBARECOMP_HANG_SECONDS.
     static const bool wd_on = [] {
         const char* e = std::getenv("GBARECOMP_HANG_WATCHDOG");
-        return !(e && e[0] == '0' && e[1] == '\0');
+        return e && e[0] != '\0' && e[0] != '0';
     }();
     if (wd_on) {
         static const long long wd_secs = [] {

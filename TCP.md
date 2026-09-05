@@ -136,16 +136,18 @@ by a `<rom>.stateN` file. The BIOS image and ROM bytes are not stored in
 the snapshot — they are reloaded and hash-verified at launch, and the
 ROM-SHA-1 gate guarantees the match.
 
-## Accuracy-burndown query commands (always-on rings)
+## Accuracy-burndown query commands
 
 Live, non-destructive window queries peered against the NanoBoyAdvance oracle
-(:19844) for the 7-axis accuracy burndown. Each reads an always-on ring or live
-state — no arming, no pause/step (ring-buffer discipline).
+(:19844) for the 7-axis accuracy burndown. Commands read live state or bounded
+rings; opt-in rings report an explicit `enabled` field so disabled capture is
+distinct from an enabled-but-empty history.
 
 ```
 cyc_anchor {pc, hits?}      mmio_cap {count?, start?}
 irq_cap {count?}            state_hash
-audio_cap {count?, start?}  (see audio section)
+audio_cap {count?, start?}  audio_trace {count?}
+runtime_trace {count?}
 ```
 
 - `cyc_anchor {"pc":P,"hits":H}` → `{ok,pc,armed,fp_count,count,cyc:[...]}`
@@ -161,17 +163,29 @@ audio_cap {count?, start?}  (see audio section)
   always-on IRQ-vector ring. `src` = active IE&IF mask; `from_halt` flags the
   wake-from-HALT path. NOTE: raise-time (IF-set instant) is not separately
   recorded — take-time only. Populated by `runtime_irq` (recompiled runtime).
-- `mmio_cap {"count":C,"start":S?}` → `{ok,total,oldest,first,count,
+- `mmio_cap {"count":C,"start":S?}` -> `{ok,enabled,total,oldest,first,count,
   entries:[{cycle,addr,value,size,pc}...]}` (Axis 4). Window query of the
-  always-on IO write-trace ring (`gba_io.cpp`, 262144 entries). Default returns
-  the most recent `count` writes; `start` selects an absolute-index window. A
-  32-bit IO write is recorded as ONE size-4 entry (the internal write16 split is
-  suppressed). `cycle`/`pc` are recomp-runtime globals (meaningful in the
-  recompiled runtime; under the interpreter only addr/value/size are).
+  opt-in IO write-trace ring (`gba_io.cpp`, 262144 entries). Enable it with
+  `GBARECOMP_MMIO_CAP=1`; `GBARECOMP_MMIO_DUMP=<path>` also arms the ring so
+  shutdown CSV dumps are populated. Default returns the most recent `count`
+  writes; `start` selects an absolute-index window. A 32-bit IO write is
+  recorded as ONE size-4 entry (the internal write16 split is suppressed).
+  `cycle`/`pc` are recomp-runtime globals (meaningful in the recompiled runtime;
+  under the interpreter only addr/value/size are). `enabled=false` means capture
+  is off, distinct from `enabled=true` with `total=0`.
 - `state_hash` → `{ok,cycles,iwram,ewram,vram,pal,oam,hash}` (Axis 7). Cheap
   read-only FNV-1a-64 over IWRAM+EWRAM+VRAM+PAL+OAM + `g_runtime_cycles`. The
   run-twice determinism probe compares end-state in one call; per-region hashes
   localize a divergence.
+- `audio_trace {"count":C}` -> `{ok,enabled,entries:[{sample_base,fifo,
+  until_cycles,start_slot,slots,count,bytes_remaining,sample}...]}`. Query of
+  the opt-in direct-sound FIFO timer trace. Enable it with
+  `GBARECOMP_AUDIO_FIFO_TRACE=1`. It records FIFO timer-step metadata only and
+  does not affect FIFO consumption or mixed audio output.
+- `runtime_trace {"count":C}` -> `{ok,enabled,count,entries:[...]}`. Query of
+  the opt-in runtime event trace. Enable it with `GBARECOMP_RUNTIME_TRACE=1` or
+  the existing trace/watchpoint environment options. `enabled=false` means trace
+  capture is off, distinct from an enabled runtime trace with no events yet.
 
 ## Comparison & verification
 
@@ -188,6 +202,7 @@ call_stack              (requires runtime stack tracking)
 dispatch_miss_info      (also written to dispatch_misses.log)
 watchdog_status         unmapped_io_log
 unknown_swi_log         symbol
+runtime_trace           audio_trace
 ```
 
 `symbol {addr}` resolves a guest PC to the nearest recompiled function name

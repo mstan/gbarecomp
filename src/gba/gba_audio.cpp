@@ -25,6 +25,14 @@ constexpr uint8_t kDutyPatterns[4][8] = {
 
 constexpr std::size_t kRingSize = 1u << 14;  // 16384 samples ~ 0.5 s
 
+bool fifo_trace_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GBARECOMP_AUDIO_FIFO_TRACE");
+        return value && *value && *value != '0';
+    }();
+    return enabled;
+}
+
 }  // namespace
 
 GbaAudio::GbaAudio() {
@@ -538,17 +546,20 @@ void GbaAudio::fifo_timer_step(DirectFifo& fifo, int fifo_id) {
     for (uint32_t i = start; i < slots; ++i) {
         fifo.samples[i] = sample;
     }
-    FifoTrace& trace = trace_[trace_write_];
-    trace.sample_base = samples_generated_;
-    trace.fifo_id = static_cast<uint8_t>(fifo_id);
-    trace.until_cycles = until_cycles;
-    trace.start_slot = start;
-    trace.slots = slots;
-    trace.count = fifo.count;
-    trace.bytes_remaining = fifo.bytes_remaining;
-    trace.sample = sample;
-    trace_write_ = (trace_write_ + 1u) % kFifoTraceSize;
-    if (trace_count_ < kFifoTraceSize) ++trace_count_;
+    if (fifo_trace_enabled()) {
+        if (trace_.empty()) trace_.resize(kFifoTraceSize);
+        FifoTrace& trace = trace_[trace_write_];
+        trace.sample_base = samples_generated_;
+        trace.fifo_id = static_cast<uint8_t>(fifo_id);
+        trace.until_cycles = until_cycles;
+        trace.start_slot = start;
+        trace.slots = slots;
+        trace.count = fifo.count;
+        trace.bytes_remaining = fifo.bytes_remaining;
+        trace.sample = sample;
+        trace_write_ = (trace_write_ + 1u) % kFifoTraceSize;
+        if (trace_count_ < kFifoTraceSize) ++trace_count_;
+    }
     if (fifo.bytes_remaining != 0) {
         fifo.shift_word >>= 8;
         --fifo.bytes_remaining;
@@ -590,8 +601,10 @@ GbaAudio::FifoDebugState GbaAudio::debug_fifo_state(int fifo_id) const {
     return out;
 }
 
+bool GbaAudio::debug_fifo_trace_enabled() { return fifo_trace_enabled(); }
+
 GbaAudio::FifoTrace GbaAudio::debug_trace_entry(uint32_t index) const {
-    if (index >= trace_count_) return FifoTrace{};
+    if (trace_.empty() || index >= trace_count_) return FifoTrace{};
     uint32_t start = (trace_write_ + kFifoTraceSize - trace_count_) %
         kFifoTraceSize;
     return trace_[(start + index) % kFifoTraceSize];
