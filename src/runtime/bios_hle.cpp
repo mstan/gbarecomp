@@ -11,7 +11,8 @@
 // guest memory (the bus_* bridge), then returning 1 so runtime_swi resumes the
 // caller at LR without an SVC-mode entry or BIOS dispatch.
 //
-// SWI semantics are ported from mGBA's src/gba/bios.c (MPL-2.0, © Jeffrey Pfau) and GBATEK. See THIRD_PARTY_ATTRIBUTION.md.
+// SWI semantics are ported from mGBA's src/gba/bios.c (MPL-2.0,
+// © Jeffrey Pfau) and GBATEK. See THIRD_PARTY_ATTRIBUTION.md.
 //
 // TIMING NOTE: the cycle cost charged per SWI is an approximation. The LLE
 // (recompiled real BIOS) accrues the exact hardware cycle count as it executes;
