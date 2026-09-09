@@ -26,7 +26,8 @@ and those headers satisfy the attribution requirement.
 
 ## mGBA
 
-- **Upstream:** https://github.com/mgba-emu/mgba (vendored at `third_party/mgba`)
+- **Upstream:** https://github.com/mgba-emu/mgba (cloned locally for the
+  oracle target; `third_party/mgba/` is gitignored and NOT tracked here)
 - **Author:** Jeffrey Pfau and contributors
 - **License:** MPL-2.0
 
@@ -34,7 +35,22 @@ and those headers satisfy the attribution requirement.
 |---|---|---|
 | `src/runtime/bios_hle.{h,cpp}` | `src/gba/bios.c` | GBA BIOS SWI High-Level Emulation: the Div/Sqrt/ArcTan/ArcTan2 fixed-point routines and stall formulas, the LZ77 / Huffman / run-length / diff-unfilter decompressors, BitUnPack, the (float) affine-matrix builders, and MidiKey2Freq. Re-implemented in C++ against this project's `g_cpu` + bus bridge. HLE is opt-in; LLE (the recompiled real BIOS) remains the default and the correctness oracle (PRINCIPLES.md "verified-enhancement HLE"). |
 
-Portions of `src/runtime/bios_hle.cpp` are derived from mGBA and remain
-subject to the MPL-2.0; the upstream source is vendored under
-`third_party/mgba/src/gba/bios.c`, satisfying the license's source-availability
-requirement.
+`src/runtime/bios_hle.{h,cpp}` are derived from mGBA's `src/gba/bios.c` and
+are therefore Covered Software under the MPL-2.0: **those two files are
+licensed MPL-2.0, not PolyForm Noncommercial**, and each carries the Exhibit A
+notice. The full license text is in
+[`third_party/MPL-2.0.txt`](third_party/MPL-2.0.txt).
+
+MPL-2.0 is file-scoped weak copyleft, so this does not affect the license of
+the rest of gbarecomp: section 3.3 expressly permits distributing a Larger
+Work under other terms provided the Covered Software stays under the MPL. The
+source-availability requirement (section 3.2) is met by those two files being
+present in this public repository — they *are* the Source Code Form of the
+modified Covered Software. An earlier revision of this notice instead claimed
+the obligation was satisfied by a vendored copy at
+`third_party/mgba/src/gba/bios.c`; that path is gitignored and has never been
+tracked here, so the claim was wrong. Nothing else in this repository is
+MPL-covered.
+
+libmgba itself is linked only into the opt-in oracle binary
+(`-DGBARECOMP_BUILD_ORACLE=ON`), never into a shipping native build.

@@ -1,3 +1,8 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this file,
+// You can obtain one at https://mozilla.org/MPL/2.0/.
+// Full text: third_party/MPL-2.0.txt
+//
 // bios_hle.h — opt-in High-Level Emulation of GBA BIOS SWI calls.
 //
 // The recompiled real BIOS (LLE) is this project's default and remains the
