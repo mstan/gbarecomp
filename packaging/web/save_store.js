@@ -211,13 +211,16 @@ class SaveStore {
   // Only while the game is not running. Before the first Start there is no FS
   // yet: the change is queued and applied right after /saves loads, before main()
   // reads the save. After exit it is applied and synced immediately.
+  // 'persisted' confirms the sync completed; 'memory-only' means the change
+  // cannot survive a reload. A failed sync rejects, leaving the files exportable.
   async modify(op) {
     if(this.running)throw Error('Stop the game before changing its saves');
     if(!this.fs){this.pending=[op];this.log(`Save ${op.op} queued: applied when the game starts`);this.emit();return 'queued';}
     await this.flush().catch(()=>{});
     this.apply(op);
-    if(this.persist())await this.flush();
-    this.emit();return 'applied';
+    const persisting=this.persist();
+    if(persisting)await this.flush();
+    this.emit();return persisting?'persisted':'memory-only';
   }
   applyPending() {
     const ops=this.pending;this.pending=[];let changed=false;

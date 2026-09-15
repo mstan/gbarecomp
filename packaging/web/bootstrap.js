@@ -66,7 +66,11 @@ $('export').onclick=()=>{
 // Start they are queued and applied once /saves is loaded, before main().
 $('exportsave').onclick=()=>{try{offer(GbrSaveStore.exportName(romBytes),saves.exportBattery());}catch(e){line('Export failed: '+e.message,true);}};
 async function changeSaves(action,label){
- try{const result=await action();renderSaves();if(result==='applied'&&exitCode!==null){line(label+' stored; reloading');location.reload();}}
+ try{
+  const result=await action();renderSaves();
+  if(result==='persisted'&&exitCode!==null){line(label+' stored; reloading');location.reload();}
+  else if(result==='memory-only')line(label+' applied only in memory; browser storage is unavailable. This change will be lost on reload. Use Export Save to keep a copy of the current battery save.',true);
+ }
  catch(e){line(label+' failed: '+e.message,true);renderSaves();}
 }
 $('importsave').onclick=()=>$('importfile').click();
