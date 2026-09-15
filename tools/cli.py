@@ -114,6 +114,10 @@ set_target_properties(gbarecomp_game PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED YES
 )
+if(EMSCRIPTEN)
+    # Generated code needs guaranteed tail calls (see runtime_arm.h).
+    target_compile_options(gbarecomp_game PRIVATE -mtail-call)
+endif()
 '''
     build_ps1 = '''$ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -181,13 +185,18 @@ https://github.com/mstan/gbarecomp
         "used_game_config": used_config,
         "generated_at_unix": int(time.time()),
     }
-    (output / "CMakeLists.txt").write_text(cmake, encoding="utf-8", newline="\n")
-    (output / "build.ps1").write_text(build_ps1, encoding="utf-8", newline="\n")
-    (output / "build.sh").write_text(build_sh, encoding="utf-8", newline="\n")
-    (output / "README.md").write_text(readme, encoding="utf-8", newline="\n")
-    (output / "gbarecomp-project.json").write_text(
-        json.dumps(metadata, indent=2) + "\n", encoding="utf-8", newline="\n"
-    )
+    # Path.write_text() only grew a `newline` keyword in 3.10; open() has
+    # always had it, and the CLI still has to run on the 3.9 that ships with
+    # macOS.
+    for name, text in (
+        ("CMakeLists.txt", cmake),
+        ("build.ps1", build_ps1),
+        ("build.sh", build_sh),
+        ("README.md", readme),
+        ("gbarecomp-project.json", json.dumps(metadata, indent=2) + "\n"),
+    ):
+        with open(output / name, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
 
 
 def build(args: argparse.Namespace) -> int:
