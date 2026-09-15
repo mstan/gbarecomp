@@ -351,8 +351,8 @@ void record_and_log_miss(std::uint32_t pc, bool thumb) {
         } else if (!g_miss_notice_logged) {
             g_miss_notice_logged = true;
             std::fprintf(stderr,
-                "self_heal: missing static coverage detected; healing in the "
-                "background and recording a TOML proposal. Set "
+                "self_heal: NOT_STATIC; missing static coverage detected; "
+                "interpreter bridge active, recording a TOML proposal. Set "
                 "GBARECOMP_SELFHEAL_VERBOSE=1 for per-PC diagnostics.\n");
         }
 

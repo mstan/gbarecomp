@@ -421,6 +421,13 @@ void overlay_loader_init(const std::string& cache_root,
         return;
     }
 
+#if defined(__EMSCRIPTEN__)
+    s_active = false;
+    std::printf("self_heal_recompile=UNAVAILABLE host=wasm "
+                "interpreter_bridge=NOT_STATIC proposals=MEMFS\n");
+    return;
+#endif
+
     // Self-improving native healing is a build-time default with an env
     // override. Dynamic/overlay-heavy games can keep it ON; fixed-ROM games
     // with proven static coverage can default it OFF so player runs never spawn
