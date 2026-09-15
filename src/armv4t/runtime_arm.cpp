@@ -816,7 +816,15 @@ constexpr uint32_t kBiosRegionEnd = 0x00004000u;
 
 }  // namespace
 
-extern "C" void runtime_dispatch(uint32_t target_pc) {
+extern "C" uint32_t g_runtime_tail_arg = 0u;
+
+namespace {
+
+// Everything runtime_dispatch does before entering generated code. Returns the
+// entry to call, or nullptr when the transfer already completed here (force-
+// interpreter bridge, RAM hook, self-heal overlay or dispatch miss). Shared by
+// runtime_dispatch and runtime_dispatch_tail so the two stay identical.
+const DispatchEntry* dispatch_resolve(uint32_t target_pc) {
     // Strip THUMB bit; codegen handles the mode via cpsr_T already.
     uint32_t pc = target_pc & ~1u;
     if (runtime_trace_enabled())
@@ -830,12 +838,12 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
     if (g_runtime_force_interp_hook &&
         g_runtime_force_interp_hook(pc, thumb ? 1 : 0)) {
         runtime_bridge_interpret(pc, thumb, 0u, 0u);
-        return;
+        return nullptr;
     }
     if (pc >= 0x02000000u && pc < 0x04000000u &&
         g_runtime_ram_dispatch_hook &&
         g_runtime_ram_dispatch_hook(pc, thumb ? 1 : 0)) {
-        return;
+        return nullptr;
     }
     const DispatchEntry* entry = nullptr;
     if (pc < kBiosRegionEnd) {
@@ -846,26 +854,53 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
     }
     if (entry) {
         g_runtime_resume_pc = entry->resume ? pc : 0u;
-        entry->fn();
-        return;
+        return entry;
     }
     // Stage-2 self-heal: third dispatch tier. After the static tables miss,
     // consult the runtime-healed native overlays before bridging. Defined in
     // src/runtime/overlay_loader.cpp (a null stub in tests/codegen/stubs.cpp,
     // since armv4t must not depend on the runtime lib). When the feature is
     // off this is a single bool check and returns 0.
-    if (overlay_try_dispatch(pc, thumb ? 1 : 0)) return;
+    if (overlay_try_dispatch(pc, thumb ? 1 : 0)) return nullptr;
     runtime_dispatch_miss(target_pc);
+    return nullptr;
 }
 
-extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
+void exchange_instruction_set(uint32_t target_pc) {
     // Bit 0 of target indicates THUMB.
     if (target_pc & 1u) g_cpu.cpsr |= CPSR_T_BIT;
     else                g_cpu.cpsr &= ~CPSR_T_BIT;
     if (runtime_trace_enabled())
         runtime_trace_event(RUNTIME_TRACE_EXCHANGE, target_pc & ~1u, target_pc,
                             0, 0);
+}
+
+}  // namespace
+
+extern "C" void runtime_dispatch(uint32_t target_pc) {
+    const DispatchEntry* entry = dispatch_resolve(target_pc);
+    if (entry) entry->fn();
+}
+
+// Tail entry: the generated GBARECOMP_TAIL_DISPATCH stored the target in
+// g_runtime_tail_arg. Under Emscripten the call into generated code is a
+// guaranteed return_call, so a guest loop that crosses functions never grows
+// the host stack; natively it is the same sibling call runtime_dispatch makes.
+extern "C" void runtime_dispatch_tail(void) {
+    const DispatchEntry* entry = dispatch_resolve(g_runtime_tail_arg);
+    if (!entry) return;
+    GBARECOMP_TAIL_CALL(entry->fn);
+}
+
+extern "C" void runtime_dispatch_with_exchange(uint32_t target_pc) {
+    exchange_instruction_set(target_pc);
     runtime_dispatch(target_pc);
+}
+
+extern "C" void runtime_dispatch_with_exchange_tail(void) {
+    const uint32_t target_pc = g_runtime_tail_arg;
+    exchange_instruction_set(target_pc);
+    GBARECOMP_TAIL_DISPATCH(target_pc);
 }
 
 extern "C" int runtime_has_static_entry(uint32_t pc, int thumb) {
@@ -1170,7 +1205,11 @@ extern "C" void runtime_restore_cpsr_from_spsr(void) {
 // strong (production) version aborts there — that abort is the
 // "BIOS not recompiled" gate.
 
-extern "C" void runtime_swi(uint32_t swi_imm) {
+namespace {
+
+// SWI exception entry up to (not including) the BIOS vector dispatch. Returns
+// false when the opt-in HLE hook serviced the call and the guest resumes at LR.
+bool swi_enter(uint32_t swi_imm) {
     uint32_t return_address = g_cpu.R[15];
     uint32_t saved_cpsr     = g_cpu.cpsr;
     if (runtime_trace_enabled())
@@ -1192,7 +1231,7 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     if (g_bios_hle_hook) {
         bool thumb = (saved_cpsr & CPSR_T_BIT) != 0;
         uint32_t swi_num = thumb ? (swi_imm & 0xFFu) : ((swi_imm >> 16) & 0xFFu);
-        if (g_bios_hle_hook(swi_num)) return;
+        if (g_bios_hle_hook(swi_num)) return false;
     }
 
     // Switch to SVC mode. SPSR_svc gets the pre-SWI CPSR. LR_svc gets
@@ -1221,8 +1260,19 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     // (enter_swi sets I=1, then pump_step(3), then the next-boundary IRQ
     // check sees I=1). The recompiled SWI codegen does not tick this op.
     runtime_tick(3u);
+    return true;
+}
 
+}  // namespace
+
+extern "C" void runtime_swi(uint32_t swi_imm) {
+    if (!swi_enter(swi_imm)) return;
     runtime_dispatch(0x00000008u);
+}
+
+extern "C" void runtime_swi_tail(void) {
+    if (!swi_enter(g_runtime_tail_arg)) return;
+    GBARECOMP_TAIL_DISPATCH(0x00000008u);
 }
 
 // Count of IRQ vectorings performed by the recompiled runtime (every

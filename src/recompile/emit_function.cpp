@@ -398,8 +398,7 @@ std::string emit_function_body_str(
     appendf(out,
         "    /* fall-through to 0x%08X */\n"
         "    g_cpu.R[15] = 0x%08Xu;\n"
-        "    runtime_dispatch(0x%08Xu);\n"
-        "    return;\n",
+        "    GBARECOMP_TAIL_DISPATCH(0x%08Xu);\n",
         fn.end_addr, fn.end_addr, fn.end_addr);
 
     return out;
