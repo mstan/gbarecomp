@@ -684,6 +684,27 @@ endif()
 # ─────────────────────────────────────────────────────────────────────────────
 enable_testing()
 
+# Browser protocol tests exercise the production JS with controlled host APIs.
+# Node is optional; native engine builds do not require browser tooling.
+find_program(GBARECOMP_NODE_EXECUTABLE NAMES node nodejs)
+if(GBARECOMP_NODE_EXECUTABLE)
+    foreach(web_test IN ITEMS host_unit host_lifecycle audio_worklet save_mount save_bootstrap)
+        add_test(NAME web_${web_test}_tests
+            COMMAND ${GBARECOMP_NODE_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/${web_test}_test.js)
+        set_tests_properties(web_${web_test}_tests PROPERTIES TIMEOUT 15)
+    endforeach()
+    add_test(NAME web_config_bootstrap_tests
+        COMMAND ${GBARECOMP_NODE_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/packaging/tests/web_config_bootstrap_test.js)
+endif()
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME web_runtime_config_tests
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/packaging/tests/test_web_runtime_config.py)
+endif()
+
 # Portable packaging generation is a Unix-only shell path. Register its smoke
 # test when the small validation toolchain is available, while keeping ordinary
 # engine builds independent of packaging-only host packages.
@@ -804,6 +825,17 @@ add_executable(audio_drc_tests tests/runtime/audio_drc_test.cpp)
 target_include_directories(audio_drc_tests PRIVATE src/runtime)
 add_test(NAME audio_drc_tests COMMAND audio_drc_tests)
 
+add_executable(audio_playback_tests tests/runtime/audio_playback_test.cpp)
+target_include_directories(audio_playback_tests PRIVATE src/debug)
+target_link_libraries(audio_playback_tests PRIVATE gbarecomp_gba)
+add_test(NAME audio_playback_tests COMMAND audio_playback_tests)
+
+add_executable(web_audio_dsp_tests
+    tests/runtime/web_audio_dsp_test.cpp
+    src/runtime/host_web_audio_dsp.cpp)
+target_include_directories(web_audio_dsp_tests PRIVATE src/runtime)
+add_test(NAME web_audio_dsp_tests COMMAND web_audio_dsp_tests)
+
 add_executable(color_lut_tests
     tests/runtime/color_lut_test.cpp
     src/runtime/color_lut.cpp)
@@ -827,6 +859,13 @@ add_test(NAME selfheal_cluster_test COMMAND selfheal_cluster_test)
 add_executable(interpreter_smoke tests/armv4t/interpreter_smoke.cpp)
 target_link_libraries(interpreter_smoke PRIVATE gbarecomp_armv4t)
 add_test(NAME interpreter_smoke COMMAND interpreter_smoke)
+
+add_executable(tail_dispatch_tests
+    tests/armv4t/tail_dispatch_test.cpp
+    tests/codegen/stubs.cpp)
+target_include_directories(tail_dispatch_tests PRIVATE tests/codegen)
+target_link_libraries(tail_dispatch_tests PRIVATE gbarecomp_armv4t)
+add_test(NAME tail_dispatch_tests COMMAND tail_dispatch_tests)
 
 add_executable(armv4t_tests tests/armv4t/test_main.cpp)
 target_link_libraries(armv4t_tests PRIVATE gbarecomp_armv4t)
