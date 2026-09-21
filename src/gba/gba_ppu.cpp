@@ -23,6 +23,8 @@ extern "C" int (*g_ws_tilemap_provider)(int bg, int hw_x, int screen_y,
 extern "C" int (*g_ws_bg_x_provider)(int bg, int output_x, int screen_y,
                                      int* out_hw_x) = nullptr;
 extern "C" unsigned g_ws_bg_x_provider_layers = 0xFu;
+extern "C" int (*g_ws_bg_xy_provider)(int, int, int, int*, int*) = nullptr;
+extern "C" unsigned g_ws_bg_xy_provider_layers = 0xFu;
 extern "C" int g_ws_affine_filter_enabled = 0;
 extern "C" int (*g_ws_affine_filter_provider)(int, int) = nullptr;
 extern "C" int g_ws_authored_margin_layers = 0;
@@ -102,7 +104,7 @@ void GbaPpu::serialize(gbarecomp::debug::SnapshotWriter& w) const {
         const std::size_t center_x = extra_left_ * 3u;
         for (std::size_t y = 0; y < kScreenHeight; ++y) {
             std::memcpy(center.data() + y * kNativeStride,
-                        latched_fb_.data() + y * wide_stride + center_x,
+                        latched_fb_.data() + (y + extra_top_) * wide_stride + center_x,
                         kNativeStride);
         }
         w.bytes(center.data(), center.size());
@@ -144,7 +146,7 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
         const std::size_t wide_stride = render_width() * 3u;
         const std::size_t center_x = extra_left_ * 3u;
         for (std::size_t y = 0; y < kScreenHeight; ++y) {
-            std::memcpy(work_fb_.data() + y * wide_stride + center_x,
+            std::memcpy(work_fb_.data() + (y + extra_top_) * wide_stride + center_x,
                         native_latch.data() + y * kNativeStride,
                         kNativeStride);
         }
@@ -176,9 +178,8 @@ void GbaPpu::reset() {
 
 void GbaPpu::set_view_margins(uint32_t left, uint32_t right,
                               uint32_t top, uint32_t bottom) {
-    // Clamp each side to its compile-time max. kMaxExtraY is 0 for now, so
-    // top/bottom are forced to 0 (vertical expansion deferred) — the params
-    // stay in the API so callers remain generic.
+    // Geometry alone cannot authorize vertical content. The compositor also
+    // requires authored providers; otherwise those rows stay black.
     const uint32_t next_left = left > kMaxExtraX ? kMaxExtraX : left;
     const uint32_t next_right = right > kMaxExtraX ? kMaxExtraX : right;
     const uint32_t next_top = top > kMaxExtraY ? kMaxExtraY : top;
@@ -1318,17 +1319,20 @@ void render_scanline_internal(uint8_t* rgb,
 // falls outside [X1,X2) so it naturally resolves to WINOUT (the conservative
 // policy for columns the game never authored). OAM X keeps its 9-bit signed
 // decode and is tested against the expanded viewport, so wrapped-negative sprites
-// (left) and x>=240 sprites (right) both appear in the margins. Vertical is not
-// expanded here (extra_top/bottom are forced 0), so `y` is the hardware scanline.
-void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
+// (left) and x>=240 sprites (right) both appear in the margins. Signed `y`
+// addresses authored vertical rows, where raw OAM/affine/bitmap extrapolation
+// is prohibited; only validated game providers may contribute content.
+void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
                           const uint8_t* io, const uint8_t* vram,
                           const uint8_t* oam, const uint8_t* pal,
-                          uint32_t out_w, uint32_t ox) {
+                          uint32_t out_w, uint32_t ox, uint32_t oy = 0) {
     constexpr uint32_t kVanW = GbaPpu::kScreenWidth;   // 240
     constexpr uint32_t kVanH = GbaPpu::kScreenHeight;  // 160
-    if (y >= kVanH) return;
-
-    uint8_t* row = rgb + y * out_w * 3;
+    const bool native_row = y >= 0 && y < static_cast<int>(kVanH);
+    uint8_t* row = rgb + (y + static_cast<int>(oy)) * out_w * 3;
+    if (!native_row && (!g_ws_authored_margin_layers || !g_ws_tilemap_provider || g_ws_pillarbox)) {
+        std::memset(row, 0, out_w * 3); return;
+    }
     if (dispcnt & 0x0080u) { std::memset(row, 0xFF, out_w * 3); return; }
 
     struct PixelCandidate {
@@ -1347,11 +1351,11 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
     const bool any_window = win0_en || win1_en || objwin_en;
     uint16_t winin  = static_cast<uint16_t>(io[0x48] | (io[0x49] << 8));
     uint16_t winout = static_cast<uint16_t>(io[0x4A] | (io[0x4B] << 8));
-    auto win_v_row = [&](uint32_t vreg) -> bool {
+    auto win_v_row = [&](uint32_t vreg, int sample_y) -> bool {
         uint32_t v  = static_cast<uint32_t>(io[vreg] | (io[vreg + 1] << 8));
         uint32_t y1 = (v >> 8) & 0xFFu, y2 = v & 0xFFu;
         if (y2 > kVanH || y1 > y2) y2 = kVanH;
-        return y >= y1 && y < y2;
+        return sample_y >= static_cast<int>(y1) && sample_y < static_cast<int>(y2);
     };
     auto win_h_in = [&](uint32_t hreg, int hx) -> bool {
         uint32_t h  = static_cast<uint32_t>(io[hreg] | (io[hreg + 1] << 8));
@@ -1359,13 +1363,13 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
         if (x2 > static_cast<int>(kVanW) || x1 > x2) x2 = static_cast<int>(kVanW);
         return hx >= x1 && hx < x2;
     };
-    const bool win0_row = win0_en && win_v_row(0x44);
-    const bool win1_row = win1_en && win_v_row(0x46);
+    const bool win0_row = win0_en && win_v_row(0x44, y);
+    const bool win1_row = win1_en && win_v_row(0x46, y);
     // OBJ-window stencil is built in vanilla 240-space; margin columns (hx
     // outside [0,240)) get no OBJ-window (WINOUT), consistent with WIN0/1.
     bool obj_window_storage[GbaPpu::kScreenWidth] = {};
     bool* obj_window_mask = nullptr;
-    if (objwin_en) {
+    if (objwin_en && native_row) {
         mark_obj_window_scanline(obj_window_storage, y, dispcnt, vram, oam,
                                  kVanW, kVanH);
         obj_window_mask = obj_window_storage;
@@ -1378,6 +1382,14 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             obj_window_mask[hx])
             return static_cast<uint16_t>((winout >> 8) & 0x3Fu);
         return static_cast<uint16_t>(winout & 0x3Fu);
+    };
+    auto window_control_at_xy = [&](int hx, int sy) -> uint16_t {
+        if (sy == y) return window_control_at_hx(hx);
+        if (!any_window) return 0x3Fu;
+        if (win0_en && win_v_row(0x44, sy) && win_h_in(0x40, hx)) return winin & 0x3Fu;
+        if (win1_en && win_v_row(0x46, sy) && win_h_in(0x42, hx)) return (winin >> 8) & 0x3Fu;
+        // Do not invent an OBJ-window stencil for a different scanline.
+        return objwin_en ? 0u : static_cast<uint16_t>(winout & 0x3Fu);
     };
     // A guest-authored window has no defined continuation beyond the native
     // 240-pixel scanline. Extend it into the margins only when every authentic
@@ -1482,16 +1494,27 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
         for (uint32_t x = 0; x < out_w; ++x) {
             int hx = static_cast<int>(x) - static_cast<int>(ox);
             const bool authored_margin = g_ws_authored_margin_layers &&
-                (hx < 0 || hx >= static_cast<int>(kVanW));
+                (!native_row || hx < 0 || hx >= static_cast<int>(kVanW));
             // Minish supplies room-map entries for margins independently of
             // the native 240px WIN0/WIN1 HUD/dialog masks. Ignore only their
             // regular-BG layer gate there; unsupported UI BGs still fail in
             // the provider below, so they cannot repeat.
-            if (!layer_enabled(x, layer) && !authored_margin) continue;
             int sample_hx = hx;
+            int sample_y = y;
             bool remapped = false;
+            bool xy_remapped = false;
+            if (g_ws_bg_xy_provider && (g_ws_bg_xy_provider_layers & (1u << layer))) {
+                int provided_x = hx, provided_y = y;
+                const int action = g_ws_bg_xy_provider(layer, hx, y, &provided_x, &provided_y);
+                if (action < 0) continue;
+                if (action > 0) {
+                    sample_hx = provided_x; sample_y = provided_y;
+                    remapped = xy_remapped = true;
+                }
+            }
+            if (!layer_enabled(x, layer) && !authored_margin && !xy_remapped) continue;
             if (g_ws_bg_x_provider &&
-                (g_ws_bg_x_provider_layers & (1u << layer))) {
+                (g_ws_bg_x_provider_layers & (1u << layer)) && !remapped) {
                 int provided_hx = hx;
                 const int action = g_ws_bg_x_provider(
                     static_cast<int>(layer), static_cast<int>(x),
@@ -1506,14 +1529,14 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             // scenery they mirror (e.g. battle arenas whose WINOUT drops the
             // world layer behind HUD windows). Non-remapped margins keep the
             // established WINOUT/fail-closed behavior.
-            if (remapped && (hx < 0 || hx >= static_cast<int>(kVanW)) &&
+            if (remapped && (xy_remapped || hx < 0 || hx >= static_cast<int>(kVanW)) &&
                 sample_hx >= 0 && sample_hx < static_cast<int>(kVanW) &&
-                (window_control_at_hx(sample_hx) & (1u << layer)) == 0)
+                (window_control_at_xy(sample_hx, sample_y) & (1u << layer)) == 0)
                 continue;
             uint32_t tex_x = static_cast<uint32_t>(
                                  sample_hx + static_cast<int>(hofs)) &
                              (width_px - 1u);
-            uint32_t tex_y = (y + vofs) & (height_px - 1u);
+            uint32_t tex_y = (sample_y + vofs) & (height_px - 1u);
             uint32_t tile_x = tex_x >> 3;
             uint32_t tile_y = tex_y >> 3;
             uint32_t block = (tile_x >> 5) + (tile_y >> 5) * block_cols;
@@ -1526,12 +1549,12 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             // the true off-screen world tile, use it; if it's armed but has no
             // data, leave the pixel transparent (no seam) rather than draw the
             // wrap. With no sidecar, keep vanilla wide behavior.
-            if (sample_hx < 0 || sample_hx >= 240) {
+            if (sample_hx < 0 || sample_hx >= 240 || sample_y < 0 || sample_y >= 160) {
                 if (g_ws_tilemap_provider) {
                     uint16_t ext;
                     const int action = g_ws_tilemap_provider(
                         static_cast<int>(layer), sample_hx,
-                        static_cast<int>(y), &ext);
+                        sample_y, &ext);
                     if (action == kWsTilemapReplace) {
                         entry = ext;
                     } else if (action != kWsTilemapKeepWrapped) {
@@ -1562,15 +1585,19 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             }
             if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
             const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
+            const bool sample_blend = xy_remapped
+                ? (window_control_at_xy(sample_hx, sample_y) & 0x20) != 0
+                : blend_enabled(x);
             submit(x, color,
                    static_cast<int>(bg_priority * 256u + 128u + layer),
                    static_cast<uint8_t>(layer),
-                   blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
+                   sample_blend && ((first_targets & (1u << layer)) != 0),
                    (second_targets & (1u << layer)) != 0);
         }
     };
     auto render_affine_bg = [&](uint32_t layer, uint32_t cnt_off,
                                 uint32_t param_off) {
+        if (!native_row) return;
         if ((dispcnt & (0x0100u << layer)) == 0) return;
         uint16_t bgcnt = static_cast<uint16_t>(io[cnt_off] | (io[cnt_off + 1] << 8));
         uint32_t char_base   = ((bgcnt >> 2) & 0x3u) * 0x4000u;
@@ -1676,6 +1703,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
     // pre-advance by -ox places the bitmap exactly where it belongs and the
     // margins fall outside its bounds, staying backdrop.
     auto render_bitmap_bg = [&]() {
+        if (!native_row) return;
         if ((dispcnt & 0x0400u) == 0) return;   // DISPCNT bit10 = BG2 enable
         constexpr uint32_t layer = 2;
         uint16_t bgcnt = static_cast<uint16_t>(io[0x0C] | (io[0x0D] << 8));
@@ -1785,7 +1813,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
         }
     }
 
-    if (dispcnt & 0x1000u) {
+    if (native_row && (dispcnt & 0x1000u)) {
         constexpr uint32_t obj_tile_base = 0x10000u;
         bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
         const uint8_t* obj_pal = pal + 0x200;
@@ -1962,7 +1990,7 @@ void render_scanline_wide(uint8_t* rgb, uint32_t y, uint16_t dispcnt,
             left <= static_cast<int>(GbaPpu::kMaxRenderWidth)) {
             for (int i = 0; i < width; ++i) {
                 const int hx = left + i, x = hx + static_cast<int>(ox);
-                if ((hx >= 0 && hx < 240) || x < 0 || x >= static_cast<int>(out_w)) continue;
+                if ((native_row && hx >= 0 && hx < 240) || x < 0 || x >= static_cast<int>(out_w)) continue;
                 const auto& pixel = pixels[i];
                 // Authored world margins are independent of native HUD/window
                 // rectangles, just like the regular-BG providers above. A
@@ -2037,8 +2065,8 @@ void GbaPpu::render(uint8_t* rgb,
         return;
     }
     const uint32_t ow = render_width();
-    for (uint32_t y = 0; y < kScreenHeight; ++y) {
-        render_scanline_wide(rgb, y, dispcnt, io, vram, oam, pal, ow, extra_left_);
+    for (int y = -static_cast<int>(extra_top_); y < static_cast<int>(kScreenHeight + extra_bottom_); ++y) {
+        render_scanline_wide(rgb, y, dispcnt, io, vram, oam, pal, ow, extra_left_, extra_top_);
     }
 }
 
@@ -2341,8 +2369,17 @@ void GbaPpu::render_scanline(uint32_t y,
                                  kScreenWidth, kScreenHeight);
         return;
     }
+    // Host-authored extra rows use this frame's published state once, at
+    // scanline zero. They never run emulated scanline timing or affine updates.
+    if (y == 0 && (extra_top_ || extra_bottom_)) {
+        for (int sy = -static_cast<int>(extra_top_); sy < static_cast<int>(kScreenHeight + extra_bottom_); ++sy) {
+            if (sy >= 0 && sy < static_cast<int>(kScreenHeight)) continue;
+            render_scanline_wide(work_fb_.data(), sy, dispcnt, io, vram, oam, pal,
+                                 render_width(), extra_left_, extra_top_);
+        }
+    }
     render_scanline_wide(work_fb_.data(), y, dispcnt, affine_io.data(),
-                         vram, oam, pal, render_width(), extra_left_);
+                         vram, oam, pal, render_width(), extra_left_, extra_top_);
 }
 
 void GbaPpu::note_affine_reference_write(unsigned bg, bool y_axis) {

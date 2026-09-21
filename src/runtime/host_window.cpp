@@ -1610,8 +1610,9 @@ void HostWindow::present(const uint8_t* rgb888) {
                        b->renderer, &drawable_w, &drawable_h) != 0) {
             SDL_GetWindowSize(b->window, &drawable_w, &drawable_h);
         }
-        const PresentationLayout layout = compute_presentation_layout(
-            drawable_w, drawable_h, b->base_w, b->base_h);
+        const PresentationLayout layout = b->resize_driven_view
+            ? compute_adaptive_presentation_layout(drawable_w, drawable_h, b->base_w, b->base_h)
+            : compute_presentation_layout(drawable_w, drawable_h, b->base_w, b->base_h);
         if (layout.width > 0 && layout.height > 0) {
             const SDL_Rect destination = {
                 layout.x, layout.y, layout.width, layout.height};

@@ -2,6 +2,7 @@
 #include "foreign_presentation_internal.h"
 #include "snapshot.h"
 #include "view_config.h"
+#include "presentation_layout.h"
 
 #include <algorithm>
 #include <array>
@@ -160,6 +161,107 @@ void test_brightness_native_domain_and_green_precision() {
     expect_pixel(f.rgb.data(), 24, 49, 16, "darken native-domain rounding");
 }
 
+int portrait_tiles(int bg, int, int y, uint16_t* tile) {
+    if (bg != 1) return 0;
+    *tile = y < 0 ? 1 : 2;
+    return gba::kWsTilemapReplace;
+}
+
+void test_authored_portrait_geometry_and_composition() {
+    const auto fit = gbarecomp::compute_adaptive_presentation_layout(540, 960, 240, 427);
+    const auto tiny = gbarecomp::compute_adaptive_presentation_layout(180, 320, 240, 427);
+    const auto cap = gbarecomp::compute_adaptive_presentation_layout(1000, 300, 240, 427);
+    if (fit.x || fit.y || fit.width != 540 || fit.height != 960 || fit.integer_scale ||
+        tiny.width != 180 || tiny.height != 320 || cap.width != 169 || cap.height != 300) {
+        std::fprintf(stderr, "adaptive presenter left a reduced-ratio border or failed downscale\n"); std::exit(1);
+    }
+    using gbarecomp::resize_driven_view_geometry;
+    auto geometry = resize_driven_view_geometry(540, 960, 569, 854, 576, 864);
+    if (geometry.width != 240 || geometry.height != 427 ||
+        geometry.extra_top != 133 || geometry.extra_bottom != 134 ||
+        resize_driven_view_geometry(540, 960, 569, 160, 576, 864).height != 160 ||
+        resize_driven_view_geometry(1, 100000, 569, 854, 576, 864).height != 854 ||
+        resize_driven_view_geometry(0, 960, 569, 854, 576, 864).height != 160) {
+        std::fprintf(stderr, "portrait aspect/capability policy failed\n"); std::exit(1);
+    }
+    Fixture f;
+    constexpr uint16_t dispcnt = 0x6200; // BG1, native rectangular window.
+    store16(&f.io[0x0a], 0x0180); // 256-color BG1, screen block 1.
+    store16(&f.io[0x40], 240); store16(&f.io[0x44], 160);
+    store16(&f.io[0x48], 0x1f); store16(&f.io[0x4a], 1); // Emerald WINOUT.
+    std::fill_n(f.vram.data(), 64, 3);
+    std::fill_n(f.vram.data() + 64, 64, 1);
+    std::fill_n(f.vram.data() + 128, 64, 2);
+    store16(&f.pal[2], 31); store16(&f.pal[4], 31 << 5); store16(&f.pal[6], 31 << 10);
+    f.ppu.render(f.rgb.data(), dispcnt, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+    f.ppu.set_view_margins(0, 0, 133, 134);
+    std::vector<uint8_t> image(f.ppu.render_bytes());
+    f.ppu.render(image.data(), dispcnt, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+    expect_pixel(image.data(), 0, 0, 0, "unauthorized portrait rows must be black");
+    gba::g_ws_authored_margin_layers = 1;
+    gba::g_ws_tilemap_provider = portrait_tiles;
+    f.ppu.render(image.data(), dispcnt, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+    expect_pixel(image.data(), 255, 0, 0, "top authored row");
+    expect_pixel(image.data() + 426 * 240 * 3, 0, 255, 0, "bottom authored row");
+    if (std::memcmp(image.data() + 133 * 240 * 3, f.rgb.data(), f.rgb.size())) {
+        std::fprintf(stderr, "portrait changed native center\n"); std::exit(1);
+    }
+    for (unsigned y = 0; y < 160; ++y)
+        f.ppu.render_scanline(y, dispcnt, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+    f.ppu.mark_framebuffer_latched();
+    if (std::memcmp(f.ppu.latched_framebuffer(), image.data(), image.size()) || f.ppu.frame_count() != 0) {
+        std::fprintf(stderr, "portrait live scanout differs or changed guest timing\n"); std::exit(1);
+    }
+    gbarecomp::debug::SnapshotWriter writer;
+    f.ppu.serialize(writer);
+    gba::GbaPpu loaded;
+    gbarecomp::debug::SnapshotReader reader(writer.buffer().data(), writer.size());
+    loaded.deserialize(reader);
+    if (!reader.ok() || reader.remaining() || std::memcmp(loaded.latched_framebuffer(), f.rgb.data(), f.rgb.size())) {
+        std::fprintf(stderr, "portrait savestate did not preserve native payload\n"); std::exit(1);
+    }
+    gba::g_ws_pillarbox = 1;
+    f.ppu.render(image.data(), dispcnt, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+    expect_pixel(image.data(), 0, 0, 0, "portrait native-scene fallback top");
+    expect_pixel(image.data() + 426 * 240 * 3, 0, 0, 0, "portrait native-scene fallback bottom");
+    gba::g_ws_pillarbox = 0;
+    gba::g_ws_authored_margin_layers = 0;
+    gba::g_ws_tilemap_provider = nullptr;
+}
+
+int ui_xy_fixture(int bg, int x, int y, int* sx, int* sy) {
+    if (bg != 0) return 0;
+    if (x < 8 && y >= -8 && y < 0) { *sx = x; *sy = y + 8; return 1; }
+    return -1;
+}
+
+void test_authored_ui_xy_uses_source_window_and_effects() {
+    Fixture f;
+    // Red BG0 in a native window, with 50% darkening. WINOUT disables it.
+    store16(&f.io[8], 0x0180);
+    store16(&f.io[0x40], 240); store16(&f.io[0x44], 160);
+    store16(&f.io[0x48], 0x21); store16(&f.io[0x4a], 0);
+    store16(&f.io[0x50], 0xC1); store16(&f.io[0x54], 8);
+    store16(&f.pal[2], 31);
+    std::fill_n(f.vram.data(), 64, 1);
+    constexpr uint16_t dispcnt = 0x2100;
+    gba::g_ws_bg_xy_provider = ui_xy_fixture;
+    gba::g_ws_bg_xy_provider_layers = 1;
+    f.ppu.render(f.rgb.data(), dispcnt, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+    expect_pixel(f.rgb.data(), 132, 0, 0, "native render ignored XY enhancement");
+    gba::g_ws_tilemap_provider = portrait_tiles;
+    gba::g_ws_authored_margin_layers = 1;
+    f.ppu.set_view_margins(0, 0, 8, 0);
+    std::vector<uint8_t> image(f.ppu.render_bytes());
+    f.ppu.render(image.data(), dispcnt, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+    expect_pixel(image.data(), 132, 0, 0, "relocated UI uses native window and brightness");
+    expect_pixel(image.data() + 8 * 240 * 3, 0, 0, 0, "relocated UI leaves no native duplicate");
+    gba::g_ws_bg_xy_provider = nullptr;
+    gba::g_ws_bg_xy_provider_layers = 0xf;
+    gba::g_ws_tilemap_provider = nullptr;
+    gba::g_ws_authored_margin_layers = 0;
+}
+
 void test_extended_view_geometry_and_clamp() {
     gba::GbaPpu ppu;
     ppu.set_view_margins(24, 24, 0, 0);
@@ -190,8 +292,8 @@ void test_extended_view_geometry_and_clamp() {
     }
     ppu.set_view_margins(1000, 1000, 7, 9);
     if (ppu.render_width() != gba::GbaPpu::kMaxRenderWidth ||
-        ppu.render_height() != gba::GbaPpu::kScreenHeight ||
-        ppu.view_extra_top() != 0 || ppu.view_extra_bottom() != 0) {
+        ppu.render_height() != 176 ||
+        ppu.view_extra_top() != 7 || ppu.view_extra_bottom() != 9) {
         std::fprintf(stderr, "extended-view clamp mismatch\n");
         std::exit(1);
     }
@@ -1745,6 +1847,8 @@ int main() {
     test_alpha_native_domain_and_green_precision();
     test_brightness_native_domain_and_green_precision();
     test_extended_view_geometry_and_clamp();
+    test_authored_portrait_geometry_and_composition();
+    test_authored_ui_xy_uses_source_window_and_effects();
     test_extended_view_capability_policy();
     test_resize_driven_view_policy();
     test_extended_view_preserves_authentic_center();

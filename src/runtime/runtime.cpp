@@ -1151,6 +1151,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gba::g_ws_obj_margin_provider = nullptr;
     gba::g_ws_bg_x_provider = nullptr;
     gba::g_ws_bg_x_provider_layers = 0xFu;
+    gba::g_ws_bg_xy_provider = nullptr;
+    gba::g_ws_bg_xy_provider_layers = 0xFu;
     gba::g_ws_affine_filter_enabled = 0;
     gba::g_ws_affine_filter_provider = nullptr;
     gba::g_ws_authored_margin_layers = 0;
@@ -2131,6 +2133,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         info.view_width = ppu.render_width();
         info.extra_left = ppu.view_extra_left();
         info.extra_right = ppu.view_extra_right();
+        info.view_height = ppu.render_height();
+        info.extra_top = ppu.view_extra_top();
+        info.extra_bottom = ppu.view_extra_bottom();
         info.io = bus.io().raw();
         info.io_size = gba::GbaIo::kIoSize;
         opts.extended_view_frame(&info);
@@ -2406,15 +2411,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     };
     FramePhaseRing frame_phase;
-    auto apply_runtime_view_width = [&](std::uint32_t target) -> bool {
-        const ViewGeometry geometry = resolve_view_geometry(
-            static_cast<int>(target),
-            resize_view_enabled ? opts.max_resize_view_width : opts.max_view_width,
-            false, gba::GbaPpu::kMaxRenderWidth);
-        if (geometry.width == ppu.render_width()) return false;
+    auto apply_runtime_view_geometry = [&](const ViewGeometry& geometry) -> bool {
+        if (geometry.width == ppu.render_width() && geometry.height == ppu.render_height()) return false;
         if (!win.set_surface_size(static_cast<int>(geometry.width),
-                                  static_cast<int>(ppu.render_height()))) return false;
-        ppu.set_view_margins(geometry.extra_left, geometry.extra_right, 0, 0);
+                                  static_cast<int>(geometry.height))) return false;
+        ppu.set_view_margins(geometry.extra_left, geometry.extra_right,
+                             geometry.extra_top, geometry.extra_bottom);
         args.view_width = static_cast<int>(ppu.render_width());
         g_ws_extra_left = static_cast<unsigned>(ppu.view_extra_left());
         g_ws_extra_right = static_cast<unsigned>(ppu.view_extra_right());
@@ -2446,7 +2448,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                         ? static_cast<std::uint32_t>(std::min<int>(
                               opts.max_view_width, (160 * 16 + 8) / 9))
                         : 240u;
-                return apply_runtime_view_width(requested);
+                return apply_runtime_view_geometry(resolve_view_geometry(
+                    requested, opts.max_view_width, false, gba::GbaPpu::kMaxRenderWidth));
             }
         }
 #endif
@@ -2454,12 +2457,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         int drawable_w = 0;
         int drawable_h = 0;
         if (!win.drawable_size(&drawable_w, &drawable_h)) return false;
-        const std::uint32_t target = resize_driven_view_width(
-            drawable_w, drawable_h, opts.max_resize_view_width,
-            gba::GbaPpu::kMaxRenderWidth);
-        if (target == ppu.render_width()) return false;
-
-        if (!apply_runtime_view_width(target)) return false;
+        const auto geometry = resize_driven_view_geometry(
+            drawable_w, drawable_h, opts.max_resize_view_width, opts.max_resize_view_height,
+            gba::GbaPpu::kMaxRenderWidth, gba::GbaPpu::kMaxRenderHeight);
+        if (!apply_runtime_view_geometry(geometry)) return false;
         if (!args.quiet) {
             std::fprintf(stderr,
                 "[gbarecomp:runtime] resize-driven view: drawable=%dx%d "

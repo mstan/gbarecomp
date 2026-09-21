@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 #include <numeric>
 
 namespace gbarecomp {
@@ -46,6 +47,25 @@ inline PresentationLayout compute_presentation_layout(int drawable_width,
         height,
         integer_scale,
     };
+}
+
+// Adaptive geometry is rounded to logical pixels; requiring an exact reduced
+// ratio can shrink coprime dimensions (240x427, for example) to integer scale.
+// Fit mode instead rounds the contained destination to physical pixels.
+inline PresentationLayout compute_adaptive_presentation_layout(int drawable_width,
+                                                               int drawable_height,
+                                                               int logical_width,
+                                                               int logical_height) {
+    if (drawable_width <= 0 || drawable_height <= 0 || logical_width <= 0 || logical_height <= 0)
+        return {};
+    int width = drawable_width, height = drawable_height;
+    if (std::int64_t(drawable_width) * logical_height <= std::int64_t(drawable_height) * logical_width)
+        height = std::max(1, static_cast<int>((std::int64_t(width) * logical_height + logical_width / 2) / logical_width));
+    else
+        width = std::max(1, static_cast<int>((std::int64_t(height) * logical_width + logical_height / 2) / logical_height));
+    const int scale = width % logical_width == 0 && height % logical_height == 0 &&
+                      width / logical_width == height / logical_height ? width / logical_width : 0;
+    return {(drawable_width - width) / 2, (drawable_height - height) / 2, width, height, scale};
 }
 
 // Sharp fractional scaling first expands every logical pixel to the largest

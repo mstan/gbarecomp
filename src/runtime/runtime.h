@@ -21,6 +21,9 @@ struct ExtendedViewFrameInfo {
     std::uint32_t view_width = 240;
     std::uint32_t extra_left = 0;
     std::uint32_t extra_right = 0;
+    std::uint32_t view_height = 160;
+    std::uint32_t extra_top = 0;
+    std::uint32_t extra_bottom = 0;
     const std::uint8_t* io = nullptr;
     std::size_t io_size = 0;
 };
@@ -60,6 +63,9 @@ struct RunOptions {
     // --resize-view; an accompanying --view-width may seed the initial
     // windowed aspect, while adaptive fullscreen follows the host display.
     std::uint16_t max_resize_view_width = 240;
+    // Vertical margins require game-authored scenery/OBJ providers. This
+    // independent opt-in leaves every existing game's height at 160.
+    std::uint16_t max_resize_view_height = 160;
     bool resize_driven_view = false;
 
     // Host-window presentation policy, independent of extended guest view.

@@ -10,6 +10,9 @@ struct ViewGeometry {
     std::uint32_t width = 240;
     std::uint32_t extra_left = 0;
     std::uint32_t extra_right = 0;
+    std::uint32_t height = 160;
+    std::uint32_t extra_top = 0;
+    std::uint32_t extra_bottom = 0;
 };
 
 inline bool legacy_extra_to_view_width(int extra_per_side, int* width) {
@@ -64,6 +67,24 @@ inline std::uint32_t resize_driven_view_width(int drawable_width,
         static_cast<std::uint64_t>(drawable_height);
     return static_cast<std::uint32_t>(
         std::clamp<std::uint64_t>(rounded, kNativeWidth, maximum));
+}
+
+inline ViewGeometry resize_driven_view_geometry(int drawable_width, int drawable_height,
+                                                std::uint32_t game_max_width,
+                                                std::uint32_t game_max_height,
+                                                std::uint32_t engine_max_width,
+                                                std::uint32_t engine_max_height) {
+    const auto width = resize_driven_view_width(drawable_width, drawable_height,
+                                                game_max_width, engine_max_width);
+    auto result = resolve_view_geometry(width, game_max_width, false, engine_max_width);
+    if (drawable_width > 0 && drawable_height > 0 && width == 240) {
+        const auto maximum = std::clamp(game_max_height, 160u, std::max(160u, engine_max_height));
+        const auto height = (std::uint64_t(drawable_height) * 240 + drawable_width / 2) / drawable_width;
+        result.height = static_cast<std::uint32_t>(std::clamp<std::uint64_t>(height, 160, maximum));
+        result.extra_top = (result.height - 160) / 2;
+        result.extra_bottom = result.height - 160 - result.extra_top;
+    }
+    return result;
 }
 
 }  // namespace gbarecomp

@@ -21,6 +21,7 @@
 #include <array>
 #include <cstdint>
 #include <cstddef>
+#include <vector>
 
 namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
@@ -97,18 +98,17 @@ public:
     // margin 0 the PPU runs the LITERAL vanilla path (render_scanline_internal),
     // so OFF-mode is byte-identical to the faithful build BY CONSTRUCTION — not
     // by algebraic equivalence (per the widescreen design review). Horizontal
-    // widening reuses each scanline's latched register state; VERTICAL widening
-    // would have to invent state for nonexistent scanlines (no VCOUNT / HBlank
-    // DMA / affine-ref / WIN_V), so kMaxExtraY is compile-capped at 0 for now —
-    // the API still accepts top/bottom (clamped to 0) so callers stay generic.
+    // widening reuses each scanline's latched register state. Vertical margins
+    // require authored providers: they run once at frame start and never
+    // advance VCOUNT, HBlank DMA, or affine scanline accumulators.
     // These margins are present-time host state and are NEVER serialized into
     // the snapshot (the save format is unchanged).
     // Horizontal capacity includes 32:9 (569x160). Individual games still
     // advertise their own ceilings; native rendering remains the default.
     static constexpr uint32_t kMaxExtraX = 168;
-    static constexpr uint32_t kMaxExtraY = 0;    // vertical deferred; bump when invented-scanline path lands
+    static constexpr uint32_t kMaxExtraY = 352;
     static constexpr uint32_t kMaxRenderWidth  = kScreenWidth  + 2u * kMaxExtraX;  // 576
-    static constexpr uint32_t kMaxRenderHeight = kScreenHeight + 2u * kMaxExtraY;  // 160
+    static constexpr uint32_t kMaxRenderHeight = kScreenHeight + 2u * kMaxExtraY;  // 864
     static constexpr std::size_t kMaxFramebufferBytes =
         static_cast<std::size_t>(kMaxRenderWidth) * kMaxRenderHeight * 3;
 
@@ -178,8 +178,8 @@ private:
     // directly produced a horizontal one-frame-stale tear band at whatever
     // scanline the guest happened to have rendered to (the Minish Cap
     // walk-scroll "warble").
-    std::array<uint8_t, kMaxFramebufferBytes> work_fb_{};
-    std::array<uint8_t, kMaxFramebufferBytes> latched_fb_{};
+    std::vector<uint8_t> work_fb_ = std::vector<uint8_t>(kMaxFramebufferBytes);
+    std::vector<uint8_t> latched_fb_ = std::vector<uint8_t>(kMaxFramebufferBytes);
     bool has_latched_fb_ = false;
 
     struct AffineLineState {
@@ -220,6 +220,11 @@ extern "C" int (*g_ws_bg_x_provider)(int bg, int output_x, int screen_y,
 // Bitmask of regular BG layers that may use g_ws_bg_x_provider. Defaults to
 // all layers; game adapters can narrow it to avoid per-pixel callback traffic.
 extern "C" unsigned g_ws_bg_x_provider_layers;
+// Optional 2D UI placement in native-relative coordinates, including signed
+// margin coordinates. Same -1/0/1 actions as the X hook. Remapped samples use
+// the source's window masks; the guest's tilemap and graphics stay untouched.
+extern "C" int (*g_ws_bg_xy_provider)(int bg, int x, int y, int* source_x, int* source_y);
+extern "C" unsigned g_ws_bg_xy_provider_layers;
 // Optional enhancement for affine backgrounds in expanded rendering. The
 // global switch is presentation configuration; the provider lets a game
 // authorize only known-safe layers and scenes.
@@ -252,7 +257,7 @@ extern "C" int g_ws_obj_native_clip;
 
 // Read-only, game-authored OBJ coverage for expanded margins. RGB555 bit 15
 // marks a transparent pixel. Priority uses the hardware 0..3 BG/OBJ order.
-// The PPU never consumes this layer inside the native 240px viewport.
+// The PPU never consumes this layer inside the native 240x160 viewport.
 // g_ws_authored_margin_layers makes it independent of native window masks,
 // matching authored BG margins. DISPCNT, BG depth and color effects still apply.
 struct WsMarginObjPixel {
