@@ -75,7 +75,7 @@ android {
         minSdk 28
         targetSdk 35
         // Release scripts stamp the version (-PgbaVersionName / -PgbaVersionCode).
-        versionCode (prop("gbaVersionCode", "GBARECOMP_VERSION_CODE") ?: g.versionCode) as int
+        versionCode(((prop("gbaVersionCode", "GBARECOMP_VERSION_CODE") ?: g.versionCode) as String) as int)
         versionName prop("gbaVersionName", "GBARECOMP_VERSION_NAME") ?: g.versionName
 
         manifestPlaceholders = [
