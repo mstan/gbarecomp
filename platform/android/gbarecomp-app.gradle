@@ -48,15 +48,35 @@ def debugAbis = g.debugAbis ?: ["arm64-v8a", "x86_64"]
 def releaseAbis = g.releaseAbis ?: ["arm64-v8a"]
 // -PgbaAbis=x86_64 (comma list) narrows a build, e.g. emulator-only iteration;
 // the generated corpus is large, so each extra ABI is a full native build.
-// Release signing: a stable release key keeps store/sideload updates working
-// across machines. -PgbaKeystore=<file.jks> (or GBARECOMP_KEYSTORE) plus the
-// password/alias properties below; without one, release builds fall back to
-// the local debug key with a loud warning.
+// Release signing: a stable release key keeps sideload updates installing over
+// earlier versions on every machine. Sources, highest first:
+//   -PgbaKeystore=<file.jks> -PgbaKeystorePassword= -PgbaKeyAlias= [-PgbaKeyPassword=]
+//   GBARECOMP_KEYSTORE / _KEYSTORE_PASSWORD / GBARECOMP_KEY_ALIAS / _KEY_PASSWORD
+//   <game>/android/signing.local.properties (gitignored): storeFile / storePassword /
+//     keyAlias / keyPassword, or signingProperties=<central file with those keys>
+// Without any, release builds fall back to the local debug key (loud warning).
+def signingLocal = new Properties()
+def signingLocalFile = new File(rootDir, "signing.local.properties")
+if (signingLocalFile.isFile()) {
+    signingLocalFile.withInputStream { signingLocal.load(it) }
+    def central = signingLocal.getProperty("signingProperties")
+    if (central) {
+        def centralFile = new File(central)
+        if (!centralFile.isFile())
+            throw new GradleException("signing.local.properties points at a missing file: ${central}")
+        signingLocal = new Properties()
+        centralFile.withInputStream { signingLocal.load(it) }
+    }
+}
 def prop = { String p, String env -> providers.gradleProperty(p).orNull ?: System.getenv(env) }
-def releaseKeystore = prop("gbaKeystore", "GBARECOMP_KEYSTORE")
-def releaseStorePassword = prop("gbaKeystorePassword", "GBARECOMP_KEYSTORE_PASSWORD")
-def releaseKeyAlias = prop("gbaKeyAlias", "GBARECOMP_KEY_ALIAS")
-def releaseKeyPassword = prop("gbaKeyPassword", "GBARECOMP_KEY_PASSWORD") ?: releaseStorePassword
+def releaseKeystore = prop("gbaKeystore", "GBARECOMP_KEYSTORE") ?: signingLocal.getProperty("storeFile")
+def releaseStorePassword = prop("gbaKeystorePassword", "GBARECOMP_KEYSTORE_PASSWORD") ?:
+    signingLocal.getProperty("storePassword")
+def releaseKeyAlias = prop("gbaKeyAlias", "GBARECOMP_KEY_ALIAS") ?: signingLocal.getProperty("keyAlias")
+def releaseKeyPassword = prop("gbaKeyPassword", "GBARECOMP_KEY_PASSWORD") ?:
+    signingLocal.getProperty("keyPassword") ?: releaseStorePassword
+if (releaseKeystore && !new File(releaseKeystore).isFile())
+    throw new GradleException("Release keystore not found: ${releaseKeystore}")
 if (releaseKeystore && !(releaseStorePassword && releaseKeyAlias))
     throw new GradleException("Release keystore given without gbaKeystorePassword/gbaKeyAlias")
 def abiOverride = providers.gradleProperty("gbaAbis").orNull
@@ -133,6 +153,10 @@ android {
     buildTypes {
         debug {
             debuggable true
+            // Same key as release when one is configured, so a device can move
+            // between private/debug builds and published releases without an
+            // uninstall (which would delete its saves).
+            if (releaseKeystore) signingConfig signingConfigs.release
             // x86_64 lets the stock emulator images run the game natively.
             ndk { abiFilters(*debugAbis) }
         }
