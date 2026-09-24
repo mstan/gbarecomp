@@ -331,6 +331,8 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/mod_function_hooks.cpp
     src/runtime/host_platform.cpp
     src/runtime/host_window.cpp
+    src/runtime/touch_input.cpp
+    src/runtime/mobile_platform.cpp
     src/runtime/color_lut.cpp
     src/runtime/asset_picker.cpp
     # Production abort stubs for runtime_dispatch_miss +
@@ -834,6 +836,9 @@ add_test(NAME save_config_tests COMMAND save_config_tests)
 add_executable(presentation_layout_tests tests/presentation_layout/test_main.cpp)
 target_include_directories(presentation_layout_tests PRIVATE src/runtime)
 add_test(NAME presentation_layout_tests COMMAND presentation_layout_tests)
+
+# Touch input: gesture recognizer, hub rings/scripts, key synthesis, JSON.
+add_gbarecomp_runtime_stack_test(touch_input_tests tests/touch_input/test_main.cpp)
 
 # P6 differential-gate primitives (offline; full-RAM snapshot/restore/diff).
 add_executable(heal_gate_tests

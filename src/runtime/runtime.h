@@ -12,6 +12,9 @@
 
 namespace gbarecomp {
 
+struct TouchFrameInfo;   // touch_input.h
+class HostOverlay;       // host_overlay.h
+
 // Read-only state published to an opted-in game's extended-view policy once
 // per emulated frame. The shared runtime owns the wider surface; the game owns
 // the decision about whether the current scene has authentic margin content.
@@ -68,6 +71,36 @@ struct RunOptions {
     std::uint16_t max_resize_view_height = 160;
     bool resize_driven_view = false;
 
+    // How a resize-driven view picks its logical size from the drawable.
+    //   Aspect  — keep 160 lines, widen with the window aspect (desktop; the
+    //             established behaviour).
+    //   Density — keep a physical logical-pixel size (touch devices), growing
+    //             BOTH axes on large screens (see density_driven_view_geometry).
+    // --view-density / GBARECOMP_VIEW_DENSITY force Density for development.
+    enum class ViewSizing : std::uint8_t { Aspect = 0, Density = 1 };
+    ViewSizing resize_view_sizing = ViewSizing::Aspect;
+    float density_mm_per_logical_px = 0.30f;
+
+    // Per-present presentation request from the game's scene policy. Scenes
+    // without authored margins (battles, full-screen menus) can ask for the
+    // exact native 240x160 view so it is drawn as large as possible, and, in
+    // portrait, anchored to the top of the screen so host-drawn controls get
+    // the space below. Null keeps the resize-driven geometry for every scene.
+    struct PresentationRequest {
+        bool native_view = false;
+        bool anchor_top = false;
+    };
+    void (*presentation_request)(PresentationRequest* request) = nullptr;
+
+    // Resume the suspend state written when the OS backgrounded the app, if
+    // the process was killed before returning to the foreground (mobile).
+    bool resume_suspend_state_on_launch = false;
+
+    // Device orientation policy on platforms that rotate (Android). Landscape
+    // is the historical default; Any follows the sensor with live re-layout.
+    enum class Orientation : std::uint8_t { Landscape = 0, Portrait = 1, Any = 2 };
+    Orientation orientation = Orientation::Landscape;
+
     // Host-window presentation policy, independent of extended guest view.
     // When true the player may freely reshape a window while SDL keeps the
     // native game image aspect-correct with letter/pillar boxing.
@@ -102,6 +135,39 @@ struct RunOptions {
     // above to select shared margin providers/pillarboxing. Null leaves the
     // established renderer behavior unchanged.
     void (*extended_view_frame)(const ExtendedViewFrameInfo* frame) = nullptr;
+
+    // ---- game-owned touch input policy (touch_input.h) ----------------------
+    // Called once per emulated frame at VBlank start — before the VBlank IRQ
+    // is raised, so the guest's input read for that frame observes the
+    // result — with the frame's touch events, recognized gestures and live
+    // pointers. Returns an ACTIVE-LOW KEYINPUT mask that is ANDed with the
+    // host keys (0x03FF = synthesize nothing). Runs on the guest thread, so
+    // it may read guest memory, but it must only STEER through the returned
+    // keys: guest state is never written by the policy. Null leaves the
+    // established input path byte-identical. Suspended during input replay
+    // (the recorded trace already contains the composed keys).
+    std::uint16_t (*input_frame)(const TouchFrameInfo* frame) = nullptr;
+
+    // Gestures the game's policy owns (TouchClaim bits). An unclaimed
+    // long-press still opens the runtime settings menu; a three-finger tap
+    // always does.
+    std::uint32_t touch_gesture_claims = 0;
+
+    // Virtual gamepad overlay default when config.ini has no saved choice:
+    // -1 = platform default (on for Android, off on desktop), 0 = off, 1 = on.
+    // The player toggles it with the corner button; the choice persists.
+    int touch_pad_default = -1;
+
+    // Optional host-drawn presentation layer (host_overlay.h). Called on every
+    // present after the game image, before the settings menu; guest thread.
+    void (*host_overlay)(HostOverlay* overlay) = nullptr;
+
+    // Optional game-owned debug TCP commands (JSON line in, JSON line out).
+    // Return non-zero when the request was handled and `reply` was written
+    // through `write` (may be called repeatedly to stream a large reply).
+    int (*tcp_command)(const char* request,
+                       void (*write)(void* ctx, const char* data, std::size_t len),
+                       void* write_ctx) = nullptr;
 
     // This cartridge carries a solar sensor. Unlike the RTC there is no ROM
     // signature to detect one from, so it has to be declared. Games that leave

@@ -543,7 +543,13 @@ uint32_t GbaIo::cycles_until_next_sio_event() const {
 }
 
 void GbaIo::set_keyinput(uint16_t keys) {
-    store_u16(&io_[IoReg::KEYINPUT], static_cast<uint16_t>(keys & 0x03FFu));
+    host_keyinput_ = static_cast<uint16_t>(keys & 0x03FFu);
+    store_u16(&io_[IoReg::KEYINPUT], composed_keyinput());
+}
+
+void GbaIo::set_synthesized_keyinput(uint16_t keys) {
+    synth_keyinput_ = static_cast<uint16_t>(keys & 0x03FFu);
+    store_u16(&io_[IoReg::KEYINPUT], composed_keyinput());
 }
 
 bool GbaIo::irq_pending() const {

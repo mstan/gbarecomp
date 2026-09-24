@@ -19,6 +19,8 @@ struct RecompRuntimeUi;
 
 namespace gbarecomp {
 
+class HostOverlay;
+
 class HostWindow {
 public:
     HostWindow();
@@ -92,6 +94,42 @@ public:
     // Dear ImGui's SDL_Renderer2 backend over the existing game renderer.
     void set_runtime_ui(RecompRuntimeUi* ui);
 #endif
+    // ---- touch (touch_input.h) ---------------------------------------------
+    // `policy` = the game consumes touch through RunOptions::input_frame;
+    // non-pad touches are then routed to the TouchHub instead of only opening
+    // settings. `claims` are the game's TouchClaim bits. `pad_default` is the
+    // virtual-pad visibility when config.ini holds no saved choice (-1 =
+    // platform default). `emulate_touch` turns desktop mouse input into touch
+    // (left = finger, right = two-finger tap, middle = three-finger tap,
+    // Backspace = platform Back) for development and validation.
+    void configure_touch(bool policy, std::uint32_t claims, int pad_default,
+                         bool emulate_touch);
+    // Loads/persists the player's pad choice in <dir>/config.ini [Touch].
+    void set_touch_config_dir(const char* dir);
+    bool touch_pad_visible() const;
+    void set_touch_pad_visible(bool visible);
+    // Logical view margins inside the surface (for touch/overlay mapping).
+    void set_view_margins(std::uint32_t left, std::uint32_t right,
+                          std::uint32_t top, std::uint32_t bottom);
+    // Game-owned host overlay, drawn each present (null = none).
+    void set_host_overlay(void (*overlay)(HostOverlay*));
+    // Physical density of the window's display (drawable px per mm).
+    float px_per_mm() const;
+    // Portrait presentations may anchor the image to the top edge so host
+    // chrome below it gets the remaining space (per-present game request).
+    void set_presentation_anchor_top(bool anchor_top);
+    // Orientation policy for rotating platforms: 0 landscape, 1 portrait,
+    // 2 any. Must be set BEFORE open(); ignored on desktop.
+    void set_orientation_policy(int policy) { orientation_policy_ = policy; }
+
+    // Mobile lifecycle. pump() reports entering the background once; the
+    // runtime then persists state and calls wait_for_foreground(), which
+    // blocks (audio paused) until the app returns (true) or quits (false).
+    bool wait_for_foreground();
+
+    // Short vibration where the platform supports it (no-op otherwise).
+    void haptic_pulse(int duration_ms, float strength);
+
     void set_fps_readout(bool on);      // presents-per-second in the title bar
     bool fps_readout() const;
     bool assist_tools_enabled() const;
@@ -154,12 +192,27 @@ public:
         // Controller angular velocity around its face-normal axis, in rad/s.
         // A DualSense supplies this through SDL's standard gyro sensor API.
         float    gyro_rate_z = 0.0f;
+        // Mobile lifecycle: the OS is moving the app to the background (or
+        // terminating it). The runtime must flush saves NOW; see
+        // wait_for_foreground().
+        bool     enter_background = false;
+        bool     terminating = false;
     };
     Events pump();
 
 private:
     bool open_ = false;
     void* impl_ = nullptr;  // backend-specific opaque
+    int orientation_policy_ = 0;
 };
+
+// Engine-wide haptic hook for game input policies (touch_input.h users).
+// Installed by the open HostWindow; a no-op when no window/vibrator exists.
+void host_haptic_pulse(int duration_ms, float strength);
+
+// Ask the open window to show the runtime settings menu at its next pump
+// (thread-safe). Lets a policy that claims Back/long-press still offer the
+// menu from a context of its choosing, e.g. Back on the free overworld.
+void host_request_settings_menu();
 
 }  // namespace gbarecomp

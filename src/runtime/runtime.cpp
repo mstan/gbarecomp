@@ -30,6 +30,7 @@
 #include "gba_rom_header.h"
 #include "host_platform.h"
 #include "host_window.h"
+#include "touch_input.h"
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
 #include "save_config.h"
@@ -86,6 +87,7 @@ extern "C" unsigned long long g_runtime_irq_entries;
 void runtime_set_frame_present_hook(std::function<bool()>);
 void runtime_set_host_service_hook(std::function<void()>);
 void runtime_set_frame_start_hook(std::function<void()>);
+void runtime_set_vblank_input_hook(std::function<void()>);
 
 #ifndef GBARECOMP_DEFAULT_GAME_CONFIG
 #define GBARECOMP_DEFAULT_GAME_CONFIG "game.toml"
@@ -206,6 +208,18 @@ struct Args {
     // Opt-in policy where the window drawable aspect selects view_width live.
     // Authorization remains game-owned through RunOptions::resize_driven_view.
     bool resize_view = false;
+    // Desktop mouse -> touch emulation (--touch-emulation or
+    // GBARECOMP_TOUCH_EMULATION=1) for developing and validating touch input.
+    bool touch_emulation = false;
+    // Force density-driven view sizing (--view-density / GBARECOMP_VIEW_DENSITY)
+    // and an optional player zoom multiplier (GBARECOMP_VIEW_ZOOM, [Touch] zoom).
+    bool view_density = false;
+    float view_zoom = 1.0f;
+    // Windowed sessions may also serve an OBSERVE-mode debug TCP port
+    // (--tcp-observe PORT / GBARECOMP_TCP_OBSERVE): memory/ring reads, touch
+    // injection, game extensions and savestates queued to the frame boundary,
+    // while the window keeps running normally (device/emulator validation).
+    int tcp_observe_port = 0;
 };
 
 #if defined(GBARECOMP_RUNTIME_UI)
@@ -942,6 +956,24 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             args->resize_view = true;
             continue;
         }
+        if (s == "--touch-emulation") {
+            args->touch_emulation = true;
+            continue;
+        }
+        if (s == "--view-density") {
+            args->view_density = true;
+            continue;
+        }
+        if (s == "--tcp-observe") {
+            const char* v = need_value("--tcp-observe");
+            if (!v) return false;
+            if (!parse_int(v, &args->tcp_observe_port) ||
+                args->tcp_observe_port <= 0 || args->tcp_observe_port > 65535) {
+                if (err) *err = "invalid --tcp-observe port";
+                return false;
+            }
+            continue;
+        }
         if (s == "--widescreen") {
             const char* v = need_value("--widescreen");
             if (!v) return false;
@@ -1458,6 +1490,20 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (const char* e = std::getenv("GBARECOMP_RESIZE_VIEW"))
             args.resize_view = e[0] && e[0] != '0';
     }
+    if (const char* e = std::getenv("GBARECOMP_TOUCH_EMULATION"))
+        args.touch_emulation = e[0] && e[0] != '0';
+    if (const char* e = std::getenv("GBARECOMP_VIEW_DENSITY"))
+        args.view_density = e[0] && e[0] != '0';
+    if (const char* e = std::getenv("GBARECOMP_TCP_OBSERVE")) {
+        const int port = std::atoi(e);
+        if (port > 0 && port <= 65535) args.tcp_observe_port = port;
+    }
+    if (const char* e = std::getenv("GBARECOMP_VIEW_ZOOM")) {
+        const float z = static_cast<float>(std::atof(e));
+        if (z >= 0.25f && z <= 4.0f) args.view_zoom = z;
+    }
+    const bool density_view =
+        args.view_density || opts.resize_view_sizing == RunOptions::ViewSizing::Density;
     bool resize_view_enabled =
         args.resize_view && opts.resize_driven_view &&
         opts.max_resize_view_width > 240 && args.window;
@@ -2147,6 +2193,106 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     struct ClearFrameStartHook {
         ~ClearFrameStartHook() { runtime_set_frame_start_hook(nullptr); }
     } clear_frame_start_hook;
+
+    // ── Game touch policy (RunOptions::input_frame) ───────────────────────
+    // Once per emulated frame at VBlank start the frame's touches are drained
+    // from the TouchHub and handed to the game's policy; its answer becomes
+    // the synthesized half of KEYINPUT. Every frame's host/synth/composed
+    // triple lands in the always-on key-synth ring. Replays carry composed
+    // keys already, so the policy is suspended there.
+    HostWindow* touch_window = nullptr;  // set once a window opens
+    const char* touch_replay_env = std::getenv("GBARECOMP_INPUT_REPLAY");
+    const bool touch_policy_suspended = touch_replay_env && touch_replay_env[0];
+    auto publish_headless_touch_presentation = [&]() {
+        if (touch_window) return;  // the window publishes its real layout
+        // Headless (TCP) runs have no drawable; model a 4x phone-density
+        // presentation so drawable-space thresholds behave like a device.
+        TouchPresentation p;
+        p.view_width = static_cast<int>(ppu.render_width());
+        p.view_height = static_cast<int>(ppu.render_height());
+        p.extra_left = ppu.view_extra_left();
+        p.extra_right = ppu.view_extra_right();
+        p.extra_top = ppu.view_extra_top();
+        p.extra_bottom = ppu.view_extra_bottom();
+        p.drawable_width = p.view_width * 4;
+        p.drawable_height = p.view_height * 4;
+        p.layout = {0, 0, p.drawable_width, p.drawable_height, 4};
+        p.drawable_px_per_mm = 16.0f;
+        TouchHub::instance().set_presentation(p);
+    };
+    auto run_touch_policy = [&]() {
+        TouchHub& hub = TouchHub::instance();
+        TouchHub::FrameBatch batch = hub.drain(ppu.frame_count(), touch_clock_ms());
+        const std::uint16_t host = bus.io().host_keyinput();
+        std::uint16_t synth = 0x03FFu;
+        bool menu_open = false;
+#if defined(GBARECOMP_RUNTIME_UI)
+        menu_open = runtime_ui_context.ui &&
+                    recomp_runtime_ui_is_open(runtime_ui_context.ui);
+#endif
+        if (!touch_policy_suspended && !menu_open) {
+            const TouchPresentation p = hub.presentation();
+            TouchFrameInfo info;
+            info.frame_count = ppu.frame_count();
+            info.host_ms = batch.now_ms;
+            info.host_keyinput = host;
+            info.view_width = static_cast<std::uint32_t>(p.view_width);
+            info.view_height = static_cast<std::uint32_t>(p.view_height);
+            info.extra_left = ppu.view_extra_left();
+            info.extra_right = ppu.view_extra_right();
+            info.extra_top = ppu.view_extra_top();
+            info.extra_bottom = ppu.view_extra_bottom();
+            info.drawable_width = p.drawable_width;
+            info.drawable_height = p.drawable_height;
+            info.game_rect = p.layout;
+            info.drawable_px_per_mm = p.drawable_px_per_mm;
+            info.view_px_per_mm = p.layout.width > 0
+                ? p.drawable_px_per_mm * static_cast<float>(p.view_width) /
+                      static_cast<float>(p.layout.width)
+                : p.drawable_px_per_mm / 4.0f;
+            info.safe_insets = p.safe_insets;
+            info.pad_visible = touch_window && touch_window->touch_pad_visible();
+            info.events = batch.events.data();
+            info.event_count = batch.events.size();
+            info.gestures = batch.gestures.data();
+            info.gesture_count = batch.gestures.size();
+            info.points = batch.points.data();
+            info.point_count = batch.points.size();
+            synth = static_cast<std::uint16_t>(opts.input_frame(&info) & 0x03FFu);
+        }
+        bus.io().set_synthesized_keyinput(synth);
+        KeySynthSample sample;
+        sample.frame = ppu.frame_count();
+        sample.host = host;
+        sample.synth = synth;
+        sample.composed = bus.io().composed_keyinput();
+        hub.record_key_synth(sample);
+    };
+    if (opts.input_frame) {
+        TouchHub::instance().set_claims(opts.touch_gesture_claims);
+        publish_headless_touch_presentation();
+        runtime_set_vblank_input_hook(run_touch_policy);
+        if (!args.quiet)
+            std::printf("touch_policy=ENABLED claims=0x%x%s\n",
+                        static_cast<unsigned>(opts.touch_gesture_claims),
+                        touch_policy_suspended ? " (suspended: input replay)" : "");
+    }
+    struct ClearVblankInputHook {
+        ~ClearVblankInputHook() { runtime_set_vblank_input_hook(nullptr); }
+    } clear_vblank_input_hook;
+    // Structured TCP commands shared by every TCP session: engine touch
+    // commands first, then the game's own extension.
+    auto tcp_extension = [&](const std::string& request, std::string& reply) -> bool {
+        if (touch_tcp_command(request, reply)) return true;
+        if (!opts.tcp_command) return false;
+        std::string streamed;
+        auto write = [](void* ctx, const char* data, std::size_t len) {
+            static_cast<std::string*>(ctx)->append(data, len);
+        };
+        if (!opts.tcp_command(request.c_str(), write, &streamed)) return false;
+        reply = std::move(streamed);
+        return true;
+    };
     if (args.tcp_port > 0) {
         // ── Free-run threading model ───────────────────────────────────────
         // The game CORE runs on a dedicated thread; the TCP server runs on THIS
@@ -2260,6 +2406,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             ctl_cv.notify_all();
         };
         ctx.pause = [&]() { park_and_wait(2000); };
+        ctx.extension = tcp_extension;
         ctx.run_status = [&]() -> std::string {
             int st; bool pk;
             { std::lock_guard<std::mutex> lk(ctl_m); st = ctl_state; pk = ctl_parked; }
@@ -2417,6 +2564,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                   static_cast<int>(geometry.height))) return false;
         ppu.set_view_margins(geometry.extra_left, geometry.extra_right,
                              geometry.extra_top, geometry.extra_bottom);
+        win.set_view_margins(ppu.view_extra_left(), ppu.view_extra_right(),
+                             ppu.view_extra_top(), ppu.view_extra_bottom());
+        if (opts.input_frame) publish_headless_touch_presentation();
         args.view_width = static_cast<int>(ppu.render_width());
         g_ws_extra_left = static_cast<unsigned>(ppu.view_extra_left());
         g_ws_extra_right = static_cast<unsigned>(ppu.view_extra_right());
@@ -2453,13 +2603,32 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             }
         }
 #endif
-        if (!resize_view_enabled || !win.is_open()) return false;
+        if (!win.is_open()) return false;
+        // The game's per-scene presentation request (battles and other
+        // margin-less scenes may ask for the exact native view, top-anchored
+        // in portrait). Evaluated every present so it follows scene changes.
+        RunOptions::PresentationRequest request;
+        if (opts.presentation_request) opts.presentation_request(&request);
+        win.set_presentation_anchor_top(request.anchor_top);
+        if (!resize_view_enabled) return false;
         int drawable_w = 0;
         int drawable_h = 0;
         if (!win.drawable_size(&drawable_w, &drawable_h)) return false;
-        const auto geometry = resize_driven_view_geometry(
-            drawable_w, drawable_h, opts.max_resize_view_width, opts.max_resize_view_height,
-            gba::GbaPpu::kMaxRenderWidth, gba::GbaPpu::kMaxRenderHeight);
+        ViewGeometry geometry;
+        if (request.native_view) {
+            geometry = ViewGeometry{};  // exact native 240x160, no margins
+        } else if (density_view) {
+            geometry = density_driven_view_geometry(
+                drawable_w, drawable_h, win.px_per_mm(),
+                opts.density_mm_per_logical_px, args.view_zoom,
+                opts.max_resize_view_width, opts.max_resize_view_height,
+                gba::GbaPpu::kMaxRenderWidth, gba::GbaPpu::kMaxRenderHeight);
+        } else {
+            geometry = resize_driven_view_geometry(
+                drawable_w, drawable_h, opts.max_resize_view_width,
+                opts.max_resize_view_height, gba::GbaPpu::kMaxRenderWidth,
+                gba::GbaPpu::kMaxRenderHeight);
+        }
         if (!apply_runtime_view_geometry(geometry)) return false;
         if (!args.quiet) {
             std::fprintf(stderr,
@@ -2475,6 +2644,58 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // the Windows timer-resolution bump doesn't apply to headless/TCP
     // batch runs (which intentionally run uncapped).
     std::optional<FramePacer> pacer;
+    // Windowed observe-mode TCP (see Args::tcp_observe_port). Savestate
+    // requests from its thread are executed by the main loop at the next
+    // present, the only point where machine state is consistent.
+    struct ObserverStateRequest {
+        bool save = false;
+        std::string path;
+        bool done = false;
+        bool ok = false;
+        std::string err;
+    };
+    std::unique_ptr<debug::TcpDebugServer> observer;
+    std::thread observer_thread;
+    std::mutex observer_m;
+    std::condition_variable observer_cv;
+    ObserverStateRequest* observer_pending = nullptr;
+    bool observer_stopping = false;
+    auto observer_request = [&](bool save, const std::string& path,
+                                std::string& err) -> bool {
+        ObserverStateRequest r;
+        r.save = save;
+        r.path = path;
+        std::unique_lock<std::mutex> lk(observer_m);
+        if (observer_stopping || observer_pending) {
+            err = observer_stopping ? "shutting down" : "another request pending";
+            return false;
+        }
+        observer_pending = &r;
+        observer_cv.wait(lk, [&] { return r.done || observer_stopping; });
+        if (!r.done) {
+            observer_pending = nullptr;
+            err = "shutting down";
+            return false;
+        }
+        err = r.err;
+        return r.ok;
+    };
+    auto stop_observer = [&]() {
+        if (!observer) return;
+        {
+            std::lock_guard<std::mutex> lk(observer_m);
+            observer_stopping = true;
+            observer_cv.notify_all();
+        }
+        observer->stop();
+        if (observer_thread.joinable()) observer_thread.join();
+        observer.reset();
+    };
+    // Early returns after the observer starts must still join its thread.
+    struct ObserverGuard {
+        std::function<void()> stop;
+        ~ObserverGuard() { if (stop) stop(); }
+    } observer_guard{stop_observer};
     if (args.window) {
         if (!HostWindow::is_available()) {
             std::fprintf(stderr,
@@ -2487,6 +2708,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         const char* runtime_title =
             opts.builtin_game_name && *opts.builtin_game_name
                 ? opts.builtin_game_name : GBARECOMP_WINDOW_TITLE;
+        win.set_orientation_policy(static_cast<int>(opts.orientation));
         if (!win.open(args.scale, ppu.render_width(), ppu.render_height(),
                       runtime_title,
                       args.screen.empty() ? nullptr : args.screen.c_str(),
@@ -2508,6 +2730,50 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             win.load_input_config(exe_dir.c_str(),
                                   opts.assist_tools_enabled_by_default,
                                   opts.assist_fast_forward_multiplier_default);
+            win.configure_touch(opts.input_frame != nullptr,
+                                opts.touch_gesture_claims,
+                                opts.touch_pad_default, args.touch_emulation);
+            win.set_touch_config_dir(exe_dir.c_str());
+        }
+        win.set_host_overlay(opts.host_overlay);
+        win.set_view_margins(ppu.view_extra_left(), ppu.view_extra_right(),
+                             ppu.view_extra_top(), ppu.view_extra_bottom());
+        touch_window = &win;
+        if (args.tcp_observe_port > 0) {
+            observer = std::make_unique<debug::TcpDebugServer>();
+            debug::TcpDebugServer::Context octx;
+            octx.cpu = nullptr;
+            octx.recomp_cpu = &g_cpu;
+            octx.runtime_trace_copy = runtime_trace_copy_recent;
+            octx.bus = &bus;
+            octx.ppu = &ppu;
+            octx.misses_query = []() { return gbarecomp::self_heal_misses_json(); };
+            octx.extension = tcp_extension;
+            octx.savestate_save = [&](const std::string& p, std::string& e) {
+                return observer_request(true, p, e);
+            };
+            octx.savestate_load = [&](const std::string& p, std::string& e) {
+                return observer_request(false, p, e);
+            };
+            octx.run_status = [&]() -> std::string {
+                char buf[192];
+                std::snprintf(buf, sizeof(buf),
+                    "{\"ok\":true,\"run\":\"windowed\",\"parked\":false,"
+                    "\"pc\":\"0x%08X\",\"frame\":%llu,\"vblank_starts\":%llu}",
+                    static_cast<unsigned>(g_cpu.R[15]),
+                    static_cast<unsigned long long>(ppu.frame_count()),
+                    static_cast<unsigned long long>(g_runtime_vblank_starts));
+                return std::string(buf);
+            };
+            const int observe_port = args.tcp_observe_port;
+            debug::TcpDebugServer* server_ptr = observer.get();
+            observer_thread = std::thread([server_ptr, octx, observe_port]() {
+                server_ptr->run(observe_port, octx);
+            });
+            std::fprintf(stderr,
+                         "[gbarecomp:runtime] windowed observe TCP on 127.0.0.1:%d "
+                         "(reads, touch_*, game commands, queued savestates; no step)\n",
+                         observe_port);
         }
         if (args.fullscreen) win.set_fullscreen(args.fullscreen);
         win.set_volume(args.volume);
@@ -2705,6 +2971,25 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         p.replace_extension(".state" + std::to_string(slot));
         return p.string();
     };
+    // Mobile suspend: a state written whenever the OS backgrounds the app,
+    // plus a marker that exists only while the app is suspended. If the OS
+    // kills the process in the background the marker survives, and the next
+    // launch resumes exactly where the player left (RunOptions opt-in).
+    auto suspend_state_path = [&]() -> std::string {
+        std::filesystem::path p(args.rom);
+        p.replace_extension(".suspend.state");
+        return p.string();
+    };
+    auto suspend_marker_path = [&]() -> std::string {
+        std::filesystem::path p(args.rom);
+        p.replace_extension(".suspend.pending");
+        return p.string();
+    };
+    auto clear_suspend_marker = [&]() {
+        std::error_code ec;
+        std::filesystem::remove(suspend_marker_path(), ec);
+    };
+    bool suspend_on_exit = false;  // OS termination keeps the marker
 
     uint64_t last_presented_frame = ppu.frame_count();
 
@@ -2941,6 +3226,27 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (!args.window) return;
         capture_rewind_point();
         auto ev = win.pump();
+        if (observer) {
+            // Observe-mode TCP savestate requests run here, at a present
+            // boundary on the guest thread.
+            std::lock_guard<std::mutex> lk(observer_m);
+            if (observer_pending && !observer_pending->done) {
+                ObserverStateRequest* r = observer_pending;
+                r->ok = r->save ? do_savestate_save(r->path, r->err)
+                                : do_savestate_load(r->path, r->err);
+                if (!r->save && r->ok) {
+                    last_presented_frame = ppu.frame_count() - 1;
+                    if (pacer) pacer->reset();
+                }
+                std::printf("observer_savestate_%s path=\"%s\" ok=%d\n",
+                            r->save ? "saved" : "loaded", r->path.c_str(),
+                            r->ok ? 1 : 0);
+                std::fflush(stdout);
+                r->done = true;
+                observer_pending = nullptr;
+                observer_cv.notify_all();
+            }
+        }
         ++assist_script_pump;
         while (assist_script_index < assist_script_events.size() &&
                assist_script_events[assist_script_index].pump <=
@@ -2982,18 +3288,51 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                  gyro_sensitivity_calibration),
                 -0x600, 0x600));
         }
+        // Record the COMPOSED register (host keys AND any touch-policy
+        // synthesis) so a replay reproduces exactly what the guest read,
+        // without needing the policy or the touches that drove it.
+        const uint16_t recorded_keys = bus.io().composed_keyinput();
         if (input_record_requested &&
-            (!input_record_have_value || ev.keyinput != input_record_last_value)) {
+            (!input_record_have_value || recorded_keys != input_record_last_value)) {
             char row[64];
             std::snprintf(row, sizeof(row), "%llu,0x%04X\n",
                           static_cast<unsigned long long>(ppu.frame_count()),
-                          static_cast<unsigned>(ev.keyinput));
+                          static_cast<unsigned>(recorded_keys));
             input_record_stream << row;
             input_record_stream.flush();
             input_record_have_value = true;
-            input_record_last_value = ev.keyinput;
+            input_record_last_value = recorded_keys;
         }
         if (ev.quit) host_quit = true;
+        if (ev.enter_background || ev.terminating) {
+            // The OS may kill a backgrounded app without further notice:
+            // persist the cartridge save and a suspend state now.
+            const bool saved = flush_save();
+            std::string e;
+            const std::string state_path = suspend_state_path();
+            const bool suspended = do_savestate_save(state_path, e);
+            if (suspended) {
+                std::ofstream marker(suspend_marker_path(), std::ios::trunc);
+                marker << ppu.frame_count() << "\n";
+            }
+            if (ev.terminating) suspend_on_exit = suspended;
+            std::fprintf(stderr,
+                         "[gbarecomp:runtime] %s: save=%s suspend_state=%s%s%s\n",
+                         ev.terminating ? "terminating" : "entering background",
+                         saved ? "flushed" : "FAILED",
+                         suspended ? state_path.c_str() : "FAILED ",
+                         suspended ? "" : e.c_str(), "");
+            std::fflush(stderr);
+            if (ev.enter_background && !ev.terminating) {
+                if (win.wait_for_foreground()) {
+                    // Live again: the suspend state is only a crash guard.
+                    clear_suspend_marker();
+                    if (pacer) pacer->reset();
+                } else {
+                    host_quit = true;
+                }
+            }
+        }
         if (bus.solar().active() && ev.solar_live) {
             // Release the manual override; the game's light source resumes.
             g_solar_override_step.store(kSolarNoOverride,
@@ -3257,6 +3596,26 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             gbarecomp::overlay_loader_shutdown();
             runtime_shutdown();
             return 1;
+        }
+    } else if (opts.resume_suspend_state_on_launch) {
+        // The previous session was suspended by the OS and never came back
+        // (killed in the background, or swiped away): resume it.
+        std::error_code ec;
+        if (std::filesystem::exists(suspend_marker_path(), ec) &&
+            std::filesystem::exists(suspend_state_path(), ec)) {
+            std::string e;
+            if (do_savestate_load(suspend_state_path(), e)) {
+                std::printf("suspend_resumed path=\"%s\" frame=%llu\n",
+                            suspend_state_path().c_str(),
+                            static_cast<unsigned long long>(ppu.frame_count()));
+                std::fflush(stdout);
+                last_presented_frame = ppu.frame_count() - 1;
+            } else {
+                std::fprintf(stderr,
+                             "[gbarecomp:runtime] suspend resume failed: %s "
+                             "(booting normally)\n", e.c_str());
+            }
+            clear_suspend_marker();
         }
     }
 
@@ -3690,10 +4049,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         recomp_runtime_ui_destroy(runtime_ui_context.ui);
         runtime_ui_context.ui = nullptr;
 #endif
+        stop_observer();
         win.close();
     }
 
     bool save_ok = flush_save();
+    if (!suspend_on_exit) clear_suspend_marker();
 
     if (!args.dump_bmp.empty() || !args.dump_png.empty()) {
         std::vector<uint8_t> fb(ppu.render_bytes(), 0);

@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -89,6 +90,10 @@ public:
         std::function<void()>        resume;       // free-run (continue)
         std::function<void()>        pause;        // park at frame boundary
         std::function<std::string()> run_status;   // JSON: run-state/parked/pc
+        // Structured command extensions (touch input, game-owned rings).
+        // Consulted before the built-in substring matcher; return true when
+        // the request was handled and `reply` holds one JSON line.
+        std::function<bool(const std::string& request, std::string& reply)> extension;
     };
 
     TcpDebugServer();
@@ -98,6 +103,16 @@ public:
     // the client closes or sends `quit`. Blocking. Returns once done.
     // Returns true on clean exit, false if listen/bind/accept failed.
     bool run(int port, const Context& ctx);
+
+    // Thread-safe: make a run() blocked on another thread return promptly
+    // (closes the listening and any client socket). Used by the windowed
+    // observer server, which lives on its own thread.
+    void stop();
+
+private:
+    std::atomic<bool> stop_{false};
+    std::atomic<std::intptr_t> listen_sock_{-1};
+    std::atomic<std::intptr_t> client_sock_{-1};
 };
 
 }  // namespace gbarecomp::debug

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Shared gbarecomp Android manifest. Per-game values arrive as manifest
+  placeholders from gbarecomp-app.gradle (the game's `gbaGame` block); the
+  game module supplies only resources (app_name, launcher icon).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-feature android:glEsVersion="0x00020000" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.sensor.gyroscope" android:required="false" />
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <application
+        android:allowBackup="false"
+        android:hardwareAccelerated="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:resizeableActivity="true"
+        android:theme="@style/GbaTheme">
+        <meta-data android:name="gbarecomp.title" android:value="${gbaTitle}" />
+        <meta-data android:name="gbarecomp.rom_label" android:value="${gbaRomLabel}" />
+        <meta-data android:name="gbarecomp.rom_sha1" android:value="${gbaRomSha1}" />
+        <meta-data android:name="gbarecomp.rom_size" android:value="${gbaRomSize}" />
+        <meta-data android:name="gbarecomp.rom_file" android:value="${gbaRomFile}" />
+        <meta-data android:name="gbarecomp.bios_required" android:value="${gbaBiosRequired}" />
+        <meta-data android:name="gbarecomp.bios_sha1" android:value="${gbaBiosSha1}" />
+        <meta-data android:name="gbarecomp.orientation" android:value="${gbaOrientation}" />
+        <meta-data android:name="gbarecomp.payload_version" android:value="${gbaPayloadVersion}" />
+        <meta-data android:name="gbarecomp.setup_note" android:value="${gbaSetupNote}" />
+        <meta-data android:name="gbarecomp.gyro" android:value="${gbaGyro}" />
+
+        <activity
+            android:name="org.gbarecomp.GbaSetupActivity"
+            android:alwaysRetainTaskState="true"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|density"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:preferMinimalPostProcessing="true"
+            android:screenOrientation="${gbaActivityOrientation}">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- configChanges keeps rotation/resizing in-process: the runtime
+             re-lays out live instead of the Activity being recreated. -->
+        <activity
+            android:name="org.gbarecomp.GbaGameActivity"
+            android:alwaysRetainTaskState="true"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|density"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:preferMinimalPostProcessing="true"
+            android:screenOrientation="${gbaActivityOrientation}" />
+    </application>
+</manifest>

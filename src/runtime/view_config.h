@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 
@@ -67,6 +68,51 @@ inline std::uint32_t resize_driven_view_width(int drawable_width,
         static_cast<std::uint64_t>(drawable_height);
     return static_cast<std::uint32_t>(
         std::clamp<std::uint64_t>(rounded, kNativeWidth, maximum));
+}
+
+// Density-driven geometry (touch devices): the logical pixel keeps a physical
+// size (`mm_per_logical_px`, scaled by the player's zoom) so a phone shows
+// roughly the native short axis while a tablet reveals more world on BOTH
+// axes, instead of the same world with bigger pixels. The view always fills
+// the drawable at its aspect; it never shrinks below native 240x160 on
+// either axis, and the scale grows past the physical target when the game's
+// (or engine's) maximum logical size would otherwise be exceeded.
+inline ViewGeometry density_driven_view_geometry(int drawable_width, int drawable_height,
+                                                 float drawable_px_per_mm,
+                                                 float mm_per_logical_px,
+                                                 float zoom,
+                                                 std::uint32_t game_max_width,
+                                                 std::uint32_t game_max_height,
+                                                 std::uint32_t engine_max_width,
+                                                 std::uint32_t engine_max_height) {
+    ViewGeometry result;
+    if (drawable_width <= 0 || drawable_height <= 0) return result;
+    const double max_w = static_cast<double>(std::clamp(
+        game_max_width, 240u, std::max(240u, engine_max_width)));
+    const double max_h = static_cast<double>(std::clamp(
+        game_max_height, 160u, std::max(160u, engine_max_height)));
+    const double dw = drawable_width, dh = drawable_height;
+    const double target = std::max(0.25, static_cast<double>(drawable_px_per_mm)) *
+                          std::max(0.05, static_cast<double>(mm_per_logical_px)) *
+                          std::max(0.25, static_cast<double>(zoom));
+    // Drawable pixels per logical pixel: at least the physical target, large
+    // enough that the maxima hold, and small enough that neither axis drops
+    // below native (a tiny window then keeps native size and letterboxes).
+    double scale = std::max({target, dw / max_w, dh / max_h});
+    scale = std::min(scale, std::min(dw / 240.0, dh / 160.0));
+    if (scale <= 0.0) return result;
+    auto clamp_axis = [](double v, double lo, double hi) {
+        return static_cast<std::uint32_t>(std::clamp(std::floor(v + 0.5), lo, hi));
+    };
+    result.width = clamp_axis(dw / scale, 240.0, max_w);
+    result.height = clamp_axis(dh / scale, 160.0, max_h);
+    const std::uint32_t extra_w = result.width - 240u;
+    const std::uint32_t extra_h = result.height - 160u;
+    result.extra_left = extra_w / 2u;
+    result.extra_right = extra_w - result.extra_left;
+    result.extra_top = extra_h / 2u;
+    result.extra_bottom = extra_h - result.extra_top;
+    return result;
 }
 
 inline ViewGeometry resize_driven_view_geometry(int drawable_width, int drawable_height,

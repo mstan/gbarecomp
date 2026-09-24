@@ -620,6 +620,8 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
               std::string& out, bool& want_quit, bool& step_failed) {
     out.clear();
 
+    if (ctx.extension && ctx.extension(std::string(req), out)) return;
+
     auto contains = [&](const char* tok) {
         return req.find(tok) != std::string_view::npos;
     };
@@ -1216,13 +1218,21 @@ bool TcpDebugServer::run(int port, const Context& ctx) {
 
     std::printf("native: tcp_debug_server listening on 127.0.0.1:%d\n", port);
     std::fflush(stdout);
+    listen_sock_.store(static_cast<std::intptr_t>(srv));
+    if (stop_.load()) {
+        if (listen_sock_.exchange(-1) != -1) CLOSESOCK(srv);
+    }
 
     bool quit_server = false;
-    while (!quit_server) {
+    while (!quit_server && !stop_.load()) {
         sockaddr_in cli{};
         socklen_t clen = sizeof(cli);
         socket_t c = ::accept(srv, reinterpret_cast<sockaddr*>(&cli), &clen);
-        if (c == INVALID_SOCKET) continue;
+        if (c == INVALID_SOCKET) {
+            if (stop_.load()) break;
+            continue;
+        }
+        client_sock_.store(static_cast<std::intptr_t>(c));
 
         std::string inbuf;
         std::string resp;
@@ -1257,20 +1267,40 @@ bool TcpDebugServer::run(int port, const Context& ctx) {
                 }
                 inbuf.erase(0, nl + 1);
             }
-            if (inbuf.size() > 8192) {
+            // Structured commands (touch scripts) can be long; keep a bound.
+            if (inbuf.size() > 262144) {
                 std::string err = "{\"ok\":false,\"error\":\"line too long\"}\n";
                 ::send(c, err.data(), static_cast<int>(err.size()), 0);
                 break;
             }
         }
+        client_sock_.store(-1);
         CLOSESOCK(c);
     }
 
-    CLOSESOCK(srv);
+    if (listen_sock_.exchange(-1) != -1) CLOSESOCK(srv);
 #ifdef _WIN32
     WSACleanup();
 #endif
     return true;
+}
+
+void TcpDebugServer::stop() {
+    stop_.store(true);
+    const std::intptr_t client = client_sock_.load();
+    if (client != -1) {
+        // Unblocks recv(); run() closes the socket itself.
+#ifdef _WIN32
+        ::shutdown(static_cast<socket_t>(client), SD_BOTH);
+#else
+        ::shutdown(static_cast<socket_t>(client), SHUT_RDWR);
+#endif
+    }
+    const std::intptr_t listener = listen_sock_.exchange(-1);
+    if (listener != -1) {
+        // Closing the listener is what unblocks accept() on every platform.
+        CLOSESOCK(static_cast<socket_t>(listener));
+    }
 }
 
 }  // namespace gbarecomp::debug

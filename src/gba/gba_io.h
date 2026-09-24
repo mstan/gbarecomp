@@ -199,7 +199,19 @@ public:
     // Host-side input update. The low 10 bits are GBA KEYINPUT
     // (active-low: 1 = released, 0 = pressed). Stored directly into
     // the IO backing so the next CPU read sees the current state.
+    //
+    // The register is the AND of two host sources: the physical/host keys
+    // (keyboard, controller, touch pad, TCP, replay) and an optional
+    // game-policy synthesized mask (touch gestures translated to presses).
+    // Both default to 0x03FF, so a game without a policy sees exactly the
+    // host keys, as before.
     void set_keyinput(uint16_t keys);
+    void set_synthesized_keyinput(uint16_t keys);
+    uint16_t host_keyinput() const { return host_keyinput_; }
+    uint16_t synthesized_keyinput() const { return synth_keyinput_; }
+    uint16_t composed_keyinput() const {
+        return static_cast<uint16_t>(host_keyinput_ & synth_keyinput_ & 0x03FFu);
+    }
 
     // Advance hardware timers by CPU cycles. Timer overflows raise IRQs,
     // clock direct-sound FIFOs, and advance the Timer 1..3 count-up chain.
@@ -242,6 +254,10 @@ private:
     std::array<uint8_t, kIoSize> io_{};
 
     bool halted_ = false;
+    // Host-side KEYINPUT sources (not guest-visible state; never serialized —
+    // the composed register value in io_ is what savestates capture).
+    uint16_t host_keyinput_ = 0x03FFu;
+    uint16_t synth_keyinput_ = 0x03FFu;
     std::size_t unmapped_count_ = 0;
     std::size_t dma_runs_[4]  = {0, 0, 0, 0};
     std::size_t dma_words_[4] = {0, 0, 0, 0};

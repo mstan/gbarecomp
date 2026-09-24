@@ -1,0 +1,212 @@
+// gbarecomp-app.gradle — shared Android application configuration.
+//
+// A game's app/build.gradle applies `com.android.application`, declares an
+// `ext.gbaGame = [...]` map, then `apply from:` this file. Everything else —
+// SDL2, the shared Java shell (org.gbarecomp.*), the manifest, the native
+// CMake root, payload staging and ABI policy — lives here so every gbarecomp
+// Android game builds the same way.
+//
+// Required gbaGame keys:
+//   applicationId, versionCode, versionName, title, romSha1 (list or CSV),
+//   romSize, romFile, variant (variants/<variant>/game.toml target path),
+//   gameToml (File: Android runtime TOML), gameRoot (File), engineRoot (File)
+// Optional:
+//   romLabel, biosRequired (false), orientation ("landscape"|"portrait"|"any"),
+//   payloadVersion ("1"), setupNote, gyro (false), payloadDirs ([[from:File, into:String]]),
+//   cmakeArguments ([]), recompUiRoot (File), releaseAbis (["arm64-v8a"]),
+//   debugAbis (["arm64-v8a","x86_64"])
+//
+// Private personal builds may embed verified assets (never distribute them):
+//   -PprivateRom=<path> [-PprivateBios=<path>]
+
+def g = project.ext.gbaGame
+def required = ["applicationId", "versionCode", "versionName", "title", "romSha1",
+                "romSize", "romFile", "variant", "gameToml", "gameRoot", "engineRoot"]
+required.each { key ->
+    if (!g.containsKey(key) || g[key] == null)
+        throw new GradleException("gbaGame.${key} is required by gbarecomp-app.gradle")
+}
+
+def engineRoot = file(g.engineRoot)
+def gameRoot = file(g.gameRoot)
+def platformRoot = new File(engineRoot, "platform/android")
+def sdlRoot = new File(platformRoot, "third_party/SDL")
+if (!new File(sdlRoot, "CMakeLists.txt").isFile())
+    throw new GradleException("SDL submodule missing at ${sdlRoot}: " +
+        "git -C ${engineRoot} submodule update --init platform/android/third_party/SDL")
+
+def cmakePath = { File f -> f.absolutePath.replace('\\', '/') }
+def romShas = (g.romSha1 instanceof Collection ? g.romSha1 : g.romSha1.toString().split(","))
+    .collect { it.toString().trim().toLowerCase() }
+def orientation = (g.orientation ?: "landscape").toString()
+def activityOrientation = orientation == "any" ? "fullUser"
+    : orientation == "portrait" ? "sensorPortrait" : "sensorLandscape"
+def stagedPayload = layout.buildDirectory.dir("generated/gbarecompPayload")
+def privateBiosPath = providers.gradleProperty("privateBios").orNull
+def privateRomPath = providers.gradleProperty("privateRom").orNull
+def debugAbis = g.debugAbis ?: ["arm64-v8a", "x86_64"]
+def releaseAbis = g.releaseAbis ?: ["arm64-v8a"]
+// -PgbaAbis=x86_64 (comma list) narrows a build, e.g. emulator-only iteration;
+// the generated corpus is large, so each extra ABI is a full native build.
+def abiOverride = providers.gradleProperty("gbaAbis").orNull
+if (abiOverride) {
+    debugAbis = abiOverride.split(",").collect { it.trim() }.findAll { it }
+    releaseAbis = debugAbis
+}
+
+android {
+    namespace g.namespace ?: g.applicationId
+    compileSdk 35
+    ndkVersion "27.1.12297006"
+
+    defaultConfig {
+        applicationId g.applicationId
+        minSdk 28
+        targetSdk 35
+        versionCode g.versionCode as int
+        versionName g.versionName
+
+        manifestPlaceholders = [
+            gbaTitle: g.title,
+            gbaRomLabel: g.romLabel ?: "${g.title} ROM",
+            gbaRomSha1: romShas.join(","),
+            gbaRomSize: "${g.romSize}",
+            gbaRomFile: g.romFile,
+            gbaBiosRequired: "${g.biosRequired ?: false}",
+            gbaBiosSha1: g.biosSha1 ?: "300c20df6731a33952ded8c436f7f186d25d3492",
+            gbaOrientation: orientation,
+            gbaActivityOrientation: activityOrientation,
+            gbaPayloadVersion: "${g.payloadVersion ?: '1'}",
+            gbaSetupNote: g.setupNote ?: "",
+            gbaGyro: "${g.gyro ?: false}",
+        ]
+
+        externalNativeBuild {
+            cmake {
+                // Generated guest shards are huge; bound concurrent compiles so
+                // a build cannot exhaust host memory (-PgbaNativeJobs=N).
+                def jobs = (providers.gradleProperty("gbaNativeJobs").orNull ?:
+                            "${g.nativeJobs ?: 8}").toString()
+                def args = [
+                    "-DANDROID_STL=c++_shared",
+                    "-DGBA_GAME_ROOT=${cmakePath(gameRoot)}",
+                    "-DGBARECOMP_ROOT=${cmakePath(engineRoot)}",
+                    "-DCMAKE_BUILD_TYPE=Release",
+                    "-DCMAKE_JOB_POOLS=gba_compile=${jobs}",
+                    "-DCMAKE_JOB_POOL_COMPILE=gba_compile",
+                ]
+                if (g.recompUiRoot) {
+                    args += "-DRECOMP_UI_ROOT=${cmakePath(file(g.recompUiRoot))}"
+                    args += "-DGBARECOMP_RUNTIME_UI_ROOT=${cmakePath(file(g.recompUiRoot))}"
+                }
+                args += (g.cmakeArguments ?: [])
+                arguments(*args)
+                cppFlags "-O2"
+                targets "main"
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+            // x86_64 lets the stock emulator images run the game natively.
+            ndk { abiFilters(*debugAbis) }
+        }
+        release {
+            minifyEnabled false
+            ndk { abiFilters(*releaseAbis) }
+            // Until a release keystore is configured, sign with the debug key
+            // so the APK installs for sideload testing.
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path new File(platformRoot, "cpp/CMakeLists.txt")
+            version "3.22.1"
+        }
+    }
+
+    sourceSets {
+        main {
+            manifest.srcFile new File(platformRoot, "AndroidManifest.xml")
+            java.srcDirs = [new File(sdlRoot, "android-project/app/src/main/java"),
+                            new File(platformRoot, "java")]
+            res.srcDirs = [new File(platformRoot, "res"), file("src/main/res")]
+            assets.srcDirs = [stagedPayload]
+        }
+        debug {
+            manifest.srcFile new File(platformRoot, "debug/AndroidManifest.xml")
+        }
+    }
+
+    packaging {
+        jniLibs { useLegacyPackaging = true }
+    }
+}
+
+// Sync (not Copy) guarantees a distributable build never inherits private
+// assets from an earlier private build.
+tasks.register("stageGbarecompPayload", Sync) {
+    inputs.property("privateRom", privateRomPath ?: "")
+    inputs.property("privateBios", privateBiosPath ?: "")
+    from(file(g.gameToml)) {
+        into("payload/variants/${g.variant}")
+        rename { "game.toml" }
+    }
+    (g.payloadDirs ?: []).each { entry ->
+        from(file(entry.from)) { into("payload/${entry.into}") }
+    }
+    if (privateRomPath != null) {
+        def romFile = file(privateRomPath)
+        from(romFile) {
+            into("payload/roms")
+            rename { g.romFile }
+        }
+        doFirst {
+            if (!romFile.isFile() || romFile.length() != (g.romSize as long))
+                throw new GradleException("Private ROM must be the ${g.romSize}-byte dump")
+            def sha = java.security.MessageDigest.getInstance("SHA-1")
+                .digest(romFile.bytes).encodeHex().toString()
+            if (!romShas.contains(sha))
+                throw new GradleException("Private ROM SHA-1 ${sha} is not accepted")
+        }
+    }
+    if (privateBiosPath != null) {
+        def biosFile = file(privateBiosPath)
+        from(biosFile) {
+            into("payload/bios")
+            rename { "gba_bios.bin" }
+        }
+        doFirst {
+            if (!biosFile.isFile() || biosFile.length() != 16384)
+                throw new GradleException("Private BIOS must be the 16 KiB gba_bios.bin dump")
+        }
+    }
+    into(stagedPayload)
+}
+
+tasks.named("preBuild").configure { dependsOn("stageGbarecompPayload") }
+
+// Public-artifact guard: a build without private properties must not carry a
+// ROM or BIOS, whatever else changed. Runs on every assemble.
+tasks.register("verifyNoPrivateAssets") {
+    dependsOn("stageGbarecompPayload")
+    doLast {
+        if (privateRomPath == null && privateBiosPath == null) {
+            def root = stagedPayload.get().asFile
+            def offenders = []
+            root.eachFileRecurse { f ->
+                def n = f.name.toLowerCase()
+                if (f.isFile() && (n.endsWith(".gba") || n.endsWith(".agb") ||
+                        n == "gba_bios.bin" || f.length() == 16384L && n.endsWith(".bin")))
+                    offenders << f
+            }
+            if (!offenders.isEmpty())
+                throw new GradleException("Public build payload contains private assets: ${offenders}")
+        }
+    }
+}
+tasks.named("preBuild").configure { dependsOn("verifyNoPrivateAssets") }

@@ -67,6 +67,10 @@ std::function<void()> g_host_service_hook;
 // the exact frame boundary, before scanline 0 of the next frame is composed.
 // Null preserves the established renderer path for every existing game.
 std::function<void()> g_frame_start_hook;
+// Optional host input policy (touch -> synthesized keys). Runs at VBlank start,
+// before the VBlank IRQ is requested, so the guest's per-frame input read sees
+// the policy's answer for this frame. Null preserves the established path.
+std::function<void()> g_vblank_input_hook;
 static const bool g_phase_prof = [] {
     const char* e = std::getenv("GBARECOMP_PHASE_PROF");
     bool on = (e != nullptr) && !(e[0] == '0' && e[1] == '\0');
@@ -557,6 +561,7 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
             ppu->mark_framebuffer_latched();
             ++g_runtime_vblank_starts;
             bus->io().run_timed_dma(1);   // VBlank-timed DMA
+            if (g_vblank_input_hook) g_vblank_input_hook();
         }
         if (events.frame_completed && g_frame_start_hook) {
             g_frame_start_hook();
@@ -931,6 +936,10 @@ void runtime_set_host_service_hook(std::function<void()> h) {
 
 void runtime_set_frame_start_hook(std::function<void()> h) {
     g_frame_start_hook = std::move(h);
+}
+
+void runtime_set_vblank_input_hook(std::function<void()> h) {
+    g_vblank_input_hook = std::move(h);
 }
 
 extern "C" bool runtime_should_yield(void) {

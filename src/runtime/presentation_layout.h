@@ -68,6 +68,55 @@ inline PresentationLayout compute_adaptive_presentation_layout(int drawable_widt
     return {(drawable_width - width) / 2, (drawable_height - height) / 2, width, height, scale};
 }
 
+// Map a drawable-space point (physical pixels, origin at the drawable's top
+// left) into the logical framebuffer shown by `layout`. Coordinates are
+// continuous: logical pixel (3, 5) spans [3,4) x [5,6). Returns true when the
+// point lies inside the presented image; the mapped coordinates are always
+// written so callers can reason about points in the surrounding bars.
+inline bool presentation_point_to_logical(const PresentationLayout& layout,
+                                          int logical_width, int logical_height,
+                                          float drawable_x, float drawable_y,
+                                          float* logical_x, float* logical_y) {
+    if (layout.width <= 0 || layout.height <= 0 ||
+        logical_width <= 0 || logical_height <= 0) {
+        if (logical_x) *logical_x = 0.0f;
+        if (logical_y) *logical_y = 0.0f;
+        return false;
+    }
+    const float lx = (drawable_x - static_cast<float>(layout.x)) *
+                     static_cast<float>(logical_width) /
+                     static_cast<float>(layout.width);
+    const float ly = (drawable_y - static_cast<float>(layout.y)) *
+                     static_cast<float>(logical_height) /
+                     static_cast<float>(layout.height);
+    if (logical_x) *logical_x = lx;
+    if (logical_y) *logical_y = ly;
+    return lx >= 0.0f && ly >= 0.0f &&
+           lx < static_cast<float>(logical_width) &&
+           ly < static_cast<float>(logical_height);
+}
+
+// Inverse of presentation_point_to_logical.
+inline void logical_point_to_presentation(const PresentationLayout& layout,
+                                          int logical_width, int logical_height,
+                                          float logical_x, float logical_y,
+                                          float* drawable_x, float* drawable_y) {
+    if (layout.width <= 0 || layout.height <= 0 ||
+        logical_width <= 0 || logical_height <= 0) {
+        if (drawable_x) *drawable_x = 0.0f;
+        if (drawable_y) *drawable_y = 0.0f;
+        return;
+    }
+    if (drawable_x)
+        *drawable_x = static_cast<float>(layout.x) +
+                      logical_x * static_cast<float>(layout.width) /
+                          static_cast<float>(logical_width);
+    if (drawable_y)
+        *drawable_y = static_cast<float>(layout.y) +
+                      logical_y * static_cast<float>(layout.height) /
+                          static_cast<float>(logical_height);
+}
+
 // Sharp fractional scaling first expands every logical pixel to the largest
 // whole-number block that fits inside the final destination. A second,
 // typically small linear stretch reaches the exact responsive layout. Exact

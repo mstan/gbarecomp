@@ -1,3 +1,6 @@
 [submodule "external/arm-recomp-core"]
 	path = external/arm-recomp-core
 	url = ../arm-recomp-core.git
+[submodule "platform/android/third_party/SDL"]
+	path = platform/android/third_party/SDL
+	url = https://github.com/mstan/SDL.git
