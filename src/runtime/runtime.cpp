@@ -775,6 +775,27 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
     return true;
 }
 
+// Every CLI flag that consumes the following argument. find_config_arg()
+// skips these values so they are never mistaken for the positional game
+// config, and parse_cli()'s need_value() refuses any flag missing here, so
+// adding a value flag without listing it fails loudly on first use instead of
+// silently dropping the game config (and with it the BIOS/ROM paths).
+constexpr std::string_view kCliValueFlags[] = {
+    "--config",      "--bios",          "--rom",           "--bios-sha1",
+    "--rom-sha1",    "--rom-crc32",     "--steps",         "--frames",
+    "--scale",       "--tcp",           "--tcp-observe",   "--dump-bmp",
+    "--dump-png",    "--load-state",    "--view-width",    "--widescreen",
+    "--save",        "--save-path",     "--gyro-sensitivity",
+    "--sharp-filter", "--linear-filter", "--affine-filter", "--screen",
+    "--volume",
+};
+
+bool cli_flag_takes_value(std::string_view flag) {
+    for (std::string_view f : kCliValueFlags)
+        if (f == flag) return true;
+    return false;
+}
+
 void find_config_arg(int argc, char** argv, Args* args) {
     for (int i = 1; i < argc; ++i) {
         std::string s = argv[i];
@@ -782,16 +803,7 @@ void find_config_arg(int argc, char** argv, Args* args) {
             args->config = argv[++i];
             continue;
         }
-        if ((s == "--bios" || s == "--rom" || s == "--bios-sha1" ||
-             s == "--rom-sha1" || s == "--rom-crc32" ||
-             s == "--steps" || s == "--frames" ||
-             s == "--scale" || s == "--tcp" || s == "--dump-bmp" ||
-             s == "--dump-png" || s == "--load-state" ||
-             s == "--view-width" || s == "--widescreen" ||
-             s == "--save" || s == "--save-path" ||
-             s == "--gyro-sensitivity" || s == "--sharp-filter" ||
-             s == "--affine-filter") &&
-            i + 1 < argc) {
+        if (cli_flag_takes_value(s) && i + 1 < argc) {
             ++i;
             continue;
         }
@@ -845,6 +857,11 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
     for (int i = 1; i < argc; ++i) {
         std::string s = argv[i];
         auto need_value = [&](const char* name) -> const char* {
+            if (!cli_flag_takes_value(name)) {
+                if (err) *err = std::string("internal: value flag ") + name +
+                                " is missing from kCliValueFlags";
+                return nullptr;
+            }
             if (i + 1 >= argc) {
                 if (err) *err = std::string("missing value for ") + name;
                 return nullptr;

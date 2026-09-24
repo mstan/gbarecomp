@@ -66,8 +66,12 @@ bool mobile_prepare_process(std::vector<std::string>& args,
     if (const char* storage = SDL_AndroidGetInternalStoragePath())
         (void)chdir(storage);
     const char* log = options.log_file ? options.log_file : "android-runtime.log";
+    // One open file description for both streams: separate freopen()s would
+    // give stderr and stdout independent offsets, and each would overwrite
+    // the other's lines in the shared log.
     std::freopen(log, "w", stderr);
-    std::freopen(log, "a", stdout);
+    std::fflush(stdout);
+    dup2(fileno(stderr), fileno(stdout));
     std::setvbuf(stderr, nullptr, _IONBF, 0);
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     // No compiler on the device: misses bridge loudly and are reported for
