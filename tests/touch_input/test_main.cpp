@@ -304,6 +304,23 @@ void test_hub_script_and_rings() {
               reply.find("\"view\":[240,160]") != std::string::npos,
           "status reports presentation");
     check(!touch_tcp_command("{\"cmd\":\"ping\"}", reply), "non-touch command ignored");
+
+    // Session diagnostics: one parseable object holding every ring.
+    json::Value diag;
+    std::string derr;
+    check(json::parse(hub.diagnostics_json(), diag, &derr) && diag.is_object(),
+          "diagnostics JSON parses");
+    const json::Value* diag_gestures = diag.get("gestures");
+    const json::Value* synth = diag.get("key_synth");
+    check(diag.get("status") && diag.get("events") && diag_gestures && synth,
+          "diagnostics has status/events/gestures/key_synth");
+    check(diag_gestures && diag_gestures->get("gestures") &&
+              diag_gestures->get("gestures")->array.size() ==
+                  static_cast<std::size_t>(diag_gestures->integer("newest", 0) -
+                                           diag_gestures->integer("oldest", 0) + 1),
+          "diagnostics carries the whole gesture ring");
+    check(synth && synth->get("samples") && !synth->get("samples")->array.empty(),
+          "diagnostics carries key-synth samples");
     hub.reset_for_tests();
 }
 

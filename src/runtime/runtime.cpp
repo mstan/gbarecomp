@@ -65,6 +65,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -1163,6 +1164,82 @@ std::size_t count_nonzero(const uint8_t* p, std::size_t n) {
         if (p[i] != 0) ++c;
     }
     return c;
+}
+
+// Session diagnostics: the always-on touch rings (and the game's own rings)
+// only live in memory, and a phone is usually played untethered. Persist
+// them whenever the app is backgrounded or exits so a session can be read
+// back afterwards (adb run-as ... files/diagnostics). Touch/diagnostics games
+// only; on by default on Android, GBARECOMP_SESSION_DIAGNOSTICS=1 elsewhere.
+bool session_diagnostics_enabled(const RunOptions& opts) {
+    if (!opts.input_frame && !opts.diagnostics_snapshot) return false;
+    if (const char* e = std::getenv("GBARECOMP_SESSION_DIAGNOSTICS"))
+        return e[0] && e[0] != '0';
+#if defined(__ANDROID__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+void write_session_diagnostics(const RunOptions& opts, const char* reason,
+                               std::uint64_t frame) {
+    if (!session_diagnostics_enabled(opts)) return;
+    namespace fs = std::filesystem;
+    constexpr std::size_t kKeepSessions = 8;
+    std::error_code ec;
+    const fs::path dir = "diagnostics";
+    fs::create_directories(dir, ec);
+    const long long now = static_cast<long long>(std::time(nullptr));
+    char name[96];
+    std::snprintf(name, sizeof(name), "session-%lld-%llu-%s.json", now,
+                  static_cast<unsigned long long>(frame), reason);
+    std::string body;
+    body.reserve(1u << 20);
+    char head[160];
+    std::snprintf(head, sizeof(head),
+                  "{\"reason\":\"%s\",\"unix_time\":%lld,\"frame\":%llu,\"touch\":",
+                  reason, now, static_cast<unsigned long long>(frame));
+    body += head;
+    body += TouchHub::instance().diagnostics_json();
+    body += ",\"game\":";
+    std::string game;
+    if (opts.diagnostics_snapshot) {
+        opts.diagnostics_snapshot(
+            [](void* ctx, const char* data, std::size_t len) {
+                static_cast<std::string*>(ctx)->append(data, len);
+            },
+            &game);
+    }
+    body += game.empty() ? "null" : game;
+    body += "}\n";
+    const fs::path final_path = dir / name;
+    const fs::path tmp_path = dir / (std::string(name) + ".tmp");
+    {
+        std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
+        f.write(body.data(), static_cast<std::streamsize>(body.size()));
+        if (!f) {
+            std::fprintf(stderr, "[gbarecomp:runtime] session diagnostics write FAILED: %s\n",
+                         tmp_path.string().c_str());
+            return;
+        }
+    }
+    fs::rename(tmp_path, final_path, ec);
+    // Keep the newest sessions (names sort by time).
+    std::vector<fs::path> sessions;
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        const std::string n = entry.path().filename().string();
+        if (n.rfind("session-", 0) == 0 && entry.path().extension() == ".json")
+            sessions.push_back(entry.path());
+    }
+    std::sort(sessions.begin(), sessions.end());
+    while (sessions.size() > kKeepSessions) {
+        fs::remove(sessions.front(), ec);
+        sessions.erase(sessions.begin());
+    }
+    std::fprintf(stderr, "[gbarecomp:runtime] session diagnostics (%s): %s (%zu bytes)\n",
+                 reason, final_path.string().c_str(), body.size());
+    std::fflush(stderr);
 }
 
 }  // namespace
@@ -2475,6 +2552,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
         if (game_thread.joinable()) game_thread.join();
         bool save_ok = flush_save();
+        write_session_diagnostics(opts, "exit", ppu.frame_count());
         gbarecomp::overlay_loader_shutdown();  // join worker + drain before banner
         emit_exit_diagnostics();
         runtime_shutdown();
@@ -3326,8 +3404,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (ev.quit) host_quit = true;
         if (ev.enter_background || ev.terminating) {
             // The OS may kill a backgrounded app without further notice:
-            // persist the cartridge save and a suspend state now.
+            // persist the cartridge save, a suspend state and the session's
+            // diagnostic rings now.
             const bool saved = flush_save();
+            write_session_diagnostics(opts, ev.terminating ? "terminating" : "background",
+                                      ppu.frame_count());
             std::string e;
             const std::string state_path = suspend_state_path();
             const bool suspended = do_savestate_save(state_path, e);
@@ -4075,6 +4156,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     bool save_ok = flush_save();
     if (!suspend_on_exit) clear_suspend_marker();
+    write_session_diagnostics(opts, "exit", ppu.frame_count());
 
     if (!args.dump_bmp.empty() || !args.dump_png.empty()) {
         std::vector<uint8_t> fb(ppu.render_bytes(), 0);

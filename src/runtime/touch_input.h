@@ -255,6 +255,9 @@ public:
     std::string gestures_json(std::uint64_t since_seq, std::size_t limit) const;
     std::string key_synth_json(std::uint64_t since_frame, std::size_t limit) const;
     std::string status_json() const;
+    // Every retained entry of every ring plus status, as one JSON object
+    // (session diagnostics persisted on background/exit).
+    std::string diagnostics_json() const;
 
     // Test support: clear rings, script, recognizer and queues.
     void reset_for_tests();

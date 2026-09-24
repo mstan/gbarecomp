@@ -664,6 +664,16 @@ std::string TouchHub::status_json() const {
     return buf;
 }
 
+std::string TouchHub::diagnostics_json() const {
+    // Each accessor takes the lock itself; the whole ring is requested.
+    std::string out = "{\"status\":" + status_json();
+    out += ",\"events\":" + events_json(0, kEventRing);
+    out += ",\"gestures\":" + gestures_json(0, kGestureRing);
+    out += ",\"key_synth\":" + key_synth_json(0, kSynthRing);
+    out += "}";
+    return out;
+}
+
 void TouchHub::reset_for_tests() {
     std::lock_guard<std::mutex> lk(m_);
     std::vector<Gesture> discard;

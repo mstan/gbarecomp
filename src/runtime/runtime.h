@@ -169,6 +169,13 @@ struct RunOptions {
                        void (*write)(void* ctx, const char* data, std::size_t len),
                        void* write_ctx) = nullptr;
 
+    // Optional game-owned rings for session diagnostics: write one JSON value
+    // through `write`. The runtime persists it, with the engine touch rings,
+    // to diagnostics/session-*.json whenever the app is backgrounded or exits,
+    // so an untethered (no adb/TCP) session can be analysed afterwards.
+    void (*diagnostics_snapshot)(void (*write)(void* ctx, const char* data, std::size_t len),
+                                 void* write_ctx) = nullptr;
+
     // This cartridge carries a solar sensor. Unlike the RTC there is no ROM
     // signature to detect one from, so it has to be declared. Games that leave
     // this false are unaffected; GBARECOMP_SOLAR still forces it on for
