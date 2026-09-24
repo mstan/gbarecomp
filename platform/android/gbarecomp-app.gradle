@@ -48,6 +48,17 @@ def debugAbis = g.debugAbis ?: ["arm64-v8a", "x86_64"]
 def releaseAbis = g.releaseAbis ?: ["arm64-v8a"]
 // -PgbaAbis=x86_64 (comma list) narrows a build, e.g. emulator-only iteration;
 // the generated corpus is large, so each extra ABI is a full native build.
+// Release signing: a stable release key keeps store/sideload updates working
+// across machines. -PgbaKeystore=<file.jks> (or GBARECOMP_KEYSTORE) plus the
+// password/alias properties below; without one, release builds fall back to
+// the local debug key with a loud warning.
+def prop = { String p, String env -> providers.gradleProperty(p).orNull ?: System.getenv(env) }
+def releaseKeystore = prop("gbaKeystore", "GBARECOMP_KEYSTORE")
+def releaseStorePassword = prop("gbaKeystorePassword", "GBARECOMP_KEYSTORE_PASSWORD")
+def releaseKeyAlias = prop("gbaKeyAlias", "GBARECOMP_KEY_ALIAS")
+def releaseKeyPassword = prop("gbaKeyPassword", "GBARECOMP_KEY_PASSWORD") ?: releaseStorePassword
+if (releaseKeystore && !(releaseStorePassword && releaseKeyAlias))
+    throw new GradleException("Release keystore given without gbaKeystorePassword/gbaKeyAlias")
 def abiOverride = providers.gradleProperty("gbaAbis").orNull
 if (abiOverride) {
     debugAbis = abiOverride.split(",").collect { it.trim() }.findAll { it }
@@ -63,8 +74,9 @@ android {
         applicationId g.applicationId
         minSdk 28
         targetSdk 35
-        versionCode g.versionCode as int
-        versionName g.versionName
+        // Release scripts stamp the version (-PgbaVersionName / -PgbaVersionCode).
+        versionCode (prop("gbaVersionCode", "GBARECOMP_VERSION_CODE") ?: g.versionCode) as int
+        versionName prop("gbaVersionName", "GBARECOMP_VERSION_NAME") ?: g.versionName
 
         manifestPlaceholders = [
             gbaTitle: g.title,
@@ -107,6 +119,17 @@ android {
         }
     }
 
+    signingConfigs {
+        if (releaseKeystore) {
+            release {
+                storeFile file(releaseKeystore)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         debug {
             debuggable true
@@ -116,9 +139,9 @@ android {
         release {
             minifyEnabled false
             ndk { abiFilters(*releaseAbis) }
-            // Until a release keystore is configured, sign with the debug key
-            // so the APK installs for sideload testing.
-            signingConfig signingConfigs.debug
+            // Release key when configured (see above); otherwise the local
+            // debug key so the APK still installs for sideload testing.
+            signingConfig releaseKeystore ? signingConfigs.release : signingConfigs.debug
         }
     }
 
@@ -224,7 +247,13 @@ if (privateRomPath != null || privateBiosPath != null) {
     android.applicationVariants.configureEach { variant ->
         variant.outputs.configureEach { output ->
             output.outputFileName =
-                "${g.variant}-${g.versionName}-${variant.buildType.name}-PRIVATE-rom-included.apk"
+                "${g.variant}-${variant.versionName}-${variant.buildType.name}-PRIVATE-rom-included.apk"
         }
     }
+}
+
+// Make an unsigned-by-release-key build impossible to miss.
+gradle.taskGraph.whenReady { graph ->
+    if (!releaseKeystore && graph.allTasks.any { it.name.startsWith("assembleRelease") })
+        logger.warn("WARNING: release APK signed with the DEBUG key (no gbaKeystore configured)")
 }
