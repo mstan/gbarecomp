@@ -74,7 +74,7 @@ bool mobile_prepare_process(std::vector<std::string>& args,
     // the offline heal loop instead of attempting an on-device rebuild.
     setenv("GBARECOMP_SELFHEAL_RECOMPILE", "0", 0);
     std::fprintf(stderr,
-                 "mobile: storage=%s cpu=static-recompiled "
+                 "mobile: storage=%s selfheal=report-only "
                  "(dispatch misses bridge loudly -> recomp_master_misses.toml.frag)\n",
                  SDL_AndroidGetInternalStoragePath()
                      ? SDL_AndroidGetInternalStoragePath() : "(unknown)");

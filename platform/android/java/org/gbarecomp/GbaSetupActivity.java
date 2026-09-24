@@ -46,6 +46,9 @@ public class GbaSetupActivity extends Activity {
     private static final String SETUP_PREFERENCES = "setup";
     private static final String SKIP_LAUNCHER_ON_BOOT = "skip_launcher_on_boot";
     private static final long BIOS_SIZE = 16 * 1024;
+    /** Validation/launcher-shortcut extra: start the game when ready without
+     *  changing the player's skip-this-screen preference. */
+    public static final String EXTRA_AUTOSTART = "org.gbarecomp.extra.AUTOSTART";
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private GbaGameConfig config;
@@ -77,7 +80,12 @@ public class GbaSetupActivity extends Activity {
         setContentView(buildContent());
         enterImmersiveMode();
         refreshStatus();
-        if (ready() && skipLauncherOnBoot()) launchGame();
+        if (!ready()) return;
+        if (getIntent().getBooleanExtra(EXTRA_AUTOSTART, false)) {
+            startActivity(new Intent(this, gameActivityClass()));
+        } else if (skipLauncherOnBoot()) {
+            launchGame();
+        }
     }
 
     @Override
@@ -347,7 +355,13 @@ public class GbaSetupActivity extends Activity {
 
     private boolean hasBundledPrivateAssets() {
         try (InputStream rom = getAssets().open("payload/roms/" + config.romFile)) {
-            return rom.read() >= 0;
+            if (rom.read() < 0) return false;
+        } catch (IOException ignored) {
+            return false;
+        }
+        if (!config.biosRequired) return true;
+        try (InputStream bios = getAssets().open("payload/bios/gba_bios.bin")) {
+            return bios.read() >= 0;
         } catch (IOException ignored) {
             return false;
         }

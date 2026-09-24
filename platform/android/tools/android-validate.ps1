@@ -55,6 +55,11 @@
     files/bios/gba_bios.bin (every gbarecomp game expects that exact name).
     Skipped if already staged with the same byte size.
 
+.PARAMETER SetupScreen
+    With -Launch: stop at the setup screen instead of passing the
+    org.gbarecomp.extra.AUTOSTART extra that starts the game once the ROM and
+    BIOS are verified.
+
 .PARAMETER Launch
     Starts the launcher activity (resolved live via
     `adb shell cmd package resolve-activity --brief`) before the rotation
@@ -107,6 +112,9 @@ param(
     [string]$Rom,
     [string]$Bios,
     [switch]$Launch,
+    # Launch straight into the game (org.gbarecomp.extra.AUTOSTART) instead of
+    # stopping at the setup screen; the player's skip preference is untouched.
+    [switch]$SetupScreen,
     [string]$Rotations = "",
     [int]$SettleSeconds = 4,
     [string]$OutDir,
@@ -366,7 +374,9 @@ if ($Launch) {
         $summary.failures += "Could not resolve a launcher activity for $Package; not launched"
     } else {
         Invoke-Adb -ArgList @('shell', 'am', 'force-stop', $Package) -AllowFailure | Out-Null
-        $startResult = Invoke-Adb -ArgList @('shell', 'am', 'start', '-n', $summary.launcherActivity) -AllowFailure
+        $startArgs = @('shell', 'am', 'start', '-n', $summary.launcherActivity)
+        if (-not $SetupScreen) { $startArgs += @('--ez', 'org.gbarecomp.extra.AUTOSTART', 'true') }
+        $startResult = Invoke-Adb -ArgList $startArgs -AllowFailure
         $summary.launched = ($startResult.ExitCode -eq 0)
         if (-not $summary.launched) {
             $summary.failures += "am start failed (exit $($startResult.ExitCode)): $($startResult.Output -join ' ')"

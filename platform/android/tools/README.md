@@ -63,6 +63,10 @@ crashed before this script attached.
 ```
 
 Notes:
+- `-Launch` passes `org.gbarecomp.extra.AUTOSTART`, so a verified install
+  goes straight into the game regardless of the player's "skip this screen"
+  preference (which it leaves untouched). Add `-SetupScreen` to stop at the
+  setup screen instead.
 - `-Rom`'s local filename is trusted as the on-device destination name
   (`files/roms/<basename>`) -- it must match what the game's manifest
   expects (e.g. `emerald_usa.gba` for Emerald), since that isn't otherwise

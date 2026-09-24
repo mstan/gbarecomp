@@ -1456,6 +1456,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     g_force_interp = 0;
     if (const char* fi = std::getenv("GBARECOMP_FORCE_INTERP"))
         g_force_interp = (fi[0] && fi[0] != '0') ? 1 : 0;
+    std::fprintf(stderr, "cpu_backend=%s\n",
+                 g_force_interp ? "interpreter (GBARECOMP_FORCE_INTERP)"
+                                : "static-recompiled");
     const char* strict_env = std::getenv("GBARECOMP_STRICT_STATIC");
     const bool strict_requested =
         strict_env && strict_env[0] != '\0' && strict_env[0] != '0';

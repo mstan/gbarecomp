@@ -2118,9 +2118,11 @@ void HostWindow::present(const uint8_t* rgb888) {
     int drawable_h = 0;
     const PresentationLayout layout =
         current_presentation_layout(b, &drawable_w, &drawable_h);
-    if (drawable_w != b->last_drawable_w || drawable_h != b->last_drawable_h ||
+    const bool presentation_changed =
+        drawable_w != b->last_drawable_w || drawable_h != b->last_drawable_h ||
         layout.x != b->last_layout.x || layout.y != b->last_layout.y ||
-        layout.width != b->last_layout.width || layout.height != b->last_layout.height) {
+        layout.width != b->last_layout.width || layout.height != b->last_layout.height;
+    if (presentation_changed) {
         int out_w = 0, out_h = 0, win_w = 0, win_h = 0;
         SDL_GetRendererOutputSize(b->renderer, &out_w, &out_h);
         SDL_GetWindowSize(b->window, &win_w, &win_h);
@@ -2137,6 +2139,20 @@ void HostWindow::present(const uint8_t* rgb888) {
     b->last_drawable_w = drawable_w;
     b->last_drawable_h = drawable_h;
     b->last_layout = layout;
+    if (presentation_changed && b->touch_controls) {
+        // Drawable-pixel pad geometry, so device validation can press pad
+        // buttons without hard-coding a layout (tools/validate-*.ps1).
+        const PadLayout p = compute_pad_layout(b);
+        std::fprintf(stderr,
+                     "host_window: pad insets=%d,%d,%d,%d dpad=%.0f,%.0f r=%.0f "
+                     "a=%.0f,%.0f b=%.0f,%.0f r=%.0f select=%.0f,%.0f start=%.0f,%.0f\n",
+                     b->safe_insets.left, b->safe_insets.top, b->safe_insets.right,
+                     b->safe_insets.bottom, p.dpad.x, p.dpad.y, p.dpad.r, p.a.x, p.a.y,
+                     p.b.x, p.b.y, p.a.r, p.select.x + p.select.w * 0.5f,
+                     p.select.y + p.select.h * 0.5f, p.start.x + p.start.w * 0.5f,
+                     p.start.y + p.start.h * 0.5f);
+        std::fflush(stderr);
+    }
     if (touch_input_enabled(b)) publish_touch_presentation(b);
 #if defined(__ANDROID__)
     const SDL_Rect destination{layout.x, layout.y, layout.width, layout.height};
