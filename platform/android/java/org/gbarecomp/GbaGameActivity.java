@@ -5,6 +5,7 @@ import android.content.res.AssetManager;
 import android.graphics.Insets;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.DisplayMetrics;
 import android.view.DisplayCutout;
 import android.view.View;
 import android.view.WindowInsets;
@@ -94,6 +95,9 @@ public class GbaGameActivity extends SDLActivity {
         }
         try {
             GbaNative.setSafeInsets(left, top, right, bottom);
+            DisplayMetrics metrics = new DisplayMetrics();
+            getWindowManager().getDefaultDisplay().getRealMetrics(metrics);
+            GbaNative.setDisplayDpi(metrics.xdpi, metrics.ydpi);
             nativeReady = true;
         } catch (UnsatisfiedLinkError notLoadedYet) {
             // libmain loads during super.onCreate; later passes succeed.

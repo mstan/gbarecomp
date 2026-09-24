@@ -65,6 +65,16 @@ Java_org_gbarecomp_GbaNative_setSafeInsets(JNIEnv*, jclass, jint left, jint top,
     g_android_insets[3].store(bottom > 0 ? bottom : 0);
     g_android_insets_known.store(true);
 }
+// Physical panel density (DisplayMetrics.xdpi/ydpi from getRealMetrics) for
+// millimetre-sized touch targets; SDL reports the user-scalable logical dpi.
+namespace {
+std::atomic<float> g_android_dpi[2] = {0.0f, 0.0f};
+}  // namespace
+extern "C" JNIEXPORT void JNICALL
+Java_org_gbarecomp_GbaNative_setDisplayDpi(JNIEnv*, jclass, jfloat xdpi, jfloat ydpi) {
+    g_android_dpi[0].store(xdpi);
+    g_android_dpi[1].store(ydpi);
+}
 #endif
 
 #if defined(_WIN32)
@@ -374,6 +384,8 @@ struct Backend {
     std::uint32_t touch_claims = 0;
     bool touch_emulation = false;   // desktop mouse -> touch
     float px_per_mm = 96.0f / 25.4f;
+    float logical_px_per_mm = 96.0f / 25.4f;  // SDL-reported (logical) density
+    bool dpi_from_env = false;                 // GBARECOMP_TOUCH_DPI override
     TouchFrameInfo::Insets safe_insets{};
     std::uint32_t margin_left = 0, margin_right = 0;
     std::uint32_t margin_top = 0, margin_bottom = 0;
@@ -608,19 +620,38 @@ PadLayout compute_pad_layout(const Backend* b) {
     const float mm = std::max(1.0f, b->px_per_mm);
     const auto& in = b->safe_insets;
     const PresentationLayout& g = b->last_layout;
-    const float margin = 4.0f * mm;
-    const float arm = 11.5f * mm;
-    const float button_r = 6.5f * mm;
-    const float shoulder_w = 18.0f * mm, shoulder_h = 7.5f * mm;
-    const float pill_w = 11.0f * mm, pill_h = 4.5f * mm;
-    p.dpad_thick = 9.0f * mm;
-    p.dpad.r = arm;
-    p.a.r = p.b.r = button_r;
 
     const float left = static_cast<float>(in.left);
     const float right = dw - static_cast<float>(in.right);
     const float top = static_cast<float>(in.top);
     const float bottom = dh - static_cast<float>(in.bottom);
+
+    // Design sizes (mm). The D-pad and the A/B cluster must never touch: when
+    // the safe width cannot hold both plus a clear gap, every control scales
+    // down together (never below 65%) instead of overlapping.
+    constexpr float kMargin = 4.0f, kArm = 11.5f, kThick = 9.0f, kButtonR = 6.5f;
+    constexpr float kGap = 5.0f;                    // D-pad <-> B clearance
+    constexpr float kClusterDx = 2.3f;              // A-B centre distance / r
+    const float cluster_w = (kClusterDx + 2.0f) * kButtonR;
+    const float need_w = kMargin + 2.0f * kArm + kGap + cluster_w + kMargin;
+    const float avail_w = (right - left) / mm;
+    // Portrait: when there is a usable band under the game image (native 3:2
+    // scenes), shrink to fit it rather than overlaying the image.
+    constexpr float kBandNeed = 50.0f;              // mm at full size
+    const float band_avail = (bottom - static_cast<float>(g.y + g.height)) / mm;
+    float s = 1.0f;
+    if (dw < dh) {
+        s = std::clamp(avail_w / need_w, 0.65f, 1.0f);
+        if (band_avail >= kBandNeed * 0.65f) s = std::min(s, band_avail / kBandNeed);
+    }
+    const float margin = kMargin * s * mm;
+    const float arm = kArm * s * mm;
+    const float button_r = kButtonR * s * mm;
+    const float shoulder_w = 18.0f * s * mm, shoulder_h = 7.5f * s * mm;
+    const float pill_w = 11.0f * s * mm, pill_h = 4.5f * s * mm;
+    p.dpad_thick = kThick * s * mm;
+    p.dpad.r = arm;
+    p.a.r = p.b.r = button_r;
 
     if (dw >= dh) {
         // Landscape: prefer the pillar-box rails beside the game image.
@@ -628,40 +659,43 @@ PadLayout compute_pad_layout(const Backend* b) {
         const float rail_r = std::max(0.0f, right - static_cast<float>(g.x + g.width));
         const float lx = rail_l >= 2.0f * (arm + margin)
             ? left + rail_l * 0.5f : left + margin + arm;
-        const float rx = rail_r >= 2.0f * (button_r * 2.2f + margin)
-            ? right - rail_r * 0.5f : right - margin - button_r * 2.2f;
+        const float half_cluster = cluster_w * 0.5f * mm;
+        const float rx = rail_r >= 2.0f * (half_cluster + margin)
+            ? right - rail_r * 0.5f : right - margin - half_cluster;
         const float cy = bottom - margin - arm - 6.0f * mm;
         p.dpad.x = lx;
         p.dpad.y = cy;
-        p.a.x = rx + button_r * 1.15f;
-        p.a.y = cy - button_r * 0.8f;
-        p.b.x = rx - button_r * 1.15f;
-        p.b.y = cy + button_r * 0.8f;
+        p.a.x = rx + button_r * kClusterDx * 0.5f;
+        p.a.y = cy - button_r * 0.9f;
+        p.b.x = rx - button_r * kClusterDx * 0.5f;
+        p.b.y = cy + button_r * 0.9f;
         p.l = {left + margin, top + margin, shoulder_w, shoulder_h};
         p.r = {right - margin - shoulder_w, top + margin, shoulder_w, shoulder_h};
         const float mid = (left + right) * 0.5f;
-        p.select = {mid - pill_w - 2.0f * mm, bottom - margin - pill_h, pill_w, pill_h};
-        p.start = {mid + 2.0f * mm, bottom - margin - pill_h, pill_w, pill_h};
+        p.select = {mid - pill_w - 3.0f * mm, bottom - margin - pill_h, pill_w, pill_h};
+        p.start = {mid + 3.0f * mm, bottom - margin - pill_h, pill_w, pill_h};
     } else {
-        // Portrait: use the band under the game image when it is tall enough.
+        // Portrait: a control band at the bottom (the space under the game
+        // image when it is tall enough, else overlaid on the image).
+        const float band_need = kBandNeed * s * mm;
         float band_top = static_cast<float>(g.y + g.height);
-        if (bottom - band_top < 42.0f * mm) band_top = bottom - 46.0f * mm;
-        const float band_h = bottom - band_top;
-        const float cy = band_top + band_h * 0.52f;
-        p.dpad.x = left + margin + arm + 3.0f * mm;
+        if (bottom - band_top < band_need) band_top = bottom - band_need;
+        const float pills_y = bottom - margin * 0.75f - pill_h;
+        // Shoulders on the band's top edge, D-pad and A/B between them and
+        // the Start/Select pills.
+        p.l = {left + margin, band_top, shoulder_w, shoulder_h};
+        p.r = {right - margin - shoulder_w, band_top, shoulder_w, shoulder_h};
+        const float cy = (band_top + shoulder_h + pills_y) * 0.5f;
+        p.dpad.x = left + margin + arm;
         p.dpad.y = cy;
-        const float rx = right - margin - button_r * 2.4f;
-        p.a.x = rx + button_r * 1.15f;
-        p.a.y = cy - button_r * 0.8f;
-        p.b.x = rx - button_r * 1.15f;
-        p.b.y = cy + button_r * 0.8f;
-        p.l = {left + margin, band_top + 1.5f * mm, shoulder_w, shoulder_h};
-        p.r = {right - margin - shoulder_w, band_top + 1.5f * mm, shoulder_w, shoulder_h};
+        p.a.x = right - margin - button_r;
+        p.a.y = cy - button_r * 0.9f;
+        p.b.x = p.a.x - button_r * kClusterDx;
+        p.b.y = cy + button_r * 0.9f;
         const float mid = (left + right) * 0.5f;
-        p.select = {mid - pill_w - 2.0f * mm, bottom - margin - pill_h, pill_w, pill_h};
-        p.start = {mid + 2.0f * mm, bottom - margin - pill_h, pill_w, pill_h};
-    }
-    const float tw = 8.0f * mm, th = tw * 0.72f, edge = 3.0f * mm;
+        p.select = {mid - pill_w - 3.0f * mm, pills_y, pill_w, pill_h};
+        p.start = {mid + 3.0f * mm, pills_y, pill_w, pill_h};
+    }    const float tw = 8.0f * mm, th = tw * 0.72f, edge = 3.0f * mm;
     float cx = right - edge - tw * 0.5f;
     float cy = bottom - edge - th * 0.5f;
     if (b->toggle_pos_saved) {
@@ -971,33 +1005,54 @@ void draw_touch_pad(Backend* b, HostOverlay& ov) {
     const PadLayout p = compute_pad_layout(b);
     const uint16_t held = active_touch_buttons(b);
     const auto S = OverlaySpace::Drawable;
-    auto tone = [held](int bit, OverlayColor idle) {
-        return (held & (1u << bit)) ? OverlayColor{255, 214, 74, 220} : idle;
-    };
-    const OverlayColor neutral{224, 234, 246, 84};
-    // D-pad cross.
-    const float arm = p.dpad.r, t = p.dpad_thick;
-    const OverlayColor dpad_col =
-        (held & 0xF0u) ? OverlayColor{255, 214, 74, 150} : neutral;
-    ov.fill_rect(p.dpad.x - t * 0.5f, p.dpad.y - arm, t, arm * 2.0f, t * 0.2f, dpad_col, S);
-    ov.fill_rect(p.dpad.x - arm, p.dpad.y - t * 0.5f, arm * 2.0f, t, t * 0.2f, dpad_col, S);
-    ov.fill_circle(p.a.x, p.a.y, p.a.r, tone(0, {255, 92, 98, 148}), S);
-    ov.fill_circle(p.b.x, p.b.y, p.b.r, tone(1, {83, 196, 255, 148}), S);
     const float mm = b->px_per_mm;
-    if (ov.text_supported()) {
-        ov.text(p.a.x, p.a.y - 2.2f * mm, 4.4f * mm, {255, 255, 255, 200}, "A",
-                OverlayAlign::Center, S);
-        ov.text(p.b.x, p.b.y - 2.2f * mm, 4.4f * mm, {255, 255, 255, 200}, "B",
-                OverlayAlign::Center, S);
-    }
-    ov.fill_rect(p.l.x, p.l.y, p.l.w, p.l.h, 2.0f * mm, tone(9, {224, 234, 246, 70}), S);
-    ov.fill_rect(p.r.x, p.r.y, p.r.w, p.r.h, 2.0f * mm, tone(8, {224, 234, 246, 70}), S);
-    ov.fill_rect(p.select.x, p.select.y, p.select.w, p.select.h, p.select.h * 0.5f,
-                 tone(2, {224, 234, 246, 70}), S);
-    ov.fill_rect(p.start.x, p.start.y, p.start.w, p.start.h, p.start.h * 0.5f,
-                 tone(3, {224, 234, 246, 70}), S);
-}
+    // Every control: a dark translucent backing (legible over any scenery),
+    // a bright outline, and a solid gold fill while pressed.
+    const OverlayColor backing{12, 16, 28, 150};
+    const OverlayColor outline{240, 244, 252, 210};
+    const OverlayColor pressed{255, 214, 74, 230};
+    const OverlayColor label{255, 255, 255, 235};
+    const float line = std::max(2.0f, 0.45f * mm);
+    auto on = [held](int bit) { return (held & (1u << bit)) != 0; };
 
+    // D-pad cross: backing + outline per arm, pressed arm highlighted.
+    const float arm = p.dpad.r, t = p.dpad_thick, cx = p.dpad.x, cy = p.dpad.y;
+    ov.fill_rect(cx - t * 0.5f, cy - arm, t, arm * 2.0f, t * 0.2f, backing, S);
+    ov.fill_rect(cx - arm, cy - t * 0.5f, arm * 2.0f, t, t * 0.2f, backing, S);
+    const float half = arm - t * 0.5f;
+    struct Arm { int bit; float x, y, w, h; };
+    const Arm arms[4] = {{6, cx - t * 0.5f, cy - arm, t, half},        // Up
+                         {7, cx - t * 0.5f, cy + t * 0.5f, t, half},   // Down
+                         {5, cx - arm, cy - t * 0.5f, half, t},        // Left
+                         {4, cx + t * 0.5f, cy - t * 0.5f, half, t}};  // Right
+    for (const Arm& a : arms)
+        if (on(a.bit)) ov.fill_rect(a.x, a.y, a.w, a.h, t * 0.2f, pressed, S);
+    ov.stroke_rect(cx - t * 0.5f, cy - arm, t, arm * 2.0f, t * 0.2f, line, outline, S);
+    ov.stroke_rect(cx - arm, cy - t * 0.5f, arm * 2.0f, t, t * 0.2f, line, outline, S);
+
+    auto round_button = [&](const PadCircle& c, int bit, OverlayColor tint, const char* text) {
+        ov.fill_circle(c.x, c.y, c.r, on(bit) ? pressed : tint, S);
+        ov.stroke_circle(c.x, c.y, c.r, line, outline, S);
+        if (ov.text_supported())
+            ov.text(c.x, c.y - 2.6f * mm, 5.2f * mm, label, text, OverlayAlign::Center, S);
+    };
+    round_button(p.a, 0, {196, 52, 64, 190}, "A");
+    round_button(p.b, 1, {40, 120, 200, 190}, "B");
+
+    auto pill = [&](const PadRect& r, int bit, const char* text, float radius) {
+        ov.fill_rect(r.x, r.y, r.w, r.h, radius, on(bit) ? pressed : backing, S);
+        ov.stroke_rect(r.x, r.y, r.w, r.h, radius, line, outline, S);
+        if (ov.text_supported()) {
+            const float size = std::min(r.h * 0.62f, 3.4f * mm);
+            ov.text(r.x + r.w * 0.5f, r.y + (r.h - size) * 0.5f, size, label, text,
+                    OverlayAlign::Center, S);
+        }
+    };
+    pill(p.l, 9, "L", 2.0f * mm);
+    pill(p.r, 8, "R", 2.0f * mm);
+    pill(p.select, 2, "SELECT", p.select.h * 0.5f);
+    pill(p.start, 3, "START", p.start.h * 0.5f);
+}
 void draw_pad_toggle(Backend* b, HostOverlay& ov) {
     if (!pad_toggle_available(b)) return;
     const PadLayout p = compute_pad_layout(b);
@@ -1684,9 +1739,13 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
             ddpi < 40.0f) {
             ddpi = 96.0f;
         }
+        b->logical_px_per_mm = ddpi / 25.4f;
         if (const char* env = std::getenv("GBARECOMP_TOUCH_DPI")) {
             const float forced = static_cast<float>(std::atof(env));
-            if (forced >= 40.0f) ddpi = forced;
+            if (forced >= 40.0f) {
+                ddpi = forced;
+                b->dpi_from_env = true;
+            }
         }
         b->px_per_mm = ddpi / 25.4f;
     }
@@ -2135,6 +2194,24 @@ void HostWindow::present(const uint8_t* rgb888) {
     if (!b->insets_from_env && g_android_insets_known.load()) {
         b->safe_insets = {g_android_insets[0].load(), g_android_insets[1].load(),
                           g_android_insets[2].load(), g_android_insets[3].load()};
+    }
+    if (!b->dpi_from_env) {
+        const float xdpi = g_android_dpi[0].load(), ydpi = g_android_dpi[1].load();
+        const float physical = (xdpi + ydpi) * 0.5f / 25.4f;
+        // Accept a sane panel density that agrees with the logical one to
+        // within 2x (a broken report must not shrink or balloon the UI).
+        if (xdpi > 0.0f && ydpi > 0.0f && physical >= 4.0f && physical <= 60.0f &&
+            physical >= b->logical_px_per_mm * 0.5f && physical <= b->logical_px_per_mm * 2.0f &&
+            std::fabs(physical - b->px_per_mm) > 0.05f) {
+            b->px_per_mm = physical;
+            std::fprintf(stderr,
+                         "host_window: physical density xdpi=%.1f ydpi=%.1f px_per_mm=%.2f "
+                         "(logical %.2f)\n", static_cast<double>(xdpi),
+                         static_cast<double>(ydpi), static_cast<double>(physical),
+                         static_cast<double>(b->logical_px_per_mm));
+            std::fflush(stderr);
+            b->last_drawable_w = -1;  // re-log presentation + pad geometry
+        }
     }
 #endif
     int drawable_w = 0;
