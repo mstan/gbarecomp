@@ -353,6 +353,9 @@ struct Backend {
         bool active = false;
         bool pad = false;
         bool toggle = false;
+        bool toggle_dragging = false;  // the toggle is being repositioned
+        float start_x = 0.0f, start_y = 0.0f;
+        float grab_dx = 0.0f, grab_dy = 0.0f;  // toggle centre - finger
         bool routed = false;
     };
     std::array<TouchPoint, 10> touches{};
@@ -361,6 +364,10 @@ struct Backend {
     bool touch_controls = false;
     bool pad_visible = false;
     bool pad_choice_saved = false;
+    // Player-placed pad toggle: centre as a fraction of the safe area, so it
+    // keeps its place across rotation. Unset = bottom-right corner.
+    bool toggle_pos_saved = false;
+    float toggle_fx = 0.0f, toggle_fy = 0.0f;
     std::string touch_config_dir;
     // A game input policy consumes touches (RunOptions::input_frame).
     bool touch_policy = false;
@@ -654,8 +661,16 @@ PadLayout compute_pad_layout(const Backend* b) {
         p.select = {mid - pill_w - 2.0f * mm, bottom - margin - pill_h, pill_w, pill_h};
         p.start = {mid + 2.0f * mm, bottom - margin - pill_h, pill_w, pill_h};
     }
-    const float t = 8.0f * mm;
-    p.toggle = {(left + right) * 0.5f - t * 0.5f, top + 1.5f * mm, t, t * 0.72f};
+    const float tw = 8.0f * mm, th = tw * 0.72f, edge = 3.0f * mm;
+    float cx = right - edge - tw * 0.5f;
+    float cy = bottom - edge - th * 0.5f;
+    if (b->toggle_pos_saved) {
+        cx = left + b->toggle_fx * (right - left);
+        cy = top + b->toggle_fy * (bottom - top);
+    }
+    cx = std::clamp(cx, left + tw * 0.5f, std::max(left + tw * 0.5f, right - tw * 0.5f));
+    cy = std::clamp(cy, top + th * 0.5f, std::max(top + th * 0.5f, bottom - th * 0.5f));
+    p.toggle = {cx - tw * 0.5f, cy - th * 0.5f, tw, th};
     return p;
 }
 
@@ -988,7 +1003,10 @@ void draw_pad_toggle(Backend* b, HostOverlay& ov) {
     const PadLayout p = compute_pad_layout(b);
     const auto S = OverlaySpace::Drawable;
     const PadRect& r = p.toggle;
-    const OverlayColor bg = b->pad_visible ? OverlayColor{255, 214, 74, 120}
+    bool held = false;
+    for (const auto& t : b->touches) held = held || (t.active && t.toggle);
+    const OverlayColor bg = held ? OverlayColor{80, 210, 255, 170}
+                          : b->pad_visible ? OverlayColor{255, 214, 74, 120}
                                            : OverlayColor{20, 26, 38, 110};
     ov.fill_rect(r.x, r.y, r.w, r.h, r.h * 0.3f, bg, S);
     ov.stroke_rect(r.x, r.y, r.w, r.h, r.h * 0.3f, 1.5f, {230, 238, 248, 150}, S);
@@ -1048,7 +1066,12 @@ void save_touch_config(const Backend* b) {
     for (const auto& l : kept) f << l << "\n";
     if (!kept.empty()) f << "\n";
     f << "[Touch]\n";
-    f << "pad_visible = " << (b->pad_visible ? 1 : 0) << "\n";
+    if (b->pad_choice_saved)
+        f << "pad_visible = " << (b->pad_visible ? 1 : 0) << "\n";
+    if (b->toggle_pos_saved) {
+        f << "toggle_x = " << b->toggle_fx << "\n";
+        f << "toggle_y = " << b->toggle_fy << "\n";
+    }
 }
 
 // GBA KEYINPUT bit order: 0=A 1=B 2=Sel 3=Sta 4=Right 5=Left 6=Up 7=Down 8=R 9=L.
@@ -2454,6 +2477,12 @@ void HostWindow::set_touch_config_dir(const char* dir) {
         if (SDL_strcasecmp(key, "pad_visible") == 0) {
             b->pad_visible = b->touch_controls && std::atoi(val) != 0;
             b->pad_choice_saved = true;
+        } else if (SDL_strcasecmp(key, "toggle_x") == 0) {
+            b->toggle_fx = std::clamp(static_cast<float>(std::atof(val)), 0.0f, 1.0f);
+            b->toggle_pos_saved = true;
+        } else if (SDL_strcasecmp(key, "toggle_y") == 0) {
+            b->toggle_fy = std::clamp(static_cast<float>(std::atof(val)), 0.0f, 1.0f);
+            b->toggle_pos_saved = true;
         }
     });
 }
@@ -2683,17 +2712,21 @@ HostWindow::Events HostWindow::pump() {
             const PadLayout pad = compute_pad_layout(b);
             if (e.type == SDL_FINGERDOWN) {
                 if (auto* touch = allocate_touch(b, e.tfinger.fingerId)) {
-                    touch->x = px;
-                    touch->y = py;
+                    touch->x = touch->start_x = px;
+                    touch->y = touch->start_y = py;
                     const uint16_t buttons =
                         (b->pad_visible && b->touch_controls)
                             ? pad_buttons_at(pad, px, py, b->px_per_mm) : 0;
-                    if (buttons) {
+                    // The toggle wins over the pad so it can never be buried
+                    // under a button (it is small and player-movable).
+                    if (pad_toggle_available(b) &&
+                        pad.toggle.contains(px, py, 2.0f * b->px_per_mm)) {
+                        touch->toggle = true;
+                        touch->grab_dx = pad.toggle.x + pad.toggle.w * 0.5f - px;
+                        touch->grab_dy = pad.toggle.y + pad.toggle.h * 0.5f - py;
+                    } else if (buttons) {
                         touch->pad = true;
                         touch->buttons = buttons;
-                    } else if (pad_toggle_available(b) &&
-                               pad.toggle.contains(px, py, 2.0f * b->px_per_mm)) {
-                        touch->toggle = true;
                     } else {
                         touch->routed = true;
                         route(TouchPhase::Down);
@@ -2707,9 +2740,27 @@ HostWindow::Events HostWindow::pump() {
                     touch->buttons = pad_buttons_at(pad, px, py, b->px_per_mm);
                 } else if (touch->routed) {
                     route(e.type == SDL_FINGERUP ? TouchPhase::Up : TouchPhase::Move);
-                } else if (touch->toggle && e.type == SDL_FINGERUP &&
-                           pad.toggle.contains(px, py, 2.0f * b->px_per_mm)) {
-                    set_touch_pad_visible(!b->pad_visible);
+                } else if (touch->toggle) {
+                    // Drag beyond the tap slop repositions the toggle; a tap
+                    // shows/hides the pad.
+                    const float slop = 2.5f * b->px_per_mm;
+                    const float mx = px - touch->start_x, my = py - touch->start_y;
+                    if (!touch->toggle_dragging && mx * mx + my * my > slop * slop)
+                        touch->toggle_dragging = true;
+                    if (touch->toggle_dragging) {
+                        const auto& in = b->safe_insets;
+                        const float l = static_cast<float>(in.left);
+                        const float t = static_cast<float>(in.top);
+                        const float w = std::max(1.0f, b->last_drawable_w - l - in.right);
+                        const float h = std::max(1.0f, b->last_drawable_h - t - in.bottom);
+                        b->toggle_fx = std::clamp((px + touch->grab_dx - l) / w, 0.0f, 1.0f);
+                        b->toggle_fy = std::clamp((py + touch->grab_dy - t) / h, 0.0f, 1.0f);
+                        b->toggle_pos_saved = true;
+                        if (e.type == SDL_FINGERUP) save_touch_config(b);
+                    } else if (e.type == SDL_FINGERUP &&
+                               pad.toggle.contains(px, py, 2.0f * b->px_per_mm)) {
+                        set_touch_pad_visible(!b->pad_visible);
+                    }
                 }
                 if (e.type == SDL_FINGERUP) *touch = {};
             }
