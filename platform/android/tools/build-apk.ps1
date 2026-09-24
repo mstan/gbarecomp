@@ -35,6 +35,8 @@
 
 .PARAMETER PrivateBios
     Path to a verified BIOS dump to embed for a private build -> -PprivateBios=.
+    Private builds are SHA-1 gated (ROM and BIOS) and written as
+    <variant>-<version>-<type>-PRIVATE-rom-included.apk; never publish them.
 
 .EXAMPLE
     .\build-apk.ps1 -GameAndroidDir F:\Projects\gbarecomp\EmeraldRecomp-android-touch\android `

@@ -183,6 +183,11 @@ tasks.register("stageGbarecompPayload", Sync) {
         doFirst {
             if (!biosFile.isFile() || biosFile.length() != 16384)
                 throw new GradleException("Private BIOS must be the 16 KiB gba_bios.bin dump")
+            def want = (g.biosSha1 ?: "300c20df6731a33952ded8c436f7f186d25d3492").toString().toLowerCase()
+            def sha = java.security.MessageDigest.getInstance("SHA-1")
+                .digest(biosFile.bytes).encodeHex().toString()
+            if (sha != want)
+                throw new GradleException("Private BIOS SHA-1 ${sha} is not the expected ${want}")
         }
     }
     into(stagedPayload)
@@ -210,3 +215,16 @@ tasks.register("verifyNoPrivateAssets") {
     }
 }
 tasks.named("preBuild").configure { dependsOn("verifyNoPrivateAssets") }
+
+// An APK carrying a ROM/BIOS is never named like a distributable one: it is
+// written as <variant>-<version>-<buildType>-PRIVATE-rom-included.apk (public
+// builds keep AGP's app-<buildType>.apk), so it cannot be attached to a
+// release by mistake.
+if (privateRomPath != null || privateBiosPath != null) {
+    android.applicationVariants.configureEach { variant ->
+        variant.outputs.configureEach { output ->
+            output.outputFileName =
+                "${g.variant}-${g.versionName}-${variant.buildType.name}-PRIVATE-rom-included.apk"
+        }
+    }
+}
