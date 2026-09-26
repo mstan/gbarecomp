@@ -14,9 +14,12 @@
 // host_window_web.cpp without SDL: present() publishes RGB888 into a shared
 // triple buffer consumed by page-owned WebGL (packaging/web/host_web.js),
 // pump() reads an input snapshot plus a command ring, and audio goes to an
-// AudioWorklet ring. Capabilities the browser lacks (gyro, solar keys without
-// bindings, exclusive fullscreen, runtime UI overlay) are reported absent,
-// never simulated. See docs/WEB_WASM_CANVAS_IMPLEMENTATION_PLAN.md.
+// AudioWorklet ring. Touch, haptics, host overlays and the mobile lifecycle map
+// onto browser equivalents (pointer events -> TouchHub, navigator.vibrate, a
+// 2D-canvas display list, page visibility). Capabilities the browser lacks
+// (gyro, solar keys without bindings, exclusive fullscreen, runtime UI overlay,
+// overlay text) are reported absent, never simulated. See
+// packaging/web/README.md.
 
 #pragma once
 
