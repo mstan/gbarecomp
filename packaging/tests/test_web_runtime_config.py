@@ -15,8 +15,28 @@ config = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(config)
 
 
+# Resolve once and always invoke this exact file: on Windows a bare 'bash' in
+# CreateProcess searches System32 (WSL) before PATH, unlike shutil.which.
+BASH = shutil.which('bash')
+
+
+def bash_path(path):
+    """Spell a host path the way the bash on PATH understands it.
+
+    On Windows that bash is MSYS2/Git/Cygwin (wants /f/...) or WSL (wants
+    /mnt/f/...); a native backslash path loses its separators in either."""
+    if os.name != 'nt':
+        return str(path)
+    for tool in ('cygpath -u', 'wslpath -a'):
+        result = subprocess.run([BASH, '-c', tool + ' "$1"', 'bash', str(path)],
+                                capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    return Path(path).as_posix()
+
+
 class RuntimeConfigTest(unittest.TestCase):
-    @unittest.skipUnless(shutil.which('bash'), 'web build requires bash')
+    @unittest.skipUnless(BASH, 'web build requires bash')
     def test_build_script_selects_default_explicit_and_no_config(self):
         with tempfile.TemporaryDirectory(prefix='web config ') as directory:
             root = Path(directory)
@@ -28,19 +48,19 @@ class RuntimeConfigTest(unittest.TestCase):
             explicit = root / 'another config.toml'
             explicit.write_text('[save]\nsize = 8192\n')
             output = root / 'web/runtime.toml'
-            env = dict(os.environ, GBARECOMP_WEB_BUILD_DIR=str(root / 'core-build'),
-                       GBARECOMP_WEB_GAME_BUILD_DIR=str(root / 'game-build'),
-                       GBARECOMP_WEB_OUT_DIR=str(output.parent))
+            env = dict(os.environ, GBARECOMP_WEB_BUILD_DIR=bash_path(root / 'core-build'),
+                       GBARECOMP_WEB_GAME_BUILD_DIR=bash_path(root / 'game-build'),
+                       GBARECOMP_WEB_OUT_DIR=bash_path(output.parent))
             def run(extra):
-                result = subprocess.run(['bash', str(ROOT / 'packaging/web/build_web.sh'),
-                                         str(project), str(bios)] + extra,
+                result = subprocess.run([BASH, bash_path(ROOT / 'packaging/web/build_web.sh'),
+                                         bash_path(project), bash_path(bios)] + extra,
                                         env=env, capture_output=True, text=True)
                 # Intentionally stop before SDK/build: BIOS sources are absent.
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('missing generated BIOS', result.stderr)
                 return output.read_text()
             self.assertIn('size = 512', run([]))
-            self.assertIn('size = 8192', run(['', '', str(explicit)]))
+            self.assertIn('size = 8192', run(['', '', bash_path(explicit)]))
             default.unlink()
             self.assertEqual(config.export_config(None), run([]))
 
