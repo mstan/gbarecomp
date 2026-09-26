@@ -816,7 +816,9 @@ constexpr uint32_t kBiosRegionEnd = 0x00004000u;
 
 }  // namespace
 
-extern "C" uint32_t g_runtime_tail_arg = 0u;
+extern "C" {
+GBARECOMP_TAIL_ARG_TLS uint32_t g_runtime_tail_arg = 0u;
+}
 
 namespace {
 

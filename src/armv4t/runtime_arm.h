@@ -179,8 +179,15 @@ void runtime_dispatch_miss(uint32_t target_pc);
 // reject at compile time. musttail needs identical signatures, so the
 // dispatch-shaped transfers hand their argument over in g_runtime_tail_arg to
 // void(void) entry points. Set immediately before the tail call and read
-// first thing by the callee; nothing may run between.
-extern uint32_t g_runtime_tail_arg;
+// first thing by the callee; nothing may run between. Thread-local so a
+// second thread entering the runtime (TCP server, worker) can never observe
+// or clobber the guest thread's hand-off.
+#if defined(__cplusplus)
+#  define GBARECOMP_TAIL_ARG_TLS thread_local
+#else
+#  define GBARECOMP_TAIL_ARG_TLS _Thread_local
+#endif
+extern GBARECOMP_TAIL_ARG_TLS uint32_t g_runtime_tail_arg;
 void runtime_dispatch_tail(void);                // runtime_dispatch(g_runtime_tail_arg)
 void runtime_dispatch_with_exchange_tail(void);  // runtime_dispatch_with_exchange(g_runtime_tail_arg)
 void runtime_swi_tail(void);                     // runtime_swi(g_runtime_tail_arg)
