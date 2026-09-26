@@ -36,7 +36,7 @@ if(Python3_Interpreter_FOUND)
             ${PROJECT_SOURCE_DIR}/tests/link/loopback.py $<TARGET_FILE:multiplayer_netplay_peer> ${use_rollback})
         set_tests_properties(multiplayer_${mode}_loopback PROPERTIES TIMEOUT 120)
     endforeach()
-    foreach(scenario loss mismatch)
+    foreach(scenario loss mismatch outage startup_loss)
         add_test(NAME multiplayer_${scenario}_loopback COMMAND ${Python3_EXECUTABLE}
             ${PROJECT_SOURCE_DIR}/tests/link/loopback.py $<TARGET_FILE:multiplayer_netplay_peer> 1 ${scenario})
         set_tests_properties(multiplayer_${scenario}_loopback PROPERTIES TIMEOUT 120)

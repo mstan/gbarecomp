@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <string_view>
 #include <cstdlib>
+#include <iomanip>
+#include <sstream>
 #ifdef GBA_LINK_PROBE_SETUP
 void gba_link_probe_setup(gbarecomp::GbaInstance&);
 #endif
@@ -32,7 +34,11 @@ int main(int argc, char** argv) {
     if (argc != 5 && argc != 7) {
         std::fprintf(stderr, "usage: gba_link_probe ROM BIOS FRAMES SAVE_TYPE [SAVE0 SAVE1]\n"
             "SAVE_TYPE: flash1m, flash512, sram, eeprom8k, eeprom512, none\n"
-            "GBA_LINK_PROBE_SLICES=1 enables experimental native batching.\n");
+            "GBA_LINK_PROBE_SLICES=1 enables experimental native batching.\n"
+            "GBA_LINK_PROBE_INPUTS: rows of relative frame, buttons0, buttons1.\n"
+            "GBA_LINK_PROBE_STATE_IN / STATE_OUT: paired session snapshots.\n"
+            "GBA_LINK_PROBE_CAPTURE_PREFIX: write each console's final PPM.\n"
+            "GBA_LINK_PROBE_REPLAY=1: verify five additional frames after restore.\n");
         return 2;
     }
     std::unique_ptr<gbarecomp::GbaMultiplayerSession> session;
@@ -83,10 +89,33 @@ int main(int argc, char** argv) {
             }
         }
         // Exercise snapshot qualification before executing a single instruction.
-        const auto cold=session->save_state();
+        auto cold=session->save_state();
+        if (const auto* path=std::getenv("GBA_LINK_PROBE_STATE_IN")) cold=read_file(path,8*1024*1024);
         if (!session->load_state(cold,&error)) throw std::runtime_error(error);
-        const std::array<std::uint16_t,2> buttons{};
+        struct Input { unsigned frame; std::array<std::uint16_t,2> buttons; };
+        std::vector<Input> script;
+        if (const auto* path=std::getenv("GBA_LINK_PROBE_INPUTS")) {
+            std::ifstream input(path);
+            if (!input) throw std::runtime_error("cannot read input script");
+            std::string line;
+            while (std::getline(input,line)) {
+                std::istringstream row(line);
+                row>>std::ws;
+                if (row.eof()) continue;
+                unsigned frame,a,b;
+                if (!(row>>std::setbase(0)>>frame>>a>>b) || !(row>>std::ws).eof())
+                    throw std::runtime_error("malformed input script row");
+                if (frame>=frames || a>0x3ff || b>0x3ff || (!script.empty() && frame<=script.back().frame))
+                    throw std::runtime_error("invalid input script row");
+                script.push_back({frame,{static_cast<std::uint16_t>(a),static_cast<std::uint16_t>(b)}});
+            }
+            if (!input.eof()) throw std::runtime_error("cannot read input script");
+        }
+        std::array<std::uint16_t,2> buttons{};
+        std::size_t input_index=0;
         for (unsigned frame=0; frame<frames; ++frame) {
+            if (input_index<script.size() && script[input_index].frame==frame)
+                buttons=script[input_index++].buttons;
             session->run_frame(buttons);
             session->discard_audio_output();
             if (frame%10==0 || frame+1==frames) {
@@ -105,6 +134,19 @@ int main(int argc, char** argv) {
             for (unsigned i=0;i<5;++i) { session->run_frame(buttons); session->discard_audio_output(); }
             if (session->save_state()!=after) throw std::runtime_error("commercial probe replay diverged");
             std::printf("five-frame whole-session replay matched (%zu snapshot bytes)\n",after.size());
+        }
+        if (const auto* path=std::getenv("GBA_LINK_PROBE_STATE_OUT")) {
+            const auto state=session->save_state();
+            std::ofstream out(path,std::ios::binary);
+            if (!out.write(reinterpret_cast<const char*>(state.data()),state.size()))
+                throw std::runtime_error("cannot write probe snapshot");
+        }
+        if (const auto* prefix=std::getenv("GBA_LINK_PROBE_CAPTURE_PREFIX")) for (unsigned port=0;port<2;++port) {
+            const auto path=std::string(prefix)+std::to_string(port)+".ppm";
+            std::ofstream out(path,std::ios::binary);
+            out<<"P6\n240 160\n255\n";
+            if (!out.write(reinterpret_cast<const char*>(session->machine(port).ppu.latched_framebuffer()),
+                gba::GbaPpu::kFramebufferBytes)) throw std::runtime_error("cannot write probe frame");
         }
         return 0;
     } catch (const std::exception& e) {

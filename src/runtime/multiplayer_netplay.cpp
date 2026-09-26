@@ -7,6 +7,16 @@
 #include <limits>
 
 namespace gbarecomp {
+GbaConnectionStatus gba_netplay_connection_status(const RNetSession* session) {
+    constexpr std::uint32_t grace=60000, show_after=2000;
+    if (!session) return {GbaConnectionPhase::Connecting,grace};
+    if (rnet_session_peer_disconnected(session,0)) return {GbaConnectionPhase::PeerLeft,0};
+    if (!rnet_session_is_running(session)) return {GbaConnectionPhase::Connecting,grace};
+    RNetSessionStats stats{}; rnet_session_get_stats(session,&stats);
+    if (stats.last_peer_rx_age_ms>=grace) return {GbaConnectionPhase::TimedOut,0};
+    return {stats.last_peer_rx_age_ms>=show_after ? GbaConnectionPhase::Reconnecting : GbaConnectionPhase::Connected,
+        grace-static_cast<std::uint32_t>(stats.last_peer_rx_age_ms)};
+}
 namespace {
 GbaNetplayHost& host(void* p) { return *static_cast<GbaNetplayHost*>(p); }
 void sanitize(RNetRbFrame& row) {

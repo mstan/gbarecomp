@@ -5,6 +5,15 @@
 #include <functional>
 
 namespace gbarecomp {
+enum class GbaConnectionPhase { Connecting, Connected, Reconnecting, TimedOut, PeerLeft };
+struct GbaConnectionStatus {
+    GbaConnectionPhase phase;
+    std::uint32_t grace_remaining_ms;
+};
+// Host policy only: it never advances guest clocks or changes cable state.
+// Pump the existing transport/rollback driver during Reconnecting; do not tear
+// down an intact session merely because its latest input has not arrived.
+GbaConnectionStatus gba_netplay_connection_status(const RNetSession*);
 struct GbaConfirmedCheckpoint {
     // All inputs before next_tick are confirmed. The snapshot is the entire
     // paired machine/cable system, not independent cartridge files.

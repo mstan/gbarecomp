@@ -40,16 +40,29 @@ not yet a playable Emerald/Mario Kart netplay release.
   The application must hash-verify its images and supply a build/BIOS/mod identity.
 * The host retains a recovery snapshot independently of rollback-ring eviction,
   and can restore it before restarting a match. It does not write save files.
+* Connection status allows a 60-second silence grace and reports reconnecting
+  after two seconds. Keep pumping the existing transport/driver during that
+  grace. A six-second complete UDP outage is exercised by a regression test;
+  this is recovery on the existing connection, not fresh-endpoint reconnect.
 
 Validation includes hardware register tests; a real original ARM ROM compiled
 and recompiled through `gba_recompile`; mid-transfer snapshot/replay identity;
 nested IRQ continuations; malformed-state rejection; input-corrected serial
 exchanges and SRAM; and two independent native processes using real UDP with
 40 ms receive latency and 10 ms jitter. An additional rollback run injects 2%
-packet loss, and a negative startup test refuses different runtime identities.
+packet loss, a complete six-second outage, and a negative startup test that
+refuses different runtime identities. The startup-loss scenario drops upload
+ACKs and ready replies to verify handshake retransmission. BOOT's owner receipt
+can acknowledge an upload whose last ACK was lost; the final application
+barrier uses a zero-size SAVE coordination probe because this library pin
+retains SAVE replies for retransmission but clears BOOT replies immediately.
 Delay-sync and forced rollback compare
 the confirmed state-hash timelines. The transport fixture is a small native ABI
 program, not a commercial-game qualification.
+The harness now injects latency/loss in an external UDP relay with a bounded
+queue that fails on overflow. The shared internal 256-packet simulator can
+overflow during large paired-state transfers and deliver packets without the
+requested latency; such a run cannot qualify latency tolerance.
 
 ## Reference provenance
 
@@ -230,6 +243,14 @@ scheduler still needs substantial performance qualification.
 With a loaded Emerald save, five additional frames restore and replay to identical
 whole-session bytes. Windows and Linux also produce identical canonical hashes
 for all eight original-ROM serial scenarios.
+
+Mario Kart's native Multi-Pak route now connects both machines, selects separate
+Toad/Yoshi characters and enters Mushroom Cup with independent race controls.
+The reproducible 4,845-frame cold-boot route and its limitations are documented
+in `tests/link/scenarios/README.md`. It exposed an unseeded serial callback at
+0802DB5C (descriptor pointer at 080DE1B4), now added to the game's configuration
+on `feature/link-serial-coverage`. Five-frame replay during the linked race
+matches whole-session bytes. Race completion and rematch remain unqualified.
 
 Do not enable product netplay or claim the complete plan is finished until
 these gates are satisfied. Track task status in Beads, not by checking boxes

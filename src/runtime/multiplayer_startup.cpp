@@ -69,6 +69,12 @@ GbaNetplayStartup::Status GbaNetplayStartup::poll(std::uint64_t now) {
         if (!rnet_session_is_running(network_)) return Status::Waiting;
         rnet_u8 op=0,slot=0; const void* data=nullptr; std::size_t size=0;
         const bool ready=rnet_session_state_take_ready(network_,&op,&slot,&data,&size)!=0;
+        // BOOT can overtake the upload's final ACK (or replace it if lost).
+        // Its owner receipt proves the host consumed this exact upload. The
+        // transport has already replaced the sending transfer with BOOT, so
+        // do not finish/clear it as though it were still MEMCARD.
+        if (phase_==Phase::Upload && sending_ && ready && op==RNET_STATE_OP_BOOT && slot==0)
+            phase_=Phase::ReceiveBoot;
         switch (phase_) {
         case Phase::Upload:
             if (!sending_) {
@@ -114,7 +120,7 @@ GbaNetplayStartup::Status GbaNetplayStartup::poll(std::uint64_t now) {
             break;
         case Phase::SendReady:
             if (!sending_) {
-                if (rnet_session_state_probe(network_,RNET_STATE_OP_BOOT,0,0,simulation_.state_hash())==0) sending_=true;
+                if (rnet_session_state_probe(network_,RNET_STATE_OP_SAVE,0,0,simulation_.state_hash())==0) sending_=true;
             } else {
                 int match=0;
                 if (rnet_session_state_probe_take_reply(network_,&match)) {
@@ -126,11 +132,12 @@ GbaNetplayStartup::Status GbaNetplayStartup::poll(std::uint64_t now) {
         case Phase::ReceiveReady: {
             rnet_u32 bytes=0,hash=0;
             if (rnet_session_state_probe_pending(network_,&op,&slot,&bytes,&hash)) {
-                const bool match=op==RNET_STATE_OP_BOOT && slot==0 && bytes==0 && hash==simulation_.state_hash();
+                const bool match=op==RNET_STATE_OP_SAVE && slot==0 && bytes==0 && hash==simulation_.state_hash();
                 if (rnet_session_state_probe_reply(network_,match)!=0) throw std::runtime_error("boot ready reply failed");
                 if (!match) throw std::runtime_error("boot state digest mismatch");
-                // Keep the guest probe response alive for retransmission;
-                // shared session code retires it when the host moves on.
+                // SAVE's zero-size coordination probe retains its response
+                // for automatic retransmission. The pinned BOOT probe clears
+                // it immediately, stranding the host if this reply is lost.
                 finish();
             }
             break;

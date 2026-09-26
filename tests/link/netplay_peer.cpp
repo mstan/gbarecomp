@@ -24,7 +24,9 @@ int main(int argc,char** argv) {
     auto* session=rnet_session_create(&config,&transport_host);
     char bind[64],peer[64];
     std::snprintf(bind,sizeof(bind),"127.0.0.1:%u",port+slot);
-    std::snprintf(peer,sizeof(peer),"127.0.0.1:%u",port+1-slot);
+    const auto* routed=std::getenv("GBA_TEST_PEER_PORT");
+    const unsigned peer_port=routed ? std::strtoul(routed,nullptr,10) : port+1-slot;
+    std::snprintf(peer,sizeof(peer),"127.0.0.1:%u",peer_port);
     if (!session || rnet_session_start_lan(session,bind,peer)) return 3;
     auto start=rbe_mono_ms();
     while (!rnet_session_is_running(session) && rbe_mono_ms()-start<5000) {
@@ -62,9 +64,20 @@ int main(int argc,char** argv) {
         if (!rnet_rb_driver_start(driver,&cfg,&callbacks)) return 5;
     }
     std::map<std::uint32_t,std::uint32_t> timeline;
-    start=rbe_mono_ms(); bool drained=false;
+    start=rbe_mono_ms(); bool drained=false, saw_reconnecting=false, recovered=false;
     while (rbe_mono_ms()-start<55000) {
         rnet_session_pump(session);
+        const auto connection=gbarecomp::gba_netplay_connection_status(session);
+        if (connection.phase==gbarecomp::GbaConnectionPhase::Reconnecting) saw_reconnecting=true;
+        if (saw_reconnecting && connection.phase==gbarecomp::GbaConnectionPhase::Connected) recovered=true;
+        if (connection.phase==gbarecomp::GbaConnectionPhase::TimedOut ||
+            connection.phase==gbarecomp::GbaConnectionPhase::PeerLeft) {
+            // A draining peer may already have sent its final marker then
+            // left. Keep polling so the driver consumes that queued marker.
+            if (!driver || rnet_rb_driver_quiesce_state(driver)==RNET_RB_QUIESCE_NONE) {
+                std::fprintf(stderr,"connection recovery grace expired or peer left\n"); return 13;
+            }
+        }
         if (host.return_to_lobby_requested()) { std::fprintf(stderr,"host error: %s\n",host.error().c_str()); return 6; }
         // A simulated tick can still be speculative. Drain only after the
         // agreed watermark covers the target; quiesce deliberately stops new
@@ -86,6 +99,9 @@ int main(int argc,char** argv) {
         if (ran) {
             timeline[host.next_tick()-1]=simulation->state_hash();
             simulation->discard_audio_output();
+            if (slot==0 && host.next_tick()==20) if (const auto* trigger=std::getenv("GBA_TEST_OUTAGE_TRIGGER")) {
+                if (FILE* signal=std::fopen(trigger,"w")) { std::fputs("ready\n",signal); std::fclose(signal); }
+            }
         }
         if (driver) {
             // At this shared-driver pin zero is also the uninitialized
@@ -98,9 +114,10 @@ int main(int argc,char** argv) {
     if (!drained) { std::fprintf(stderr,"loopback did not drain: tick %u %s\n",host.next_tick(),host.error().c_str()); return 8; }
     FILE* report=std::fopen(argv[5],"w"); if (!report) return 9;
     const auto confirmed=driver ? rnet_rb_driver_confirmed_through(driver) : host.next_tick()-1;
-    std::fprintf(report,"confirmed %u replay %llu episodes %u desyncs %u\n",confirmed,
+    std::fprintf(report,"confirmed %u replay %llu episodes %u desyncs %u reconnecting %u recovered %u\n",confirmed,
         static_cast<unsigned long long>(driver ? rnet_rb_driver_resim_ticks(driver) : 0),
-        driver ? rnet_rb_driver_episode_count(driver) : 0,driver ? rnet_rb_driver_desync_count(driver) : 0);
+        driver ? rnet_rb_driver_episode_count(driver) : 0,driver ? rnet_rb_driver_desync_count(driver) : 0,
+        saw_reconnecting,recovered);
     for (auto [tick,hash]:timeline) if (tick<=confirmed) std::fprintf(report,"%u %08x\n",tick,hash);
     std::fclose(report);
     // Keep pumping long enough for the other peer's final confirmation/QUIESCE.
