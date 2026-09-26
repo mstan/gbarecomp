@@ -690,7 +690,7 @@ enable_testing()
 # Node is optional; native engine builds do not require browser tooling.
 find_program(GBARECOMP_NODE_EXECUTABLE NAMES node nodejs)
 if(GBARECOMP_NODE_EXECUTABLE)
-    foreach(web_test IN ITEMS host_unit host_lifecycle host_input audio_worklet
+    foreach(web_test IN ITEMS host_unit host_lifecycle host_input host_touch audio_worklet
                               save_mount save_bootstrap)
         add_test(NAME web_${web_test}_tests
             COMMAND ${GBARECOMP_NODE_EXECUTABLE}

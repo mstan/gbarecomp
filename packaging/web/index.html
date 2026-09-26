@@ -2,19 +2,40 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>gbarecomp web</title>
 <style>
   :root { color-scheme: dark; }
   body { margin: 0; padding: 16px; background: #111; color: #ddd;
          font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
-  #bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  #bar, #savebar, #assetbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
   button { font: inherit; padding: 6px 14px; }
   #status { color: #9cf; }
-  #savebar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
-  #surface { width: 100%; max-width: 720px; height: min(65vh, 600px); resize: both; overflow: hidden; }
+  #surface { position: relative; width: 100%; max-width: 720px; height: min(65vh, 600px); resize: both; overflow: hidden; }
   #surface:fullscreen { max-width: none !important; height: 100%; }
   canvas { display: block; background: #000; width: 100%; height: 100%; image-rendering: pixelated; }
+  canvas.gbr-overlay { position: absolute; inset: 0; background: transparent; pointer-events: none; image-rendering: auto; }
+  /* Touch gamepad (host_web.js buildPad). Presses feed the GBA keys; every
+     other touch on the game goes to the game's touch policy. */
+  .gbr-pad { position: absolute; inset: 0; pointer-events: none; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .gbr-pad > * { position: absolute; pointer-events: auto; touch-action: none; box-sizing: border-box;
+                 background: rgba(20, 26, 38, 0.45); border: 2px solid rgba(230, 238, 248, 0.55); color: rgba(230, 238, 248, 0.85);
+                 display: flex; align-items: center; justify-content: center; font-weight: bold; }
+  .gbr-pad > .held { background: rgba(80, 210, 255, 0.55); }
+  .gbr-pad-dpad { left: max(12px, env(safe-area-inset-left)); bottom: max(12px, env(safe-area-inset-bottom)); width: 34vmin; height: 34vmin; max-width: 180px; max-height: 180px; border-radius: 50%; }
+  .gbr-pad-dpad::before { content: ''; position: absolute; inset: 36% 8%; border-radius: 4px; background: rgba(230, 238, 248, 0.35); }
+  .gbr-pad-dpad::after { content: ''; position: absolute; inset: 8% 36%; border-radius: 4px; background: rgba(230, 238, 248, 0.35); }
+  .gbr-pad-a, .gbr-pad-b { width: 15vmin; height: 15vmin; max-width: 80px; max-height: 80px; border-radius: 50%; }
+  .gbr-pad-a { right: max(12px, env(safe-area-inset-right)); bottom: calc(max(12px, env(safe-area-inset-bottom)) + min(10vmin, 55px)); }
+  .gbr-pad-b { right: calc(max(12px, env(safe-area-inset-right)) + min(18vmin, 95px)); bottom: max(12px, env(safe-area-inset-bottom)); }
+  .gbr-pad-l, .gbr-pad-r { top: max(12px, env(safe-area-inset-top)); width: 20vmin; max-width: 110px; height: 9vmin; max-height: 48px; border-radius: 10px; }
+  .gbr-pad-l { left: max(12px, env(safe-area-inset-left)); }
+  .gbr-pad-r { right: max(12px, env(safe-area-inset-right)); }
+  .gbr-pad-select, .gbr-pad-start { bottom: max(8px, env(safe-area-inset-bottom)); width: 16vmin; max-width: 86px; height: 7vmin; max-height: 36px; border-radius: 18px; font-size: 11px; }
+  .gbr-pad-select { left: calc(50% - min(17vmin, 92px)); }
+  .gbr-pad-start { left: calc(50% + min(1vmin, 6px)); }
+  .gbr-pad-toggle { position: absolute; top: max(8px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); padding: 4px 12px; opacity: 0.8; }
+  [hidden] { display: none !important; }
   #log { white-space: pre-wrap; word-break: break-all; max-height: 45vh; overflow: auto;
          background: #000; padding: 8px; margin-top: 12px; }
   .err { color: #f88; }
@@ -45,7 +66,7 @@
 </div>
 <div id="surface"><canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="0" aria-label="Game screen"></canvas></div>
 <p id="metrics"></p><div id="downloads"></div>
-<p class="help">Saves stay in this browser (IndexedDB for this site, on this device) and are never uploaded. Private windows, clearing site data or a different domain lose them: export a copy to keep one. X/Z = A/B, arrows = D-pad, C/V = L/R, Enter = Start, right Shift = Select; Shift+P pauses. F1–F9 loads; Shift+F1–F9 saves. Click the game to activate keyboard/gamepad. Sensors and the native overlay are unavailable.</p>
+<p class="help">Saves stay in this browser (IndexedDB for this site, on this device) and are never uploaded. Private windows, clearing site data or a different domain lose them: export a copy to keep one. X/Z = A/B, arrows = D-pad, C/V = L/R, Enter = Start, right Shift = Select; Shift+P pauses; Alt+Enter toggles fullscreen. F1–F9 loads; Shift+F1–F9 saves (a Shift key bound to a game button, like Select, never turns a load into a save). Click the game to activate keyboard/gamepad. On touch screens a gamepad is drawn over the game. Sensors, overlay text and the native in-game menu are unavailable.</p>
 <div class="help">
   Query params: <code>?args=--frames%20600%20--no-window</code> replaces the extra runtime
   arguments; <code>&amp;env=KEY=VALUE,KEY2=VALUE2</code> sets environment variables;
