@@ -1,7 +1,12 @@
-"""Browser save persistence acceptance (docs/WEB_SAVE_PERSISTENCE_PLAN.md §9).
+"""Browser save persistence acceptance (packaging/web/README.md, "Browser
+acceptance tests").
 
-Serve a bundle that has rom_sha1.js with packaging/web/serve.py, then:
+Build a developer bundle that carries its own ROM/BIOS (the test boots through
+?args=/?env=, which only --dev bundles honour on localhost), serve it with
+packaging/web/serve.py, then:
 
+  bash packaging/web/build_web.sh --dev --embed-private-rom <project> <bios-gen> <rom> <bios> [config]
+  python3 packaging/web/serve.py <project>/web-PRIVATE 18083
   python3 tests/web/test_save.py --url http://127.0.0.1:18083/ /tmp/gbr-save
 
 One Chrome profile is reused for the whole run, so IndexedDB survives page
@@ -87,10 +92,11 @@ def check(name,fn):
 b=Browser(out,a.gpu,autoplay=True,profile_dir=profile)
 try:
  open_page(b)
- sha=b.eval('(globalThis.GBARECOMP_ROM_SHA1||"").toLowerCase()');assert re.fullmatch('[0-9a-f]{40}',sha),'bundle has no rom_sha1.js'
+ sha=b.eval('(globalThis.GBARECOMP_ROM_SHA1||"").toLowerCase()');assert re.fullmatch('[0-9a-f]{40}',sha),'bundle has no build_info.js'
+ assert b.eval('!!(GBARECOMP_BUILD.dev&&GBARECOMP_BUILD.embedded)'),'needs a bundle built with --dev --embed-private-rom'
  d=f'/saves/{sha}'
  # Chip size from the cartridge's library signature, matching the runtime defaults.
- kind=b.eval('(async()=>{const r=new Uint8Array(await (await fetch("game.gba")).arrayBuffer());const m=new TextDecoder("latin1").decode(r).match(/(EEPROM|SRAM_F|SRAM|FLASH1M|FLASH512|FLASH)_V\\d\\d\\d/);return m?m[1]:null;})()')
+ kind=b.eval('(async()=>{const r=new Uint8Array(await (await fetch(GBARECOMP_BUILD.embedded.rom)).arrayBuffer());const m=new TextDecoder("latin1").decode(r).match(/(EEPROM|SRAM_F|SRAM|FLASH1M|FLASH512|FLASH)_V\\d\\d\\d/);return m?m[1]:null;})()')
  size={'EEPROM':8192,'SRAM':32768,'SRAM_F':32768,'FLASH':65536,'FLASH512':65536,'FLASH1M':131072}.get(kind)
  assert size,f'no battery save chip detected ({kind})'
  payload=bytes((i*131+7)&255 for i in range(size));digest=hashlib.sha256(payload).hexdigest()
@@ -110,7 +116,10 @@ try:
  check('T7a',t7_unavailable)
 
  def t1_import():
+  warned=len(b.dialogs)
   first=boot(b,'t1-import',queue_import=js_payload)
+  # T7a left a battery save that existed only in memory: leaving must warn.
+  assert any(d.get('type')=='beforeunload' for d in b.dialogs[warned:]),'no beforeunload warning for memory-only saves'
   assert loaded in first
   assert b.eval('GbrSaves.snapshot().lastPersisted')>0 and b.eval('GbrSaves.snapshot().state')=='idle'
   # Page reload: only IndexedDB can bring the file back.
