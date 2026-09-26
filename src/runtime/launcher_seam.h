@@ -37,6 +37,7 @@
 #if defined(RECOMP_LAUNCHER)
 
 #include "runtime.h"
+#include "multiplayer_launch.h"
 #include "../gba/gba_bios.h"
 #if defined(GBARECOMP_ENABLE_MODS)
 #include "mod_runtime.h"
@@ -44,6 +45,9 @@
 
 #include "recomp_launcher.h"    // recomp-ui C ABI (include dir via recomp_ui.cmake)
 #include "launcher_profile.h"   // launcher_profile_apply("gba", ...)
+#if defined(RECOMP_UI_HAS_NETPLAY_HOST)
+#include "launcher_netplay_seam.h"
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -650,7 +654,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     }
     if (const char* env = std::getenv("GBARECOMP_NO_LAUNCHER"))
         if (env[0] && env[0] != '0') skip_once = true;
-    if (headless || (skip_once && !force_launcher)) return 0;
+    if (headless || (skip_once && !force_launcher) || (opts.netplay && opts.netplay->enabled)) return 0;
 
     const std::string dir = exe_dir(args);
     const auto state_path = [&](const char* filename,
@@ -882,6 +886,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     if (!save_display.empty()) gi.sram_path = save_display.c_str();
 
     std::string title = std::string(gi.name) + " \xE2\x80\x94 Launcher";
+#if defined(RECOMP_UI_HAS_NETPLAY_HOST)
+    try { gbarecomp_seam::configure_netplay(gi,opts,dir); }
+    catch (const std::exception& e) { std::fprintf(stderr,"netplay: %s\n",e.what()); return 1; }
+#endif
 
     char picked_rom[1024] = {0};
     int rc = recomp_launcher_run_window(title.c_str(), &ls, &gi, dir.c_str(),
@@ -889,6 +897,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
                                         picked_rom, sizeof(picked_rom));
     if (rc == 1) return 1;    // user closed the launcher: quit without booting
     if (rc != 0) return 0;    // unavailable: fall back to the asset picker
+#if defined(RECOMP_UI_HAS_NETPLAY_HOST)
+    try { gbarecomp_seam::accept_netplay(ls.netplay_launch,opts); }
+    catch (const std::exception& e) { std::fprintf(stderr,"netplay: %s\n",e.what()); return 1; }
+#endif
 
     // ---- persist + translate the committed settings -------------------------
     cfg.scale         = ls.window_scale > 0 ? ls.window_scale : cfg.scale;

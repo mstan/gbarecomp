@@ -27,13 +27,13 @@ std::uint32_t ready_hash(const std::vector<std::uint8_t>& bytes) {
 }
 }
 GbaNetplayCheckpointAgreement::GbaNetplayCheckpointAgreement(const GbaNetplayHost& host,
-    RNetSession* network,unsigned seat,std::string identity,std::uint32_t through,std::uint32_t tick)
+    RNetSession* network,unsigned seat,std::string identity,std::uint32_t through,std::uint32_t tick,bool wait)
     : host_(host),network_(network),seat_(seat),identity_(std::move(identity)),through_(through),
-      phase_(seat ? Phase::ReceiveProposal : Phase::SendProposal) {
+      proposed_tick_(tick),wait_for_confirmation_(wait),phase_(seat ? Phase::ReceiveProposal : Phase::SendProposal) {
     if (!network || seat>1 || rnet_session_local_slot(network)!=static_cast<int>(seat) ||
-        identity_.empty() || identity_.size()>1024)
+        identity_.empty() || identity_.size()>1024 || (wait && !tick))
         throw std::invalid_argument("invalid checkpoint agreement configuration");
-    if (!seat_) {
+    if (!seat_ && !wait) {
         if (!host_.copy_checkpoint(tick,through_,checkpoint_))
             throw std::invalid_argument("proposed checkpoint is unavailable or unconfirmed");
         proposal_=proposal(identity_,checkpoint_); ready_hash_=ready_hash(proposal_);
@@ -49,6 +49,14 @@ GbaNetplayCheckpointAgreement::Status GbaNetplayCheckpointAgreement::poll(std::u
         rnet_session_pump(network_);
         if (rnet_session_peer_disconnected(network_,0)) throw std::runtime_error("peer left before checkpoint agreement");
         if (!rnet_session_is_running(network_)) return Status::Waiting;
+        if (wait_for_confirmation_ && proposal_.empty()) {
+            if (host_.replaying() || through_==UINT32_MAX || through_==0 ||
+                through_<proposed_tick_-1 || host_.next_tick()<proposed_tick_)
+                return Status::Waiting;
+            if (!host_.copy_checkpoint(proposed_tick_,through_,checkpoint_))
+                throw std::runtime_error("checkpoint aged out before bilateral confirmation");
+            proposal_=proposal(identity_,checkpoint_); ready_hash_=ready_hash(proposal_);
+        }
         rnet_u8 op=0,slot=0; const void* data=nullptr; std::size_t size=0;
         const bool ready=rnet_session_state_take_ready(network_,&op,&slot,&data,&size)!=0;
         // The receipt may supersede the proposal sender before its last ACK
@@ -78,6 +86,8 @@ GbaNetplayCheckpointAgreement::Status GbaNetplayCheckpointAgreement::poll(std::u
                     throw std::runtime_error("unexpected checkpoint proposal");
                 const auto bytes=std::span(static_cast<const std::uint8_t*>(data),size);
                 const auto tick=boundary(bytes,identity_);
+                if (wait_for_confirmation_ && tick!=proposed_tick_)
+                    throw std::runtime_error("peer chose a different checkpoint boundary");
                 if (!host_.copy_checkpoint(tick,through_,checkpoint_))
                     throw std::runtime_error("peer checkpoint is unavailable or unconfirmed locally");
                 proposal_=proposal(identity_,checkpoint_);

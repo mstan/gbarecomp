@@ -3,6 +3,7 @@
 #include <recomp_net/rb_driver.h>
 #include <retcomm_rbengine/snap_ring.h>
 #include <functional>
+#include <optional>
 
 namespace gbarecomp {
 enum class GbaConnectionPhase { Connecting, Connected, Reconnecting, TimedOut, PeerLeft };
@@ -33,6 +34,7 @@ struct GbaNetplayOutput {
 class GbaNetplayHost {
 public:
     static constexpr std::uint32_t kSnapshotDepth = 120;
+    static constexpr std::uint16_t kCheckpointRequest = 0x400;
     explicit GbaNetplayHost(GbaMultiplayerSession&);
     ~GbaNetplayHost();
     GbaNetplayHost(const GbaNetplayHost&) = delete;
@@ -43,6 +45,9 @@ public:
     std::function<std::uint16_t(std::uint32_t)> sample_local;
     bool run_published_tick();
     bool try_delay_frame(RNetSession*);
+    // Session-control bit carried in input rows, removed before guest KEYINPUT.
+    // Only confirmed input history may initiate a paired save-and-leave.
+    std::optional<std::uint32_t> checkpoint_request(std::uint32_t confirmed_through) const;
     // Consume the newest forward frame once, selecting the machine through the
     // manifest's input-seat mapping. Replay, stalls and repeated calls expose
     // no output. An unconsumed frame is replaced by the next forward frame;
@@ -64,10 +69,13 @@ public:
     bool retain_confirmed(std::uint32_t confirmed_through);
     const GbaConfirmedCheckpoint& confirmed_checkpoint() const { return confirmed_; }
     // Freeze an exact boundary for peer agreement. Supply the driver's CURRENT
-    // confirmation watermark, not a cached high-water value. No active episode
-    // or published tick; caller pauses admission throughout the agreement.
+    // confirmation watermark, not a cached high-water value. No replay or
+    // published tick; live agreement must revalidate after draining.
     bool copy_checkpoint(std::uint32_t next_tick, std::uint32_t confirmed_through,
                          GbaConfirmedCheckpoint& out) const;
+    // Revalidate an already bilaterally accepted candidate after draining.
+    // This compares bytes only; it does not certify a new boundary.
+    bool checkpoint_unchanged(const GbaConfirmedCheckpoint&) const;
     // Only after the old driver/transport has stopped. A new match must agree
     // on this exact checkpoint and start its input timeline again at zero.
     bool restore_confirmed_for_restart();
@@ -83,6 +91,10 @@ private:
     std::string error_;
     GbaConfirmedCheckpoint confirmed_;
     std::vector<std::uint32_t> snapshot_ticks_;
+    std::uint32_t checkpoint_request_tick_=UINT32_MAX;
+    bool published_checkpoint_request_=false;
+    std::uint32_t with_control_digest(std::uint32_t) const;
+    bool copy_state_at(std::uint32_t,std::vector<std::uint8_t>&) const;
     int save_snapshot(std::uint32_t);
     void publish(std::uint32_t,const RNetRbFrame*,int,bool);
     void fail(const char*);

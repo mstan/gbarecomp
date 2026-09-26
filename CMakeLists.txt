@@ -515,11 +515,11 @@ function(target_link_gbarecomp_runtime_stack target_name)
     gbarecomp_compiler_uses_msvc_linker(_gbarecomp_msvc_linker)
     if(APPLE OR _gbarecomp_msvc_linker)
         target_link_libraries(${target_name} PRIVATE
-            gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
+            ${ARGN} gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
     else()
         target_link_libraries(${target_name} PRIVATE
             -Wl,--start-group
-            gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug
+            ${ARGN} gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug
             -Wl,--end-group)
     endif()
 endfunction()

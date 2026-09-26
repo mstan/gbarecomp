@@ -1,0 +1,52 @@
+# Exact source compatibility identity for opted-in game executables. Hash the
+# generated native bodies, game hooks, runtime/device code and network code;
+# never substitute a friendly version name or a dirty Git HEAD alone.
+function(gbarecomp_source_digest source output)
+    file(READ "${source}" contents)
+    string(REPLACE "\r\n" "\n" contents "${contents}")
+    string(SHA256 digest "${contents}")
+    set(${output} "${digest}" PARENT_SCOPE)
+endfunction()
+function(gbarecomp_target_netplay_identity target game_root generated_root)
+    set(engine_root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/..")
+    cmake_path(NORMAL_PATH engine_root)
+    set(identity "gba-source-identity/2\n")
+    foreach(group engine game generated network rollback)
+        if(group STREQUAL "engine")
+            set(root "${engine_root}/src")
+        elseif(group STREQUAL "game")
+            set(root "${game_root}/src")
+        elseif(group STREQUAL "generated")
+            set(root "${generated_root}")
+        elseif(group STREQUAL "network")
+            set(root "${engine_root}/external/recomp-net")
+        else()
+            set(root "${engine_root}/external/rbengine")
+        endif()
+        file(GLOB_RECURSE sources CONFIGURE_DEPENDS
+            "${root}/*.c" "${root}/*.cpp" "${root}/*.h" "${root}/*.hpp")
+        list(SORT sources)
+        foreach(source IN LISTS sources)
+            # Network checkouts may have local build outputs; only their
+            # published source/include trees participate.
+            file(RELATIVE_PATH relative "${root}" "${source}")
+            if((group STREQUAL "network" OR group STREQUAL "rollback") AND
+               NOT relative MATCHES "^(src|include)/")
+                continue()
+            endif()
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${source}")
+            # Git's Windows CRLF conversion is not a different simulation.
+            gbarecomp_source_digest("${source}" digest)
+            string(APPEND identity "${group}/${relative}=${digest}\n")
+        endforeach()
+    endforeach()
+    foreach(source "${engine_root}/CMakeLists.txt" "${game_root}/CMakeLists.txt")
+        gbarecomp_source_digest("${source}" digest)
+        string(APPEND identity "cmake=${digest}\n")
+    endforeach()
+    string(SHA256 digest "${identity}")
+    set(header "${CMAKE_CURRENT_BINARY_DIR}/${target}-netplay/gba_netplay_build_identity.h")
+    file(CONFIGURE OUTPUT "${header}" CONTENT
+        "#pragma once\n#define GBARECOMP_NETPLAY_BUILD_ID \"${digest}\"\n" @ONLY)
+    target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/${target}-netplay")
+endfunction()

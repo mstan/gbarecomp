@@ -14,6 +14,8 @@ struct GbaNetplayMatchOptions {
     std::int64_t rtc_seed_seconds = 0;
     int prediction = 6;
     bool rollback = true;
+    bool force_turn = false;
+    std::uint32_t planned_finish_tick=0;
     // The caller loaded an agreed paired archive; compare it byte-for-byte
     // instead of exchanging the individual cartridge saves at cold startup.
     bool restored_pair = false;
@@ -55,11 +57,15 @@ public:
     const std::string& error() const { return error_; }
     std::uint32_t next_tick() const { return host_.next_tick(); }
     std::uint64_t replay_ticks() const;
+    // Request save-and-leave through ordinary reliable/predicted input history.
+    // The request itself must confirm before either peer chooses the boundary.
+    void request_checkpoint();
+    bool checkpoint_pending() const { return checkpoint_requested_ || finish_tick_!=0; }
 
     // Both peers must agree this boundary through application session control
     // before calling. This is NOT a unilateral save/disconnect request. Keeps
-    // running until the target's inputs confirm, drains the driver, then
-    // independently agrees the exact whole-session snapshot with the peer.
+    // running until both peers independently agree the exact confirmed
+    // snapshot, then drains and verifies that rollback did not change it.
     void finish_at(std::uint32_t next_tick);
     const GbaConfirmedCheckpoint& checkpoint() const;
     bool store_checkpoint(const std::filesystem::path&, std::string* error) const;
@@ -80,5 +86,7 @@ private:
     int seat_ = 0, slots_ = 2, delay_ = 2, prediction_ = 6;
     std::uint32_t finish_tick_ = 0;
     std::uint64_t replay_ticks_ = 0;
+    bool checkpoint_requested_=false;
+    bool checkpoint_agreed_=false;
 };
 }

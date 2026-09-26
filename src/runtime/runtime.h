@@ -9,8 +9,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 namespace gbarecomp {
+struct GbaNetplayLaunch;
 
 struct TouchFrameInfo;   // touch_input.h
 class HostOverlay;       // host_overlay.h
@@ -41,6 +43,8 @@ struct ExtendedViewFrameInfo {
 // constants from GbaBios, empty ROM hash that forces the user to
 // provide --config or --rom-sha1).
 struct RunOptions {
+    // Optional adapter installed by games that link gbarecomp_netplay.
+    std::shared_ptr<GbaNetplayLaunch> netplay;
     const char*   builtin_game_name = nullptr;
     const char*   builtin_rom_sha1  = nullptr;
     std::uint32_t builtin_rom_crc32 = 0;

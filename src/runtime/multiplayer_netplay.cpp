@@ -1,4 +1,5 @@
 #include "multiplayer_netplay.h"
+#include "simulation_archive.h"
 #include <retcomm_rbengine/mono_ms.h>
 #include <cstdlib>
 #include <cstring>
@@ -18,9 +19,18 @@ GbaConnectionStatus gba_netplay_connection_status(const RNetSession* session) {
         grace-static_cast<std::uint32_t>(stats.last_peer_rx_age_ms)};
 }
 namespace {
+constexpr std::uint32_t kSnapshotHeader=0x314e4247;
+std::span<const std::uint8_t> snapshot_state(std::span<const std::uint8_t> data,
+        std::uint32_t tick,std::uint32_t& request) {
+    gba::SimulationArchive<true> archive(data);
+    archive.identity(kSnapshotHeader); archive.identity(tick); archive(request);
+    if (request!=UINT32_MAX && request>=tick)
+        throw std::invalid_argument("invalid checkpoint request in netplay snapshot");
+    return data.last(archive.remaining());
+}
 GbaNetplayHost& host(void* p) { return *static_cast<GbaNetplayHost*>(p); }
 void sanitize(RNetRbFrame& row) {
-    row.buttons &= 0x3ff;
+    row.buttons &= 0x7ff;
     row.stick_x = row.stick_y = 0;
     row.analog = 0;
 }
@@ -28,7 +38,7 @@ bool decode(const RNetInputSample& sample, RNetRbFrame& row) {
     if (!sample.valid) return false;
     // recomp-net seeds its delay prefix and empty seats with size-zero neutral.
     if (sample.size == 0) { row.buttons=0; sanitize(row); return true; }
-    if (sample.size != 2 || (sample.bytes[1] & 0xfc)) return false;
+    if (sample.size != 2 || (sample.bytes[1] & 0xf8)) return false;
     row.buttons = sample.bytes[0] | (sample.bytes[1] << 8);
     sanitize(row);
     return true;
@@ -70,7 +80,9 @@ bool GbaNetplayHost::retain_confirmed(std::uint32_t through) {
         std::size_t size=0;
         const auto* data=rbe_snap_ring_peek(snapshots_,best,&size);
         if (!data) throw std::logic_error("confirmed snapshot disappeared");
-        std::vector<std::uint8_t> state(data,data+size);
+        std::uint32_t request;
+        const auto bytes=snapshot_state({data,size},best,request);
+        std::vector<std::uint8_t> state(bytes.begin(),bytes.end());
         confirmed_={best,std::move(state)};
         return true;
     } catch (const std::exception& e) { fail(e.what()); return false; }
@@ -88,15 +100,27 @@ bool GbaNetplayHost::copy_checkpoint(std::uint32_t tick,std::uint32_t through,
     if (published_ || replaying_ || tick>next_tick_ ||
         (tick && (through==UINT32_MAX || tick-1>through))) return false;
     std::vector<std::uint8_t> state;
+    if (!copy_state_at(tick,state)) return false;
+    out={tick,std::move(state)};
+    return true;
+}
+bool GbaNetplayHost::checkpoint_unchanged(const GbaConfirmedCheckpoint& checkpoint) const {
+    std::vector<std::uint8_t> state;
+    return !published_ && !replaying_ && copy_state_at(checkpoint.next_tick,state) && state==checkpoint.state;
+}
+bool GbaNetplayHost::copy_state_at(std::uint32_t tick,std::vector<std::uint8_t>& state) const {
     if (tick==next_tick_) state=simulation_.save_state();
     else {
         std::size_t size=0;
         const auto* data=rbe_snap_ring_peek(snapshots_,tick,&size);
-        if (data) state.assign(data,data+size);
+        if (data) {
+            std::uint32_t request;
+            const auto bytes=snapshot_state({data,size},tick,request);
+            state.assign(bytes.begin(),bytes.end());
+        }
         else if (tick==confirmed_.next_tick && !confirmed_.state.empty()) state=confirmed_.state;
         else return false;
     }
-    out={tick,std::move(state)};
     return true;
 }
 void GbaNetplayHost::begin_match() {
@@ -104,6 +128,7 @@ void GbaNetplayHost::begin_match() {
     next_tick_=0; published_=replaying_=lobby_requested_=false;
     output_ready_=false; simulation_.discard_audio_output();
     error_.clear(); snapshot_ticks_.clear(); rbe_snap_ring_clear(snapshots_);
+    checkpoint_request_tick_=UINT32_MAX; published_checkpoint_request_=false;
     confirmed_={0,std::move(state)};
     std::fill(inputs_.begin(),inputs_.end(),0);
 }
@@ -117,7 +142,10 @@ int GbaNetplayHost::serialize(void* ctx,std::uint32_t tick,std::uint8_t** out,st
     auto& h = host(ctx);
     try {
         if (tick != h.next_tick_) throw std::logic_error("snapshot tick is not the simulation boundary");
+        gba::SimulationArchive<false> archive;
+        archive.identity(kSnapshotHeader); archive.identity(tick); archive(h.checkpoint_request_tick_);
         auto state = h.simulation_.save_state();
+        archive.blob(state,state.size()); state=archive.take();
         auto* data = static_cast<std::uint8_t*>(std::malloc(state.size()));
         if (!data) return 0;
         std::memcpy(data,state.data(),state.size()); *out = data; *size = state.size();
@@ -127,12 +155,18 @@ int GbaNetplayHost::serialize(void* ctx,std::uint32_t tick,std::uint8_t** out,st
 int GbaNetplayHost::deserialize(void* ctx,std::uint32_t tick,const std::uint8_t* data,std::size_t size) {
     auto& h = host(ctx);
     std::string error;
-    if (!h.simulation_.load_state({data,size},&error)) { h.fail(error.c_str()); return 0; }
+    std::uint32_t request;
+    try {
+        const auto state=snapshot_state({data,size},tick,request);
+        if (!h.simulation_.load_state(state,&error)) { h.fail(error.c_str()); return 0; }
+    } catch (const std::exception& e) { h.fail(e.what()); return 0; }
     // A driver's NACK may demote a former confirmation watermark. A replay
     // crossing the retained boundary invalidates that candidate; do not offer
     // stale save bytes for later agreement merely because its tick is large.
     if (tick<h.confirmed_.next_tick) h.confirmed_={};
     h.next_tick_ = tick; h.published_ = false;
+    h.checkpoint_request_tick_=request;
+    h.published_checkpoint_request_=false;
     h.output_ready_=false;
     h.simulation_.discard_audio_output();
     return 1;
@@ -140,9 +174,11 @@ int GbaNetplayHost::deserialize(void* ctx,std::uint32_t tick,const std::uint8_t*
 void GbaNetplayHost::publish(std::uint32_t tick,const RNetRbFrame* rows,int slots,bool replay) {
     if (tick != next_tick_ || slots != static_cast<int>(inputs_.size()) || !rows || published_ ||
         replay != replaying_) { fail("invalid netplay input publication boundary"); return; }
+    published_checkpoint_request_=false;
     for (int i = 0; i < slots; ++i) {
         if (!rows[i].is_valid) { fail("missing netplay input seat"); return; }
         inputs_[i] = rows[i].buttons & 0x3ff;
+        published_checkpoint_request_|=(rows[i].buttons&kCheckpointRequest)!=0;
     }
     published_ = true;
 }
@@ -151,6 +187,8 @@ bool GbaNetplayHost::run_published_tick() {
     try {
         output_ready_=false; simulation_.discard_audio_output();
         simulation_.run_frame(inputs_);
+        if (published_checkpoint_request_ && checkpoint_request_tick_==UINT32_MAX)
+            checkpoint_request_tick_=next_tick_;
         if (replaying_) simulation_.discard_audio_output();
         ++next_tick_; published_ = false;
         output_ready_=!replaying_;
@@ -191,13 +229,14 @@ RNetRbHost GbaNetplayHost::callbacks() {
     result.resim_begin = [](void* c) { auto& h=host(c); h.replaying_=true; h.output_ready_=false; h.simulation_.discard_audio_output(); };
     result.resim_end = [](void* c) { auto& h=host(c); h.simulation_.discard_audio_output(); h.replaying_=false; };
     result.digest_master = [](void* c) -> std::uint32_t {
-        try { return host(c).simulation_.state_hash(); }
+        try { return host(c).with_control_digest(host(c).simulation_.state_hash()); }
         catch (const std::exception& e) { host(c).fail(e.what()); return 0; }
     };
     result.digest_parts = [](void* c,RNetRbDigestParts* p) {
         *p = {};
-        try { auto& s=host(c).simulation_; p->master=s.state_hash(); auto parts=s.state_hash_parts();
-              for (unsigned i=0;i<3;++i) p->part[i]=parts[i]; }
+        try { auto& h=host(c); auto& s=h.simulation_; p->master=h.with_control_digest(s.state_hash()); auto parts=s.state_hash_parts();
+              for (unsigned i=0;i<3;++i) p->part[i]=parts[i];
+              p->part[2]=h.with_control_digest(p->part[2]); }
         catch (const std::exception& e) { host(c).fail(e.what()); }
     };
     result.decode_sample = [](void* c,int,const RNetInputSample* s,RNetRbFrame* r) {
@@ -213,7 +252,7 @@ RNetHostVTable GbaNetplayHost::delay_callbacks() {
     RNetHostVTable result{}; result.ctx=this;
     result.sample_local = [](rnet_u32 tick,RNetInputSample* s,void* c) {
         auto& h=host(c); *s={}; s->tick=tick; s->size=2; s->valid=1;
-        try { const auto buttons=h.sample_local ? h.sample_local(tick)&0x3ff : 0;
+        try { const auto buttons=h.sample_local ? h.sample_local(tick)&0x7ff : 0;
               s->bytes[0]=buttons&0xff; s->bytes[1]=buttons>>8; }
         catch (const std::exception& e) { h.fail(e.what()); }
     };
@@ -236,5 +275,19 @@ bool GbaNetplayHost::try_delay_frame(RNetSession* session) {
     if (!run_published_tick()) return false;
     rnet_session_advance(session);
     return true;
+}
+std::optional<std::uint32_t> GbaNetplayHost::checkpoint_request(std::uint32_t through) const {
+    if (through==UINT32_MAX || through>=next_tick_ || published_ || replaying_) return {};
+    if (checkpoint_request_tick_<=through) return checkpoint_request_tick_;
+    return {};
+}
+std::uint32_t GbaNetplayHost::with_control_digest(std::uint32_t digest) const {
+    // The game cannot observe session control, but prediction reconciliation
+    // must: matching guest bytes alone must not confirm a missing save request.
+    if (checkpoint_request_tick_==UINT32_MAX) return digest;
+    digest=(digest^0x434b5054u)*16777619u;
+    for (unsigned shift=0;shift<32;shift+=8)
+        digest=(digest^((checkpoint_request_tick_>>shift)&0xff))*16777619u;
+    return digest;
 }
 } // namespace gbarecomp

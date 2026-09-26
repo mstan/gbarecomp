@@ -20,6 +20,7 @@
 // step_once() becomes a real `runtime_dispatch` driver.
 
 #include "runtime.h"
+#include "multiplayer_launch.h"
 #include "view_config.h"
 
 #include "asset_picker.h"
@@ -72,6 +73,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <stdexcept>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -1334,7 +1336,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                      static_cast<double>(args.gyro_sensitivity *
                                          gyro_sensitivity_calibration));
     }
-    gba::g_ws_affine_filter_enabled = args.affine_filter ? 1 : 0;
+    const bool netplay = opts.netplay && opts.netplay->enabled;
+    gba::g_ws_affine_filter_enabled = !netplay && args.affine_filter ? 1 : 0;
 
 #if defined(GBARECOMP_ENABLE_MODS)
     bool mods_ready = false;
@@ -1345,7 +1348,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         // display setting must never bypass the mod feature's validation.
         args.resize_view = false;
     }
-    if (mods_requested) {
+    if (mods_requested && !netplay) {
         std::filesystem::path executable =
             argc > 0 && argv && argv[0] ? argv[0] : "";
         const std::filesystem::path executable_dir =
@@ -1421,7 +1424,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         args.rom = r.path;
     }
 
-    if (!args.steps_set && !args.frames_set && args.tcp_port <= 0) {
+    if (!netplay && !args.steps_set && !args.frames_set && args.tcp_port <= 0) {
         // Auto-window when nothing was specified and SDL is built in.
         if (!args.window_set && HostWindow::is_available()) {
             args.window = true;
@@ -1468,6 +1471,36 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         std::fprintf(stderr, "[gbarecomp:runtime] invalid ROM header: %s\n",
                      header.error.c_str());
         return 1;
+    }
+
+    if (netplay) {
+        try {
+            if (!opts.netplay->run || !opts.builtin_rom_sha1 ||
+                rom_sha1!=lower_ascii(opts.builtin_rom_sha1) ||
+                bios.sha1_hex()!=gba::GbaBios::kExpectedSha1)
+                throw std::runtime_error("netplay requires this build's original ROM and retail BIOS");
+            GbaNetplayBoot boot;
+            boot.bios=&bios; boot.rom=&rom; boot.expected_rom_sha1=opts.builtin_rom_sha1;
+            boot.rom_path=args.rom; boot.bios_path=args.bios;
+            boot.title=opts.builtin_game_name ? opts.builtin_game_name : "GBA";
+            boot.screen=args.screen; boot.scale=args.scale; boot.fullscreen=args.fullscreen;
+            boot.volume=args.volume; boot.linear_filter=args.linear_filter;
+            boot.sharp_filter=args.sharp_filter; boot.show_fps=opts.show_fps_by_default;
+            if (args.frames_set) {
+                if (args.frames<=0) throw std::invalid_argument("invalid netplay frame limit");
+                boot.finish_tick=static_cast<std::uint32_t>(args.frames);
+            }
+            if (!resolve_save_configuration(header.save_type,args.save_type,args.save_size,
+                    std::getenv("GBARECOMP_SAVE_TYPE"),&boot.save,&err))
+                throw std::runtime_error(err);
+            boot.local_save=args.save_path;
+            if (boot.local_save.empty()) { boot.local_save=args.rom; boot.local_save.replace_extension(".sav"); }
+            boot.config_directory=std::filesystem::absolute(argv[0]).parent_path();
+            return opts.netplay->run(*opts.netplay,boot);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr,"[gbarecomp:netplay] %s\n",e.what());
+            return 1;
+        }
     }
 
     if (!args.quiet) {

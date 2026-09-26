@@ -29,8 +29,9 @@ int run(GbaMultiplayerSession& simulation,int slot,unsigned port,unsigned nonce,
     std::string error;
     // A runner cannot publish a speculative pair, even before its first poll.
     if (match.store_checkpoint(output+".paired",&error) || std::filesystem::exists(output+".paired")) return 20;
-    const unsigned target=restored ? 30 : 80;
-    match.finish_at(target);
+    unsigned target=restored ? 30 : 80;
+    const bool requested=!restored && std::getenv("GBA_TEST_REQUEST_CHECKPOINT");
+    if (!requested) match.finish_at(target);
     std::map<std::uint32_t,std::uint32_t> timeline;
     bool saw_reconnecting=false,recovered=false;
     const auto start=rbe_mono_ms();
@@ -38,6 +39,7 @@ int run(GbaMultiplayerSession& simulation,int slot,unsigned port,unsigned nonce,
     while (match.phase()!=GbaNetplayMatch::Phase::CheckpointReady && rbe_mono_ms()-start<95000) {
         if (match.phase()==GbaNetplayMatch::Phase::Running) {
             const auto tick=match.next_tick();
+            if (requested && slot==1 && tick>=20) match.request_checkpoint();
             if (match.poll(false)!=GbaNetplayMatch::Step::Idle || match.next_tick()!=tick) return 23;
         }
         const auto step=match.poll();
@@ -63,6 +65,10 @@ int run(GbaMultiplayerSession& simulation,int slot,unsigned port,unsigned nonce,
             std::this_thread::sleep_for(std::chrono::milliseconds(step==GbaNetplayMatch::Step::Forward ? 16 : 1));
     }
     if (match.phase()!=GbaNetplayMatch::Phase::CheckpointReady) return 8;
+    if (requested) {
+        target=match.checkpoint().next_tick;
+        if (target<84 || target>128) return 24;
+    }
     if (match.checkpoint().next_tick!=target || match.take_output(frame)) return 22;
     if (!match.store_checkpoint(output+".paired",&error)) return 16;
     GbaConfirmedCheckpoint decoded;

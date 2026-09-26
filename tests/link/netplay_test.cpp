@@ -27,6 +27,29 @@ void admission_pacing() {
     CHECK(!pacer.ready(recovered+milliseconds(1)));
     CHECK(pacer.ready(recovered+P::frame_period));
 }
+void confirmed_session_control() {
+    using namespace gbarecomp;
+    auto simulation=create(true); GbaNetplayHost host(*simulation); auto api=host.callbacks();
+    RNetRbFrame rows[2]{}; for (auto& row:rows) row.is_valid=1;
+    CHECK(api.snap_save(api.ctx,0));
+    rows[1].buttons=GbaNetplayHost::kCheckpointRequest;
+    api.publish(api.ctx,0,rows,2,0); CHECK(host.run_published_tick());
+    const auto requested=simulation->save_state();
+    const auto requested_digest=api.digest_master(api.ctx);
+    CHECK(requested_digest!=simulation->state_hash());
+    CHECK(api.snap_save(api.ctx,1));
+    CHECK(!host.checkpoint_request(UINT32_MAX));
+    CHECK(host.checkpoint_request(0)==0);
+    api.resim_begin(api.ctx); CHECK(api.snap_load(api.ctx,0));
+    CHECK(!host.checkpoint_request(0));
+    rows[1].buttons=0;
+    api.publish(api.ctx,0,rows,2,1); CHECK(api.run_tick(api.ctx,0)); api.resim_end(api.ctx);
+    CHECK(!host.checkpoint_request(0));
+    CHECK(simulation->save_state()==requested); // control bit never reaches the guest
+    CHECK(api.digest_master(api.ctx)!=requested_digest);
+    CHECK(api.snap_load(api.ctx,1));
+    CHECK(host.checkpoint_request(0)==0 && api.digest_master(api.ctx)==requested_digest);
+}
 void restore_corrected_session() {
     using namespace gbarecomp;
     auto simulation=create(); GbaNetplayHost h(*simulation); const auto api=h.callbacks();
@@ -62,10 +85,11 @@ void delay_publication() {
     auto simulation=create(); gbarecomp::GbaNetplayHost h(*simulation); auto api=h.delay_callbacks();
     h.sample_local=[](std::uint32_t tick) { return std::uint16_t(tick|0xf400); };
     RNetInputSample sample{}; api.sample_local(3,&sample,api.ctx);
-    CHECK(sample.size==2 && sample.valid && sample.bytes[0]==3 && sample.bytes[1]==0);
+    CHECK(sample.size==2 && sample.valid && sample.bytes[0]==3 && sample.bytes[1]==4);
     RNetInputSample samples[]={sample,sample};
     api.publish(0,samples,2,api.ctx); CHECK(h.run_published_tick());
     CHECK(h.next_tick()==1);
+    CHECK(h.checkpoint_request(0)==0); // bit 10 is session control, higher bits are stripped
     CHECK(simulation->machine(0).bus.read32(0x02000000)==0x22251114);
     samples[0].size=1; api.publish(1,samples,2,api.ctx);
     CHECK(h.return_to_lobby_requested() && !h.run_published_tick());
@@ -177,6 +201,8 @@ void demoted_candidate() {
         api.publish(api.ctx,tick,rows,2,0); CHECK(host.run_published_tick());
     }
     CHECK(host.retain_confirmed(1));
+    const auto accepted=host.confirmed_checkpoint();
+    CHECK(host.checkpoint_unchanged(accepted));
     const auto stale=host.confirmed_checkpoint().state;
     CHECK(!stale.empty());
     api.resim_begin(api.ctx); CHECK(api.snap_load(api.ctx,1)); api.snap_drop_after(api.ctx,1);
@@ -185,7 +211,8 @@ void demoted_candidate() {
     api.publish(api.ctx,1,rows,2,1); CHECK(api.run_tick(api.ctx,1)); api.resim_end(api.ctx);
     CHECK(host.retain_confirmed(1));
     CHECK(host.confirmed_checkpoint().state!=stale);
+    CHECK(!host.checkpoint_unchanged(accepted));
     CHECK(host.confirmed_checkpoint().state==simulation->save_state());
 }
 }
-int main() { admission_pacing(); restore_corrected_session(); delay_publication(); local_output(); confirmed_checkpoint(); agreement_gate(); demoted_candidate(); std::puts("whole-session netplay host tests passed"); }
+int main() { admission_pacing(); confirmed_session_control(); restore_corrected_session(); delay_publication(); local_output(); confirmed_checkpoint(); agreement_gate(); demoted_candidate(); std::puts("whole-session netplay host tests passed"); }

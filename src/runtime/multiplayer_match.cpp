@@ -1,5 +1,6 @@
 #include "multiplayer_match.h"
 #include <retcomm_rbengine/mono_ms.h>
+#include <cstdio>
 #include <stdexcept>
 
 namespace gbarecomp {
@@ -15,11 +16,13 @@ GbaNetplayMatch::GbaNetplayMatch(GbaMultiplayerSession& simulation, GbaNetplayMa
         throw std::invalid_argument("an advanced session requires paired checkpoint startup");
     seat_=n.local_slot; delay_=n.input_delay; prediction_=options_.prediction;
     // Refuse mismatched admission policies before either peer can simulate.
-    const auto handshake_identity=options_.identity+"|gba-match/1:"+std::to_string(options_.build_fingerprint)+":"+
+    const auto handshake_identity=options_.identity+"|gba-match/2:"+std::to_string(options_.build_fingerprint)+":"+
         std::to_string(n.protocol_magic)+":"+std::to_string(delay_)+":"+
-        std::to_string(prediction_)+":"+std::to_string(options_.rollback);
+        std::to_string(prediction_)+":"+std::to_string(options_.rollback)+":"+std::to_string(options_.force_turn)+":"+
+        std::to_string(options_.planned_finish_tick);
     host_.sample_local=[this](std::uint32_t tick) {
-        return sample_local ? sample_local(tick) : std::uint16_t(0);
+        const auto buttons=sample_local ? sample_local(tick)&0x3ff : 0;
+        return static_cast<std::uint16_t>(buttons|(checkpoint_requested_ ? GbaNetplayHost::kCheckpointRequest : 0));
     };
     const auto callbacks=host_.delay_callbacks();
     network_.reset(rnet_session_create(&n,&callbacks)); session_=network_.get();
@@ -28,6 +31,7 @@ GbaNetplayMatch::GbaNetplayMatch(GbaMultiplayerSession& simulation, GbaNetplayMa
         agreement_=std::make_unique<GbaNetplayCheckpointAgreement>(host_,session_,seat_,handshake_identity,UINT32_MAX,0);
     else
         startup_=std::make_unique<GbaNetplayStartup>(simulation_,session_,seat_,handshake_identity,options_.rtc_seed_seconds);
+    if (options_.planned_finish_tick) finish_at(options_.planned_finish_tick);
 }
 GbaNetplayMatch::~GbaNetplayMatch() = default;
 
@@ -44,6 +48,7 @@ void GbaNetplayMatch::start_driver() {
         RNetRbDriverConfig cfg{};
         cfg.session=&session_; cfg.local_slot=&seat_; cfg.slot_count=&slots_;
         cfg.input_delay=&delay_; cfg.input_prediction=&prediction_;
+        cfg.force_turn=options_.force_turn; cfg.occupied_mask=3;
         cfg.replay_mode=RNET_RB_REPLAY_INCREMENTAL; cfg.snap_depth=GbaNetplayHost::kSnapshotDepth;
         cfg.part_names[0]="GBA0"; cfg.part_names[1]="other-GBAs"; cfg.part_names[2]="cable-and-scheduler";
         cfg.log_prefix="gba_match_rb"; cfg.env_alias="GBA_RB";
@@ -92,12 +97,45 @@ GbaNetplayMatch::Step GbaNetplayMatch::poll(bool allow_simulation) {
         }
         if (host_.return_to_lobby_requested()) throw std::runtime_error(host_.error());
         const auto through=driver_ ? rnet_rb_driver_confirmed_through(driver_.get()) : host_.next_tick()-1;
+        if (!finish_tick_ && (!driver_ || through!=0)) {
+            if (const auto request=host_.checkpoint_request(through)) {
+                // Leave time for both peers to observe the confirmed control
+                // row (D<=20, prediction<=16), within the 120-frame history.
+                // A pathological late observation fails closed: never save a
+                // different boundary or a speculative cartridge independently.
+                if (*request>UINT32_MAX-64) throw std::runtime_error("checkpoint tick overflow");
+                finish_at(*request+64);
+            }
+        }
         const bool confirmed=finish_tick_ && host_.next_tick()>=finish_tick_ && through!=UINT32_MAX &&
             (!driver_ || through!=0) && through>=finish_tick_-1;
-        if (driver_ && confirmed) rnet_rb_driver_request_quiesce(driver_.get());
+        if (driver_ && finish_tick_ && (agreement_ || confirmed)) {
+            // QUIESCE also stops the other peer opening corrections. First
+            // agree the full candidate while both drivers can still correct;
+            // one peer's watermark is not permission to stop the other.
+            if (!agreement_) agreement_=std::make_unique<GbaNetplayCheckpointAgreement>(
+                host_,session_,seat_,options_.identity,through,finish_tick_,true);
+            agreement_->update_confirmation(through);
+            if (!host_.replaying()) {
+                const auto status=agreement_->poll(rbe_mono_ms());
+                if (status==GbaNetplayCheckpointAgreement::Status::Failed)
+                    throw std::runtime_error(agreement_->error());
+                checkpoint_agreed_=status==GbaNetplayCheckpointAgreement::Status::Ready;
+            }
+            if (checkpoint_agreed_) rnet_rb_driver_request_quiesce(driver_.get());
+        }
         if (driver_ && rnet_rb_driver_quiesce_state(driver_.get())==RNET_RB_QUIESCE_TIMED_OUT)
             throw std::runtime_error("GBA checkpoint drain timed out");
-        if (confirmed && (!driver_ || rnet_rb_driver_quiesce_state(driver_.get())==RNET_RB_QUIESCE_DRAINED)) {
+        if ((driver_ && checkpoint_agreed_ && rnet_rb_driver_quiesce_state(driver_.get())==RNET_RB_QUIESCE_DRAINED) ||
+            (!driver_ && confirmed)) {
+            std::fprintf(stderr,"gba checkpoint seat=%d target=%u sim=%u confirmed=%u\n",seat_,finish_tick_,host_.next_tick(),through);
+            if (driver_) {
+                if (!host_.checkpoint_unchanged(agreement_->checkpoint()))
+                    throw std::runtime_error("agreed checkpoint changed during rollback drain");
+                replay_ticks_=replay_ticks(); driver_.reset();
+                phase_=Phase::CheckpointReady;
+                return Step::Idle;
+            }
             replay_ticks_=replay_ticks(); driver_.reset();
             agreement_=std::make_unique<GbaNetplayCheckpointAgreement>(host_,session_,seat_,options_.identity,through,finish_tick_);
             phase_=Phase::AgreeingCheckpoint;
@@ -126,6 +164,10 @@ void GbaNetplayMatch::finish_at(std::uint32_t tick) {
         (phase_!=Phase::Starting && phase_!=Phase::Running))
         throw std::invalid_argument("checkpoint requires one agreed future input boundary");
     finish_tick_=tick;
+    std::fprintf(stderr,"gba checkpoint planned seat=%d target=%u sim=%u\n",seat_,tick,host_.next_tick());
+}
+void GbaNetplayMatch::request_checkpoint() {
+    if (phase_==Phase::Running && !finish_tick_) checkpoint_requested_=true;
 }
 const GbaConfirmedCheckpoint& GbaNetplayMatch::checkpoint() const {
     if (phase_!=Phase::CheckpointReady) throw std::logic_error("GBA checkpoint has not been agreed");

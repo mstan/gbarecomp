@@ -19,8 +19,8 @@ not yet a playable Emerald/Mario Kart netplay release.
   functions still share their executable code and legacy C ABI; the scheduler
   binds an active context only while executing that instance.
 * Native IRQ entry, nested IRQ state and exception return survive context
-  switches without retaining a native C++ stack. Suspension uses ordinary
-  exception unwinding at the generated instruction prologue.
+  switches without retaining a native C++ stack. Generated execution propagates
+  suspension through ordinary returns; custom callbacks retain exception unwind.
 * The session owns the common device timeline. Link events wait for all
   endpoints; host threads and host time cannot decide transfer ordering.
 * Canonical little-endian whole-session snapshots have manifest identity,
@@ -37,7 +37,7 @@ not yet a playable Emerald/Mario Kart netplay release.
   once, selecting the local machine through the manifest's input-seat mapping.
   Replay, stalled admission and duplicate reads cannot emit output. Skipped
   forward frames discard their old audio; other machines never feed the local
-  speaker queue. The product window still needs to consume this interface.
+  speaker queue. The opt-in product window consumes this interface.
 * `GbaNetplayStartup` uses recomp-net's existing MEMCARD upload and BOOT transfer
   operations. Each seat contributes its own save image and RTC seed. The host
   assembles the two-machine state; identity/owner receipts and a state-digest
@@ -47,11 +47,14 @@ not yet a playable Emerald/Mario Kart netplay release.
   and can restore it before restarting a match. It does not write save files.
   Replaying across that boundary invalidates the cached candidate; a demoted
   confirmation watermark cannot preserve stale speculative save bytes.
-* `GbaNetplayCheckpointAgreement` freezes an exact confirmed boundary after the
-  old driver stops. Each peer checks its own snapshot against the full digest,
+* `GbaNetplayCheckpointAgreement` compares an exact confirmed boundary while
+  both drivers can still correct. Each peer checks its snapshot against the full digest,
   exchanges a receipt, and completes a retransmittable ready barrier. A mismatch
   refuses archive export. Agreed archives include both machines, cable and
   scheduler with a version, program identity and whole-archive checksum.
+  After bilateral agreement, the match drains rollback and checks that the
+  accepted bytes survived unchanged. Unilateral quiescence can suppress a
+  correction still owed by the other peer.
 * `gba_store_agreed_checkpoint` writes that pair to one application-selected
   recovery file using an exclusive adjacent staging file, a flush and atomic
   replacement (plus a directory flush on POSIX). It never exports individual
@@ -154,8 +157,8 @@ Only one shared rollback driver may be started per process because its admission
 scheduler is process-global. The two-process test follows that constraint.
 The driver's QUIESCE operation drains open episodes but deliberately prevents
 opening new corrections: **quiesced does not imply every simulated frame is
-confirmed**. The harness waits for the confirmed watermark to cover its target
-before asking to drain. At this pin zero is also the uninitialized watermark,
+confirmed**. The match independently agrees the exact target snapshot on both
+peers before draining, then revalidates those bytes. At this pin zero is also the uninitialized watermark,
 and a peer NACK can demote it. Retained recovery snapshots therefore remain
 candidates: durable save or reconnect logic must explicitly agree an exact
 checkpoint tick and digest with the other peer. Neither QUIESCE nor the
@@ -176,9 +179,66 @@ caller must stop admission before restoring a paired archive and construct a
 new match/transport with a fresh session ID. Seven two-process fixture tests
 exercise both admission modes, build and delay mismatch rejection before any
 guest frame, a six-second outage, startup ACK loss, and paired warm restart on
-Windows/Linux. The commercial probe uses this same controller. Shared lobby
-registration, game-window binding and user-driven checkpoint negotiation are
-still product integration work.
+Windows/Linux. The commercial probe uses this same controller.
+
+`request_checkpoint()` sends save-and-leave control with input rows. Its first
+tick is snapshotted and hashed by the network adapter, but never reaches guest
+KEYINPUT. Omitting it from the digest could incorrectly confirm a predicted
+missing request. Both peers choose the same future boundary only after that
+control confirms; request and outage scenarios exercise this path.
+
+## Opt-in game application
+
+Emerald and Mario Kart builds can enable `GBARECOMP_NETPLAY=ON`. They require
+the engine feature branch, regenerated native code from the games' serial
+coverage branches, and a shared recomp-ui checkout with the netplay backend
+(qualified revision `b9ef2f539be3622eeb0e7d4a2ff33c8edf129667`). Explicit
+`GBARECOMP_ROOT`, `RECOMP_UI_ROOT`, and `GBA_GAME_GENERATED_ROOT` CMake paths
+allow qualification without replacing existing generated corpora or submodule
+pins. Netplay remains off by default.
+
+The shared launcher registers two-player cable rooms and maps input seats to
+cable positions, including a host occupying player two. Runtime entry verifies
+the original cartridge and retail BIOS, exchanges each owner's save and RTC,
+and uses a complete source identity over generated code, game hooks, devices
+and networking. Multiplayer skips plugins and expanded views. The runner owns
+the local window, input, forward audio/video, pacing and reconnect indication.
+
+For direct IP, both executables use the same nonzero session ID, opposite
+seats, and reachable UDP endpoints. For example, on one machine:
+
+```text
+EmeraldRecomp --rom emerald.gba --bios gba_bios.bin --save player0.sav --netplay-bind 127.0.0.1:5000 --netplay-peer 127.0.0.1:5001 --netplay-seat 0 --netplay-session 123
+EmeraldRecomp --rom emerald.gba --bios gba_bios.bin --save player1.sav --netplay-bind 127.0.0.1:5001 --netplay-peer 127.0.0.1:5000 --netplay-seat 1 --netplay-session 123
+```
+
+Rollback is the direct-IP default. Both peers may add `--netplay-delay-sync`
+and choose `--netplay-delay 2..20` (default six). `--frames N` is an optional
+qualification limit which must agree at startup.
+
+Closing once or pressing a configured save hotkey (default Shift+F1) requests
+a paired save and leave. Closing again abandons that attempt. The default
+archive is `netplay/session-<ID>.paired` beside the executable; override it with
+`--netplay-checkpoint PATH`. Cartridge saves are never independently exported.
+Resume by giving both players their matching archive with `--netplay-resume
+PATH` and a fresh session ID; this option also works before the shared launcher.
+The archive includes the entire pair, and requires the exact image/build
+identity. There is no GUI archive chooser yet. A save path cannot overwrite
+the source cartridge save, ROM or BIOS.
+
+`tests/link/application_loopback.py` drives the actual game executables with
+SDL dummy audio/video, a latency relay, whole-archive comparison, fresh-process
+resume and original-save hash checks. It does not qualify visible monitor
+pacing, audible quality, or Internet lobby/NAT traversal.
+
+The current product smoke passes Emerald on Windows/Linux and Mario Kart on
+Windows in both admission modes: 120 cold ticks, then 60 further ticks in new
+processes loading the paired archives. Each round produces identical archives
+on both peers and leaves original saves unchanged. Windows also passes with
+only system directories on PATH after staging SDL2 and the three MinGW runtime
+DLLs beside each executable. The final Windows host/transport suite passes all
+20 cases; Linux passes eight product/host cases. Five consecutive Windows
+rollback runs and five save-request/outage runs pass the bilateral stop fix.
 
 Restart stress exposed a shared transport bug: one finished-transfer ID tracked
 both directions, so sending a receipt erased the last received proposal's replay
@@ -316,29 +376,27 @@ The following are not implemented/qualified by the fixture tests:
 * Native batching and full generated/BIOS interior-resume coverage (including
   exceptional codegen paths), DMA beat/event ordering, and remaining normal-mode
   pin/clock edge cases.
-* Product binding of the startup barrier: verified BIOS/build/mod identity,
-  each player's own save, ordered seat-to-machine mapping and RTC seeds.
-* Shared recomp-ui lobby/launcher binding, local view/audio ownership, and the
-  product's 60-second reconnect/recovery flow. Bind the implemented agreement
-  and paired persistence APIs to product storage and recovery choices; qualify
-  process/power-loss behavior and changed-endpoint reconnect. Do not treat
-  agreement as proof that both peers' disks completed a write.
-* Sustained connected gameplay in Emerald and Mario Kart at playable real-time
-  speed, Steam Deck hardware execution, and real-world loss/jitter tests. Full
-  battles, race completion and rematches are not required release gates.
+* Visible launcher host/join and local window/audio qualification on real
+  hardware. Startup identity, owner saves, RTC, seat mapping and the window
+  runner are implemented; automated application smoke uses SDL dummy drivers.
+* Product recovery UX beyond explicit paired-archive CLI resume, process and
+  power-loss qualification, and changed-endpoint discovery through the lobby.
+  Agreement does not prove both peers' disks completed a write.
+* Real Internet/NAT and Steam Deck execution. Sustained linked gameplay and
+  playable speed under injected latency pass the recorded probes below;
+  full battles, race completion and rematches are not required release gates.
 
 The runtime/host fixtures and both loopback modes pass in Windows MinGW Release
-and Linux x86-64 Release under WSL. This does not qualify the target games or
-Steam Deck presentation/audio integration.
+and Linux x86-64 Release under WSL. Target-game qualification below is separate
+from Steam Deck presentation/audio integration.
 
 The headless native Emerald probe runs two machines through the real BIOS and
 loads the available cartridge save into the overworld. It found the copied
 IntrSIO32 IRQ routine at 03004664
 (ROM 082E3554, 0x960 bytes), which is now mapped in Emerald's game configuration
 on `feature/link-serial-coverage`. The probe also installs the regular game's
-byte-validated flash RAM dispatch hook per instance. This is boot/native-coverage
-evidence, not a completed trade, battle or cable-room test. The conservative
-scheduler still needs substantial performance qualification.
+byte-validated flash RAM dispatch hook per instance. Those early results were
+boot/native-coverage evidence; later cable and performance qualification follows.
 With a loaded Emerald save, five additional frames restore and replay to identical
 whole-session bytes. Windows and Linux also produce identical canonical hashes
 for all eight original-ROM serial scenarios.
@@ -398,8 +456,8 @@ and Windows/Linux: 1,402,790 bytes, hash `f907c720` for the documented warm grid
 state and `mksc-usa-native-probe` identity. See `tests/link/scenarios/README.md`
 for the opt-in harness; it requires locally supplied images and paired state.
 
-Do not enable product netplay or claim the complete plan is finished until
-these gates are satisfied. Track task status in Beads, not by checking boxes
+Keep product netplay opt-in until these release gates are satisfied. Track
+task status in Beads, not by checking boxes
 in this architecture document.
 
 ## Reproducing validation

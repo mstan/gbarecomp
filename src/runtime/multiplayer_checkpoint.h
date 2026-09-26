@@ -3,8 +3,7 @@
 #include <filesystem>
 
 namespace gbarecomp {
-// An application barrier AFTER stopping the old rollback driver. Admission
-// stays paused. Each peer must independently hold the same exact confirmed
+// An application barrier. Each peer must independently hold the same exact confirmed
 // snapshot; no host snapshot is accepted to paper over a desync. Only metadata
 // and receipts travel over recomp-net. Seat zero proposes the boundary.
 class GbaNetplayCheckpointAgreement {
@@ -12,7 +11,10 @@ public:
     enum class Status { Waiting, Ready, Failed };
     GbaNetplayCheckpointAgreement(const GbaNetplayHost&, RNetSession*, unsigned seat,
         std::string identity, std::uint32_t confirmed_through,
-        std::uint32_t proposed_next_tick=0);
+        std::uint32_t proposed_next_tick=0,bool wait_for_confirmation=false);
+    // Live agreement keeps rollback running until BOTH peers have accepted
+    // the boundary. Supply its current watermark before each poll.
+    void update_confirmation(std::uint32_t through) { through_=through; }
     Status poll(std::uint64_t monotonic_ms);
     const std::string& error() const { return error_; }
     // Unavailable until both peers have explicitly acknowledged the exact
@@ -30,6 +32,8 @@ private:
     unsigned seat_;
     std::string identity_,error_;
     std::uint32_t through_;
+    std::uint32_t proposed_tick_=0;
+    bool wait_for_confirmation_=false;
     Phase phase_;
     bool sending_=false,started_=false;
     std::uint64_t started_ms_=0;

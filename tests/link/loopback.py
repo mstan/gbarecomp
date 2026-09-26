@@ -30,7 +30,9 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
                 env["GBA_TEST_CHECKPOINT_CORRUPT"] = "1"
             if mode == "restart":
                 env["GBA_TEST_RESTART"] = "1"
-            if mode == "outage":
+            if mode in ("request_checkpoint", "request_outage"):
+                env["GBA_TEST_REQUEST_CHECKPOINT"] = "1"
+            if mode in ("outage", "request_outage"):
                 env["GBA_TEST_OUTAGE_TRIGGER"] = str(root / "outage")
             # Force corrections as well as naturally late rows: verify restored
             # state matters, not just that idle peers reach the same final PC.
@@ -66,7 +68,7 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
             print("restored the agreed archive on a fresh connection and matched 30 further input ticks")
         if rollback:
             assert all(int(r[0].split()[3]) > 0 for r in reports), "rollback was not exercised by both peers"
-        if mode == "outage":
+        if mode in ("outage", "request_outage"):
             assert not relay.errors, relay.errors
             assert relay.outage_started is not None and relay.dropped > 0, "outage never interrupted gameplay"
             assert time.monotonic()-relay.outage_started >= 6, "peers finished during the outage"
@@ -88,7 +90,8 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
         for log in logs:
             log.flush()
         for path in sorted(root.glob("*.log")):
-            print(path.name, path.read_text(errors="replace")[-18000:])
+            report=path.read_text(errors="replace")
+            print(path.name,report if len(report)<26000 else report[:8000]+"\n[...middle omitted...]\n"+report[-18000:])
         raise
     finally:
         relay.close()
