@@ -54,7 +54,12 @@ $('load').onclick=()=>{host.command('Load',Number($('slot').value));$('canvas').
 $('fullscreen').onclick=()=>host.fullscreenRequest(document.fullscreenElement?0:1);
 $('audio').onclick=()=>host.resumeAudio().catch(e=>line(e,true));
 $('stop').onclick=()=>host.store('quit',1);
-$('reload').onclick=()=>location.reload();
+// Never reload away a change that exists only in memory without asking.
+function reload(reason){
+ if(saves.unsaved()&&!confirm('A save change is not stored in this browser yet and would be lost. Reload anyway? (Cancel, then use Export Save to keep a copy.)')){line(reason+' cancelled: unsaved save data',true);return false;}
+ location.reload();return true;
+}
+$('reload').onclick=()=>reload('Restart');
 $('volume').oninput=()=>host.store('volume',Number($('volume').value));
 $('filter').onchange=()=>host.store('filter',Number($('filter').value));
 $('export').onclick=()=>{
@@ -63,13 +68,19 @@ $('export').onclick=()=>{
  if(globalThis.Module?.FS){const fs=Module.FS;const walk=(dir,depth=0)=>{if(depth>4)return;for(const name of fs.readdir(dir)){if(name==='.'||name==='..')continue;const path=dir.replace(/\/$/,'')+'/'+name;try{const stat=fs.stat(path);if(fs.isDir(stat.mode)){if(!['/proc','/dev'].includes(path))walk(path,depth+1);}else if(/(recomp_coverage_.*\.json|recomp_master_misses_.*\.toml\.frag|\.sav|\.sav\.bak|\.state[0-9]+|^state[0-9]+|\.ss[0-9]|\.csv|\.png)$/.test(name))offer(name,fs.readFile(path));}catch(e){line(e,true);}}};walk('/');}
 };
 // Visitor-side save management. Changes need a stopped game; before the first
-// Start they are queued and applied once /saves is loaded, before main().
+// Start they are queued in order and applied once /saves is loaded, before main().
 $('exportsave').onclick=()=>{try{offer(GbrSaveStore.exportName(romBytes),saves.exportBattery());}catch(e){line('Export failed: '+e.message,true);}};
 async function changeSaves(action,label){
  try{
   const result=await action();renderSaves();
-  if(result==='persisted'&&exitCode!==null){line(label+' stored; reloading');location.reload();}
+  if(result==='persisted'){
+   line(label+' stored in this browser');
+   // After an exit the finished guest cannot reload the save: restart, but
+   // only when nothing else is waiting to be stored.
+   if(exitCode!==null&&!saves.unsaved()){line('Reloading to start with the stored save');location.reload();}
+  }
   else if(result==='memory-only')line(label+' applied only in memory; browser storage is unavailable. This change will be lost on reload. Use Export Save to keep a copy of the current battery save.',true);
+  else if(result==='queued')line(label+' queued: it is applied when you press Start, and the log will say whether it was stored');
  }
  catch(e){line(label+' failed: '+e.message,true);renderSaves();}
 }
@@ -81,19 +92,23 @@ function renderSaves(){
  const s=saves.snapshot();let text,bad=false;
  if(!sha)text='not kept (ROM SHA-1 unknown)',bad=true;
  else if(blocked)text='not opened ('+blocked+')',bad=true;
+ else if(s.memoryOnly)text=(s.state==='unavailable'?'unavailable, ':'')+'NOT stored: changes are in memory only and are lost on reload ('+(s.error||'browser storage unavailable')+'); use Export Save',bad=true;
  else if(s.state==='unavailable')text='unavailable, saves are lost on reload: '+s.error,bad=true;
- else if(s.state==='error')text='error: '+s.error,bad=true;
+ else if(s.state==='error')text='error: '+s.error+(s.unsaved?' (latest change NOT stored)':''),bad=true;
  else if(s.writeError)text='error: '+s.writeError,bad=true;
  else if(saves.busy())text='saving…';
+ else if(s.unsaved)text='changed, not stored yet';
  else if(s.lastPersisted)text=`saved ${Math.max(0,Math.round((Date.now()-s.lastPersisted)/1000))}s ago`+(s.persistent===false?' (best-effort storage: export a copy)':'');
- else if(s.pending.length)text=s.pending[0]+' queued for Start';
+ else if(s.pending.length)text=s.pending.join(', ')+' queued for Start';
  else text=saves.mounted?'stored in this browser':'kept in this browser';
  $('savestatus').textContent='Browser save: '+text;$('savestatus').className=bad?'err':'';
  const locked=!sha||!!blocked||running||saves.busy();
  $('exportsave').disabled=!saves.fs;$('importsave').disabled=locked;$('restoresave').disabled=locked;$('deletesaves').disabled=locked;
 }
 document.addEventListener('visibilitychange',()=>{if(document.hidden)saves.persist();}); // what MEMFS already holds; the runtime flushes the rest on pause
-addEventListener('beforeunload',e=>{if(saves.busy()){e.preventDefault();e.returnValue='';}});
+// Warn while anything the runtime (or the visitor) wrote is not yet stored in
+// IndexedDB, including memory-only changes, not only while a sync is running.
+addEventListener('beforeunload',e=>{if(saves.unsaved()){saves.persist();e.preventDefault();e.returnValue='';}});
 setInterval(()=>{const s=host.snapshot();$('metrics').textContent=`${s.state} · published ${s.published||0} · consumed ${s.consumed} · GL uploads ${s.uploaded} · replaced ${s.replaced||0} · audio ${s.audio} · queue overflow ${s.audioOverflow||0}`;if(exitCode===null&&!blocked&&s.state!=='idle')$('status').textContent=s.fatal?'failed: '+s.fatal:s.state;renderSaves();},250);
 renderSaves();
 if(q.get('autostart')==='1')addEventListener('load',()=>$('start').click());
