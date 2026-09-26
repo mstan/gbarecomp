@@ -20,6 +20,13 @@ struct GbaConfirmedCheckpoint {
     std::uint32_t next_tick = 0;
     std::vector<std::uint8_t> state;
 };
+// Disposable host output. Never included in snapshots or persistent saves.
+struct GbaNetplayOutput {
+    std::uint32_t tick = 0;
+    GbaMachineId machine = 0;
+    std::array<std::uint8_t,gba::GbaPpu::kFramebufferBytes> rgb888{};
+    std::vector<std::int16_t> audio;
+};
 // Engine callbacks for the shared episode driver. The runner owns transport,
 // lobby/startup agreement, and the driver lifetime. No serial data crosses this
 // interface. Construct after agreed ROMs, individual saves and RTC seeds load.
@@ -36,6 +43,12 @@ public:
     std::function<std::uint16_t(std::uint32_t)> sample_local;
     bool run_published_tick();
     bool try_delay_frame(RNetSession*);
+    // Consume the newest forward frame once, selecting the machine through the
+    // manifest's input-seat mapping. Replay, stalls and repeated calls expose
+    // no output. An unconsumed frame is replaced by the next forward frame;
+    // its audio is discarded as well, so catch-up cannot build an old backlog.
+    // Call after driver.finish_frame(); do not mutate the simulation directly.
+    bool take_output(std::size_t local_seat, GbaNetplayOutput&);
     bool replaying() const { return replaying_; }
     bool return_to_lobby_requested() const { return lobby_requested_; }
     const std::string& error() const { return error_; }
@@ -66,6 +79,7 @@ private:
     std::vector<std::uint16_t> inputs_;
     std::uint32_t next_tick_ = 0;
     bool published_ = false, replaying_ = false, lobby_requested_ = false;
+    bool output_ready_ = false;
     std::string error_;
     GbaConfirmedCheckpoint confirmed_;
     std::vector<std::uint32_t> snapshot_ticks_;

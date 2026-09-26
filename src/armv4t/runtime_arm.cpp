@@ -840,10 +840,10 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
         runtime_bridge_interpret(pc, thumb, 0u, 0u);
         return;
     }
-    if (pc >= 0x02000000u && pc < 0x04000000u &&
-        g_runtime_ram_dispatch_hook &&
-        g_runtime_ram_dispatch_hook(pc, thumb ? 1 : 0)) {
-        return;
+    if (pc >= 0x02000000u && pc < 0x04000000u && g_runtime_ram_dispatch_hook) {
+        if (g_resumable_context && g_resumable_context->ram_dispatch_boundary)
+            g_resumable_context->ram_dispatch_boundary(pc);
+        if (g_runtime_ram_dispatch_hook(pc, thumb ? 1 : 0)) return;
     }
     const DispatchEntry* entry = nullptr;
     if (pc < kBiosRegionEnd) {

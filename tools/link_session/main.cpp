@@ -12,6 +12,10 @@
 #include <cstdlib>
 #include <iomanip>
 #include <sstream>
+#include <algorithm>
+#ifdef GBA_LINK_PROBE_NETPLAY
+#include "netplay_probe.h"
+#endif
 #ifdef GBA_LINK_PROBE_SETUP
 void gba_link_probe_setup(gbarecomp::GbaInstance&);
 #endif
@@ -113,7 +117,19 @@ int main(int argc, char** argv) {
         }
         std::array<std::uint16_t,2> buttons{};
         std::size_t input_index=0;
-        for (unsigned frame=0; frame<frames; ++frame) {
+        if (std::getenv("GBA_LINK_PROBE_NET_SEAT")) {
+#ifdef GBA_LINK_PROBE_NETPLAY
+            const auto inputs=[&](std::uint32_t tick) {
+                const auto after=std::upper_bound(script.begin(),script.end(),tick,
+                    [](auto t,const auto& row) { return t<row.frame; });
+                return after==script.begin() ? std::array<std::uint16_t,2>{} : std::prev(after)->buttons;
+            };
+            gba_link_probe_netplay(*session,frames,inputs,GBA_LINK_PROBE_PROGRAM "/native-probe-v1");
+            buttons=inputs(frames-1);
+#else
+            throw std::runtime_error("network probe requires GBARECOMP_NETPLAY=ON");
+#endif
+        } else for (unsigned frame=0; frame<frames; ++frame) {
             if (input_index<script.size() && script[input_index].frame==frame)
                 buttons=script[input_index++].buttons;
             session->run_frame(buttons);

@@ -38,11 +38,12 @@ inline int program(std::uint32_t pc,int) {
     runtime_tick(1);
     return 1;
 }
-inline std::unique_ptr<gbarecomp::GbaMultiplayerSession> create(bool repeat=false) {
+inline std::unique_ptr<gbarecomp::GbaMultiplayerSession> create(bool repeat=false,bool reverse_seats=false) {
     using namespace gbarecomp;
     GbaSessionConfig c;
     c.machines={{0,"net-test",std::string(40,'a')},{1,"net-test",std::string(40,'a')}};
     c.links={{GbaLinkMedium::Cable,{0,1}}}; c.input_machines={0,1};
+    if (reverse_seats) c.input_machines={1,0};
     auto s=std::make_unique<GbaMultiplayerSession>(c);
     for (unsigned port=0;port<2;++port) {
         auto& m=s->machine(port);

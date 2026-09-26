@@ -31,6 +31,9 @@ struct RuntimeArmContext {
     RuntimeThumbAluImmediateOverride immediate_override = nullptr;
     RuntimeBusReadOverride read_override = nullptr;
     RuntimeRamDispatchHook ram_dispatch = nullptr;
+    // Trusted scheduler wiring, not guest state. Runs before a RAM callback can
+    // inspect mutable memory, including calls nested inside generated code.
+    void (*ram_dispatch_boundary)(std::uint32_t) = nullptr;
     RuntimeForceInterpHook force_interp = nullptr;
     void (*entry_hook)(std::uint32_t) = nullptr;
     int (*bios_hook)(std::uint32_t) = nullptr;

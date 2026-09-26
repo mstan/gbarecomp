@@ -51,6 +51,36 @@ void delay_publication() {
     CHECK(h.return_to_lobby_requested() && !h.run_published_tick());
     CHECK(h.next_tick()==1);
 }
+void local_output() {
+    using namespace gbarecomp;
+    auto simulation=create(true,true); GbaNetplayHost host(*simulation); const auto api=host.callbacks();
+    GbaNetplayOutput output;
+    CHECK(!host.take_output(0,output));
+    RNetRbFrame rows[2]{}; for (auto& row:rows) row.is_valid=1;
+    CHECK(api.snap_save(api.ctx,0));
+    api.publish(api.ctx,0,rows,2,0); CHECK(host.run_published_tick());
+    const auto state=simulation->save_state();
+    CHECK(host.take_output(1,output)); CHECK(output.tick==0 && output.machine==0);
+    CHECK(output.audio.size()>=548 && output.audio.size()<=550);
+    CHECK(!host.take_output(0,output)); // one local view, no duplicate sound
+    CHECK(simulation->save_state()==state);
+    std::int16_t samples[8];
+    for (auto seat:{0,1}) CHECK(simulation->machine(seat).bus.audio().drain_samples(samples,8)==0);
+    api.resim_begin(api.ctx); CHECK(api.snap_load(api.ctx,0));
+    rows[1].buttons=16;
+    api.publish(api.ctx,0,rows,2,1); CHECK(api.run_tick(api.ctx,0));
+    CHECK(!host.take_output(1,output)); api.resim_end(api.ctx);
+    CHECK(!host.take_output(1,output)); // resim_end does not present catch-up frames
+    for (unsigned tick=1;tick<4;++tick) {
+        api.publish(api.ctx,tick,rows,2,0); CHECK(host.run_published_tick());
+    }
+    CHECK(host.take_output(0,output)); CHECK(output.tick==3 && output.machine==1);
+    CHECK(output.audio.size()>=548 && output.audio.size()<=550); // only newest tick
+    host.begin_match(); CHECK(!host.take_output(0,output));
+    bool rejected=false;
+    try { (void)host.take_output(2,output); } catch (const std::out_of_range&) { rejected=true; }
+    CHECK(rejected);
+}
 void confirmed_checkpoint() {
     using namespace gbarecomp;
     auto simulation=create(true); GbaNetplayHost h(*simulation); const auto api=h.callbacks();
@@ -138,4 +168,4 @@ void demoted_candidate() {
     CHECK(host.confirmed_checkpoint().state==simulation->save_state());
 }
 }
-int main() { restore_corrected_session(); delay_publication(); confirmed_checkpoint(); agreement_gate(); demoted_candidate(); std::puts("whole-session netplay host tests passed"); }
+int main() { restore_corrected_session(); delay_publication(); local_output(); confirmed_checkpoint(); agreement_gate(); demoted_candidate(); std::puts("whole-session netplay host tests passed"); }

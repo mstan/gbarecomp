@@ -102,6 +102,7 @@ bool GbaNetplayHost::copy_checkpoint(std::uint32_t tick,std::uint32_t through,
 void GbaNetplayHost::begin_match() {
     auto state=simulation_.save_state();
     next_tick_=0; published_=replaying_=lobby_requested_=false;
+    output_ready_=false; simulation_.discard_audio_output();
     error_.clear(); snapshot_ticks_.clear(); rbe_snap_ring_clear(snapshots_);
     confirmed_={0,std::move(state)};
     std::fill(inputs_.begin(),inputs_.end(),0);
@@ -109,6 +110,7 @@ void GbaNetplayHost::begin_match() {
 void GbaNetplayHost::fail(const char* message) {
     if (error_.empty()) error_ = message;
     lobby_requested_ = true;
+    output_ready_=false; simulation_.discard_audio_output();
 }
 RbeSnapVTable GbaNetplayHost::snapshot_callbacks() { return {this,serialize,deserialize}; }
 int GbaNetplayHost::serialize(void* ctx,std::uint32_t tick,std::uint8_t** out,std::size_t* size) {
@@ -131,6 +133,7 @@ int GbaNetplayHost::deserialize(void* ctx,std::uint32_t tick,const std::uint8_t*
     // stale save bytes for later agreement merely because its tick is large.
     if (tick<h.confirmed_.next_tick) h.confirmed_={};
     h.next_tick_ = tick; h.published_ = false;
+    h.output_ready_=false;
     h.simulation_.discard_audio_output();
     return 1;
 }
@@ -146,11 +149,27 @@ void GbaNetplayHost::publish(std::uint32_t tick,const RNetRbFrame* rows,int slot
 bool GbaNetplayHost::run_published_tick() {
     if (!published_ || lobby_requested_) return false;
     try {
+        output_ready_=false; simulation_.discard_audio_output();
         simulation_.run_frame(inputs_);
         if (replaying_) simulation_.discard_audio_output();
         ++next_tick_; published_ = false;
+        output_ready_=!replaying_;
         return true;
     } catch (const std::exception& e) { fail(e.what()); return false; }
+}
+bool GbaNetplayHost::take_output(std::size_t seat,GbaNetplayOutput& out) {
+    if (seat>=simulation_.input_count()) throw std::out_of_range("unknown local input seat");
+    if (!output_ready_ || replaying_ || published_ || lobby_requested_) return false;
+    auto& machine=simulation_.input_machine(seat);
+    out.tick=next_tick_-1; out.machine=machine.descriptor.id;
+    std::copy_n(machine.ppu.latched_framebuffer(),out.rgb888.size(),out.rgb888.begin());
+    out.audio.clear();
+    std::array<std::int16_t,1024> samples;
+    while (const auto count=machine.bus.audio().drain_samples(samples.data(),samples.size()))
+        out.audio.insert(out.audio.end(),samples.begin(),samples.begin()+count);
+    simulation_.discard_audio_output(); // other consoles never feed local speakers
+    output_ready_=false;
+    return true;
 }
 RNetRbHost GbaNetplayHost::callbacks() {
     RNetRbHost result{}; result.ctx = this;
@@ -169,7 +188,7 @@ RNetRbHost GbaNetplayHost::callbacks() {
     result.run_tick = [](void* c,std::uint32_t t) -> int {
         auto& h=host(c); return t == h.next_tick_ && h.run_published_tick();
     };
-    result.resim_begin = [](void* c) { auto& h=host(c); h.replaying_=true; h.simulation_.discard_audio_output(); };
+    result.resim_begin = [](void* c) { auto& h=host(c); h.replaying_=true; h.output_ready_=false; h.simulation_.discard_audio_output(); };
     result.resim_end = [](void* c) { auto& h=host(c); h.simulation_.discard_audio_output(); h.replaying_=false; };
     result.digest_master = [](void* c) -> std::uint32_t {
         try { return host(c).simulation_.state_hash(); }

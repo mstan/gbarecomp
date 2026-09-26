@@ -6,6 +6,46 @@
 #include <string_view>
 
 #define CHECK(expr) do { if (!(expr)) { std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr); std::exit(1); } } while (0)
+namespace {
+gba::GbaLinkHub* callback_cable=nullptr;
+unsigned callback_visits=0;
+int ram_callback(std::uint32_t pc,int thumb) {
+    CHECK(pc==0x03000000 && !thumb);
+    CHECK(g_runtime_cycles==6);
+    CHECK(callback_cable->cycle(0)==6 && callback_cable->cycle(1)==6);
+    ++callback_visits;
+    CHECK(!runtime_should_yield());
+    ++g_cpu.R[0];
+    runtime_tick(1);
+    g_cpu.R[15]=g_cpu.R[14];
+    return 1;
+}
+void native_ram_boundary(const std::vector<std::uint8_t>& rom) {
+    using namespace gbarecomp;
+    GbaSessionConfig config;
+    config.machines={{0,"ram-boundary",std::string(40,'a')},{1,"ram-boundary",std::string(40,'a')}};
+    config.input_machines={0,1}; config.links={{GbaLinkMedium::Cable,{0,1}}};
+    auto session=std::make_unique<GbaMultiplayerSession>(config);
+    for (auto id:{0,1}) {
+        auto& m=session->machine(id);
+        m.bus.set_rom(rom.data(),rom.size());
+        m.execution.cpu.R[15]=0x08000128;
+        m.execution.ram_dispatch=ram_callback;
+    }
+    const auto cold=session->save_state();
+    callback_cable=&session->cable(); callback_visits=0;
+    session->run_until(32); CHECK(callback_visits==2);
+    const auto reference=session->save_state();
+    std::string error; CHECK(session->load_state(cold,&error));
+    callback_cable=&session->cable(); callback_visits=0;
+    session->set_native_slices(true);
+    session->run_until(6); CHECK(callback_visits==0);
+    session->run_until(32); CHECK(callback_visits==2);
+    CHECK(session->save_state()==reference);
+    for (auto id:{0,1}) CHECK(session->machine(id).bus.read32(0x02000000)==42);
+    callback_cable=nullptr;
+}
+}
 int main(int argc, char** argv) {
     CHECK(argc == 2 || argc == 3);
     const bool trace = argc == 3 && std::string_view(argv[2])=="--trace";
@@ -67,5 +107,8 @@ int main(int argc, char** argv) {
         CHECK(session->save_state() == after);
         if (hashes) std::printf("%u,%08x\n",scenario,session->state_hash());
     }
-    if (!trace && !hashes && !normal_trace) std::puts("generated ROM multiplayer/normal exchanges and replay passed");
+    if (!trace && !hashes && !normal_trace) {
+        native_ram_boundary(rom);
+        std::puts("generated ROM multiplayer/normal exchanges, RAM boundary and replay passed");
+    }
 }

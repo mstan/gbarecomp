@@ -92,3 +92,19 @@ normal_wait:
     mov r7, #0x42
     str r7, [r6, #16]
     b done
+
+/* Separate native-to-RAM scheduling probe; never entered by the SIO oracle.
+ * The host supplies trusted native coverage for the target at 03000000. */
+.global ram_dispatch_probe
+ram_dispatch_probe:
+    mov r4, #0x03000000
+    mov r0, #41
+    mov lr, pc
+    bx r4
+    mov r6, #0x02000000
+    str r0, [r6]
+    mov r5, #0x04000000
+    add r5, r5, #0x300
+    mov r7, #0
+    strb r7, [r5, #1]
+    b .

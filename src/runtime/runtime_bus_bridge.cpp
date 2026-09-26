@@ -1134,6 +1134,19 @@ void runtime_session_begin_slice(std::uint64_t deadline) {
     g_session_instruction_started = false; g_session_slice = true;
     g_session_slice_stopped = false; g_session_slice_deadline = deadline;
 }
+void runtime_session_ram_dispatch_boundary(std::uint32_t pc) {
+    if (!g_session_execution) return;
+    if (g_session_instruction_started) {
+        // The generated caller already installed any return continuation.
+        // Resume at its target after every machine's devices pay the caller's
+        // cycle debt, before even the callback's validation reads take place.
+        g_cpu.R[15]=pc;
+        throw RuntimeDispatchYield{};
+    }
+    // A callback is trusted native coverage, but not decoded by the batching
+    // classifier. Its generated body runs through the reference safe points.
+    g_session_slice=false;
+}
 void runtime_session_tick_devices(std::uint32_t cycles) {
     if (g_active_bus && g_active_ppu) tick_devices(g_active_bus, g_active_ppu, cycles);
 }

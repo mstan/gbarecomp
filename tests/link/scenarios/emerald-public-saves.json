@@ -1,0 +1,18 @@
+[
+  {
+    "filename": "projectpokemon-emerald.sav",
+    "source": "https://github.com/goofwear/ProjectCompleteDexSaves",
+    "revision": "ac7b1f87636a7acb4b9226d6f084657d0193a65c",
+    "download": "https://raw.githubusercontent.com/goofwear/ProjectCompleteDexSaves/ac7b1f87636a7acb4b9226d6f084657d0193a65c/Gen%203%20-%20E%20Project%20386.sav",
+    "bytes": 131072,
+    "sha256": "ed56361f4cca72c50266d277a4db70d01bb92f1e17ffab7c5f8a5591aa5ca652"
+  },
+  {
+    "filename": "blackwing-emerald.sav",
+    "source": "https://projectpokemon.org/home/forums/topic/37598-pokemon-emerald-save-file-with-all-shiny-pokemon/",
+    "credit": "Blackwing; corrected attachment credited to St. GIGA",
+    "download": "https://projectpokemon.org/home/applications/core/interface/file/attachment.php?id=28210",
+    "bytes": 131072,
+    "sha256": "7b9b723f94e2e411a56a3d6cb8d0bd0100eca9554c40821bc19285b55f338b64"
+  }
+]

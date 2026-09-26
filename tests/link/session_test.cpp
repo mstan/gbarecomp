@@ -5,6 +5,32 @@
 
 #define CHECK(expr) do { if (!(expr)) { std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr); std::exit(1); } } while (0)
 namespace {
+gba::GbaLinkHub* callback_cable=nullptr;
+unsigned callback_visits=0;
+int ram_callback(std::uint32_t pc,int) {
+    CHECK(pc==0x03000000);
+    // Validation reads are already a callback side effect: the scheduler must
+    // reach this boundary before entering it, not wait for its first prologue.
+    CHECK(g_runtime_cycles==3);
+    CHECK(callback_cable->cycle(0)==3 && callback_cable->cycle(1)==3);
+    ++callback_visits;
+    CHECK(!runtime_should_yield());
+    runtime_tick(1); g_cpu.R[15]=0x08000004;
+    return 1;
+}
+int ram_caller(std::uint32_t pc,int) {
+    if (pc==0x08000000) {
+        CHECK(!runtime_should_yield());
+        runtime_tick(3);
+        runtime_dispatch(0x03000000);
+        return 1;
+    }
+    if (pc==0x08000004) {
+        CHECK(!runtime_should_yield());
+        runtime_tick(1); bus_write_u8(0x04000301,0); return 1;
+    }
+    return 0;
+}
 // Small native instruction fixture obeying the generated ABI. It performs an
 // actual MMIO cable exchange and stores the result into each machine's RAM.
 int program(std::uint32_t pc, int) {
@@ -33,6 +59,28 @@ gbarecomp::GbaSessionConfig config() {
     c.input_machines = {30,10}; // seats and cable ports are independent
     c.links = {{GbaLinkMedium::Cable,{10,30}}};
     return c;
+}
+void ram_dispatch_rendezvous() {
+    using namespace gbarecomp;
+    auto session=std::make_unique<GbaMultiplayerSession>(config());
+    callback_cable=&session->cable(); callback_visits=0;
+    for (auto id:{10,30}) {
+        auto& execution=session->machine(id).execution;
+        execution.cpu.R[15]=0x08000000;
+        execution.program_dispatch=ram_caller;
+        execution.ram_dispatch=ram_callback;
+    }
+    session->run_until(3);
+    CHECK(callback_visits==0);
+    const auto before=session->save_state();
+    session->run_until(8); CHECK(callback_visits==2);
+    const auto after=session->save_state();
+    std::string error; CHECK(session->load_state(before,&error));
+    callback_cable=&session->cable(); callback_visits=0;
+    session->set_native_slices(true);
+    session->run_until(8); CHECK(callback_visits==2);
+    CHECK(session->save_state()==after);
+    callback_cable=nullptr;
 }
 void native_exchange() {
     using namespace gbarecomp;
@@ -126,6 +174,6 @@ void exception_continuations() {
 }
 }
 int main() {
-    exception_continuations(); native_exchange();
+    exception_continuations(); native_exchange(); ram_dispatch_rendezvous();
     std::puts("native multiplayer session tests passed");
 }

@@ -40,6 +40,7 @@ void runtime_restore_timing_context(const RuntimeTimingContext&);
 void runtime_session_execution(bool enabled);
 void runtime_session_begin_instruction();
 void runtime_session_begin_slice(std::uint64_t deadline);
+void runtime_session_ram_dispatch_boundary(std::uint32_t pc);
 void runtime_session_tick_devices(std::uint32_t cycles);
 
 }  // namespace gbarecomp

@@ -74,6 +74,7 @@ private:
 }
 GbaInstance::GbaInstance(GbaMachineDescriptor value) : descriptor(std::move(value)) {
     execution.cpu.cpsr = 0xd3; // hardware reset: SVC, ARM, IRQ/FIQ masked
+    execution.ram_dispatch_boundary=runtime_session_ram_dispatch_boundary;
     bus.io().set_bus(&bus);
     bus.io().set_ppu(&ppu);
     bus.rtc().set_emulated_clock(0); // startup replaces with agreed per-machine seed
@@ -139,8 +140,9 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
             instance.timing.cycles = cycle_;
             bind(instance);
             const auto& e=instance.execution;
+            const bool ram_callback=e.ram_dispatch && e.cpu.R[15]>=0x02000000 && e.cpu.R[15]<0x04000000;
             if (native_slices_ && !e.program_dispatch && !e.immediate_override && !e.read_override &&
-                !e.ram_dispatch && !e.force_interp && !e.entry_hook && !e.bios_hook &&
+                !ram_callback && !e.force_interp && !e.entry_hook && !e.bios_hook &&
                 !gba::g_rom_read16_override && !gba::g_rom_read32_override) {
                 // No newly started cable transfer can complete within this
                 // lookahead (normal 8-bit fast clock takes 64 cycles).

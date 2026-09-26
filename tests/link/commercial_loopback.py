@@ -1,0 +1,76 @@
+"""Opt-in real-cartridge netplay qualification; supply all images locally."""
+import argparse
+import os
+import pathlib
+import random
+import re
+import subprocess
+import tempfile
+from udp_relay import UdpRelay, reserve_routes
+
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument("exe")
+p.add_argument("rom")
+p.add_argument("bios")
+p.add_argument("save_type")
+p.add_argument("state", help="matching paired warm snapshot, produced by the local probe")
+p.add_argument("inputs", help="relative-frame controller script")
+p.add_argument("--frames", type=int, default=120)
+p.add_argument("--delay", action="store_true", help="use delay-sync instead of rollback")
+args = p.parse_args()
+for name in ("exe", "rom", "bios", "state", "inputs"):
+    setattr(args, name, str(pathlib.Path(getattr(args, name)).resolve(strict=True)))
+
+with tempfile.TemporaryDirectory(prefix="gba-commercial-net-") as tmp:
+    root = pathlib.Path(tmp)
+    port, sockets = reserve_routes()
+    relay = UdpRelay(port,sockets)
+    nonce = random.randrange(1, 2**31)
+    peers, logs = [], []
+    try:
+        relay.start()
+        for slot in range(2):
+            env = {k: v for k, v in os.environ.items() if not k.startswith(
+                ("GBA_LINK_PROBE_", "RNET_RB_", "GBA_RB_", "RNET_SIM_", "RBE_RB_"))}
+            env.update(GBA_LINK_PROBE_STATE_IN=args.state, GBA_LINK_PROBE_INPUTS=args.inputs,
+                GBA_LINK_PROBE_STATE_OUT=str(root / f"peer{slot}.state"),
+                GBA_LINK_PROBE_SLICES="1", GBA_LINK_PROBE_NET_SEAT=str(slot),
+                GBA_LINK_PROBE_NET_SESSION=str(nonce), GBA_LINK_PROBE_NET_BIND=f"127.0.0.1:{port+slot}",
+                GBA_LINK_PROBE_NET_PEER=f"127.0.0.1:{port+2+slot}",
+                GBA_LINK_PROBE_NET_ROLLBACK="0" if args.delay else "1",
+                GBA_RB_FORCE_MISPREDICT="7" if slot == 0 and not args.delay else "0")
+            log = open(root / f"peer{slot}.log", "w", encoding="utf-8")
+            logs.append(log)
+            peers.append(subprocess.Popen([args.exe,args.rom,args.bios,str(args.frames),args.save_type],
+                env=env,stdout=log,stderr=log,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0))
+        for peer in peers:
+            assert peer.wait(timeout=360) == 0, f"cartridge peer exited {peer.returncode}"
+        reports = [(root / f"peer{i}.log").read_text(errors="replace") for i in range(2)]
+        assert not relay.errors, relay.errors
+        assert relay.delayed > 0 and relay.peak > 0, "latency injection was not exercised"
+        for report in reports:
+            assert "LINK SIMULATOR OVERFLOW" not in report, "latency simulator overflow invalidates qualification"
+            match = re.search(r"network agreed tick=(\d+) hash=([0-9a-f]+) replay=(\d+) bytes=(\d+)",report)
+            assert match and int(match[1]) == args.frames, "missing exact checkpoint agreement"
+            if not args.delay:
+                assert int(match[3]) > 0, "rollback was not exercised"
+            print(match[0])
+        left = (root / "peer0.state").read_bytes()
+        right = (root / "peer1.state").read_bytes()
+        assert left == right, "native cartridge session bytes diverged"
+        print(f"{'delay-sync' if args.delay else 'rollback'} native cartridge: {len(left)} identical bytes, 40 ms latency / 10 ms jitter per direction")
+    except Exception:
+        for log in logs:
+            log.flush()
+        for path in sorted(root.glob("*.log")):
+            print(path.name,path.read_text(errors="replace")[-20000:])
+        raise
+    finally:
+        relay.close()
+        for peer in peers:
+            if peer.poll() is None:
+                peer.terminate()
+                peer.wait(timeout=5)
+        for log in logs:
+            log.close()

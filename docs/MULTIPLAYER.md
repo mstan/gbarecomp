@@ -33,6 +33,11 @@ not yet a playable Emerald/Mario Kart netplay release.
 * Replay discards host audio output while retaining mixer/FIFO evolution. The
   core never presents frames or writes save files. Speculative cartridge save
   writes reside in snapshotted memory.
+* `GbaNetplayHost::take_output` provides the newest forward frame and audio
+  once, selecting the local machine through the manifest's input-seat mapping.
+  Replay, stalled admission and duplicate reads cannot emit output. Skipped
+  forward frames discard their old audio; other machines never feed the local
+  speaker queue. The product window still needs to consume this interface.
 * `GbaNetplayStartup` uses recomp-net's existing MEMCARD upload and BOOT transfer
   operations. Each seat contributes its own save image and RTC seed. The host
   assembles the two-machine state; identity/owner receipts and a state-digest
@@ -194,10 +199,18 @@ events and accounting for cycle debt. It is not the final performance design.
 An optional `set_native_slices(true)` path now classifies instructions (without
 interpreting them) and continues native dispatch through ordinary CPU/RAM work
 until the next device event. Device accesses and unknown operations end a slice;
-custom dispatch/hooks fall back to the reference path. Bounded lookahead is less
+custom dispatch/hooks fall back to the reference path. RAM dispatch callbacks
+now have an explicit rendezvous before even their validation reads: a native
+ROM run can use batching until it reaches the callback, then resume on the
+reference path. This keeps Emerald's copied flash-code hook from disabling
+batching for the entire cartridge. Bounded lookahead is less
 than the shortest supported cable transfer, so a peer cannot create a previously
 unknown completion IRQ behind a machine's execution. Generated-ROM tests compare
 full snapshots with the reference from both cold start and mid-transfer.
+An additional original generated-code fixture checks ROM-to-RAM callback entry,
+device-clock agreement and byte-identical reference/batched continuation. A
+240-frame Emerald intro-to-menu segment also matches the previous reference
+snapshot byte for byte with batching enabled.
 This path remains opt-in pending commercial-game and broader codegen coverage.
 
 Larger native slices need a proven SIO/MMIO rendezvous boundary and deterministic
@@ -256,7 +269,8 @@ and Linux x86-64 Release under WSL. This does not qualify the target games or
 Steam Deck presentation/audio integration.
 
 The headless native Emerald probe runs two machines through the real BIOS and
-600 cartridge frames. It found the copied IntrSIO32 IRQ routine at 03004664
+loads the available cartridge save into the overworld. It found the copied
+IntrSIO32 IRQ routine at 03004664
 (ROM 082E3554, 0x960 bytes), which is now mapped in Emerald's game configuration
 on `feature/link-serial-coverage`. The probe also installs the regular game's
 byte-validated flash RAM dispatch hook per instance. This is boot/native-coverage
@@ -265,6 +279,14 @@ scheduler still needs substantial performance qualification.
 With a loaded Emerald save, five additional frames restore and replay to identical
 whole-session bytes. Windows and Linux also produce identical canonical hashes
 for all eight original-ROM serial scenarios.
+The Windows/Linux two-process Emerald movement probe also reaches an agreed 120-tick
+checkpoint after rollback under 40 ms latency plus 10 ms jitter per direction:
+1,533,848 identical bytes, hash `b316f504` for its specific loaded-save state and
+`emerald-usa-native-probe` identity. This does not qualify trade/battle; the
+original local save is before the Pokédex with only one party Pokémon. Two
+publicly shared test saves have since been obtained with source/hash provenance
+and validated sector checksums; both boot natively. See the scenario README for
+reproduction without distributing saves or cartridge assets in this repository.
 
 Mario Kart's native Multi-Pak route now connects both machines, selects separate
 Toad/Yoshi characters and enters Mushroom Cup with independent race controls.
@@ -273,6 +295,11 @@ in `tests/link/scenarios/README.md`. It exposed an unseeded serial callback at
 0802DB5C (descriptor pointer at 080DE1B4), now added to the game's configuration
 on `feature/link-serial-coverage`. Five-frame replay during the linked race
 matches whole-session bytes. Race completion and rematch remain unqualified.
+The real-cartridge UDP probe now also runs the native linked race under both
+delay-sync and rollback. The exact 120-tick checkpoints match across both modes
+and Windows/Linux: 1,402,790 bytes, hash `f907c720` for the documented warm grid
+state and `mksc-usa-native-probe` identity. See `tests/link/scenarios/README.md`
+for the opt-in harness; it requires locally supplied images and paired state.
 
 Do not enable product netplay or claim the complete plan is finished until
 these gates are satisfied. Track task status in Beads, not by checking boxes
