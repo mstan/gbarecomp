@@ -161,6 +161,56 @@ void runtime_dispatch(uint32_t target_pc);
 void runtime_dispatch_with_exchange(uint32_t target_pc);
 void runtime_dispatch_miss(uint32_t target_pc);
 
+// ── Guaranteed tail transfers ──────────────────────────────────────
+// Every guest transfer that never returns to its host caller (B, a computed
+// PC write, BX, LDR/LDM/POP into PC, SWI entry and the function fall-through)
+// is a C call in tail position. Native clang/gcc lower those calls to jumps
+// (sibling-call optimisation), so a guest loop that crosses function
+// boundaries costs no host stack. The WebAssembly backend does not: every
+// generated function has several `return`s and the calls stay calls, so the
+// V8 stack overflows as play time grows (docs/WEB_WASM_EXPERIMENTS.md §5).
+//
+// The generator emits those transfers through the macros below, always as a
+// complete statement at the start of a line inside a braced block (never as
+// the body of an unbraced `if`). Natively they expand to exactly the
+// historical text — `f(); return;` — so native builds, the gcc/tcc self-heal
+// overlays and MSVC see the same token stream as before. Under Emscripten
+// they become musttail returns, which clang must lower to `return_call` or
+// reject at compile time. musttail needs identical signatures, so the
+// dispatch-shaped transfers hand their argument over in g_runtime_tail_arg to
+// void(void) entry points. Set immediately before the tail call and read
+// first thing by the callee; nothing may run between. Thread-local so a
+// second thread entering the runtime (TCP server, worker) can never observe
+// or clobber the guest thread's hand-off.
+#if defined(__cplusplus)
+#  define GBARECOMP_TAIL_ARG_TLS thread_local
+#else
+#  define GBARECOMP_TAIL_ARG_TLS _Thread_local
+#endif
+extern GBARECOMP_TAIL_ARG_TLS uint32_t g_runtime_tail_arg;
+void runtime_dispatch_tail(void);                // runtime_dispatch(g_runtime_tail_arg)
+void runtime_dispatch_with_exchange_tail(void);  // runtime_dispatch_with_exchange(g_runtime_tail_arg)
+void runtime_swi_tail(void);                     // runtime_swi(g_runtime_tail_arg)
+
+#if defined(__EMSCRIPTEN__)
+#  if !defined(__wasm_tail_call__)
+#    error "gbarecomp: generated code needs guaranteed tail calls; compile and link with -mtail-call"
+#  endif
+#  define GBARECOMP_MUSTTAIL __attribute__((musttail))
+#  define GBARECOMP_TAIL_CALL(fn) GBARECOMP_MUSTTAIL return fn()
+#  define GBARECOMP_TAIL_DISPATCH(pc) \
+       g_runtime_tail_arg = (pc); GBARECOMP_MUSTTAIL return runtime_dispatch_tail()
+#  define GBARECOMP_TAIL_DISPATCH_WITH_EXCHANGE(pc) \
+       g_runtime_tail_arg = (pc); GBARECOMP_MUSTTAIL return runtime_dispatch_with_exchange_tail()
+#  define GBARECOMP_TAIL_SWI(imm) \
+       g_runtime_tail_arg = (imm); GBARECOMP_MUSTTAIL return runtime_swi_tail()
+#else
+#  define GBARECOMP_TAIL_CALL(fn) fn(); return
+#  define GBARECOMP_TAIL_DISPATCH(pc) runtime_dispatch(pc); return
+#  define GBARECOMP_TAIL_DISPATCH_WITH_EXCHANGE(pc) runtime_dispatch_with_exchange(pc); return
+#  define GBARECOMP_TAIL_SWI(imm) runtime_swi(imm); return
+#endif
+
 // Whole-program force-interpreter backend (co-simulation "interp" side). When
 // g_force_interp != 0, the main run loop calls runtime_force_interp_step() once
 // per guest instruction instead of dispatching generated code — interpreting the

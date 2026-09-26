@@ -42,6 +42,7 @@
 #endif
 #include "../gba/sha1.h"
 #include "snapshot.h"
+#include "file_replace.h"
 #include "mod_state.h"
 #include "tcp_debug_server.h"
 #ifdef GBA_COSIM
@@ -148,6 +149,9 @@ struct Args {
     std::string rom_sha1;
     std::uint32_t rom_crc32 = 0;  // 0 = no CRC check (per-game TOML fills)
     std::string save_path;
+    // Save-state slot directory (<dir>/state<N>). Empty keeps the historical
+    // <rom>.state<N> location.
+    std::string state_dir;
     std::optional<gba::SaveType> save_type;
     std::size_t save_size = 0;
     int steps = 16;
@@ -788,7 +792,7 @@ constexpr std::string_view kCliValueFlags[] = {
     "--dump-png",    "--load-state",    "--view-width",    "--widescreen",
     "--save",        "--save-path",     "--gyro-sensitivity",
     "--sharp-filter", "--linear-filter", "--affine-filter", "--screen",
-    "--volume",
+    "--volume",      "--state-dir",
 };
 
 bool cli_flag_takes_value(std::string_view flag) {
@@ -1007,6 +1011,12 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             const char* v = need_value(s.c_str());
             if (!v) return false;
             args->save_path = v;
+            continue;
+        }
+        if (s == "--state-dir") {
+            const char* v = need_value("--state-dir");
+            if (!v) return false;
+            args->state_dir = v;
             continue;
         }
         if (s == "--screen") {
@@ -1900,12 +1910,15 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     bus.io().set_ppu(&ppu);
     bus.io().set_bus(&bus);
 
-    auto flush_save = [&]() -> bool {
+    // Clean = nothing to write (no save chip / not dirty); callers that only
+    // care about success compare against Failed.
+    enum class SaveFlush { Clean, Written, Failed };
+    auto flush_save = [&]() -> SaveFlush {
         const bool has_save =
             bus.save().sram_enabled() || bus.save().eeprom_enabled() ||
             bus.save().flash_enabled();
         if (!has_save || args.save_path.empty() || !bus.save().dirty()) {
-            return true;
+            return SaveFlush::Clean;
         }
         std::vector<uint8_t> save_bytes = bus.save().sram_enabled()
             ? bus.save().sram_bytes()
@@ -1920,31 +1933,22 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         const std::string tmp = args.save_path + ".tmp";
         if (!write_file(tmp, save_bytes, &err)) {
             std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
-            return false;
+            return SaveFlush::Failed;
         }
-        std::error_code ec;
-        std::filesystem::rename(tmp, args.save_path, ec);  // REPLACE_EXISTING on NTFS/POSIX
-        if (ec) {
-            // Rare filesystems refuse atomic rename-over; fall back to
-            // remove-then-rename (a narrower non-atomic window, still far
-            // better than writing the target in place).
-            std::error_code ec2;
-            std::filesystem::remove(args.save_path, ec2);
-            std::filesystem::rename(tmp, args.save_path, ec2);
-            if (ec2) {
-                std::fprintf(stderr,
-                             "[gbarecomp:runtime] save rename failed: %s\n",
-                             ec2.message().c_str());
-                std::filesystem::remove(tmp, ec2);
-                return false;
-            }
+        std::string replace_err;
+        if (!gbarecomp::debug::replace_file_preserving(tmp, args.save_path,
+                                                       &replace_err)) {
+            std::fprintf(stderr, "[gbarecomp:runtime] save %s\n",
+                         replace_err.c_str());
+            return SaveFlush::Failed;
         }
         bus.save().clear_dirty();
         if (!args.quiet) {
             std::printf("save_flushed path=\"%s\" size=%zu\n",
                         args.save_path.c_str(), save_bytes.size());
+            std::fflush(stdout);  // mid-session event; wasm stdout is fully buffered
         }
-        return true;
+        return SaveFlush::Written;
     };
 
     set_active_bus(&bus);
@@ -2185,6 +2189,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         g_runtime_cycles = 0;
         runtime_fp_reset();
         ++g_runtime_state_epoch;
+#if defined(GBARECOMP_WEB_HOST)
+        bus.audio().discard_playback();
+#endif
         return true;
     };
     auto do_savestate_save_bytes = [&](std::vector<uint8_t>& bytes,
@@ -2201,6 +2208,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         g_runtime_cycles = 0;
         runtime_fp_reset();
         ++g_runtime_state_epoch;
+#if defined(GBARECOMP_WEB_HOST)
+        bus.audio().discard_playback();
+#endif
         return true;
     };
 
@@ -2551,7 +2561,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             ctl_cv.notify_all();
         }
         if (game_thread.joinable()) game_thread.join();
-        bool save_ok = flush_save();
+        bool save_ok = flush_save() != SaveFlush::Failed;
         write_session_diagnostics(opts, "exit", ppu.frame_count());
         gbarecomp::overlay_loader_shutdown();  // join worker + drain before banner
         emit_exit_diagnostics();
@@ -2560,6 +2570,17 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     }
 
     HostWindow win;
+    // Single battery-flush entry point for the windowed/headless session. On the
+    // web it also tells the page to sync /saves to IndexedDB (only when
+    // something was written or the write failed).
+    auto flush_save_notify = [&]() -> bool {
+        const SaveFlush r = flush_save();
+#if defined(GBARECOMP_WEB_HOST)
+        if (r != SaveFlush::Clean)
+            web_notify_storage_write(WebStorageWrite::Battery, r == SaveFlush::Written);
+#endif
+        return r != SaveFlush::Failed;
+    };
     std::vector<uint8_t> live_fb;
     // MC-WS-002 capture: per-present dump of the exact composed bytes handed to
     // SDL (`live_fb`). Gated by GBARECOMP_FRAMEDUMP_DIR; START = first guest
@@ -3063,8 +3084,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // Host-window save-state slots: the ROM path with a .stateN extension.
     // Shift+F1..F9 writes slots 1..9 and F1..F9 restores them; a runtime menu
     // may additionally expose slot 10 without changing the established
-    // function-key shortcut scheme.
+    // function-key shortcut scheme. --state-dir <dir> moves them to
+    // <dir>/state<N> (the browser keeps them under /saves/<rom sha1>).
     auto slot_path = [&](int slot) -> std::string {
+        if (!args.state_dir.empty()) {
+            return (std::filesystem::path(args.state_dir) /
+                    ("state" + std::to_string(slot))).string();
+        }
         std::filesystem::path p(args.rom);
         p.replace_extension(".state" + std::to_string(slot));
         return p.string();
@@ -3406,7 +3432,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             // The OS may kill a backgrounded app without further notice:
             // persist the cartridge save, a suspend state and the session's
             // diagnostic rings now.
-            const bool saved = flush_save();
+            const bool saved = flush_save_notify();
             write_session_diagnostics(opts, ev.terminating ? "terminating" : "background",
                                       ppu.frame_count());
             std::string e;
@@ -3513,7 +3539,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (ev.save_slot) {
             std::string path = slot_path(ev.save_slot);
             std::string e;
-            if (do_savestate_save(path, e)) {
+            const bool saved = do_savestate_save(path, e);
+            if (saved) {
                 std::printf("savestate_saved slot=%d path=\"%s\"\n",
                             ev.save_slot, path.c_str());
                 std::fflush(stdout);
@@ -3522,6 +3549,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                              "[gbarecomp:runtime] savestate save (slot %d) "
                              "failed: %s\n", ev.save_slot, e.c_str());
             }
+#if defined(GBARECOMP_WEB_HOST)
+            web_notify_storage_write(WebStorageWrite::State, saved);
+#endif
         }
         if (ev.load_slot) {
             std::string path = slot_path(ev.load_slot);
@@ -3589,6 +3619,111 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     };
 
+    // Battery-save auto-flush, shared by the outer loop and the windowed
+    // present-in-place hook. A crash or forced kill must not lose a session's
+    // progress, but one in-game save is a multi-second burst of flash/SRAM
+    // writes, so the file is written once the game has left save memory
+    // untouched for kSaveSettleFrames (~1 s): one complete write per save,
+    // never a snapshot of a half-written sector. A game that never stops
+    // writing is still flushed every kSaveMaxDelayFrames (~10 s). Idle play
+    // never writes. After an attempt (even a failed one) both clocks restart,
+    // so an unwritable save path is retried at the same pace, not every frame.
+    // flush_save() writes atomically and clears the dirty flag.
+    constexpr uint64_t kSaveSettleFrames = 60;
+    constexpr uint64_t kSaveMaxDelayFrames = 600;
+    uint64_t save_seen_seq = bus.save().write_seq();
+    uint64_t save_last_change_frame = ppu.frame_count();
+    uint64_t save_dirty_since_frame = ppu.frame_count();
+    bool save_pending = false;
+    auto maybe_flush_battery = [&](uint64_t frame) {
+        if (!bus.save().dirty()) {
+            save_pending = false;
+            return;
+        }
+        if (!save_pending) {
+            save_pending = true;
+            save_dirty_since_frame = frame;
+            save_last_change_frame = frame;
+        }
+        const uint64_t seq = bus.save().write_seq();
+        if (seq != save_seen_seq) {
+            save_seen_seq = seq;
+            save_last_change_frame = frame;
+        }
+        if (frame - save_last_change_frame >= kSaveSettleFrames ||
+            frame - save_dirty_since_frame >= kSaveMaxDelayFrames) {
+            flush_save_notify();
+            save_last_change_frame = frame;
+            save_dirty_since_frame = frame;
+        }
+    };
+#if defined(GBARECOMP_WEB_HOST)
+    uint64_t host_audio_state_epoch = g_runtime_state_epoch;
+#endif
+    auto drain_host_audio = [&]() {
+        int16_t audio_buf[2048];
+#if defined(GBARECOMP_WEB_HOST)
+        if (host_audio_state_epoch != g_runtime_state_epoch) {
+            // State restore owns audio invalidation through this epoch. Keep
+            // load/rewind command handlers free of direct reset_audio() calls.
+            win.reset_audio();
+            host_audio_state_epoch = g_runtime_state_epoch;
+        }
+        // Bounded work, including 262144 Hz source frames and rate transitions.
+        for (int budget = 0; budget < 16; ++budget) {
+            uint32_t rate = 0;
+            const auto n = bus.audio().drain_sample_block(audio_buf, 2048, rate);
+            if (!n) break;
+            if (!fast_forward_active) {
+                gba_mod_audio_mix(audio_buf, n);
+                win.push_audio_block(audio_buf, n, rate);
+            }
+        }
+#else
+        const auto n = bus.audio().drain_samples(audio_buf, 2048);
+        if (n && !fast_forward_active) {
+            gba_mod_audio_mix(audio_buf, n);
+            win.push_audio_samples(audio_buf, n);
+        }
+#endif
+    };
+    auto service_host_pause = [&]() {
+        bool waited = false;
+        while (!host_quit && args.window && (host_paused
+#if defined(GBARECOMP_WEB_HOST)
+                || win.auto_paused()
+#endif
+                )) {
+#if defined(GBARECOMP_WEB_HOST)
+            win.report_paused(true);
+            if (!waited) {
+                win.reset_audio();
+                // The hook checks the 60-frame debounce before pausing, so a
+                // hidden tab would otherwise hold a dirty save only in RAM for
+                // as long as it stays hidden. Web only: native pause is unchanged.
+                flush_save_notify();
+            }
+#endif
+            waited = true;
+            pump_host_input();
+#if defined(GBARECOMP_WEB_HOST)
+            // The page re-presents its private staging copy; publishing here
+            // would count paused frames as new ones.
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+#else
+            // Keep the native window (and any runtime UI drawn over the
+            // game renderer) alive while the guest is held still.
+            win.present(live_fb.data());
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+#endif
+        }
+        if (waited && pacer) pacer->reset();
+#if defined(GBARECOMP_WEB_HOST)
+        win.report_paused(false);
+        if (waited) { bus.audio().discard_playback(); win.reset_audio(); }
+#endif
+    };
+
     if (args.window) {
         runtime_set_host_service_hook([&]() { win.service_events(); });
     }
@@ -3638,14 +3773,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (phase_active) fp_t1 = FramePhaseRing::now_ns();
                 if (present_frame) win.present(live_fb.data());
                 if (phase_active) fp_t2 = FramePhaseRing::now_ns();
-                int16_t audio_buf[2048];
-                std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
-                if (n > 0 && !fast_forward_active) {
-                    gba_mod_audio_mix(audio_buf, n);
-                    win.push_audio_samples(audio_buf, n);
-                }
+                drain_host_audio();
+                // Windowed present-in-place stays inside one step_once() for
+                // the whole session, so the outer loop's auto-flush never runs.
+                maybe_flush_battery(frame);
                 if (phase_active) fp_t3 = FramePhaseRing::now_ns();
                 pump_host_input();
+                service_host_pause();
                 // Present-in-place can remain inside a single step_once() for
                 // the entire windowed session. Advance deterministic replays
                 // here as well as in the outer loop so windowed repros exercise
@@ -3939,20 +4073,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     }
 
     int dispatches_since_pump = 0;
-    // Battery-save auto-flush debounce (see the loop body). ~1 s at 59.7 Hz.
-    constexpr uint64_t kSaveFlushIntervalFrames = 60;
-    uint64_t save_last_flush_frame = ppu.frame_count();
     if (input_replay_requested) apply_input_replay();
     if (args.window) pump_host_input();
 
     for (uint64_t i = 0; i < step_budget && !host_quit; ++i) {
         // Paused: hold the guest still, keep the window alive (input pump,
         // re-present, ~100 Hz idle). Applies to windowed play only.
-        while (host_paused && !host_quit && args.window) {
-            pump_host_input();
-            win.present(live_fb.data());
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
+        service_host_pause();
         if (host_quit) break;
         if (!step_once()) break;
         if (input_replay_requested) {
@@ -4047,12 +4174,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     if (++framedump_written >= framedump_max) host_quit = true;
                 }
                 if (phase_active) fp_t2 = FramePhaseRing::now_ns();
-                int16_t audio_buf[2048];
-                std::size_t n = bus.audio().drain_samples(audio_buf, 2048);
-                if (n > 0 && !fast_forward_active) {
-                    gba_mod_audio_mix(audio_buf, n);
-                    win.push_audio_samples(audio_buf, n);
-                }
+                drain_host_audio();
                 if (phase_active) fp_t3 = FramePhaseRing::now_ns();
                 pump_host_input();
                 if (phase_active) fp_t4 = FramePhaseRing::now_ns();
@@ -4083,22 +4205,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 wram_trace_tick();
             }
         }
-        // Save resilience: flush the battery save to disk shortly AFTER the
-        // game writes it, not only on a clean exit. Without this, a crash or a
-        // forced kill loses the entire session's progress (hours, for an RPG);
-        // with it, at most ~1 s of save activity is at risk. Dirty-gated (idle
-        // play never writes) and debounced by frame count so a completed
-        // in-game save reaches disk within ~1 s and a multi-sector flash write
-        // isn't hammered every frame. flush_save() writes atomically and clears
-        // the dirty flag. Runs on the game/step thread in both windowed and
-        // headless loops; the separate TCP debug path keeps exit-only flush.
-        if (bus.save().dirty()) {
-            uint64_t fc_now = ppu.frame_count();
-            if (fc_now - save_last_flush_frame >= kSaveFlushIntervalFrames) {
-                flush_save();
-                save_last_flush_frame = fc_now;
-            }
-        }
+        // Battery-save auto-flush (policy at maybe_flush_battery). The TCP
+        // debug path keeps exit-only flush.
+        maybe_flush_battery(ppu.frame_count());
         if (!args.window && args.frames >= 0 &&
             ppu.frame_count() - headless_base_frame >=
                 static_cast<uint64_t>(args.frames)) {
@@ -4154,7 +4263,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         win.close();
     }
 
-    bool save_ok = flush_save();
+    // Through the wrapper: the web notice does not depend on HostWindow, so
+    // running after win.close() is fine.
+    bool save_ok = flush_save_notify();
     if (!suspend_on_exit) clear_suspend_marker();
     write_session_diagnostics(opts, "exit", ppu.frame_count());
 

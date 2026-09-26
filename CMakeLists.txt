@@ -59,6 +59,14 @@ else()
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 endif()
 
+# WebAssembly: generated code relies on guaranteed tail calls (runtime_arm.h,
+# GBARECOMP_TAIL_*). Without -mtail-call clang silently ignores musttail, so the
+# header refuses to compile; enable the feature for every target and the link.
+if(EMSCRIPTEN)
+    add_compile_options(-mtail-call)
+    add_link_options(-mtail-call)
+endif()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SDL2 — soft dependency. When present we build host_window.cpp with the
 # real SDL backend; otherwise it compiles as a no-op stub. CI and headless
@@ -95,6 +103,7 @@ option(GBA_COSIM
     "Build the first-divergence co-simulation oracle (state hash + TCP park/step)"
     OFF)
 
+if(NOT EMSCRIPTEN)
 if(ANDROID AND TARGET SDL2::SDL2)
     # Android applications provide SDL from the parent Gradle/CMake project.
     # Reusing that target keeps SDLActivity's libSDL2.so as the single backend.
@@ -165,6 +174,8 @@ else()
 endif()
 
 endif()
+
+endif() # NOT EMSCRIPTEN: never discover host SDL for wasm
 
 if(GBARECOMP_STATIC_RELEASE)
     # NOTE: -static / -static-libgcc / -static-libstdc++ MUST be set
@@ -351,7 +362,6 @@ add_library(gbarecomp_runtime STATIC
     # must work even when the package catalog itself is disabled.
     src/runtime/mod_function_hooks.cpp
     src/runtime/host_platform.cpp
-    src/runtime/host_window.cpp
     src/runtime/touch_input.cpp
     src/runtime/mobile_platform.cpp
     src/runtime/color_lut.cpp
@@ -411,6 +421,34 @@ else()
                    "to populate.")
 endif()
 target_include_directories(gbarecomp_runtime PUBLIC src/runtime)
+option(GBARECOMP_WEB_HOST "Build the browser HostWindow backend" OFF)
+if(EMSCRIPTEN AND NOT GBARECOMP_WEB_HOST)
+    message(FATAL_ERROR
+        "Emscripten builds require -DGBARECOMP_WEB_HOST=ON; use "
+        "packaging/web/build_web.sh for the supported browser bundle")
+endif()
+if(GBARECOMP_WEB_HOST AND NOT EMSCRIPTEN)
+    message(FATAL_ERROR "GBARECOMP_WEB_HOST requires Emscripten")
+endif()
+if(EMSCRIPTEN)
+    include(cmake/web_host_link_options.cmake)
+    gbarecomp_web_host_link_options(GBARECOMP_WEB_HOST_LINK_OPTIONS)
+    string(JOIN "\n" GBARECOMP_WEB_HOST_LINK_OPTIONS_RSP
+        ${GBARECOMP_WEB_HOST_LINK_OPTIONS})
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/gbarecomp_web_host_link_options.rsp"
+        "${GBARECOMP_WEB_HOST_LINK_OPTIONS_RSP}\n")
+endif()
+if(EMSCRIPTEN AND GBARECOMP_RUNTIME_UI_ROOT)
+    message(FATAL_ERROR "The SDL_Renderer2 runtime UI is unavailable on wasm; use the HTML host controls")
+endif()
+if(GBARECOMP_WEB_HOST)
+    target_sources(gbarecomp_runtime PRIVATE src/runtime/host_window_web.cpp)
+    target_compile_definitions(gbarecomp_runtime PUBLIC GBARECOMP_WEB_HOST=1)
+    message(STATUS "gbarecomp: host_backend=web")
+else()
+    target_sources(gbarecomp_runtime PRIVATE src/runtime/host_window.cpp)
+endif()
+
 if(GBARECOMP_RUNTIME_UI_ROOT AND
    EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/recomp_runtime_ui.h")
     target_compile_definitions(gbarecomp_runtime PUBLIC GBARECOMP_RUNTIME_UI=1)
@@ -466,6 +504,7 @@ endif()
 add_library(gbarecomp_debug STATIC
     src/debug/tcp_debug_server.cpp
     src/debug/trace_ring.cpp
+    src/debug/file_replace.cpp
     src/debug/snapshot.cpp
     src/debug/mod_state.cpp
     src/debug/ws_provenance.cpp
@@ -672,6 +711,28 @@ endif()
 # ─────────────────────────────────────────────────────────────────────────────
 enable_testing()
 
+# Browser protocol tests exercise the production JS with controlled host APIs.
+# Node is optional; native engine builds do not require browser tooling.
+find_program(GBARECOMP_NODE_EXECUTABLE NAMES node nodejs)
+if(GBARECOMP_NODE_EXECUTABLE)
+    foreach(web_test IN ITEMS host_unit host_lifecycle host_input host_touch audio_worklet
+                              save_mount save_bootstrap asset_store bootstrap)
+        add_test(NAME web_${web_test}_tests
+            COMMAND ${GBARECOMP_NODE_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/${web_test}_test.js)
+        set_tests_properties(web_${web_test}_tests PROPERTIES TIMEOUT 15)
+    endforeach()
+    add_test(NAME web_config_bootstrap_tests
+        COMMAND ${GBARECOMP_NODE_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/packaging/tests/web_config_bootstrap_test.js)
+endif()
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME web_runtime_config_tests
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/packaging/tests/test_web_runtime_config.py)
+endif()
+
 # Portable packaging generation is a Unix-only shell path. Register its smoke
 # test when the small validation toolchain is available, while keeping ordinary
 # engine builds independent of packaging-only host packages.
@@ -722,6 +783,10 @@ add_executable(mod_audio_tests
     src/gba/mod_audio.cpp)
 target_include_directories(mod_audio_tests PRIVATE src/gba)
 add_test(NAME mod_audio_tests COMMAND mod_audio_tests)
+
+add_executable(file_replace_tests tests/debug/file_replace_test.cpp)
+target_link_libraries(file_replace_tests PRIVATE gbarecomp_debug)
+add_test(NAME file_replace_tests COMMAND file_replace_tests)
 
 add_executable(mod_state_tests tests/mod_state/test_main.cpp)
 target_include_directories(mod_state_tests PRIVATE src/debug)
@@ -792,6 +857,17 @@ add_executable(audio_drc_tests tests/runtime/audio_drc_test.cpp)
 target_include_directories(audio_drc_tests PRIVATE src/runtime)
 add_test(NAME audio_drc_tests COMMAND audio_drc_tests)
 
+add_executable(audio_playback_tests tests/runtime/audio_playback_test.cpp)
+target_include_directories(audio_playback_tests PRIVATE src/debug)
+target_link_libraries(audio_playback_tests PRIVATE gbarecomp_gba)
+add_test(NAME audio_playback_tests COMMAND audio_playback_tests)
+
+add_executable(web_audio_dsp_tests
+    tests/runtime/web_audio_dsp_test.cpp
+    src/runtime/host_web_audio_dsp.cpp)
+target_include_directories(web_audio_dsp_tests PRIVATE src/runtime)
+add_test(NAME web_audio_dsp_tests COMMAND web_audio_dsp_tests)
+
 add_executable(color_lut_tests
     tests/runtime/color_lut_test.cpp
     src/runtime/color_lut.cpp)
@@ -815,6 +891,13 @@ add_test(NAME selfheal_cluster_test COMMAND selfheal_cluster_test)
 add_executable(interpreter_smoke tests/armv4t/interpreter_smoke.cpp)
 target_link_libraries(interpreter_smoke PRIVATE gbarecomp_armv4t)
 add_test(NAME interpreter_smoke COMMAND interpreter_smoke)
+
+add_executable(tail_dispatch_tests
+    tests/armv4t/tail_dispatch_test.cpp
+    tests/codegen/stubs.cpp)
+target_include_directories(tail_dispatch_tests PRIVATE tests/codegen)
+target_link_libraries(tail_dispatch_tests PRIVATE gbarecomp_armv4t)
+add_test(NAME tail_dispatch_tests COMMAND tail_dispatch_tests)
 
 add_executable(armv4t_tests tests/armv4t/test_main.cpp)
 target_link_libraries(armv4t_tests PRIVATE gbarecomp_armv4t)

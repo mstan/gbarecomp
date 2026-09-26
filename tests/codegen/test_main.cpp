@@ -500,6 +500,52 @@ bool run_case(const TestCase& tc, std::size_t idx) {
         note(d, "cycles: interp=%u recomp=%llu", interp_cycles,
              static_cast<unsigned long long>(codegen_test::g_ticked_cycles));
     }
+    // Tail-transfer contract. GBARECOMP_TAIL_* natively expands to
+    // `call; return`, so a transfer that does not link must leave the
+    // function, and an instruction the interpreter does not branch on must
+    // continue to the next one. A transfer may leave by dispatching or, for a
+    // self-loop, by returning with R15 set for the caller to redispatch. BL
+    // keeps its continuation (call, then return-address check) and is exempt.
+    const bool links = ins.op == armv4t::IrOp::BL ||
+                       ins.op == armv4t::IrOp::BL_suffix ||
+                       ins.op == armv4t::IrOp::BLX_reg;
+    const uint32_t next_pc = tc.pc + (tc.thumb ? 2u : 4u);
+    const bool taken = tc.branches && cpu_interp.R[15] != next_pc;
+    if (!links && (taken || codegen_test::g_dispatch_called) &&
+        codegen_test::g_fellthrough) {
+        note(d, "transfer (dispatch=%d target=0x%08X) fell through instead "
+                "of returning", codegen_test::g_dispatch_called ? 1 : 0,
+             codegen_test::g_last_dispatch_target);
+    }
+    if (!taken && !codegen_test::g_dispatch_called &&
+        !codegen_test::g_fellthrough) {
+        note(d, "returned although nothing was transferred");
+    }
+    // Same instruction with its direct target resolved to a named function:
+    // B must leave through GBARECOMP_TAIL_CALL, BL must call and continue its
+    // return-address check, and a not-taken branch must call nothing.
+    if (kNamedTestFns[idx]) {
+        std::memset(&g_cpu, 0, sizeof(g_cpu));
+        for (int rg = 0; rg < 16; ++rg) g_cpu.R[rg] = tc.r_init[rg];
+        g_cpu.cpsr = tc.cpsr_init;
+        g_cpu.R[15] = tc.pc;
+        codegen_test::bus_reset(geom.base, geom.size);
+        for (std::size_t k = 0; k < tc.mem_init_count; ++k) {
+            codegen_test::bus_write_u32_direct(
+                tc.mem_init[k].addr, tc.mem_init[k].value);
+        }
+        kNamedTestFns[idx]();
+        if (taken != codegen_test::g_named_sink_called) {
+            note(d, "named target: taken=%d but named call=%d", taken ? 1 : 0,
+                 codegen_test::g_named_sink_called ? 1 : 0);
+        }
+        if (taken && !links && codegen_test::g_fellthrough) {
+            note(d, "named target: GBARECOMP_TAIL_CALL fell through");
+        }
+        if (!taken && !codegen_test::g_fellthrough) {
+            note(d, "named target: not-taken branch did not fall through");
+        }
+    }
     // runtime_tick can synchronously deliver an IRQ. BX must therefore expose
     // the destination instruction-set mode before ticking, not merely before
     // dispatching the destination.
