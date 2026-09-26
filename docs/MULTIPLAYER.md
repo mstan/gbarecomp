@@ -161,6 +161,35 @@ candidates: durable save or reconnect logic must explicitly agree an exact
 checkpoint tick and digest with the other peer. Neither QUIESCE nor the
 watermark alone is a durable-save acknowledgement.
 
+`GbaNetplayMatch` now owns this lifecycle for runners: cold save/RTC startup or
+warm paired-state verification, one forward/replay frame per `poll()`, the
+60-second reconnect policy, and exact checkpoint agreement. It never waits or
+sleeps for the network; callers can keep pumping window and lobby events while
+inputs stall. `take_output()` selects the local machine and suppresses replay
+audio/video. The launcher starts its chosen transport on the owned session;
+the match includes delay/prediction/mode in startup compatibility checks.
+
+`finish_at()` requires an input boundary already agreed by application session
+control. It is not a unilateral save request. Only `CheckpointReady` permits
+paired archive storage, under the caller's exact image/build identity. The
+caller must stop admission before restoring a paired archive and construct a
+new match/transport with a fresh session ID. Seven two-process fixture tests
+exercise both admission modes, build and delay mismatch rejection before any
+guest frame, a six-second outage, startup ACK loss, and paired warm restart on
+Windows/Linux. The commercial probe uses this same controller. Shared lobby
+registration, game-window binding and user-driven checkpoint negotiation are
+still product integration work.
+
+Restart stress exposed a shared transport bug: one finished-transfer ID tracked
+both directions, so sending a receipt erased the last received proposal's replay
+guard. Delayed BEGIN packets could then reopen an old transfer and stall the
+next checkpoint. The recomp-net pin includes `35a2135` (received history per
+sender, stale BEGIN rejection and sender-scoped chunks) and `fa8416e` (bounds an
+existing lobby test fixture). A captured-UDP regression fails without the fix
+and passes with it on Windows/Linux. Five additional jittered paired restarts
+pass. The library's 22 Windows tests and 24 Linux tests pass; the Linux total
+includes a targeted rerun after correcting the unrelated overflowing fixture.
+
 ## State ownership and determinism
 
 The dedicated codec includes EWRAM/IWRAM/VRAM/palette/OAM, IO registers,

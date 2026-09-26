@@ -24,6 +24,8 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
             env["GBA_TEST_PEER_PORT"] = str(port+2+slot)
             if mode == "mismatch" and slot == 1:
                 env["GBA_TEST_BOOT_ID"] = "incompatible-runtime-build"
+            if mode == "policy_mismatch" and slot == 1:
+                env["GBA_TEST_POLICY_MISMATCH"] = "1"
             if mode == "checkpoint_mismatch" and slot == 1:
                 env["GBA_TEST_CHECKPOINT_CORRUPT"] = "1"
             if mode == "restart":
@@ -38,10 +40,10 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
             peers.append(subprocess.Popen([exe, str(slot), str(port), str(nonce), str(rollback), str(root / f"peer{slot}.txt")],
                 stdout=log, stderr=log, env=env,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0))
-        if mode == "mismatch":
+        if mode in ("mismatch", "policy_mismatch"):
             assert peers[0].wait(timeout=15) == 11, "host accepted incompatible startup"
             assert "program identity mismatch" in (root / "peer0.log").read_text(errors="replace")
-            print("startup refused a different runtime/build identity before any guest frame")
+            print("startup refused a different build or admission policy before any guest frame")
             sys.exit(0)
         if mode == "checkpoint_mismatch":
             assert not rollback, "checkpoint corruption scenario requires the exact delay-sync tip"
