@@ -76,6 +76,7 @@ public:
     void deserialize(gbarecomp::debug::SnapshotReader& r);
 
 private:
+    friend class SimulationStateCodec;
     static constexpr std::size_t kDefaultSramSize = 32 * 1024;
     static constexpr std::size_t kMaxEepromSize = 8 * 1024;
 

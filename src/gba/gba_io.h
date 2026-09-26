@@ -34,6 +34,7 @@
 namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
 namespace gba {
+class GbaSerialDevice;
 
 class GbaPpu;
 class GbaIrq;
@@ -225,6 +226,8 @@ public:
     // handler re-kicks the transfer. (GBATEK § "SIO Normal Mode".)
     void tick_sio(uint32_t cycles);
     uint32_t cycles_until_next_sio_event() const;
+    void set_serial_device(GbaSerialDevice* device);
+    GbaSerialDevice* serial_device() const { return serial_device_; }
 
     // DMA cycle-stealing: a DMA transfer steals bus cycles from the CPU. The
     // DMA loops accumulate their GBATEK transfer cost here; the runtime drains
@@ -244,6 +247,8 @@ public:
     void deserialize(gbarecomp::debug::SnapshotReader& r);
 
 private:
+    friend class SimulationStateCodec;
+    GbaSerialDevice* serial_device_ = nullptr;
     GbaPpu*       ppu_   = nullptr;
     GbaIrq*       irq_   = nullptr;
     armv4t::Bus*  bus_   = nullptr;

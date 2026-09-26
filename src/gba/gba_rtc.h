@@ -52,8 +52,15 @@ public:
 
     void serialize(gbarecomp::debug::SnapshotWriter& w) const;
     void deserialize(gbarecomp::debug::SnapshotReader& r);
+    // Multiplayer clock: a negotiated civil-time seed, then emulated cycles.
+    // Host time and environment overrides cannot affect this timeline.
+    void set_emulated_clock(std::int64_t seed_seconds, std::uint64_t cycles = 0);
+    void advance_emulated_clock(std::uint32_t cycles);
 
 private:
+    friend class SimulationStateCodec;
+    bool emulated_clock_ = false;
+    std::uint64_t emulated_cycles_ = 0;
     enum class Phase { Idle, Command, Read, Write };
 
     // Broken-down local civil time (dow 0=Sun..6=Sat).

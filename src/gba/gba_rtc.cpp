@@ -338,6 +338,7 @@ int64_t GbaRtc::linear_seconds(const Civil& c) const {
 }
 
 int64_t GbaRtc::current_seconds() const {
+    if (emulated_clock_) return boot_seconds_ + static_cast<int64_t>(emulated_cycles_ / 16777216u) + offset_;
     if (boot_seeded_) {
         const int64_t elapsed = have_fixed_ ? 0 : (steady_seconds() - boot_monotonic_seconds_);
         return boot_seconds_ + elapsed + offset_;
@@ -400,7 +401,9 @@ GbaRtc::Civil GbaRtc::now() const {
 void GbaRtc::set_offset_from(const Civil& target) {
     int64_t tlin = linear_seconds(target);
     int64_t base_lin;
-    if (boot_seeded_) {
+    if (emulated_clock_) {
+        base_lin = boot_seconds_ + static_cast<int64_t>(emulated_cycles_ / 16777216u);
+    } else if (boot_seeded_) {
         const int64_t elapsed = have_fixed_ ? 0 : (steady_seconds() - boot_monotonic_seconds_);
         base_lin = boot_seconds_ + elapsed;
     } else {
@@ -417,6 +420,17 @@ void GbaRtc::set_offset_from(const Civil& target) {
 void GbaRtc::reset_clock() {
     control_ = 0;
     offset_ = 0;
+}
+
+void GbaRtc::set_emulated_clock(std::int64_t seconds, std::uint64_t cycles) {
+    emulated_clock_ = true;
+    emulated_cycles_ = cycles;
+    boot_seconds_ = seconds;
+    boot_seeded_ = true;
+    offset_ = 0;
+}
+void GbaRtc::advance_emulated_clock(std::uint32_t cycles) {
+    if (emulated_clock_) emulated_cycles_ += cycles;
 }
 
 }  // namespace gba

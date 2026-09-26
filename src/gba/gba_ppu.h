@@ -162,6 +162,7 @@ public:
     bool has_latched_framebuffer() const { return has_latched_fb_; }
 
 private:
+    friend class SimulationStateCodec;
     uint32_t scanline_        = 0;   // 0..227
     uint32_t dot_in_scanline_ = 0;   // 0..307 (in dots, not cycles)
     uint32_t cycle_in_dot_    = 0;   // 0..3

@@ -8,10 +8,12 @@
 // interpreter's case in src/armv4t/interpreter.cpp.
 
 #include "runtime_arm.h"
+#include "runtime_context.h"
 #include "symbol_lookup.h"
 
 #include <cstdio>
 #include <cstdlib>
+#include <stdexcept>
 
 // runtime_dispatch_miss / runtime_unimplemented_op default-abort
 // implementations live in src/runtime/runtime_arm_default_aborts.cpp
@@ -66,6 +68,8 @@ extern "C" int g_runtime_force_interp_step_active = 0;
 extern "C" unsigned long long g_runtime_vblank_starts;
 
 namespace {
+
+gbarecomp::RuntimeArmContext* g_resumable_context = nullptr;
 
 constexpr uint32_t kTraceSize = 4096u;
 RuntimeTraceEntry g_trace[kTraceSize] = {};
@@ -823,12 +827,16 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
         runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
 
     bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+    if (g_resumable_context && g_resumable_context->program_dispatch &&
+        g_resumable_context->program_dispatch(pc, thumb ? 1 : 0)) return;
     // A generated caller may enter mutable code without returning through the
     // outer run loop first. Honor the per-PC interpreter predicate at this
     // central dispatch boundary too, and use the existing whole-subtree bridge
     // so the generated call/return ABI remains balanced.
     if (g_runtime_force_interp_hook &&
         g_runtime_force_interp_hook(pc, thumb ? 1 : 0)) {
+        if (g_resumable_context)
+            throw std::logic_error("multiplayer requires native dispatch coverage");
         runtime_bridge_interpret(pc, thumb, 0u, 0u);
         return;
     }
@@ -855,6 +863,12 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
     // since armv4t must not depend on the runtime lib). When the feature is
     // off this is a single bool check and returns 0.
     if (overlay_try_dispatch(pc, thumb ? 1 : 0)) return;
+    if (g_resumable_context) {
+        char message[96];
+        std::snprintf(message,sizeof(message),"multiplayer native dispatch entry is missing: %08x (%s)",
+            pc,thumb ? "Thumb" : "ARM");
+        throw std::logic_error(message);
+    }
     runtime_dispatch_miss(target_pc);
 }
 
@@ -1125,7 +1139,23 @@ extern "C" void runtime_exception_return(uint32_t new_pc) {
     // can tell when *its* IRQ (vs. a nested inner one) has returned. Set
     // after the bank swap so g_irq_nest_depth still reflects the level being
     // left (runtime_irq decrements only after its loop exits).
-    if (old_mode == 0x12u) g_irq_iret_depth = g_irq_nest_depth;
+    if (old_mode == 0x12u) {
+        g_irq_iret_depth = g_irq_nest_depth;
+        if (g_resumable_context) {
+            auto& stack = g_resumable_context->interrupts;
+            if (stack.empty()) throw std::logic_error("IRQ return without continuation");
+            const auto frame = stack.back();
+            stack.pop_back();
+            for (unsigned i = 0; i < 4; ++i) g_cpu.R[i] = frame.preserved[i];
+            g_cpu.R[12] = frame.preserved[4];
+            g_call_return_depth = frame.return_depth;
+            g_call_return_floor = frame.return_floor;
+            g_irq_iret_depth = frame.iret_depth;
+            --g_irq_nest_depth;
+            // Never fall through the discarded native IRQ call chain.
+            throw gbarecomp::RuntimeDispatchYield{};
+        }
+    }
 }
 
 extern "C" void runtime_note_interpreted_exception_return(uint32_t old_mode) {
@@ -1339,6 +1369,17 @@ extern "C" void runtime_irq(uint32_t return_address) {
     // enclosing IRQ's) frames — see g_call_return_floor. Restored below.
     uint32_t saved_floor   = g_call_return_floor;
     g_call_return_floor    = g_call_return_depth;
+    if (g_resumable_context) {
+        gbarecomp::RuntimeIrqContinuation frame;
+        frame.preserved = {saved_r0, saved_r1, saved_r2, saved_r3, saved_r12};
+        frame.return_floor = saved_floor;
+        frame.return_depth = g_call_return_depth;
+        frame.iret_depth = saved_iret;
+        g_resumable_context->interrupts.push_back(frame);
+        // The outer dispatcher resumes the recompiled BIOS vector. The
+        // continuation, including nesting/floor state, now belongs to the GBA.
+        throw gbarecomp::RuntimeDispatchYield{};
+    }
     // Whole-program interpreter mode must cover exception handlers too.
     // Previously only the main run loop honored GBARECOMP_FORCE_INTERP, while
     // IRQs always entered the generated dispatch table. Besides making the
@@ -1394,3 +1435,47 @@ extern "C" void runtime_shutdown(void) {
     gbarecomp::runtime_arm::g_bus_handle = nullptr;
     g_call_return_depth = 0;
 }
+
+namespace gbarecomp {
+void runtime_capture_arm_context(RuntimeArmContext& out) {
+    out.cpu = g_cpu;
+    out.returns.assign(g_call_return_stack, g_call_return_stack + g_call_return_depth);
+    out.return_floor = g_call_return_floor;
+    out.irq_depth = g_irq_nest_depth;
+    out.iret_depth = g_irq_iret_depth;
+    out.resume_pc = g_runtime_resume_pc;
+    out.irq_from_halt = g_runtime_irq_from_halt;
+    out.irq_entries = g_runtime_irq_entries;
+    out.immediate_override = g_runtime_thumb_alu_imm_override;
+    out.read_override = g_runtime_bus_read_override;
+    out.ram_dispatch = g_runtime_ram_dispatch_hook;
+    out.force_interp = g_runtime_force_interp_hook;
+    out.entry_hook = g_runtime_fn_entry_hook;
+    out.bios_hook = g_bios_hle_hook;
+}
+void runtime_restore_arm_context(const RuntimeArmContext& in) {
+    if (in.returns.size() > kCallReturnStackSize || in.return_floor > in.returns.size() ||
+        in.irq_depth != in.interrupts.size())
+        throw std::invalid_argument("invalid runtime execution context");
+    for (const auto& frame : in.interrupts)
+        if (frame.return_floor > frame.return_depth || frame.return_depth > in.returns.size())
+            throw std::invalid_argument("invalid IRQ continuation");
+    g_cpu = in.cpu;
+    runtime_call_stack_restore(in.returns.data(), static_cast<std::uint32_t>(in.returns.size()));
+    g_call_return_floor = in.return_floor;
+    g_irq_nest_depth = in.irq_depth;
+    g_irq_iret_depth = in.iret_depth;
+    g_runtime_resume_pc = in.resume_pc;
+    g_runtime_irq_from_halt = in.irq_from_halt;
+    g_runtime_irq_entries = in.irq_entries;
+    g_runtime_thumb_alu_imm_override = in.immediate_override;
+    g_runtime_bus_read_override = in.read_override;
+    g_runtime_ram_dispatch_hook = in.ram_dispatch;
+    g_runtime_force_interp_hook = in.force_interp;
+    g_runtime_force_interp_step_active = 0;
+    g_runtime_fn_entry_hook = in.entry_hook;
+    g_bios_hle_hook = in.bios_hook;
+}
+void runtime_set_resumable_context(RuntimeArmContext* context) { g_resumable_context = context; }
+bool runtime_has_resumable_context() { return g_resumable_context != nullptr; }
+} // namespace gbarecomp

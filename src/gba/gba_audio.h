@@ -67,6 +67,8 @@ public:
     // the number actually written. Used by the host audio backend
     // and by the TCP audio_samples command.
     std::size_t drain_samples(int16_t* out, std::size_t max);
+    // Drop host playback only; preserve deterministic mixer/FIFO state.
+    void discard_output() { ring_tail_ = ring_head_; }
 
     uint32_t sample_rate() const { return kSystemHz / cycles_per_sample_; }
 
@@ -160,6 +162,7 @@ public:
     void deserialize(gbarecomp::debug::SnapshotReader& r);
 
 private:
+    friend class SimulationStateCodec;
     // ── Channel 1: square wave with frequency sweep ──────────────
     struct Sound1 {
         bool     active = false;

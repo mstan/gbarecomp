@@ -47,6 +47,7 @@ public:
 };
 
 class GpioPort {
+    friend class SimulationStateCodec;
 public:
     static constexpr uint32_t kData      = 0xC4;
     static constexpr uint32_t kDirection = 0xC6;

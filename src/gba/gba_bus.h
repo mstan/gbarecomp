@@ -80,6 +80,7 @@ public:
     // through `bios->read*()` only while BIOS access is enabled. Pass
     // nullptr to leave BIOS region unmapped.
     void set_bios(const GbaBios* bios) { bios_ = bios; }
+    const GbaBios* bios() const { return bios_; }
 
     // Real GBA BIOS bytes are protected after the BIOS hands control
     // to cartridge code. Runtime-generated reads update this from the
@@ -241,6 +242,7 @@ public:
     }
 
 private:
+    friend class SimulationStateCodec;
     // Notify a registered write observer of a pending store; returns true if the
     // store should be SUPPRESSED (device trap during shadow validation). Reads
     // the pre-store value for RAM regions so the gate can journal/roll back.

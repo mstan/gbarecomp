@@ -1,6 +1,7 @@
 // gba_io.cpp — see gba_io.h.
 
 #include "gba_io.h"
+#include "gba_serial_device.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -154,7 +155,7 @@ GbaIo::GbaIo() {
     io_[0x088] = 0x00;
     io_[0x089] = 0x02;
 }
-GbaIo::~GbaIo() = default;
+GbaIo::~GbaIo() { set_serial_device(nullptr); }
 
 namespace {
 
@@ -520,6 +521,7 @@ void GbaIo::request_irq(uint16_t bit) {
 }
 
 void GbaIo::tick_sio(uint32_t cycles) {
+    if (serial_device_) { serial_device_->tick(cycles); return; }
     if (!sio_transfer_active_) return;
     if (cycles < sio_cycles_remaining_) {
         sio_cycles_remaining_ -= cycles;
@@ -538,6 +540,7 @@ void GbaIo::tick_sio(uint32_t cycles) {
 }
 
 uint32_t GbaIo::cycles_until_next_sio_event() const {
+    if (serial_device_) return serial_device_->cycles_until_event();
     if (!sio_transfer_active_) return 0xFFFFFFFFu;
     return sio_cycles_remaining_ ? sio_cycles_remaining_ : 1u;
 }
@@ -598,6 +601,8 @@ void GbaIo::warn_unhandled(uint32_t off, uint32_t value, bool is_write, uint8_t 
 // ─────────────────────────────────────────────────────────────────────
 
 uint8_t GbaIo::read8(uint32_t off) {
+    if (serial_device_ && GbaSerialDevice::handles(off))
+        return static_cast<uint8_t>(serial_device_->read16(off & ~1u) >> ((off & 1u) * 8));
     if (off >= kIoSize) { warn_unhandled(off, 0, false, 1); return 0; }
     // POSTFLG: low bit is the boot flag. We're always "first boot"
     // for now, so return 0.
@@ -624,6 +629,7 @@ uint8_t GbaIo::read8(uint32_t off) {
 }
 
 uint16_t GbaIo::read16(uint32_t off) {
+    if (serial_device_ && GbaSerialDevice::handles(off)) return serial_device_->read16(off);
     if (off + 1 >= kIoSize) { warn_unhandled(off, 0, false, 2); return 0; }
     if (off == IoReg::VCOUNT) {
         return ppu_ ? ppu_->vcount() : 0;
@@ -659,6 +665,12 @@ uint32_t GbaIo::read32(uint32_t off) {
 // ─────────────────────────────────────────────────────────────────────
 
 void GbaIo::write8(uint32_t off, uint8_t v) {
+    if (serial_device_ && GbaSerialDevice::handles(off)) {
+        auto shift = (off & 1u) * 8;
+        serial_device_->write16(off & ~1u, static_cast<uint16_t>(v << shift),
+                                static_cast<uint16_t>(0xffu << shift));
+        return;
+    }
     if (off == IoReg::UNDOC_410) {
         // The retail BIOS writes FF here during reset. Hardware exposes this
         // as an undocumented 8-bit write-only register; no verified side
@@ -713,6 +725,7 @@ void GbaIo::write8(uint32_t off, uint8_t v) {
 }
 
 void GbaIo::write16(uint32_t off, uint16_t v) {
+    if (serial_device_ && GbaSerialDevice::handles(off)) { serial_device_->write16(off, v); return; }
     if (off + 1 >= kIoSize) { warn_unhandled(off, v, true, 2); return; }
     if (!g_mmio_split) mmio_cap_record(0x04000000u + off, v, 2);
     if (audio_ && off >= 0x060 && off <= 0x0AF) {
