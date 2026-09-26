@@ -42,6 +42,7 @@
 #endif
 #include "../gba/sha1.h"
 #include "snapshot.h"
+#include "file_replace.h"
 #include "mod_state.h"
 #include "tcp_debug_server.h"
 #ifdef GBA_COSIM
@@ -1934,22 +1935,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
             return SaveFlush::Failed;
         }
-        std::error_code ec;
-        std::filesystem::rename(tmp, args.save_path, ec);  // REPLACE_EXISTING on NTFS/POSIX
-        if (ec) {
-            // Rare filesystems refuse atomic rename-over; fall back to
-            // remove-then-rename (a narrower non-atomic window, still far
-            // better than writing the target in place).
-            std::error_code ec2;
-            std::filesystem::remove(args.save_path, ec2);
-            std::filesystem::rename(tmp, args.save_path, ec2);
-            if (ec2) {
-                std::fprintf(stderr,
-                             "[gbarecomp:runtime] save rename failed: %s\n",
-                             ec2.message().c_str());
-                std::filesystem::remove(tmp, ec2);
-                return SaveFlush::Failed;
-            }
+        std::string replace_err;
+        if (!gbarecomp::debug::replace_file_preserving(tmp, args.save_path,
+                                                       &replace_err)) {
+            std::fprintf(stderr, "[gbarecomp:runtime] save %s\n",
+                         replace_err.c_str());
+            return SaveFlush::Failed;
         }
         bus.save().clear_dirty();
         if (!args.quiet) {

@@ -16,6 +16,7 @@
 
 #include "snapshot.h"
 #include "mod_state.h"
+#include "file_replace.h"
 
 #include <filesystem>
 #include <fstream>
@@ -175,22 +176,13 @@ bool save_state(const char* path, const SnapshotContext& ctx, std::string* err) 
             return false;
         }
     }
-    std::error_code ec;
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-        // Rare filesystems refuse rename-over; narrow non-atomic fallback.
-        std::error_code ec2;
-        std::filesystem::remove(path, ec2);
-        std::filesystem::rename(tmp, path, ec2);
-        if (ec2) {
-            if (err) *err = std::string("snapshot: rename failed: ") + path +
-                            " (" + ec2.message() + ")";
-            std::filesystem::remove(tmp, ec2);
-            return false;
-        }
+    if (!replace_file_preserving(tmp, path, err)) {
+        if (err) *err = "snapshot: " + *err;
+        return false;
     }
     return true;
 }
+
 
 bool load_state_bytes(const uint8_t* data, std::size_t size,
                       const SnapshotContext& ctx, std::string* err) {

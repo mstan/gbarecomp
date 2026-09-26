@@ -483,6 +483,7 @@ endif()
 add_library(gbarecomp_debug STATIC
     src/debug/tcp_debug_server.cpp
     src/debug/trace_ring.cpp
+    src/debug/file_replace.cpp
     src/debug/snapshot.cpp
     src/debug/mod_state.cpp
     src/debug/ws_provenance.cpp
@@ -757,6 +758,10 @@ add_executable(mod_audio_tests
     src/gba/mod_audio.cpp)
 target_include_directories(mod_audio_tests PRIVATE src/gba)
 add_test(NAME mod_audio_tests COMMAND mod_audio_tests)
+
+add_executable(file_replace_tests tests/debug/file_replace_test.cpp)
+target_link_libraries(file_replace_tests PRIVATE gbarecomp_debug)
+add_test(NAME file_replace_tests COMMAND file_replace_tests)
 
 add_executable(mod_state_tests tests/mod_state/test_main.cpp)
 target_include_directories(mod_state_tests PRIVATE src/debug)
