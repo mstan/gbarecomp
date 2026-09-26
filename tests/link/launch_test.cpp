@@ -26,6 +26,8 @@ int main() {
     invalid=*launch; invalid.session_id=0; CHECK(rejects(invalid));
     invalid=*launch; invalid.input_delay=21; CHECK(rejects(invalid));
     invalid=*launch; invalid.prediction=17; CHECK(rejects(invalid));
+    invalid=*launch; invalid.peer_endpoint.clear(); CHECK(rejects(invalid));
+    invalid.local_seat=0; validate_gba_netplay_launch(invalid); // passive LAN host
     launch->enabled=false;
     args={"game","--netplay-resume","previous.paired","--netplay-checkpoint","next.paired"};
     parse_gba_netplay_arguments(args,*launch);

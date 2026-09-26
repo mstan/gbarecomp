@@ -32,6 +32,21 @@ int main() {
     selected.slot_port_valid=0; selected.local_slot=1; selected.rollback=0;
     gbarecomp_seam::accept_netplay(selected,opts);
     CHECK(opts.netplay->local_seat==1 && opts.netplay->seat_machine[1]==1 && !opts.netplay->rollback);
+    // Exact shared backend LAN contract: host listens without a fixed peer;
+    // guest binds an ephemeral port and supplies the host endpoint. The host
+    // may drive cable port one while remaining transport/session slot zero.
+    selected.local_slot=0; selected.slot_port_valid=1;
+    selected.slot_port[0]=1; selected.slot_port[1]=0;
+    selected.input_prediction=0; selected.peer_hostport[0]=0;
+    std::snprintf(selected.bind_hostport,sizeof(selected.bind_hostport),"0.0.0.0:5010");
+    gbarecomp_seam::accept_netplay(selected,opts);
+    CHECK(opts.netplay->peer_endpoint.empty() && opts.netplay->local_seat==0 && opts.netplay->seat_machine[0]==1);
+    bad=selected; bad.local_slot=1; CHECK(refused(bad));
+    selected.local_slot=1;
+    std::snprintf(selected.bind_hostport,sizeof(selected.bind_hostport),"0.0.0.0:0");
+    std::snprintf(selected.peer_hostport,sizeof(selected.peer_hostport),"127.0.0.1:5010");
+    gbarecomp_seam::accept_netplay(selected,opts);
+    CHECK(opts.netplay->bind_endpoint=="0.0.0.0:0" && opts.netplay->prediction==6 && !opts.netplay->rollback);
     selected.enabled=0; gbarecomp_seam::accept_netplay(selected,opts); CHECK(!opts.netplay->enabled);
     std::puts("shared launcher seat/policy bridge tests passed");
 }

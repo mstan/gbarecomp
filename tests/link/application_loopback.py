@@ -21,6 +21,8 @@ p.add_argument("save1")
 p.add_argument("--frames",type=int,default=120)
 p.add_argument("--resume-frames",type=int,default=60)
 p.add_argument("--delay",action="store_true")
+p.add_argument("--lan-contract",action="store_true",
+               help="shared launcher's passive host and ephemeral guest, without the latency relay")
 p.add_argument("--save-type",choices=["flash1m","flash512","eeprom"],default="flash1m")
 p.add_argument("--save-size",type=int,default=131072)
 args=p.parse_args()
@@ -31,10 +33,12 @@ before=[hashlib.sha256(s.read_bytes()).digest() for s in saves]
 with tempfile.TemporaryDirectory(prefix="gba-application-net-") as tmp:
     root=pathlib.Path(tmp)
     port,sockets=reserve_routes()
-    relay=UdpRelay(port,sockets)
+    relay=None if args.lan_contract else UdpRelay(port,sockets)
+    if not relay:
+        for sock in sockets: sock.close()
     peers=[]; logs=[]
     try:
-        relay.start()
+        if relay: relay.start()
         def round_trip(label,frames,resume=None):
             nonce=random.randrange(1,2**31)
             current=[]
@@ -44,9 +48,14 @@ with tempfile.TemporaryDirectory(prefix="gba-application-net-") as tmp:
                 # are opened read-only; only new paired archives may be written.
                 config=root/f"peer{seat}.toml"
                 config.write_text(f'[save]\ntype = "{args.save_type}"\nsize = {args.save_size}\n')
+                bind=f"127.0.0.1:{port+seat}"
+                peer=f"127.0.0.1:{port+2+seat}"
+                if args.lan_contract:
+                    bind=f"0.0.0.0:{0 if seat else port}"
+                    peer=f"127.0.0.1:{port}" if seat else ""
                 argv=[args.exe,"--config",str(config),"--rom",args.rom,"--bios",args.bios,
                       "--save",str(saves[seat]),"--frames",str(frames),"--scale","1",
-                      "--netplay-bind",f"127.0.0.1:{port+seat}","--netplay-peer",f"127.0.0.1:{port+2+seat}",
+                      "--netplay-bind",bind,"--netplay-peer",peer,
                       "--netplay-seat",str(seat),"--netplay-session",str(nonce),
                       "--netplay-checkpoint",str(paths[seat])]
                 if resume: argv.extend(["--netplay-resume",str(resume[seat])])
@@ -72,17 +81,19 @@ with tempfile.TemporaryDirectory(prefix="gba-application-net-") as tmp:
             assert restarted[0].read_bytes()!=left,"resumed application did not advance"
             assert archives[0].read_bytes()==left,"resume overwrote its input archive"
             print(f"fresh game processes resumed the pair and agreed {args.resume_frames} further ticks")
-        assert not relay.errors,relay.errors
-        assert relay.delayed>0
+        if relay:
+            assert not relay.errors,relay.errors
+            assert relay.delayed>0
         assert before==[hashlib.sha256(s.read_bytes()).digest() for s in saves],"original save changed"
         print(f"actual game application {'delay-sync' if args.delay else 'rollback'}: {args.frames} frames, "
-              f"{len(left)} identical paired-archive bytes; original saves unchanged; SDL dummy video/audio")
+              f"{len(left)} identical paired-archive bytes; original saves unchanged; SDL dummy video/audio; "
+              f"{'passive LAN host/ephemeral guest' if args.lan_contract else '40ms latency/10ms jitter'}")
     except Exception:
         for log in logs: log.flush()
         for path in sorted(root.glob("*.log")): print(path.name,path.read_text(errors="replace")[-12000:])
         raise
     finally:
-        relay.close()
+        if relay: relay.close()
         for peer in peers:
             if peer.poll() is None: peer.terminate(); peer.wait(timeout=5)
         for log in logs: log.close()
