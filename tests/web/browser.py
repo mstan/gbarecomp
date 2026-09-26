@@ -1,5 +1,35 @@
-import argparse, base64, json, os, pathlib, subprocess, tempfile, time, urllib.parse, urllib.request
+"""Headless Chrome/Chromium driver (DevTools protocol) for the browser tests.
+
+The browser is found through $CHROME (or $GBARECOMP_CHROME), then the usual
+install locations on Windows, macOS and Linux, then PATH. Any Chromium-based
+browser with --remote-debugging-port works (Chrome, Chromium, Edge).
+Requires: pip install websocket-client.
+"""
+import argparse, base64, json, os, pathlib, shutil, subprocess, sys, tempfile, time, urllib.parse, urllib.request
 import websocket
+
+def chrome_candidates():
+ env=[os.environ.get(k) for k in ('CHROME','GBARECOMP_CHROME')]
+ if sys.platform.startswith('win') or sys.platform in ('cygwin','msys'):
+  roots=[os.environ.get(k) for k in ('PROGRAMFILES','PROGRAMFILES(X86)','LOCALAPPDATA','PROGRAMW6432')]
+  rel=[r'Google\Chrome\Application\chrome.exe',r'Google\Chrome Beta\Application\chrome.exe',
+       r'Chromium\Application\chrome.exe',r'Microsoft\Edge\Application\msedge.exe']
+  paths=[os.path.join(r,x) for r in roots if r for x in rel]
+ elif sys.platform=='darwin':
+  apps=['Google Chrome.app/Contents/MacOS/Google Chrome','Chromium.app/Contents/MacOS/Chromium',
+        'Microsoft Edge.app/Contents/MacOS/Microsoft Edge']
+  paths=[os.path.join(d,a) for d in ('/Applications',os.path.expanduser('~/Applications')) for a in apps]
+ else:
+  paths=['/usr/bin/google-chrome','/usr/bin/google-chrome-stable','/usr/bin/chromium','/usr/bin/chromium-browser',
+         '/snap/bin/chromium','/opt/google/chrome/chrome']
+ names=['google-chrome','google-chrome-stable','chromium','chromium-browser','chrome','msedge','microsoft-edge']
+ return [p for p in env if p]+paths+[w for w in (shutil.which(n) for n in names) if w]
+
+def find_chrome():
+ for path in chrome_candidates():
+  if os.path.isfile(path):return path
+ raise SystemExit('No Chrome/Chromium found. Set CHROME=/path/to/chrome (tried: '+', '.join(chrome_candidates())+')')
+
 class Browser:
  # profile_dir: reuse a Chrome profile across instances (IndexedDB survives
  # close/kill); it is never deleted. Default: a temporary profile.
@@ -8,7 +38,7 @@ class Browser:
   if profile_dir: pathlib.Path(profile_dir).mkdir(parents=True,exist_ok=True); self.profile=None; profile=str(profile_dir)
   else: self.profile=tempfile.TemporaryDirectory(prefix='gbr-canvas-chrome-'); profile=self.profile.name
   self.log=open(self.output/'chrome.log','a')
-  flags=[os.environ.get('CHROME', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),'--headless=new','--user-data-dir='+profile,'--no-first-run','--no-default-browser-check','--remote-debugging-port=0','--remote-allow-origins=*','--window-size=800,700']
+  flags=[find_chrome(),'--headless=new','--user-data-dir='+profile,'--no-first-run','--no-default-browser-check','--remote-debugging-port=0','--remote-allow-origins=*','--window-size=800,700']
   if autoplay: flags+=['--autoplay-policy=no-user-gesture-required']
   if not gpu: flags+=['--use-angle=swiftshader','--enable-unsafe-swiftshader']
   portfile=pathlib.Path(profile)/'DevToolsActivePort'
@@ -20,7 +50,7 @@ class Browser:
   port=int(portfile.read_text().splitlines()[0]); self.port=port
   tabs=json.load(urllib.request.urlopen(f'http://127.0.0.1:{port}/json'))
   tab=next(t for t in tabs if t['type']=='page')
-  self.ws=websocket.create_connection(tab['webSocketDebuggerUrl'],timeout=20); self.seq=0; self.events=[]
+  self.ws=websocket.create_connection(tab['webSocketDebuggerUrl'],timeout=20); self.seq=0; self.events=[]; self.dialogs=[]
   self.call('Runtime.enable');self.call('Page.enable')
  def call(self, method, params=None):
   self.seq+=1; mid=self.seq; self.ws.send(json.dumps({'id':mid,'method':method,'params':params or {}}))
@@ -30,10 +60,20 @@ class Browser:
     if 'error' in x: raise RuntimeError(x)
     return x.get('result',{})
    self.events.append(x)
+   if x.get('method')=='Page.javascriptDialogOpening':
+    # The page warns before unloading while a save exists only in memory.
+    # Record it (tests may assert on it) and leave, as a navigating user would.
+    self.dialogs.append(x['params'])
+    if x['params'].get('type')=='beforeunload':
+     self.seq+=1;self.ws.send(json.dumps({'id':self.seq,'method':'Page.handleJavaScriptDialog','params':{'accept':True}}))
  def eval(self, expr):
   r=self.call('Runtime.evaluate',{'expression':expr,'returnByValue':True,'awaitPromise':True})
   if 'exceptionDetails' in r: raise RuntimeError(r)
   return r.get('result',{}).get('value')
+ def click(self,element_id):
+  """Real mouse click (a user gesture) at the centre of an element."""
+  x,y=self.eval(f'(()=>{{const r=document.getElementById({json.dumps(element_id)}).getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2];}})()')
+  for t in ['mousePressed','mouseReleased']:self.call('Input.dispatchMouseEvent',{'type':t,'x':x,'y':y,'button':'left','clickCount':1})
  def screenshot(self,name):
   r=self.call('Page.captureScreenshot',{'format':'png','captureBeyondViewport':False})
   (self.output/name).write_bytes(base64.b64decode(r['data']))
@@ -41,7 +81,7 @@ class Browser:
   """Second page in the same browser/profile, driven like the first."""
   req=urllib.request.Request(f'http://127.0.0.1:{self.port}/json/new?'+urllib.parse.quote(url,safe=':/?&=%'),method='PUT')
   t=json.load(urllib.request.urlopen(req))
-  tab=Browser.__new__(Browser); tab.output=self.output; tab.seq=0; tab.events=[]
+  tab=Browser.__new__(Browser); tab.output=self.output; tab.seq=0; tab.events=[]; tab.dialogs=[]
   tab.ws=websocket.create_connection(t['webSocketDebuggerUrl'],timeout=20)
   tab.call('Runtime.enable');tab.call('Page.enable')
   return tab
