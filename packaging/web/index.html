@@ -43,8 +43,15 @@
 </style>
 </head>
 <body>
+<div id="assetbar">
+  <span id="romstatus">ROM</span>
+  <button id="pickrom" disabled>Choose ROM…</button><input id="romfile" type="file" accept=".gba,.GBA,application/octet-stream" hidden>
+  <span id="biosstatus">BIOS</span>
+  <button id="pickbios" disabled>Choose BIOS…</button><input id="biosfile" type="file" accept=".bin,.BIN,application/octet-stream" hidden>
+  <button id="forgetassets" disabled>Forget ROM/BIOS</button>
+</div>
 <div id="bar">
-  <button id="start">Start</button>
+  <button id="start" disabled>Start</button>
   <button id="pause" disabled>Pause / resume</button>
   <button id="fullscreen" disabled>Fullscreen</button>
   <button id="audio" disabled>Enable audio</button>
@@ -66,16 +73,18 @@
 </div>
 <div id="surface"><canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="0" aria-label="Game screen"></canvas></div>
 <p id="metrics"></p><div id="downloads"></div>
+<p class="help">Bring your own files: choose your dump of the game ROM (checked against the SHA-1 this page was built for) and your GBA BIOS. They are kept only in this browser (IndexedDB for this site) and are never uploaded; "Forget ROM/BIOS" removes them.</p>
 <p class="help">Saves stay in this browser (IndexedDB for this site, on this device) and are never uploaded. Private windows, clearing site data or a different domain lose them: export a copy to keep one. X/Z = A/B, arrows = D-pad, C/V = L/R, Enter = Start, right Shift = Select; Shift+P pauses; Alt+Enter toggles fullscreen. F1–F9 loads; Shift+F1–F9 saves (a Shift key bound to a game button, like Select, never turns a load into a save). Click the game to activate keyboard/gamepad. On touch screens a gamepad is drawn over the game. Sensors, overlay text and the native in-game menu are unavailable.</p>
 <div class="help">
-  Query params: <code>?args=--frames%20600%20--no-window</code> replaces the extra runtime
-  arguments; <code>&amp;env=KEY=VALUE,KEY2=VALUE2</code> sets environment variables;
-  <code>&amp;rom=file.gba&amp;bios=file.bin</code> picks the served asset names.
+  Developer bundles only (built with <code>build_web.sh --dev</code> and opened from localhost):
+  <code>?args=--frames%20600%20--no-window</code> replaces the extra runtime
+  arguments; <code>&amp;env=KEY=VALUE,KEY2=VALUE2</code> sets environment variables.
 </div>
 <div id="log"></div>
-<script src="rom_sha1.js" onerror="void 0"></script>
+<script src="build_info.js"></script>
 <script src="host_web.js"></script>
 <script src="save_store.js"></script>
+<script src="asset_store.js"></script>
 <script src="bootstrap.js"></script>
 </body>
 </html>

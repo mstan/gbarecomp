@@ -4,7 +4,9 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(require('node:path').join(__dirname, '../web/bootstrap.js'), 'utf8');
 
-async function launch(sha, configStatus = 200) {
+// mode 'byor': the player's files come from the asset store (default bundle).
+// mode 'embedded': a --embed-private-rom developer bundle fetches PRIVATE-* files.
+async function launch(sha, configStatus = 200, mode = 'byor') {
   const elements = new Map(), files = new Map(), requests = [], scripts = [];
   const element = () => ({disabled: false, children: [], appendChild() {},
     addEventListener() {}, replaceChildren() {}});
@@ -22,14 +24,26 @@ async function launch(sha, configStatus = 200) {
   class Saves {
     snapshot() {return {state: 'idle', pending: []};}
     busy() {return false;}
+    unsaved() {return false;}
     async acquireLock(s) {this.sha = s; return true;}
     mount(module, s) {this.mountedSha = s;}
     persist() {}
     async flush() {}
   }
+  class Assets {
+    constructor(options) {this.options = options;}
+    async load() {
+      return {rom: {name: 'mine.gba', size: 7, bytes: new Uint8Array(Buffer.from('ROMDATA')).buffer},
+        bios: {name: 'bios.bin', size: 4, bytes: new Uint8Array(Buffer.from('BIOS')).buffer}};
+    }
+    async verifyRom() {return {ok: true};}
+    async verifyBios() {return {ok: true, warning: null};}
+  }
   const runtimeConfig = '[save]\ntype = "eeprom"\nsize = 512\n';
-  const context = vm.createContext({document, GbrWebHost: Host, GbrSaveStore: Saves,
-    GBARECOMP_ROM_SHA1: sha, location: {search: ''}, URLSearchParams, Uint8Array,
+  const build = {romSha1: sha, biosSha1: 'b'.repeat(40), dev: false,
+    embedded: mode === 'embedded' ? {rom: 'PRIVATE-game.gba', bios: 'PRIVATE-gba_bios.bin'} : null};
+  const context = vm.createContext({document, GbrWebHost: Host, GbrSaveStore: Saves, GbrAssetStore: Assets,
+    GBARECOMP_ROM_SHA1: sha, GBARECOMP_BUILD: build, location: {search: '', hostname: 'example.com'}, URLSearchParams, Uint8Array,
     console: {log() {}, error() {}}, addEventListener() {}, setInterval() {},
     fetch: async name => {
       requests.push(name);
@@ -37,6 +51,8 @@ async function launch(sha, configStatus = 200) {
         arrayBuffer: async () => Buffer.from(name === 'runtime.toml' ? runtimeConfig : name)};
     }});
   vm.runInContext(source, context);
+  await context.GbrAssetsLoaded;
+  assert.equal(context.GbrAssets.options.romSha1, sha, 'the asset gate uses the baked-in SHA-1');
   await document.getElementById('start').onclick();
   if (configStatus !== 200) {
     assert.equal(context.Module, undefined);
@@ -53,10 +69,18 @@ async function launch(sha, configStatus = 200) {
   assert.equal(files.get(value('--config')), runtimeConfig);
   assert.equal(value('--rom'), '/data/game.gba');
   assert.equal(value('--bios'), '/data/gba_bios.bin');
+  assert.equal(value('--rom-sha1'), sha);
   assert.equal(value('--save-path'), `/saves/${sha}/battery.sav`);
   assert.equal(value('--state-dir'), `/saves/${sha}`);
   assert.equal(context.GbrSaves.mountedSha, sha);
-  assert.deepEqual(requests, ['game.gba', 'gba_bios.bin', 'runtime.toml']);
+  if (mode === 'embedded') {
+    assert.deepEqual(requests, ['PRIVATE-game.gba', 'PRIVATE-gba_bios.bin', 'runtime.toml']);
+    assert.equal(files.get('/data/game.gba'), 'PRIVATE-game.gba');
+  } else {
+    assert.deepEqual(requests, ['runtime.toml'], 'a public bundle never fetches a ROM or BIOS');
+    assert.equal(files.get('/data/game.gba'), 'ROMDATA');
+    assert.equal(files.get('/data/gba_bios.bin'), 'BIOS');
+  }
   assert.deepEqual(scripts, ['game.js']);
 }
 
@@ -64,5 +88,6 @@ async function launch(sha, configStatus = 200) {
   await launch('a'.repeat(40));
   await launch('b'.repeat(40));
   await launch('a'.repeat(40), 404);
-  console.log('web config bootstrap PASS (preRun, host paths, per-game save paths, missing config)');
+  await launch('c'.repeat(40), 200, 'embedded');
+  console.log('web config bootstrap PASS (preRun, host paths, per-game save paths, missing config, picked vs embedded assets)');
 })().catch(error => {console.error(error); process.exitCode = 1;});
