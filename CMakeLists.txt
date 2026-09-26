@@ -691,7 +691,7 @@ enable_testing()
 find_program(GBARECOMP_NODE_EXECUTABLE NAMES node nodejs)
 if(GBARECOMP_NODE_EXECUTABLE)
     foreach(web_test IN ITEMS host_unit host_lifecycle host_input host_touch audio_worklet
-                              save_mount save_bootstrap)
+                              save_mount save_bootstrap asset_store bootstrap)
         add_test(NAME web_${web_test}_tests
             COMMAND ${GBARECOMP_NODE_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/${web_test}_test.js)
