@@ -50,6 +50,10 @@ public:
     std::vector<uint8_t> eeprom_bytes() const;
     bool dirty() const { return dirty_; }
     void clear_dirty() { dirty_ = false; }
+    // Bumped by every write that changes save contents. Host-side bookkeeping
+    // (not serialized): the runtime waits for it to stop moving before it
+    // flushes the battery file, so one in-game save is written once.
+    uint64_t write_seq() const { return write_seq_; }
 
     // Cartridge FLASH controller (Macronix MX29L010 1 Mbit / 128 KB, the
     // chip every pret Gen3 game uses; also models 512 Kbit / 64 KB). The
@@ -85,6 +89,8 @@ private:
 
     bool eeprom_enabled_ = false;
     bool dirty_ = false;
+    uint64_t write_seq_ = 0;
+    void mark_dirty() { dirty_ = true; ++write_seq_; }
     std::size_t eeprom_size_ = 0;
     uint32_t eeprom_addr_bits_ = 0;
     uint32_t eeprom_block_mask_ = 0;

@@ -3619,10 +3619,44 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     };
 
-    // Battery-save auto-flush debounce (outer loop and present-in-place hook).
-    // ~1 s at 59.7 Hz.
-    constexpr uint64_t kSaveFlushIntervalFrames = 60;
-    uint64_t save_last_flush_frame = ppu.frame_count();
+    // Battery-save auto-flush, shared by the outer loop and the windowed
+    // present-in-place hook. A crash or forced kill must not lose a session's
+    // progress, but one in-game save is a multi-second burst of flash/SRAM
+    // writes, so the file is written once the game has left save memory
+    // untouched for kSaveSettleFrames (~1 s): one complete write per save,
+    // never a snapshot of a half-written sector. A game that never stops
+    // writing is still flushed every kSaveMaxDelayFrames (~10 s). Idle play
+    // never writes. After an attempt (even a failed one) both clocks restart,
+    // so an unwritable save path is retried at the same pace, not every frame.
+    // flush_save() writes atomically and clears the dirty flag.
+    constexpr uint64_t kSaveSettleFrames = 60;
+    constexpr uint64_t kSaveMaxDelayFrames = 600;
+    uint64_t save_seen_seq = bus.save().write_seq();
+    uint64_t save_last_change_frame = ppu.frame_count();
+    uint64_t save_dirty_since_frame = ppu.frame_count();
+    bool save_pending = false;
+    auto maybe_flush_battery = [&](uint64_t frame) {
+        if (!bus.save().dirty()) {
+            save_pending = false;
+            return;
+        }
+        if (!save_pending) {
+            save_pending = true;
+            save_dirty_since_frame = frame;
+            save_last_change_frame = frame;
+        }
+        const uint64_t seq = bus.save().write_seq();
+        if (seq != save_seen_seq) {
+            save_seen_seq = seq;
+            save_last_change_frame = frame;
+        }
+        if (frame - save_last_change_frame >= kSaveSettleFrames ||
+            frame - save_dirty_since_frame >= kSaveMaxDelayFrames) {
+            flush_save_notify();
+            save_last_change_frame = frame;
+            save_dirty_since_frame = frame;
+        }
+    };
 #if defined(GBARECOMP_WEB_HOST)
     uint64_t host_audio_state_epoch = g_runtime_state_epoch;
 #endif
@@ -3741,13 +3775,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (phase_active) fp_t2 = FramePhaseRing::now_ns();
                 drain_host_audio();
                 // Windowed present-in-place stays inside one step_once() for
-                // the whole session, so the outer loop's auto-flush below never
-                // runs; flush here with the same dirty gate and debounce.
-                if (bus.save().dirty() &&
-                    frame - save_last_flush_frame >= kSaveFlushIntervalFrames) {
-                    flush_save_notify();
-                    save_last_flush_frame = frame;
-                }
+                // the whole session, so the outer loop's auto-flush never runs.
+                maybe_flush_battery(frame);
                 if (phase_active) fp_t3 = FramePhaseRing::now_ns();
                 pump_host_input();
                 service_host_pause();
@@ -4044,8 +4073,6 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     }
 
     int dispatches_since_pump = 0;
-    // Battery-save auto-flush debounce (see the loop body).
-    save_last_flush_frame = ppu.frame_count();
     if (input_replay_requested) apply_input_replay();
     if (args.window) pump_host_input();
 
@@ -4178,22 +4205,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 wram_trace_tick();
             }
         }
-        // Save resilience: flush the battery save to disk shortly AFTER the
-        // game writes it, not only on a clean exit. Without this, a crash or a
-        // forced kill loses the entire session's progress (hours, for an RPG);
-        // with it, at most ~1 s of save activity is at risk. Dirty-gated (idle
-        // play never writes) and debounced by frame count so a completed
-        // in-game save reaches disk within ~1 s and a multi-sector flash write
-        // isn't hammered every frame. flush_save() writes atomically and clears
-        // the dirty flag. Runs on the game/step thread in both windowed and
-        // headless loops; the separate TCP debug path keeps exit-only flush.
-        if (bus.save().dirty()) {
-            uint64_t fc_now = ppu.frame_count();
-            if (fc_now - save_last_flush_frame >= kSaveFlushIntervalFrames) {
-                flush_save_notify();
-                save_last_flush_frame = fc_now;
-            }
-        }
+        // Battery-save auto-flush (policy at maybe_flush_battery). The TCP
+        // debug path keeps exit-only flush.
+        maybe_flush_battery(ppu.frame_count());
         if (!args.window && args.frames >= 0 &&
             ppu.frame_count() - headless_base_frame >=
                 static_cast<uint64_t>(args.frames)) {

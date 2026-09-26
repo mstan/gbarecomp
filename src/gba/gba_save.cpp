@@ -33,7 +33,7 @@ void GbaSave::sram_write(uint32_t off, uint8_t value) {
     std::size_t index = static_cast<std::size_t>(off) % sram_size_;
     if (sram_data_[index] != value) {
         sram_data_[index] = value;
-        dirty_ = true;
+        mark_dirty();
     }
 }
 
@@ -192,7 +192,7 @@ void GbaSave::finish_eeprom_write() {
                 (v << 1) | command_bits_[data_start + byte * 8u + bit]);
         }
         if (byte_offset + byte < eeprom_size_) {
-            if (eeprom_[byte_offset + byte] != v) dirty_ = true;
+            if (eeprom_[byte_offset + byte] != v) mark_dirty();
             eeprom_[byte_offset + byte] = v;
         }
     }
@@ -354,7 +354,7 @@ void GbaSave::flash_write(uint32_t off, uint8_t value) {
     case FlashState::EraseUnlock2: {
         if (off == 0x5555 && value == 0x10) {
             std::fill(flash_data_.begin(), flash_data_.end(), 0xFF);  // chip erase
-            dirty_ = true;
+            mark_dirty();
         } else if (value == 0x30) {
             // Sector erase: off is the 4 KB sector base within the bank.
             std::size_t base = static_cast<std::size_t>(flash_bank_) *
@@ -362,7 +362,7 @@ void GbaSave::flash_write(uint32_t off, uint8_t value) {
             for (uint32_t i = 0; i < 0x1000u; ++i) {
                 if (base + i < flash_data_.size()) flash_data_[base + i] = 0xFF;
             }
-            dirty_ = true;
+            mark_dirty();
         }
         flash_state_ = FlashState::Idle;
         break;
@@ -372,7 +372,7 @@ void GbaSave::flash_write(uint32_t off, uint8_t value) {
                               kFlashBankBytes + off;
         if (idx < flash_data_.size() && flash_data_[idx] != value) {
             flash_data_[idx] = value;
-            dirty_ = true;
+            mark_dirty();
         }
         flash_state_ = FlashState::Idle;
         break;
