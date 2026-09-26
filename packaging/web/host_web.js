@@ -4,14 +4,34 @@
 const DEFAULT_KEYS=['KeyX','KeyZ','ShiftRight','Enter','ArrowRight','ArrowLeft','ArrowUp','ArrowDown','KeyV','KeyC'];
 const COMMAND={Pause:1,Save:2,Load:3,WindowBigger:4,WindowSmaller:5,VolumeUp:6,VolumeDown:7,DisplayPerf:8,Rewind:9,SolarBrighter:10,SolarDimmer:11,SolarLive:12};
 const DETACH={Pending:0,SafeToFree:1,UnsafeRetain:2};
+// Physical modifier keys. A modifier that is itself bound to a game button
+// (Select = right Shift by default) never turns a key into a hotkey chord.
+const MODIFIER_CODES={ShiftLeft:'Shift',ShiftRight:'Shift',ControlLeft:'Ctrl',ControlRight:'Ctrl',AltLeft:'Alt',AltRight:'Alt'};
+const MODIFIERS=['Ctrl','Alt','Shift'];
+const EVENT_FLAG={Ctrl:'ctrlKey',Alt:'altKey',Shift:'shiftKey'};
+// Save-state slots, same semantics as the native backend: F1-F9 load,
+// Shift+F1-F9 save. Matched with the same exact-modifier rule as [KeyMap].
+const SLOT_BINDINGS=[];
+for(let n=1;n<=9;++n)SLOT_BINDINGS.push({command:'Load',slot:n,binding:'F'+n},{command:'Save',slot:n,binding:'Shift+F'+n});
 const gcd=(a,b)=>b?gcd(b,a%b):a;
 function layout(dw,dh,w,h){const g=gcd(w,h),u=Math.floor(Math.min(dw/(w/g),dh/(h/g)));return {x:Math.floor((dw-u*w/g)/2),y:Math.floor((dh-u*h/g)/2),w:u*w/g,h:u*h/g,integer:u%g===0};}
+// "Ctrl+Shift+KeyX" -> {code:'KeyX',Ctrl:true,Alt:false,Shift:true,count:2}
+function parseBinding(text){
+  if(!text)return null;
+  const parts=String(text).split('+'),code=parts.pop();if(!code)return null;
+  const b={code,count:0};for(const m of MODIFIERS){b[m]=parts.includes(m);if(b[m])++b.count;}
+  return b;
+}
+const exactMods=(b,mods)=>MODIFIERS.every(m=>b[m]===!!mods[m]);
+const requiredMods=(b,mods)=>MODIFIERS.every(m=>!b[m]||!!mods[m]);
 class Host {
   constructor(canvas,report=()=>{}) {
     this.canvas=canvas;this.report=report;this.keys=DEFAULT_KEYS.slice();
     this.hotkeys={Pause:'Shift+KeyP',Turbo:'Tab',Fullscreen:'Alt+Enter',WindowBigger:'',WindowSmaller:'',VolumeUp:'',VolumeDown:'',DisplayPerf:'KeyF'};
     this.stats={state:'idle',consumed:0,uploaded:0,lastSeq:0,contextLosses:0,contextRestores:0,viewGenerations:0,copyMs:0,uploadMs:0,audio:'unavailable',fatal:null};
-    this.front=0;this.keyboard=new Set();this.gamepad=0;this.touch=0;this.listeners=[];this.inputListeners=[];this.lost=false;this.active=false;
+    // keyboard: physical keys held while the canvas has focus. consumed: keys
+    // whose press was taken by a hotkey chord (Alt+Enter never presses Start).
+    this.front=0;this.keyboard=new Set();this.consumed=new Set();this.eventMods={};this.gamepad=0;this.touch=0;this.listeners=[];this.inputListeners=[];this.lost=false;this.active=false;
   }
   fail(e){this.stats.fatal=String(e?.message||e||'WebAssembly runtime aborted');this.stats.state='failed';this.report(String(e));if(this.control)this.store('quit',1);}
   on(target,type,fn,list=this.listeners){target.addEventListener(type,fn);list.push(()=>target.removeEventListener(type,fn));}
@@ -133,26 +153,75 @@ class Host {
     if(this.control)for(const key of Object.keys(this.d.fields))if(key!=='_end')s[key==='state'?'producerState':key]=this.load(key);
     return {...this.finalStats,...s};
   }
-  publishKeys(){if(!this.control)return;let pressed=this.gamepad|this.touch;for(let i=0;i<10;++i)if(this.keyboard.has(this.keys[i]))pressed|=1<<i;this.store('keys',(~pressed)&1023);this.store('inputUpdates',this.load('inputUpdates')+1);this.store('turbo',this.keyboard.has(this.hotkeys.Turbo)?1:0);}
-  clearInput(){this.keyboard.clear();this.gamepad=0;this.touch=0;this.publishKeys();}
+  // ---- keyboard -----------------------------------------------------------
+  gameCodes(){const out=new Set();for(const k of this.keys){const b=parseBinding(k);if(b)out.add(b.code);}return out;}
+  // Modifier state for binding matches. A held modifier key bound to a game
+  // button (Select = ShiftRight) does not count, so Select+F1 loads slot 1 and
+  // Select+P is not Pause. Event flags cover modifiers pressed before focus.
+  effectiveMods(e){
+    const game=this.gameCodes(),src=e||this.eventMods,out={};
+    for(const m of MODIFIERS){
+      let free=false,gameHeld=false;
+      for(const [code,kind] of Object.entries(MODIFIER_CODES)){if(kind!==m||!this.keyboard.has(code))continue;if(game.has(code))gameHeld=true;else free=true;}
+      out[m]=free||(!!src[EVENT_FLAG[m]]&&!gameHeld);
+    }
+    return out;
+  }
+  // Held game buttons: the bound key is down (and not consumed by a hotkey
+  // chord) and every modifier the binding names is held. When several bindings
+  // share a key, only the most specific satisfied one engages.
+  keyboardMask(){
+    const mods=this.effectiveMods(),parsed=this.keys.map(parseBinding),best=new Map();
+    const live=b=>b&&this.keyboard.has(b.code)&&!this.consumed.has(b.code)&&requiredMods(b,mods);
+    for(const b of parsed)if(live(b))best.set(b.code,Math.max(best.get(b.code)??-1,b.count));
+    let mask=0;parsed.forEach((b,i)=>{if(live(b)&&best.get(b.code)===b.count)mask|=1<<i;});
+    return mask;
+  }
+  turboHeld(){const t=parseBinding(this.hotkeys.Turbo);return !!t&&this.keyboard.has(t.code)&&exactMods(t,this.effectiveMods());}
+  // Edge hotkey (including save-state slots) for a key press, exact modifiers
+  // as on the native backend. Meta chords stay with the browser/OS.
+  hotkeyFor(e){
+    if(e.metaKey)return null;
+    const mods=this.effectiveMods(e);
+    for(const [name,text] of Object.entries(this.hotkeys)){const b=parseBinding(text);if(b&&b.code===e.code&&exactMods(b,mods))return {name,binding:b};}
+    for(const s of SLOT_BINDINGS){const b=parseBinding(s.binding);if(b.code===e.code&&exactMods(b,mods))return {name:s.command,slot:s.slot,binding:b};}
+    return null;
+  }
+  publishKeys(){if(!this.control)return;const pressed=this.gamepad|this.touch|this.keyboardMask();this.store('keys',(~pressed)&1023);this.store('inputUpdates',this.load('inputUpdates')+1);this.store('turbo',this.turboHeld()?1:0);}
+  clearInput(){this.keyboard.clear();this.consumed.clear();this.eventMods={};this.gamepad=0;this.touch=0;this.publishKeys();}
   command(kind,arg=0){if(!this.active)return false;const k=typeof kind==='string'?COMMAND[kind]:kind;if(!k)return false;const w=this.load('commandWrite'),r=this.load('commandRead');if(((w-r)>>>0)>=this.d.commandSlots){this.store('commandOverflow',this.load('commandOverflow')+1);this.report('Control queue full');return false;}const p=this.ptr+this.d.commands+(w&(this.d.commandSlots-1))*12;new Uint32Array(this.buffer,p,3).set([w,k,arg]);this.store('commandWrite',(w+1)>>>0);return true;}
+  keyDown(e){
+    this.eventMods={ctrlKey:e.ctrlKey,altKey:e.altKey,shiftKey:e.shiftKey};
+    const hot=this.hotkeyFor(e),game=this.gameCodes().has(e.code),modifier=!!MODIFIER_CODES[e.code];
+    if(!game&&!hot&&!modifier)return false;
+    if(game||hot)e.preventDefault?.();
+    this.keyboard.add(e.code);
+    // A chord (hotkey with modifiers) owns its key until release; a bare
+    // hotkey that is also a game button drives both, like the native backend.
+    if(hot&&(hot.binding.count>0||!game))this.consumed.add(e.code);
+    this.publishKeys();
+    if(e.repeat||!hot)return true;
+    if(hot.slot)this.command(hot.name,hot.slot);
+    else if(hot.name==='Fullscreen')this.fullscreenRequest(root.document?.fullscreenElement?0:1);
+    else if(hot.name!=='Turbo')this.command(hot.name);
+    return true;
+  }
+  keyUp(e){
+    this.eventMods={ctrlKey:e.ctrlKey,altKey:e.altKey,shiftKey:e.shiftKey};
+    const held=this.keyboard.delete(e.code);this.consumed.delete(e.code);
+    if(held&&this.gameCodes().has(e.code))e.preventDefault?.();
+    this.publishKeys();return held;
+  }
   bindInput(){
     this.unbindInput();
     const on=(target,type,fn)=>this.on(target,type,fn,this.inputListeners);
     const editable=e=>e.target?.closest?.('input,textarea,select,[contenteditable="true"]');
-    const binding=e=>[e.ctrlKey?'Ctrl':'',e.altKey?'Alt':'',e.shiftKey?'Shift':'',e.code].filter(Boolean).join('+');
     on(this.canvas,'click',()=>this.canvas.focus());
     on(root,'keydown',e=>{
       if(editable(e)||document.activeElement!==this.canvas){this.clearInput();return;}
-      const hot=Object.keys(this.hotkeys).find(k=>this.hotkeys[k]===binding(e));
-      const slot=/^F[1-9]$/.test(e.code)?Number(e.code.slice(1)):0;
-      if(!this.keys.includes(e.code)&&!hot&&!slot)return;
-      e.preventDefault();this.keyboard.add(e.code);this.publishKeys();if(e.repeat)return;
-      if(slot)this.command(e.shiftKey?'Save':'Load',slot);
-      else if(hot==='Fullscreen')this.fullscreenRequest(document.fullscreenElement?0:1);
-      else if(hot&&hot!=='Turbo')this.command(hot);
+      this.keyDown(e);
     });
-    on(root,'keyup',e=>{if(this.keyboard.delete(e.code)){e.preventDefault();this.publishKeys();}});
+    on(root,'keyup',e=>this.keyUp(e));
     on(root,'blur',()=>this.clearInput());
     on(document,'focusin',e=>{if(e.target!==this.canvas)this.clearInput();});
     on(document,'visibilitychange',()=>{this.clearInput();this.store('hidden',document.hidden?1:0);});
@@ -180,7 +249,11 @@ class Host {
       const numeric={40:'Enter',41:'Escape',43:'Tab',44:'Space',79:'ArrowRight',80:'ArrowLeft',81:'ArrowDown',82:'ArrowUp',229:'ShiftRight',225:'ShiftLeft'};
       const parts=value.split('+');const key=parts.pop();let code=names[key]||(/^[a-z]$/i.test(key)?'Key'+key.toUpperCase():/^F([1-9]|1[0-2])$/.test(key)?key:null);
       if(/^\d+$/.test(key)){const n=Number(key);code=n>=4&&n<=29?'Key'+String.fromCharCode(65+n-4):numeric[n];}
-      if(!value)return '';if(!code){this.report('Unsupported web binding: '+value);return null;}return [...parts,code].join('+');
+      if(!value)return '';if(!code){this.report('Unsupported web binding: '+value);return null;}
+      // Canonical modifier names/order so bindings compare structurally.
+      const mods=parts.map(p=>({control:'Ctrl',ctrl:'Ctrl',alt:'Alt',shift:'Shift'})[p.toLowerCase()]);
+      if(mods.some(m=>!m)){this.report('Unsupported web binding: '+value);return null;}
+      return [...MODIFIERS.filter(m=>mods.includes(m)),code].join('+');
     };
     const mapping=['a','b','select','start','right','left','up','down','r','l'];
     for(const [k,v] of Object.entries(section(keys,'player1'))){const i=mapping.indexOf(k.toLowerCase()),code=convert(v);if(i>=0&&code!==null)this.keys[i]=code;}
@@ -227,5 +300,5 @@ class Host {
   dispose(){cancelAnimationFrame(this.raf);this.observer?.disconnect();this.unbindInput();for(const off of this.listeners)off();this.listeners=[];if(this.gl&&!this.lost){const g=this.gl;g.deleteTexture(this.texture);g.deleteTexture(this.sharpTexture);g.deleteFramebuffer(this.fbo);g.deleteBuffer(this.vbo);g.deleteProgram(this.program);}}
 }
 root.GbrWebHost=Host;
-if(typeof module!=='undefined')module.exports={Host,layout};
+if(typeof module!=='undefined')module.exports={Host,layout,parseBinding};
 })(globalThis);
