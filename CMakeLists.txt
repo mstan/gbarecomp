@@ -730,7 +730,8 @@ add_test(NAME link_tests COMMAND link_tests)
 # Node is optional; native engine builds do not require browser tooling.
 find_program(GBARECOMP_NODE_EXECUTABLE NAMES node nodejs)
 if(GBARECOMP_NODE_EXECUTABLE)
-    foreach(web_test IN ITEMS host_unit host_lifecycle audio_worklet save_mount save_bootstrap)
+    foreach(web_test IN ITEMS host_unit host_lifecycle host_input audio_worklet
+                              save_mount save_bootstrap)
         add_test(NAME web_${web_test}_tests
             COMMAND ${GBARECOMP_NODE_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/web/${web_test}_test.js)
