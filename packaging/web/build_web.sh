@@ -1,10 +1,18 @@
 #!/bin/bash
 # Build a browser bundle for an exported game project (tools/cli.py build ...).
 #
-#   packaging/web/build_web.sh <project dir> <generated BIOS dir> [rom] [bios] [config]
+#   packaging/web/build_web.sh [--dev] [--embed-private-rom] \
+#       <project dir> <generated BIOS dir> [rom] [bios] [config]
+#
+# The default bundle contains NO ROM and NO BIOS: the page asks the player for
+# their own files, checks the ROM SHA-1 baked in here and keeps both in the
+# browser (IndexedDB). [rom] is only read to verify/derive that SHA-1.
+# --embed-private-rom (developer only) copies ROM and BIOS into the bundle as
+# PRIVATE-* files in <project>/web-PRIVATE: never publish that directory.
+# --dev lets a page served from localhost take ?args= / ?env= URL parameters.
 #
 # Runtime config defaults to <project dir>/game.toml when present. Pass the
-# original config as argument 5 when tools/cli.py --config used another path.
+# original config as [config] when tools/cli.py --config used another path.
 # Only runtime settings are exported; local ROM/BIOS/save paths are omitted.
 #
 # Produces <project dir>/web/{index.html,game.js,game.wasm,...}. Serve it with
@@ -13,8 +21,8 @@
 # Isolated build/output directories: GBARECOMP_WEB_BUILD_DIR (runtime),
 # GBARECOMP_WEB_GAME_BUILD_DIR (game library), GBARECOMP_WEB_OUT_DIR (bundle).
 # The runtime is configured with -DGBARECOMP_WEB_HOST=ON: no SDL, no
-# OffscreenCanvas; host_web.js, bootstrap.js and the AudioWorklet DSP bundle
-# are always copied so JS-only changes reach the output without a ROM rebuild.
+# OffscreenCanvas; the page scripts and the AudioWorklet DSP bundle are always
+# copied so JS-only changes reach the output without a ROM rebuild.
 #
 # Threading model: -sPROXY_TO_PTHREAD. main() and the whole guest run on a Web
 # Worker, where the blocking run loop and present-in-place are legal; the
@@ -31,8 +39,22 @@
 # build is only honest for a game whose coverage is FULLY STATIC.
 set -euo pipefail
 
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
+EMBED=0
+DEV=0
+POSITIONAL=()
+for arg in "$@"; do
+  case "$arg" in
+    --embed-private-rom) EMBED=1 ;;
+    --dev) DEV=1 ;;
+    -h|--help) usage; exit 0 ;;
+    --*) echo "error: unknown option $arg" >&2; usage >&2; exit 2 ;;
+    *) POSITIONAL+=("$arg") ;;
+  esac
+done
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 if [ $# -lt 2 ] || [ $# -gt 5 ]; then
-  sed -n '2,8p' "$0"
+  usage >&2
   exit 2
 fi
 
@@ -43,9 +65,42 @@ ROM=${3:-}
 BIOS=${4:-}
 JOBS=${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc)}
 absolute_dir() { mkdir -p "$1"; (cd "$1" && pwd); }
+
+# SHA-1 of a file: sha1sum (GNU), shasum (macOS/BSD) or Python. Never empty.
+sha1_of() {
+  local digest=""
+  if command -v sha1sum > /dev/null 2>&1; then
+    digest=$(sha1sum "$1" | cut -d' ' -f1)
+  elif command -v shasum > /dev/null 2>&1; then
+    digest=$(shasum -a 1 "$1" | cut -d' ' -f1)
+  elif command -v python3 > /dev/null 2>&1; then
+    digest=$(python3 -c 'import hashlib,sys;print(hashlib.sha1(open(sys.argv[1],"rb").read()).hexdigest())' "$1")
+  else
+    echo "error: no SHA-1 tool (sha1sum, shasum or python3) is available" >&2
+    exit 1
+  fi
+  digest=$(printf '%s' "$digest" | tr 'A-F' 'a-f')
+  if ! printf '%s' "$digest" | grep -Eq '^[0-9a-f]{40}$'; then
+    echo "error: could not compute the SHA-1 of $1 (got '$digest')" >&2
+    exit 1
+  fi
+  printf '%s\n' "$digest"
+}
+file_size() { wc -c < "$1" | tr -d ' '; }
+
+if [ -n "$ROM" ] && [ ! -f "$ROM" ]; then echo "error: ROM not found: $ROM" >&2; exit 1; fi
+if [ -n "$BIOS" ] && [ ! -f "$BIOS" ]; then echo "error: BIOS not found: $BIOS" >&2; exit 1; fi
+if [ "$EMBED" = 1 ] && { [ -z "$ROM" ] || [ -z "$BIOS" ]; }; then
+  echo "error: --embed-private-rom needs both the ROM and the BIOS arguments" >&2; exit 2
+fi
+
 B=$(absolute_dir "${GBARECOMP_WEB_BUILD_DIR:-$R/build-web-host}")
 GAME_BUILD=$(absolute_dir "${GBARECOMP_WEB_GAME_BUILD_DIR:-$PROJECT/build-web-host}")
-OUT=$(absolute_dir "${GBARECOMP_WEB_OUT_DIR:-$PROJECT/web}")
+if [ "$EMBED" = 1 ]; then
+  OUT=$(absolute_dir "${GBARECOMP_WEB_OUT_DIR:-$PROJECT/web-PRIVATE}")
+else
+  OUT=$(absolute_dir "${GBARECOMP_WEB_OUT_DIR:-$PROJECT/web}")
+fi
 CONFIG_ARGS=("$OUT/runtime.toml")
 CONFIG=""
 if [ $# -ge 5 ]; then
@@ -54,9 +109,61 @@ elif [ -f "$PROJECT/game.toml" ]; then
   CONFIG="$PROJECT/game.toml"
 fi
 if [ -n "$CONFIG" ]; then CONFIG_ARGS+=(--config "$CONFIG"); fi
+# Never leave copyrighted inputs or a previous build's identity behind: a
+# bring-your-own-ROM rebuild into a directory that once held a private bundle
+# must not keep serving its ROM/BIOS.
+rm -f "$OUT/game.gba" "$OUT/gba_bios.bin" "$OUT/rom_sha1.js" "$OUT/build_info.js" \
+      "$OUT/manifest.json" "$OUT"/PRIVATE-*
 # Always replace the file, including when rebuilding without a config. Do this
 # before compilation so invalid/missing explicit inputs fail promptly.
 python3 "$R/packaging/web/runtime_config.py" "${CONFIG_ARGS[@]}"
+
+# Expected hashes come from the exported runtime settings ([rom].sha1 and
+# [bios].sha1, the same values the native runtime checks).
+toml_value() {
+  python3 - "$OUT/runtime.toml" "$1" "$2" <<'PY'
+import sys
+path, want_section, want_key = sys.argv[1:4]
+section = ""
+for raw in open(path, encoding="utf-8"):
+    line = raw.split('#', 1)[0].strip()
+    if line.startswith('[') and line.endswith(']'):
+        section = line[1:-1].strip()
+    elif '=' in line and section == want_section:
+        key, value = (part.strip() for part in line.split('=', 1))
+        if key == want_key:
+            print(value.strip('"').strip().lower())
+PY
+}
+ROM_SHA1=$(toml_value rom sha1 | tail -n1)
+if [ -n "$ROM_SHA1" ] && ! printf '%s' "$ROM_SHA1" | grep -Eq '^[0-9a-f]{40}$'; then
+  echo "error: [rom].sha1 in the runtime config is not a SHA-1: $ROM_SHA1" >&2; exit 1
+fi
+if [ -n "$ROM" ]; then
+  GIVEN_ROM_SHA1=$(sha1_of "$ROM")
+  if [ -n "$ROM_SHA1" ] && [ "$GIVEN_ROM_SHA1" != "$ROM_SHA1" ]; then
+    echo "error: $ROM has SHA-1 $GIVEN_ROM_SHA1, but the game config expects $ROM_SHA1" >&2; exit 1
+  fi
+  ROM_SHA1=$GIVEN_ROM_SHA1
+fi
+if [ -z "$ROM_SHA1" ]; then
+  echo "error: cannot determine the expected ROM SHA-1: set [rom].sha1 in the game config or pass the ROM" >&2
+  exit 1
+fi
+BIOS_SHA1=$(toml_value bios sha1 | tail -n1)
+# gba::GbaBios::kExpectedSha1 (the runtime's default when no [bios].sha1 is set).
+BIOS_SHA1=${BIOS_SHA1:-300c20df6731a33952ded8c436f7f186d25d3492}
+if [ -n "$BIOS" ]; then
+  if [ "$(file_size "$BIOS")" != 16384 ]; then
+    echo "error: $BIOS is not a 16 KiB GBA BIOS" >&2; exit 1
+  fi
+  GIVEN_BIOS_SHA1=$(sha1_of "$BIOS")
+  if [ "$GIVEN_BIOS_SHA1" != "$BIOS_SHA1" ]; then
+    # Same policy as the native runtime: an uncatalogued BIOS is a warning.
+    echo "warning: $BIOS has SHA-1 $GIVEN_BIOS_SHA1 (expected $BIOS_SHA1)" >&2
+  fi
+fi
+
 check_cache() {
   if [ -f "$1/CMakeCache.txt" ] && ! grep -Fxq "CMAKE_HOME_DIRECTORY:INTERNAL=$2" "$1/CMakeCache.txt"; then
     echo "error: CMake cache in $1 belongs to another source tree" >&2; exit 1
@@ -121,24 +228,61 @@ em++ -O2 -std=c++20 -I"$R/src/runtime" "$R/src/runtime/host_web_audio_dsp.cpp" -
   -sEXPORTED_RUNTIME_METHODS=HEAP16 -sINITIAL_MEMORY=16777216 \
   -o "$OUT/audio_dsp.js"
 cat "$OUT/audio_dsp.js" "$R/packaging/web/audio_worklet.js" > "$OUT/audio_worklet_bundle.js"
-cp "$R/packaging/web/index.html" "$R/packaging/web/host_web.js" "$R/packaging/web/save_store.js" "$R/packaging/web/bootstrap.js" "$R/packaging/web/audio_worklet.js" "$OUT/"
-python3 - "$R" "$OUT" "$BIOS_GEN" "$CONFIG" <<'MANIFEST'
-import hashlib,json,pathlib,subprocess,sys
-root,out,bios=map(pathlib.Path,sys.argv[1:4])
-config=pathlib.Path(sys.argv[4]) if sys.argv[4] else None
+cp "$R/packaging/web/index.html" "$R/packaging/web/host_web.js" "$R/packaging/web/save_store.js" \
+   "$R/packaging/web/asset_store.js" "$R/packaging/web/bootstrap.js" "$R/packaging/web/audio_worklet.js" "$OUT/"
+
+EMBED_ROM=""
+EMBED_BIOS=""
+if [ "$EMBED" = 1 ]; then
+  EMBED_ROM="PRIVATE-game.gba"
+  EMBED_BIOS="PRIVATE-gba_bios.bin"
+  cp "$ROM" "$OUT/$EMBED_ROM"
+  cp "$BIOS" "$OUT/$EMBED_BIOS"
+  cat > "$OUT/PRIVATE-DO-NOT-PUBLISH.txt" <<'TXT'
+PRIVATE BUILD. This directory contains a copyrighted game ROM and GBA BIOS
+(PRIVATE-game.gba, PRIVATE-gba_bios.bin), embedded by
+build_web.sh --embed-private-rom for local testing only.
+
+Never upload, deploy, share or commit this directory. Build the public bundle
+without --embed-private-rom: it contains no ROM or BIOS and asks each player
+for their own files.
+TXT
+fi
+REVISION=$(git -C "$R" rev-parse HEAD 2>/dev/null || true)
+REVISION=${REVISION:-unknown}
+EMCC_VERSION=$(emcc --version | head -n1)
+python3 - "$OUT" "$ROM_SHA1" "$BIOS_SHA1" "$EMBED_ROM" "$EMBED_BIOS" "$DEV" <<'INFO'
+import json,pathlib,sys
+out=pathlib.Path(sys.argv[1]); rom,bios,embed_rom,embed_bios,dev=sys.argv[2:7]
+info={'romSha1':rom,'biosSha1':bios,'dev':dev=='1',
+      'embedded':{'rom':embed_rom,'bios':embed_bios} if embed_rom else None}
+text=('// Generated by build_web.sh. Expected hashes for the bring-your-own-ROM gate.\n'
+      f'self.GBARECOMP_ROM_SHA1 = {json.dumps(rom)};\n'
+      f'self.GBARECOMP_BUILD = {json.dumps(info)};\n')
+(out/'build_info.js').write_text(text,encoding='utf-8')
+INFO
+python3 - "$OUT" "$BIOS_GEN" "$CONFIG" "$REVISION" "$EMCC_VERSION" "$ROM_SHA1" "$BIOS_SHA1" "$EMBED" "$DEV" <<'MANIFEST'
+import hashlib,json,pathlib,sys
+out,bios=map(pathlib.Path,sys.argv[1:3])
+config=pathlib.Path(sys.argv[3]) if sys.argv[3] else None
+revision,emcc,rom_sha1,bios_sha1,embed,dev=sys.argv[4:10]
 def digest(p): return hashlib.sha256(p.read_bytes()).hexdigest()
-data={'abi':1,'host_backend':'web','revision':subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip(),
-      'emcc':subprocess.check_output(['emcc','--version'],text=True).splitlines()[0],
-      'files':{p.name:digest(p) for p in out.iterdir() if p.is_file() and p.name in ['game.js','game.wasm','host_web.js','save_store.js','bootstrap.js','index.html','audio_worklet_bundle.js','runtime.toml']},
+bundle=['game.js','game.wasm','host_web.js','save_store.js','asset_store.js','bootstrap.js','index.html',
+        'audio_worklet_bundle.js','runtime.toml','build_info.js']
+data={'abi':2,'host_backend':'web','revision':revision,'emcc':emcc,
+      'assets':'embedded-PRIVATE' if embed=='1' else 'bring-your-own',
+      'expected':{'rom_sha1':rom_sha1,'bios_sha1':bios_sha1},'dev':dev=='1',
+      'files':{p.name:digest(p) for p in out.iterdir() if p.is_file() and p.name in bundle},
       'inputs':{p.name:digest(p) for p in [bios/'bios_recompiled.cpp',bios/'bios_dispatch_table.cpp']+([config] if config else []) if p.exists()}}
 (out/'manifest.json').write_text(json.dumps(data,indent=2)+'\n')
 MANIFEST
-if [ -n "$ROM" ]; then
-  cp "$ROM" "$OUT/game.gba"
-  printf 'self.GBARECOMP_ROM_SHA1 = "%s";\n' "$(shasum -a 1 "$ROM" | cut -d' ' -f1)" > "$OUT/rom_sha1.js"
-fi
-if [ -n "$BIOS" ]; then
-  cp "$BIOS" "$OUT/gba_bios.bin"
-fi
 ls -la "$OUT" | grep -v ' \._'
+if [ "$EMBED" = 1 ]; then
+  echo "!! PRIVATE bundle: $OUT contains the ROM and BIOS. Local testing only; NEVER publish it."
+else
+  echo "== bring-your-own-ROM bundle: no ROM or BIOS in $OUT (expected ROM SHA-1 $ROM_SHA1)"
+fi
+if [ "$DEV" = 1 ]; then
+  echo "== developer bundle: ?args= / ?env= are honoured when served from localhost"
+fi
 echo "== done. serve with: python3 $R/packaging/web/serve.py $OUT"

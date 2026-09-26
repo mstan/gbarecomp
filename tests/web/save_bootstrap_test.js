@@ -40,7 +40,14 @@ function fixture() {
       .filter(name => name.startsWith(dir + '/')).map(name => name.slice(dir.length + 1))],
     syncfs(populate, done) { assert.equal(populate, false); syncs.push(done); },
   };
-  const context = vm.createContext({document, GbrWebHost: Host,
+  // The player's ROM/BIOS, as kept by asset_store.js (its own suite covers it).
+  class Assets {
+    async load() {
+      const record = name => ({name, size: 4, bytes: new Uint8Array(4).buffer});
+      return {rom: record('game.gba'), bios: record('gba_bios.bin')};
+    }
+  }
+  const context = vm.createContext({document, GbrWebHost: Host, GbrAssetStore: Assets,
     GBARECOMP_ROM_SHA1: 'a'.repeat(40),
     location: {search: '', reload() { ++reloads; }}, URLSearchParams,
     Uint8Array, Blob, performance,
@@ -55,6 +62,7 @@ function fixture() {
   const saves = context.GbrSaves;
   const dir = '/saves/' + 'a'.repeat(40);
   async function exit(code) {
+    await context.GbrAssetsLoaded;
     await get('start').onclick();
     assert(context.Module, 'bootstrap created the runtime');
     // Initialization/mounting has its own suite. Here guest writes are complete
@@ -92,7 +100,7 @@ async function test_post_exit_changes() {
         await turn();
         const context = `${operation}, ${storage}, exit ${code}`;
         assert.equal(f.reloads(), 0, context + ': no reload without confirmed persistence');
-        assert(!f.logs.some(line => /stored; reloading/.test(line)), context);
+        assert(!f.logs.some(line => /Reloading to start/.test(line)), context);
         if (storage === 'success' || storage === 'failure') {
           assert.equal(f.syncs.length, 1, context);
           f.syncs[0](storage === 'failure' ? Error('quota exceeded') : null);
@@ -103,7 +111,8 @@ async function test_post_exit_changes() {
         await changing;
         await turn();  // Delete's UI handler deliberately does not return a promise.
         assert.equal(f.reloads(), storage === 'success' ? 1 : 0, context);
-        assert.equal(f.logs.some(line => /stored; reloading/.test(line)), storage === 'success', context);
+        assert.equal(f.logs.some(line => /Reloading to start with the stored save/.test(line)), storage === 'success', context);
+        assert.equal(f.logs.some(line => /stored in this browser/.test(line)), storage === 'success', context);
         if (storage === 'failure') assert(f.logs.some(line => /failed:.*quota exceeded/.test(line)), context);
         if (operation === 'delete') assert.equal(f.files.size, 0, context);
         else if (storage !== 'success') {
@@ -128,11 +137,16 @@ async function test_import_before_start() {
   assert.equal(f.files.size, 0);
   assert.equal(f.saves.pending[0].op, 'import');
   assert.equal(f.saves.pending[0].bytes[0], 7);
-  assert(!f.logs.some(line => /stored; reloading/.test(line)));
+  assert(!f.logs.some(line => /Reloading/.test(line)));
+  assert(f.logs.some(line => /Import queued: it is applied when you press Start/.test(line)));
+  // A second queued change is kept, in order (never replaces the first).
+  await f.change('delete');
+  await turn();
+  assert.equal(f.saves.pending.map(op => op.op).join(), 'import,delete');
 }
 
 (async () => {
   await test_post_exit_changes();
   await test_import_before_start();
-  console.log('web save bootstrap PASS (reload after confirmed sync only, failures, export, queued import)');
+  console.log('web save bootstrap PASS (reload after confirmed sync only, failures, export, queued changes in order)');
 })().catch(error => { console.error(error); process.exitCode = 1; });

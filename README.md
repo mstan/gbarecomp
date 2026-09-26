@@ -244,7 +244,7 @@ integration can reduce large clean builds substantially; see
 The browser target uses Emscripten and pthreads. The recompiler and BIOS must
 be built natively first; the generated game and runtime are then compiled to
 WebAssembly. Install and activate the Emscripten SDK (the current workflow is
-validated with 6.0.9) before running the web build:
+validated with 6.0.10) before running the web build:
 
 ```sh
 source ~/emsdk/emsdk_env.sh
@@ -256,23 +256,28 @@ GBARECOMP_CORE="$PWD/build/gba_recompile" python3 tools/cli.py build \
   --rom /path/to/game.gba --output /path/to/game-recomp \
   --config /path/to/game.toml --force
 bash packaging/web/build_web.sh /path/to/game-recomp \
-  build/generated_bios /path/to/game.gba bios/gba_bios.bin
+  build/generated_bios /path/to/game.gba "" /path/to/game.toml
 python3 packaging/web/serve.py /path/to/game-recomp/web 8080
 ```
 
-Open `http://127.0.0.1:8080/` in a browser. The server supplies the COOP and
-COEP headers required by WebAssembly pthreads. For a quick headless smoke test,
-use `index.html?autostart=1`; the browser must still be allowed to start audio
-through a real user click when autoplay is blocked. The page also supports
-`args=`, `env=`, `rom=`, `bios=`, `sha1=` and `autostart=1` query parameters.
+Open `http://127.0.0.1:8080/` in a browser, choose your own game ROM and GBA
+BIOS, and press Start. The bundle contains neither file: the page checks the
+ROM against the SHA-1 it was built for and keeps both files in that browser's
+IndexedDB, so each player picks them once and a normal bundle can be
+published. The ROM argument above is only hashed. The server supplies the COOP
+and COEP headers required by WebAssembly pthreads. `index.html?autostart=1`
+starts as soon as stored files are available; the browser must still be
+allowed to start audio through a real user click when autoplay is blocked.
 
 `build_web.sh` accepts an optional fifth argument with the original TOML
 configuration. If omitted, it uses `<project>/game.toml` when present and
 otherwise writes an empty `runtime.toml`; passing a missing explicit file is an
 error. Runtime settings are copied to the bundle, while local ROM/BIOS/save
-paths are omitted. See [`packaging/web/README.md`](packaging/web/README.md) for
-isolated build directories, cache behavior, validation commands and browser
-troubleshooting.
+paths are omitted. For local testing only, `--embed-private-rom` builds a
+`web-PRIVATE` bundle with the ROM and BIOS inside (never publish it), and
+`--dev` enables `?args=` / `?env=` URL parameters on localhost. See
+[`packaging/web/README.md`](packaging/web/README.md) for isolated build
+directories, cache behavior, validation commands and browser troubleshooting.
 
 ## Architecture
 

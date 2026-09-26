@@ -3,7 +3,9 @@
    for the page's origin. Nothing is sent to the server and there are no
    external dependencies. The page decides when to sync (FS.syncfs); the runtime
    only reports that it wrote (web_notify_storage_write in host_window_web.cpp).
-   See docs/WEB_SAVE_PERSISTENCE_PLAN.md. */
+   Every change is tracked until IndexedDB confirms it (unsaved()), so the page
+   can say truthfully whether data is stored or only in memory, and warn before
+   a reload would lose it. See packaging/web/README.md. */
 (function(root) {
 'use strict';
 const BATTERY_SIZES=[512,8192,32768,65536,131072];
@@ -19,11 +21,18 @@ class SaveStore {
     this.lastPersisted=0;this.persistent=null;this.error=null;this.writeError=null;
     this.writes=0;this.syncs=0;this.retries=0;this.lastSyncMs=0;this.attempt=0;
     this.waiters=[];this.pending=[];this.locked=null;
+    // changeSeq counts MEMFS changes (runtime writes, visitor operations);
+    // persistedSeq is the newest change a completed sync has stored.
+    this.changeSeq=0;this.persistedSeq=0;this.syncSeq=0;
   }
   busy(){return this.state==='syncing'||this.state==='again';}
+  // True while some change exists only in memory (not yet, or never, stored).
+  unsaved(){return this.busy()||this.changeSeq>this.persistedSeq;}
+  canPersist(){return this.mounted&&this.state!=='unavailable';}
   emit(){try{this.onStatus(this.snapshot());}catch(e){}}
   snapshot(){return {state:this.state,lastPersisted:this.lastPersisted,persistent:this.persistent,error:this.error,writeError:this.writeError,
-    writes:this.writes,syncs:this.syncs,retries:this.retries,lastSyncMs:this.lastSyncMs,sha1:this.sha1,locked:this.locked,pending:this.pending.map(p=>p.op)};}
+    writes:this.writes,syncs:this.syncs,retries:this.retries,lastSyncMs:this.lastSyncMs,sha1:this.sha1,locked:this.locked,pending:this.pending.map(p=>p.op),
+    unsaved:this.unsaved(),memoryOnly:this.changeSeq>this.persistedSeq&&!this.canPersist()};}
   // One tab per game: the last tab to write would otherwise win and the other
   // would keep running on a stale save. Resolves false when another tab holds it.
   acquireLock(sha1) {
@@ -46,8 +55,10 @@ class SaveStore {
     const FS=this.fs=Module.FS;this.sha1=sha1;this.dir='/saves/'+sha1;
     FS.mkdirTree(this.dir);
     const unavailable=e=>{
-      this.state='unavailable';this.error=describe(e);this.ensureDir();this.applyPending();
+      this.state='unavailable';this.error=describe(e);this.ensureDir();
       this.log('Browser save storage unavailable: '+this.error+'. The game runs, but saves are lost on reload; export them.',true);
+      const applied=this.applyPending();
+      if(applied.length)this.log(`Queued save change (${applied.join(', ')}) applied in memory only: it is NOT stored in this browser and is lost on reload. Use Export Save to keep a copy.`,true);
       this.emit();this.settle();
     };
     const IDBFS=FS.filesystems?.IDBFS;
@@ -65,8 +76,11 @@ class SaveStore {
           this.ensureDir();const stale=this.cleanTmp();
           this.state='idle';this.error=null;
           this.log(`Browser saves loaded (${this.dir}: ${this.files().join(', ')||'empty'}${stale?`; removed ${stale} stale temp file(s)`:''})`);
-          if(this.applyPending()||coalesced)this.persist();else this.settle();
+          const applied=this.applyPending();
+          if(applied.length||coalesced)this.persist();else this.settle();
           this.emit();
+          if(applied.length)this.flush().then(()=>this.log(`Queued save change (${applied.join(', ')}) stored in this browser`),
+            e=>this.log(`Queued save change (${applied.join(', ')}) applied but NOT stored: ${e.message}. Use Export Save to keep a copy.`,true));
         }catch(e){unavailable(e);}
         finally{done();}
       });
@@ -86,7 +100,9 @@ class SaveStore {
         const db=request.result;
         db.onversionchange=()=>db.close();
         try {
-          if(!db.objectStoreNames.contains('FILE_DATA'))throw Error('Unrecognized legacy save database');
+          // Some other script on this origin owns a database named '/saves'.
+          // It is not ours to read: skip migration, keep saving.
+          if(!db.objectStoreNames.contains('FILE_DATA')){db.close();resolve(null);return;}
           const transaction=db.transaction('FILE_DATA','readonly'),entries=[];
           const prefix=this.dir+'/';
           const cursor=transaction.objectStore('FILE_DATA').openCursor(root.IDBKeyRange.bound(prefix,prefix+'\uffff'));
@@ -114,9 +130,18 @@ class SaveStore {
     // An existing per-game database is authoritative. Never merge an old
     // backup/state into newer data, or resurrect files deliberately deleted.
     if(!this.files().some(name=>!name.endsWith('.tmp'))) {
-      const entries=await this.readLegacy();
-      for(const {name,contents} of entries)this.fs.writeFile(this.dir+'/'+name,contents);
-      if(entries.length)this.log(`Migrated ${entries.length} save file(s) for this game; legacy copies kept`);
+      let entries;
+      try{entries=await this.readLegacy();}
+      catch(e){
+        // Never let an old or foreign database disable saving. Without the
+        // marker the migration is retried next launch while this game has no
+        // files of its own yet; legacy copies are never modified.
+        this.log('Legacy save migration skipped ('+describe(e)+'); saving works normally and any old saves are left untouched',true);
+        return;
+      }
+      if(entries===null)this.log("Ignored an unrelated IndexedDB database named '/saves' (not a gbarecomp save store)");
+      for(const {name,contents} of entries||[])this.fs.writeFile(this.dir+'/'+name,contents);
+      if(entries?.length)this.log(`Migrated ${entries.length} save file(s) for this game; legacy copies kept`);
     }
     this.fs.writeFile(marker,'1');
     // Commit migration and its marker together before guest writes are allowed.
@@ -132,7 +157,8 @@ class SaveStore {
   onWrite(kind,ok) {
     ++this.writes;
     if(!ok){this.writeError=`the runtime failed to write the ${KIND[kind]||'save'}`;this.log('Save error: '+this.writeError+' (see the log above)',true);this.emit();return;}
-    this.writeError=null;this.persist();
+    this.writeError=null;++this.changeSeq;
+    if(!this.persist())this.emit();
   }
   // Sync MEMFS -> IndexedDB. Coalesced: never more than one syncfs in flight.
   persist() {
@@ -141,7 +167,7 @@ class SaveStore {
     this.attempt=0;this.sync();return true;
   }
   sync() {
-    this.state='syncing';++this.syncs;this.emit();
+    this.state='syncing';++this.syncs;this.syncSeq=this.changeSeq;this.emit();
     const t0=performance.now();
     try{this.fs.syncfs(false,err=>this.synced(err,t0));}catch(e){this.synced(e,t0);}
   }
@@ -149,6 +175,7 @@ class SaveStore {
     this.lastSyncMs=performance.now()-t0;
     if(!err) {
       this.attempt=0;this.error=null;this.lastPersisted=Date.now();
+      this.persistedSeq=Math.max(this.persistedSeq,this.syncSeq);
       if(this.state==='again'){this.sync();return;}
       this.state='idle';this.emit();this.settle();void this.requestPersistence();return;
     }
@@ -209,29 +236,35 @@ class SaveStore {
   restoreBackup(){return this.modify({op:'restore'});}
   deleteAll(){return this.modify({op:'delete'});}
   // Only while the game is not running. Before the first Start there is no FS
-  // yet: the change is queued and applied right after /saves loads, before main()
-  // reads the save. After exit it is applied and synced immediately.
-  // 'persisted' confirms the sync completed; 'memory-only' means the change
+  // yet: every change is queued, in order, and applied right after /saves
+  // loads, before main() reads the save; the log then says whether it was
+  // stored. After exit it is applied and synced immediately.
+  // 'persisted' confirms IndexedDB stored this change; 'memory-only' means it
   // cannot survive a reload. A failed sync rejects, leaving the files exportable.
   async modify(op) {
     if(this.running)throw Error('Stop the game before changing its saves');
-    if(!this.fs){this.pending=[op];this.log(`Save ${op.op} queued: applied when the game starts`);this.emit();return 'queued';}
+    if(!this.fs){
+      this.pending.push(op);
+      this.log(`Save ${op.op} queued (${this.pending.length} pending): applied in order when the game starts`);
+      this.emit();return 'queued';
+    }
     await this.flush().catch(()=>{});
     this.apply(op);
-    const persisting=this.persist();
-    if(persisting)await this.flush();
-    this.emit();return persisting?'persisted':'memory-only';
+    const seq=this.changeSeq;
+    if(!this.persist()){this.emit();return 'memory-only';}
+    await this.flush();
+    this.emit();return this.persistedSeq>=seq?'persisted':'memory-only';
   }
   applyPending() {
-    const ops=this.pending;this.pending=[];let changed=false;
-    for(const op of ops){try{this.apply(op);changed=true;}catch(e){this.log('Save '+op.op+' failed: '+e.message,true);}}
-    return changed;
+    const ops=this.pending;this.pending=[];const applied=[];
+    for(const op of ops){try{this.apply(op);applied.push(op.op);}catch(e){this.log('Save '+op.op+' failed: '+e.message,true);}}
+    return applied;
   }
   apply(op) {
     const FS=this.fs,path=this.batteryPath(),bak=path+'.bak';
     const exists=p=>{try{FS.stat(p);return true;}catch(e){return false;}};
     const write=(p,data)=>{FS.writeFile(p+'.tmp',data);FS.rename(p+'.tmp',p);};
-    this.ensureDir();
+    this.ensureDir();++this.changeSeq;
     if(op.op==='import') {
       if(exists(path))write(bak,FS.readFile(path));
       write(path,op.bytes);

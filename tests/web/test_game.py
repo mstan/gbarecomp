@@ -1,4 +1,15 @@
-"""Capture fresh game evidence; no historical directory can satisfy this run."""
+"""Capture fresh game evidence; no historical directory can satisfy this run.
+
+Needs a developer bundle that carries its own ROM/BIOS (the test drives the
+runtime through ?args=/?env=), served from localhost:
+
+  bash packaging/web/build_web.sh --dev --embed-private-rom <project> <bios-gen> <rom> <bios> [config]
+  python3 packaging/web/serve.py <project>/web-PRIVATE 18083
+  python3 tests/web/test_game.py 1800 /tmp/gbr-game
+
+See packaging/web/README.md ("Browser acceptance tests"). Never publish a
+--embed-private-rom bundle.
+"""
 import argparse,json,time,urllib.parse
 from browser import Browser
 p=argparse.ArgumentParser();p.add_argument('frames',type=int);p.add_argument('output');p.add_argument('--url',default='http://127.0.0.1:18083/');p.add_argument('--headless',action='store_true');p.add_argument('--strict',action='store_true');a=p.parse_args()
@@ -7,7 +18,8 @@ try:
  env='GBARECOMP_SELFHEAL_RECOMPILE=0'+(',GBARECOMP_STRICT_STATIC=1' if a.strict else '')
  q=urllib.parse.urlencode({'args':f'{"--no-window" if a.headless else "--window"} --frames {a.frames} --dump-png /data/final.png','env':env})
  b.call('Page.navigate',{'url':a.url+'?'+q});time.sleep(.5)
- for t in ['mousePressed','mouseReleased']:b.call('Input.dispatchMouseEvent',{'type':t,'x':45,'y':32,'button':'left','clickCount':1})
+ assert b.eval('!!(globalThis.GBARECOMP_BUILD&&GBARECOMP_BUILD.dev&&GBARECOMP_BUILD.embedded)'),'needs a bundle built with --dev --embed-private-rom'
+ b.click('start')
  deadline=time.monotonic()+max(90,a.frames/30+30);samples=[]
  while time.monotonic()<deadline:
   time.sleep(1);s=b.eval('GbrHost.snapshot()');samples.append(s)
