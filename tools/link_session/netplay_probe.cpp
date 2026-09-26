@@ -43,6 +43,9 @@ void gba_link_probe_netplay(gbarecomp::GbaMultiplayerSession& simulation,unsigne
     if (!nonce || frames<2) throw std::invalid_argument("network probe needs a nonzero session ID and at least two frames");
     const auto* mode=std::getenv("GBA_LINK_PROBE_NET_ROLLBACK");
     const bool rollback=!mode || std::string_view(mode)!="0";
+    const auto timeout=std::getenv("GBA_LINK_PROBE_NET_TIMEOUT_MS") ?
+        number("GBA_LINK_PROBE_NET_TIMEOUT_MS",3600000) : 300000;
+    if (timeout<1000) throw std::invalid_argument("network probe simulation deadline must be 1 second to 1 hour");
     GbaNetplayHost host(simulation);
     host.sample_local=[&](std::uint32_t tick) { return input(tick)[seat]; };
     RNetConfig config; rnet_config_init_defaults(&config);
@@ -81,7 +84,7 @@ void gba_link_probe_netplay(gbarecomp::GbaMultiplayerSession& simulation,unsigne
     }
     const auto started=rbe_mono_ms(); bool done=false;
     GbaNetplayOutput output;
-    while (rbe_mono_ms()-started<300000) {
+    while (rbe_mono_ms()-started<timeout) {
         rnet_session_pump(session);
         const auto connection=gba_netplay_connection_status(session);
         if (connection.phase==GbaConnectionPhase::TimedOut || connection.phase==GbaConnectionPhase::PeerLeft)

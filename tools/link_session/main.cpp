@@ -42,7 +42,8 @@ int main(int argc, char** argv) {
             "GBA_LINK_PROBE_INPUTS: rows of relative frame, buttons0, buttons1.\n"
             "GBA_LINK_PROBE_STATE_IN / STATE_OUT: paired session snapshots.\n"
             "GBA_LINK_PROBE_CAPTURE_PREFIX: write each console's final PPM.\n"
-            "GBA_LINK_PROBE_REPLAY=1: verify five additional frames after restore.\n");
+            "GBA_LINK_PROBE_REPLAY=1: verify five additional frames after restore.\n"
+            "GBA_LINK_PROBE_REPLAY_RUN=1: restore and verify the full local input segment.\n");
         return 2;
     }
     std::unique_ptr<gbarecomp::GbaMultiplayerSession> session;
@@ -117,6 +118,9 @@ int main(int argc, char** argv) {
         }
         std::array<std::uint16_t,2> buttons{};
         std::size_t input_index=0;
+        const bool replay_run=std::getenv("GBA_LINK_PROBE_REPLAY_RUN")!=nullptr;
+        if (replay_run && std::getenv("GBA_LINK_PROBE_NET_SEAT"))
+            throw std::runtime_error("full-segment replay is a local probe option; use the network rollback harness for peers");
         if (std::getenv("GBA_LINK_PROBE_NET_SEAT")) {
 #ifdef GBA_LINK_PROBE_NETPLAY
             const auto inputs=[&](std::uint32_t tick) {
@@ -141,6 +145,21 @@ int main(int argc, char** argv) {
                     session->state_hash());
                 std::fflush(stdout);
             }
+        }
+        if (replay_run) {
+            const auto expected=session->save_state();
+            if (!session->load_state(cold,&error)) throw std::runtime_error(error);
+            buttons={}; input_index=0;
+            for (unsigned frame=0; frame<frames; ++frame) {
+                if (input_index<script.size() && script[input_index].frame==frame)
+                    buttons=script[input_index++].buttons;
+                session->run_frame(buttons);
+                session->discard_audio_output();
+            }
+            if (session->save_state()!=expected)
+                throw std::runtime_error("commercial probe full-segment replay diverged");
+            std::printf("whole-session input replay matched (%u frames, %zu snapshot bytes)\n",
+                frames,expected.size());
         }
         if (std::getenv("GBA_LINK_PROBE_REPLAY")) {
             const auto before=session->save_state();

@@ -17,7 +17,11 @@ p.add_argument("state", help="matching paired warm snapshot, produced by the loc
 p.add_argument("inputs", help="relative-frame controller script")
 p.add_argument("--frames", type=int, default=120)
 p.add_argument("--delay", action="store_true", help="use delay-sync instead of rollback")
+p.add_argument("--timeout", type=int, default=300, help="simulation deadline in seconds (1..3600); barriers get another 125 seconds")
+p.add_argument("--emerald-trade", action="store_true", help="require a reciprocal slot-zero Emerald trade persisted on both cartridges")
 args = p.parse_args()
+if not 1 <= args.timeout <= 3600:
+    p.error("--timeout must be 1..3600 seconds")
 for name in ("exe", "rom", "bios", "state", "inputs"):
     setattr(args, name, str(pathlib.Path(getattr(args, name)).resolve(strict=True)))
 
@@ -38,6 +42,7 @@ with tempfile.TemporaryDirectory(prefix="gba-commercial-net-") as tmp:
                 GBA_LINK_PROBE_NET_SESSION=str(nonce), GBA_LINK_PROBE_NET_BIND=f"127.0.0.1:{port+slot}",
                 GBA_LINK_PROBE_NET_PEER=f"127.0.0.1:{port+2+slot}",
                 GBA_LINK_PROBE_NET_ROLLBACK="0" if args.delay else "1",
+                GBA_LINK_PROBE_NET_TIMEOUT_MS=str(args.timeout * 1000),
                 GBA_RB_FORCE_MISPREDICT="7" if slot == 0 and not args.delay else "0")
             log = open(root / f"peer{slot}.log", "w", encoding="utf-8")
             logs.append(log)
@@ -45,7 +50,7 @@ with tempfile.TemporaryDirectory(prefix="gba-commercial-net-") as tmp:
                 env=env,stdout=log,stderr=log,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0))
         for peer in peers:
-            assert peer.wait(timeout=360) == 0, f"cartridge peer exited {peer.returncode}"
+            assert peer.wait(timeout=args.timeout + 125) == 0, f"cartridge peer exited {peer.returncode}"
         reports = [(root / f"peer{i}.log").read_text(errors="replace") for i in range(2)]
         assert not relay.errors, relay.errors
         assert relay.delayed > 0 and relay.peak > 0, "latency injection was not exercised"
@@ -59,6 +64,9 @@ with tempfile.TemporaryDirectory(prefix="gba-commercial-net-") as tmp:
         left = (root / "peer0.state").read_bytes()
         right = (root / "peer1.state").read_bytes()
         assert left == right, "native cartridge session bytes diverged"
+        if args.emerald_trade:
+            from emerald_trade_check import check_trade
+            check_trade(args.state, root / "peer0.state")
         print(f"{'delay-sync' if args.delay else 'rollback'} native cartridge: {len(left)} identical bytes, 40 ms latency / 10 ms jitter per direction")
     except Exception:
         for log in logs:

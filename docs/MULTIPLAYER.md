@@ -285,8 +285,26 @@ checkpoint after rollback under 40 ms latency plus 10 ms jitter per direction:
 `emerald-usa-native-probe` identity. This does not qualify trade/battle; the
 original local save is before the Pokédex with only one party Pokémon. Two
 publicly shared test saves have since been obtained with source/hash provenance
-and validated sector checksums; both boot natively. See the scenario README for
-reproduction without distributing saves or cartridge assets in this repository.
+and validated sector checksums. The 8,815-frame cold preparation route reproduces
+the staged cable-desk snapshot exactly. Both native cartridges enter the Trade
+Center, exchange Torchic and Salamence, complete the coordinated save and return
+to the party menu. Read-only assertions verify reciprocal personality/trainer
+identities in RAM and in each newest complete flash bank, unchanged other party
+members, Pokemon checksums, all 28 sector checksums per cartridge and zero
+game-reported cable errors. The source saves remain unchanged.
+
+Full input-segment restore/replay also matches across actual flash programming
+and pre-trade saves (300 and 440 frames); the completed 440-frame segment has
+1,533,888 identical bytes on Windows/Linux. A connected Trade Center movement
+test reaches the same 120-tick checkpoint under Linux delay-sync and Windows/Linux
+rollback, with 40 ms latency and 10 ms jitter in each direction: hash `b6109e3a`,
+1,533,888 bytes. The full 3,600-tick Linux network trade also passes under both
+delay-sync and forced rollback: hash `d7ed71cf`, 1,533,880 identical bytes, with
+reciprocal Pokemon identities verified in both newest save banks. The recorded
+rollback peers resimulate 3,274 and 1,999 ticks. Battle, broader platform/performance
+qualification and product persistence/recovery remain separate gates.
+See `tests/link/scenarios/README.md` for the controller routes, independent
+trade checker and reproduction without distributing cartridge/save assets.
 
 Mario Kart's native Multi-Pak route now connects both machines, selects separate
 Toad/Yoshi characters and enters Mushroom Cup with independent race controls.
