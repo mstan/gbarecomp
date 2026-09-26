@@ -21,7 +21,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "arm_codegen.h"
 #include "arm_decode.h"
@@ -56,6 +58,11 @@ int emit(FILE* f, const char* out_path) {
         "\n"
         "#include \"runtime_arm.h\"\n"
         "#include \"test_cases.h\"\n"
+        "\n"
+        "// Reached only when the instruction falls through to the next one.\n"
+        "// A tail transfer (GBARECOMP_TAIL_*) must return before it; the\n"
+        "// runner checks this against whether a transfer was dispatched.\n"
+        "extern \"C\" void codegen_test_fellthrough(void);\n"
         "\n");
 
     // Per-test function bodies.
@@ -121,6 +128,7 @@ int emit(FILE* f, const char* out_path) {
             "// [%zu] %s (%s) pc=0x%08X word=0x%08X%s\n"
             "extern \"C\" void tc_%zu(void) {\n"
             "%s"
+            "    codegen_test_fellthrough();\n"
             "}\n\n",
             i, tc.name, tc.thumb ? "THUMB" : "ARM",
             tc.pc, tc.word,
@@ -135,6 +143,61 @@ int emit(FILE* f, const char* out_path) {
                 i, tc.name);
         }
     }
+
+    // Named-target variants: the same instruction with its static branch
+    // target resolved to a function name, which is how real games reach
+    // GBARECOMP_TAIL_CALL (B) and named BL calls.
+    std::fprintf(f, "extern \"C\" void tc_named_sink(void);\n\n");
+    std::vector<bool> has_named(kTestCasesCount, false);
+    std::size_t tail_call_sites = 0;
+    for (std::size_t i = 0; i < kTestCasesCount; ++i) {
+        const TestCase& tc = kTestCases[i];
+        armv4t::Instr ins = decode_one(tc);
+        const bool direct = ins.op == armv4t::IrOp::B ||
+                            ins.op == armv4t::IrOp::BL ||
+                            ins.op == armv4t::IrOp::BL_suffix;
+        if (!direct || ins.branch_target == 0 || ins.branch_target == tc.pc)
+            continue;
+        const std::unordered_map<uint64_t, std::string> names = {
+            {(static_cast<uint64_t>(ins.branch_target) << 1u) |
+                 (tc.thumb ? 1u : 0u),
+             "tc_named_sink"},
+        };
+        armv4t::CodegenCtx ctx{};
+        ctx.current_function_addr = tc.pc;
+        ctx.current_function_thumb = tc.thumb;
+        ctx.alu_immediate_override_pcs = &thumb_alu_immediate_override_pcs;
+        ctx.names_by_key = &names;
+        bool not_implemented = false;
+        std::string body = armv4t::ArmCodegen::emit_instr(
+            ins, ctx, &not_implemented);
+        if (body.find("tc_named_sink") == std::string::npos) continue;
+        for (std::size_t p = body.find("GBARECOMP_TAIL_CALL(");
+             p != std::string::npos;
+             p = body.find("GBARECOMP_TAIL_CALL(", p + 1)) {
+            ++tail_call_sites;
+        }
+        has_named[i] = true;
+        std::fprintf(f,
+            "// [%zu] %s (named target 0x%08X)\n"
+            "extern \"C\" void tc_named_%zu(void) {\n"
+            "%s"
+            "    codegen_test_fellthrough();\n"
+            "}\n\n",
+            i, tc.name, ins.branch_target, i, body.c_str());
+    }
+    if (tail_call_sites == 0) {
+        std::fprintf(stderr,
+            "gen_codegen_tests: ERROR — no GBARECOMP_TAIL_CALL sites were "
+            "emitted by the named-target variants.\n");
+        return 8;
+    }
+    std::fprintf(f, "extern \"C\" const TestFn kNamedTestFns[] = {\n");
+    for (std::size_t i = 0; i < kTestCasesCount; ++i) {
+        if (has_named[i]) std::fprintf(f, "    &tc_named_%zu,\n", i);
+        else std::fprintf(f, "    nullptr,\n");
+    }
+    std::fprintf(f, "};\n\n");
 
     // Lookup table.
     std::fprintf(f,
