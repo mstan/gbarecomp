@@ -218,7 +218,10 @@ static void sampler_loop() {
 }
 
 static void start_sampler() {
-    if (!std::getenv("GBARECOMP_SAMPLE")) return;
+    // Binding an instance is a hot path. Read this launch-time diagnostic
+    // option once: Windows getenv scans/locks the environment on every call.
+    static const bool enabled = std::getenv("GBARECOMP_SAMPLE") != nullptr;
+    if (!enabled) return;
     if (g_sampling.exchange(true)) return;  // start once
     g_sampler = std::thread(sampler_loop);
     std::atexit([] {
@@ -955,13 +958,16 @@ void runtime_set_vblank_input_hook(std::function<void()> h) {
 
 extern "C" bool runtime_should_yield(void) {
     if (g_session_execution) {
+        if (gbarecomp::runtime_dispatch_suspended()) return true;
         auto* bus = gbarecomp::g_active_bus;
         const bool safe = g_session_slice && bus && gbarecomp::multiplayer_slice_safe(*bus,g_cpu);
         if (g_session_instruction_started && (!g_session_slice || g_session_slice_stopped ||
             !safe || g_runtime_cycles >= g_session_slice_deadline))
-            throw gbarecomp::RuntimeDispatchYield{};
-        if (bus && bus->io().irq_pending() && !(g_cpu.cpsr & CPSR_I_BIT))
-            runtime_irq(g_cpu.R[15]); // explicit continuation, normal C++ unwind
+            return gbarecomp::runtime_suspend_dispatch();
+        if (bus && bus->io().irq_pending() && !(g_cpu.cpsr & CPSR_I_BIT)) {
+            runtime_irq(g_cpu.R[15]);
+            if (gbarecomp::runtime_dispatch_suspended()) return true;
+        }
         g_session_instruction_started = true;
         if (!safe) g_session_slice_stopped = true;
     }

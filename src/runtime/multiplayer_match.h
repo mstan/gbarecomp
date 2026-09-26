@@ -17,7 +17,13 @@ struct GbaNetplayMatchOptions {
     // The caller loaded an agreed paired archive; compare it byte-for-byte
     // instead of exchanging the individual cartridge saves at cold startup.
     bool restored_pair = false;
-    GbaNetplayMatchOptions() { rnet_config_init_defaults(&network); }
+    GbaNetplayMatchOptions() {
+        rnet_config_init_defaults(&network);
+        // Six GBA frames (~100 ms) give ordinary WAN jitter room at startup.
+        // The shared rollback driver may adapt this later; delay-sync has no
+        // predictor/adaptive scheduler. A lobby can explicitly choose 2..20.
+        network.input_delay=6;
+    }
 };
 
 // One application-thread match. The launcher chooses the transport and the
@@ -39,7 +45,10 @@ public:
     // The match owns it; it stays valid until destruction, including failure.
     RNetSession* transport() const { return network_.get(); }
     std::function<std::uint16_t(std::uint32_t)> sample_local;
-    Step poll();
+    // False services transport/startup without admitting a simulation frame.
+    // Advance the caller's pacing deadline only on Forward; replay then runs
+    // without consuming additional presentation slots.
+    Step poll(bool allow_simulation = true);
     bool take_output(GbaNetplayOutput&);
     Phase phase() const { return phase_; }
     GbaConnectionStatus connection() const { return connection_; }

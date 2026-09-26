@@ -1,5 +1,6 @@
 #include "multiplayer_netplay.h"
 #include "multiplayer_checkpoint.h"
+#include "multiplayer_pacing.h"
 #include "netplay_fixture.h"
 #include <cstdio>
 #include <cstdlib>
@@ -7,6 +8,25 @@
 #define CHECK(expr) do { if (!(expr)) { std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr); std::exit(1); } } while (0)
 namespace {
 using link_fixture::create;
+void admission_pacing() {
+    using namespace std::chrono;
+    using P=gbarecomp::GbaNetplayPacer;
+    P pacer;
+    const P::Time start(seconds(100));
+    CHECK(pacer.ready(start));
+    pacer.forwarded(start);
+    // A ten-ms frame must leave only the remaining fraction to wait.
+    CHECK(!pacer.ready(start+milliseconds(10)));
+    CHECK(pacer.ready(start+P::frame_period));
+    pacer.forwarded(start+P::frame_period+milliseconds(3));
+    // Ordinary scheduling/network jitter must not accumulate into slowdown.
+    CHECK(pacer.ready(start+P::frame_period*2));
+    // A long network stall does not accumulate a burst of old frame slots.
+    const auto recovered=start+seconds(6);
+    pacer.forwarded(recovered);
+    CHECK(!pacer.ready(recovered+milliseconds(1)));
+    CHECK(pacer.ready(recovered+P::frame_period));
+}
 void restore_corrected_session() {
     using namespace gbarecomp;
     auto simulation=create(); GbaNetplayHost h(*simulation); const auto api=h.callbacks();
@@ -168,4 +188,4 @@ void demoted_candidate() {
     CHECK(host.confirmed_checkpoint().state==simulation->save_state());
 }
 }
-int main() { restore_corrected_session(); delay_publication(); local_output(); confirmed_checkpoint(); agreement_gate(); demoted_candidate(); std::puts("whole-session netplay host tests passed"); }
+int main() { admission_pacing(); restore_corrected_session(); delay_publication(); local_output(); confirmed_checkpoint(); agreement_gate(); demoted_candidate(); std::puts("whole-session netplay host tests passed"); }

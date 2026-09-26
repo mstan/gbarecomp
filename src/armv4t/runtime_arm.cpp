@@ -70,6 +70,8 @@ extern "C" unsigned long long g_runtime_vblank_starts;
 namespace {
 
 gbarecomp::RuntimeArmContext* g_resumable_context = nullptr;
+bool g_return_yield = false, g_dispatch_suspended = false;
+std::uint32_t g_suspended_pc = 0;
 
 constexpr uint32_t kTraceSize = 4096u;
 RuntimeTraceEntry g_trace[kTraceSize] = {};
@@ -800,6 +802,14 @@ namespace {
 // and THUMB entries, so scan the equal-address run for CPSR.T.
 const DispatchEntry* lookup_in(const DispatchEntry* table, unsigned len,
                                uint32_t pc, bool thumb) {
+    // Both generated tables are immutable for this executable. Resume PCs in
+    // hot guest loops need not repeat a binary search at every native slice.
+    // Cache hits validate table, PC and mode; this is disposable host metadata.
+    struct CachedEntry { const DispatchEntry* table=nullptr; const DispatchEntry* entry=nullptr; };
+    static CachedEntry cache[4096];
+    auto& cached=cache[((pc>>1)^(pc>>12)^unsigned(thumb))&4095];
+    if (cached.table==table && cached.entry && cached.entry->addr==pc &&
+        (cached.entry->thumb!=0)==thumb) return cached.entry;
     unsigned lo = 0, hi = len;
     while (lo < hi) {
         unsigned mid = (lo + hi) >> 1u;
@@ -807,7 +817,9 @@ const DispatchEntry* lookup_in(const DispatchEntry* table, unsigned len,
         else                       hi = mid;
     }
     for (unsigned i = lo; i < len && table[i].addr == pc; ++i) {
-        if ((table[i].thumb != 0) == thumb) return &table[i];
+        if ((table[i].thumb != 0) == thumb) {
+            cached={table,&table[i]}; return &table[i];
+        }
     }
     return nullptr;
 }
@@ -821,6 +833,9 @@ constexpr uint32_t kBiosRegionEnd = 0x00004000u;
 }  // namespace
 
 extern "C" void runtime_dispatch(uint32_t target_pc) {
+    // A generated caller can fall through to another dispatch when the yielded
+    // PC equals its return address. Do not enter that target or its RAM hook.
+    if (gbarecomp::runtime_dispatch_suspended()) return;
     // Strip THUMB bit; codegen handles the mode via cpsr_T already.
     uint32_t pc = target_pc & ~1u;
     if (runtime_trace_enabled())
@@ -840,9 +855,18 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
         runtime_bridge_interpret(pc, thumb, 0u, 0u);
         return;
     }
-    if (pc >= 0x02000000u && pc < 0x04000000u && g_runtime_ram_dispatch_hook) {
+    if (pc >= 0x02000000u && pc < 0x04000000u && g_runtime_ram_dispatch_hook &&
+        (!g_resumable_context || !g_resumable_context->ram_dispatch_filter ||
+         g_resumable_context->ram_dispatch_filter(pc, thumb ? 1 : 0))) {
         if (g_resumable_context && g_resumable_context->ram_dispatch_boundary)
             g_resumable_context->ram_dispatch_boundary(pc);
+        // User callbacks need not obey the generated return-propagation ABI.
+        // A declined hook still allows its generated RAM body to use it.
+        struct CallbackYieldScope {
+            bool previous = g_return_yield;
+            CallbackYieldScope() { g_return_yield = false; }
+            ~CallbackYieldScope() { g_return_yield = previous; }
+        } callback_yield;
         if (g_runtime_ram_dispatch_hook(pc, thumb ? 1 : 0)) return;
     }
     const DispatchEntry* entry = nullptr;
@@ -930,6 +954,9 @@ extern "C" int runtime_call_should_return(uint32_t target_pc) {
 }
 
 extern "C" void runtime_call_cancel_return(uint32_t return_pc) {
+    // Host frames are returning because the scheduler suspended the guest;
+    // their guest continuations must survive until guest BX/POP consumes them.
+    if (gbarecomp::runtime_dispatch_suspended()) return;
     uint32_t pc = return_pc & ~1u;
     // Never pop below the active IRQ floor (an interrupted mainline frame).
     if (g_call_return_depth > g_call_return_floor &&
@@ -1152,8 +1179,10 @@ extern "C" void runtime_exception_return(uint32_t new_pc) {
             g_call_return_floor = frame.return_floor;
             g_irq_iret_depth = frame.iret_depth;
             --g_irq_nest_depth;
-            // Never fall through the discarded native IRQ call chain.
-            throw gbarecomp::RuntimeDispatchYield{};
+            // Generated exception-return instructions tail-return immediately.
+            // Keep the restored mainline PC while their native callers unwind.
+            gbarecomp::runtime_suspend_dispatch();
+            return;
         }
     }
 }
@@ -1378,7 +1407,8 @@ extern "C" void runtime_irq(uint32_t return_address) {
         g_resumable_context->interrupts.push_back(frame);
         // The outer dispatcher resumes the recompiled BIOS vector. The
         // continuation, including nesting/floor state, now belongs to the GBA.
-        throw gbarecomp::RuntimeDispatchYield{};
+        gbarecomp::runtime_suspend_dispatch();
+        return;
     }
     // Whole-program interpreter mode must cover exception handlers too.
     // Previously only the main run loop honored GBARECOMP_FORCE_INTERP, while
@@ -1476,6 +1506,26 @@ void runtime_restore_arm_context(const RuntimeArmContext& in) {
     g_runtime_fn_entry_hook = in.entry_hook;
     g_bios_hle_hook = in.bios_hook;
 }
-void runtime_set_resumable_context(RuntimeArmContext* context) { g_resumable_context = context; }
+void runtime_set_resumable_context(RuntimeArmContext* context) {
+    g_resumable_context = context;
+    runtime_set_return_yield(false);
+}
 bool runtime_has_resumable_context() { return g_resumable_context != nullptr; }
+void runtime_set_return_yield(bool enabled) {
+    g_return_yield = enabled;
+    g_dispatch_suspended = false;
+}
+bool runtime_suspend_dispatch() {
+    if (!g_return_yield) throw RuntimeDispatchYield{};
+    g_suspended_pc = g_cpu.R[15];
+    g_dispatch_suspended = true;
+    return true;
+}
+bool runtime_dispatch_suspended() {
+    if (!g_dispatch_suspended) return false;
+    // Every generated instruction installs its PC before should_yield(). A
+    // caller which reached that prologue must not overwrite the callee's PC.
+    g_cpu.R[15] = g_suspended_pc;
+    return true;
+}
 } // namespace gbarecomp

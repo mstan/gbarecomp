@@ -44,6 +44,9 @@ public:
     // Experimental event-bounded native batching; reference mode stays
     // available for differential qualification. Does not change saved state.
     void set_native_slices(bool enabled) { native_slices_ = enabled; }
+    // Differential/performance reference: keep exception-based suspension
+    // while retaining the same slice and device boundaries.
+    void set_return_yields(bool enabled) { return_yields_ = enabled; }
     std::uint64_t cycle() const { return cycle_; }
     std::size_t machine_count() const { return machines_.size(); }
     gba::GbaLinkHub& cable() { return *cable_; }
@@ -55,5 +58,6 @@ private:
     std::unique_ptr<gba::GbaLinkHub> cable_;
     std::uint64_t cycle_ = 0;
     bool native_slices_ = false;
+    bool return_yields_ = true;
 };
 } // namespace gbarecomp

@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
+#include <chrono>
 #ifdef GBA_LINK_PROBE_NETPLAY
 #include "netplay_probe.h"
 #endif
@@ -69,6 +70,7 @@ int main(int argc, char** argv) {
         session = std::make_unique<GbaMultiplayerSession>(std::move(config));
         if (const auto* slices = std::getenv("GBA_LINK_PROBE_SLICES"))
             session->set_native_slices(std::string_view(slices)=="1");
+        if (std::getenv("GBA_LINK_PROBE_EXCEPTION_YIELDS")) session->set_return_yields(false);
         for (unsigned port=0; port<2; ++port) {
             auto& m = session->machine(port);
             m.bus.set_bios(&bios);
@@ -117,6 +119,8 @@ int main(int argc, char** argv) {
             if (!input.eof()) throw std::runtime_error("cannot read input script");
         }
         std::array<std::uint16_t,2> buttons{};
+        std::vector<double> frame_ms;
+        frame_ms.reserve(frames);
         std::size_t input_index=0;
         const bool replay_run=std::getenv("GBA_LINK_PROBE_REPLAY_RUN")!=nullptr;
         if (replay_run && std::getenv("GBA_LINK_PROBE_NET_SEAT"))
@@ -136,8 +140,11 @@ int main(int argc, char** argv) {
         } else for (unsigned frame=0; frame<frames; ++frame) {
             if (input_index<script.size() && script[input_index].frame==frame)
                 buttons=script[input_index++].buttons;
+            const auto frame_start=std::chrono::steady_clock::now();
             session->run_frame(buttons);
             session->discard_audio_output();
+            frame_ms.push_back(std::chrono::duration<double,std::milli>(
+                std::chrono::steady_clock::now()-frame_start).count());
             if (frame%10==0 || frame+1==frames) {
                 std::printf("frame=%u cycles=%llu pc0=%08x pc1=%08x hash=%08x\n", frame+1,
                     static_cast<unsigned long long>(session->cycle()),
@@ -145,6 +152,13 @@ int main(int argc, char** argv) {
                     session->state_hash());
                 std::fflush(stdout);
             }
+        }
+        if (!frame_ms.empty()) {
+            double total=0; for (auto ms:frame_ms) total+=ms;
+            std::sort(frame_ms.begin(),frame_ms.end());
+            std::printf("simulation frames=%zu fps=%.2f mean_ms=%.3f p95_ms=%.3f max_ms=%.3f\n",
+                frame_ms.size(),frame_ms.size()*1000.0/total,total/frame_ms.size(),
+                frame_ms[(frame_ms.size()-1)*95/100],frame_ms.back());
         }
         if (replay_run) {
             const auto expected=session->save_state();

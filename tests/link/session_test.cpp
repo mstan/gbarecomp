@@ -5,6 +5,40 @@
 
 #define CHECK(expr) do { if (!(expr)) { std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr); std::exit(1); } } while (0)
 namespace {
+void return_yield_continuation() {
+    using namespace gbarecomp;
+    RuntimeArmContext original, guest;
+    RuntimeTimingContext timing;
+    runtime_capture_arm_context(original); runtime_capture_timing_context(timing);
+    guest.cpu.cpsr=0xd3;
+    guest.cpu.R[15]=0x08000000;
+    guest.returns={0x08000004,0x08000008};
+    runtime_restore_arm_context(guest); runtime_set_resumable_context(&guest);
+    runtime_session_execution(true); runtime_session_begin_instruction();
+    runtime_set_return_yield(true);
+    CHECK(!runtime_should_yield());
+    runtime_tick(1); g_cpu.R[15]=0x08000004;
+    const auto cycles=g_runtime_cycles;
+    CHECK(runtime_should_yield());
+    // Nested generated callers cancel only their native frames on a suspended
+    // return. A matching caller return PC must not accidentally resume it.
+    runtime_call_cancel_return(0x08000008);
+    runtime_call_cancel_return(0x08000004);
+    CHECK(runtime_call_stack_depth()==2);
+    g_cpu.R[15]=0x08000100; // another caller's instruction prologue
+    CHECK(runtime_should_yield());
+    CHECK(g_cpu.R[15]==0x08000004 && g_runtime_cycles==cycles);
+    // Neither fall-through dispatch nor its custom RAM callback may execute.
+    guest.ram_dispatch=[](std::uint32_t,int) { CHECK(false); return 0; };
+    g_runtime_ram_dispatch_hook=guest.ram_dispatch;
+    runtime_dispatch(0x03000000);
+    CHECK(g_cpu.R[15]==0x08000004 && runtime_call_stack_depth()==2);
+    runtime_set_return_yield(false); // next dispatch consumes real guest returns
+    CHECK(runtime_call_should_return(0x08000008));
+    CHECK(runtime_call_should_return(0x08000004));
+    runtime_session_execution(false); runtime_set_resumable_context(nullptr);
+    runtime_restore_arm_context(original); runtime_restore_timing_context(timing);
+}
 gba::GbaLinkHub* callback_cable=nullptr;
 unsigned callback_visits=0;
 int ram_callback(std::uint32_t pc,int) {
@@ -131,8 +165,17 @@ void native_exchange() {
     CHECK((session->machine(10).bus.io().read16(0x130) & 0x3ff) == 0x3fd);
     CHECK((session->machine(30).bus.io().read16(0x130) & 0x3ff) == 0x3fe);
 }
-void exception_continuations() {
+void exception_continuations(bool return_yield) {
     using namespace gbarecomp;
+    const auto suspend=[&](auto operation) {
+        runtime_set_return_yield(return_yield);
+        if (return_yield) {
+            operation(); CHECK(runtime_dispatch_suspended());
+            runtime_set_return_yield(false);
+        } else {
+            try { operation(); CHECK(false); } catch (const RuntimeDispatchYield&) {}
+        }
+    };
     RuntimeArmContext original;
     runtime_capture_arm_context(original);
     RuntimeArmContext a, b;
@@ -142,7 +185,7 @@ void exception_continuations() {
     a.returns = {0x08001234};
     runtime_restore_arm_context(a);
     runtime_set_resumable_context(&a);
-    try { runtime_irq(0x08000040); CHECK(false); } catch (const RuntimeDispatchYield&) {}
+    suspend([] { runtime_irq(0x08000040); });
     CHECK(g_cpu.R[15] == 0x18);
     CHECK(a.interrupts.size() == 1);
     runtime_capture_arm_context(a);
@@ -158,14 +201,14 @@ void exception_continuations() {
     const auto outer_spsr = g_cpu.banked_spsr[ARM_BANK_IRQ];
     // Model a nested IRQ after the handler unmasks IRQs.
     g_cpu.cpsr &= ~CPSR_I_BIT;
-    try { runtime_irq(0x00000140); CHECK(false); } catch (const RuntimeDispatchYield&) {}
+    suspend([] { runtime_irq(0x00000140); });
     CHECK(a.interrupts.size() == 2);
     g_cpu.R[0] = 888;
-    try { runtime_exception_return(0x140); CHECK(false); } catch (const RuntimeDispatchYield&) {}
+    suspend([] { runtime_exception_return(0x140); });
     CHECK(g_cpu.R[0] == 777 && a.interrupts.size() == 1);
     // A real nested IRQ wrapper saves/restores this banked SPSR in guest RAM.
     g_cpu.banked_spsr[ARM_BANK_IRQ] = outer_spsr;
-    try { runtime_exception_return(0x08000040); CHECK(false); } catch (const RuntimeDispatchYield&) {}
+    suspend([] { runtime_exception_return(0x08000040); });
     CHECK(g_cpu.R[0] == 123 && g_cpu.R[12] == 456);
     CHECK(g_cpu.R[15] == 0x08000040 && a.interrupts.empty());
     CHECK(g_cpu.cpsr == 0x1f);
@@ -174,6 +217,8 @@ void exception_continuations() {
 }
 }
 int main() {
-    exception_continuations(); native_exchange(); ram_dispatch_rendezvous();
+    return_yield_continuation();
+    exception_continuations(false); exception_continuations(true);
+    native_exchange(); ram_dispatch_rendezvous();
     std::puts("native multiplayer session tests passed");
 }

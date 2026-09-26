@@ -63,7 +63,7 @@ void GbaNetplayMatch::fail(std::string message) {
 std::uint64_t GbaNetplayMatch::replay_ticks() const {
     return driver_ ? rnet_rb_driver_resim_ticks(driver_.get()) : replay_ticks_;
 }
-GbaNetplayMatch::Step GbaNetplayMatch::poll() {
+GbaNetplayMatch::Step GbaNetplayMatch::poll(bool allow_simulation) {
     try {
         rnet_session_pump(session_);
         connection_=gba_netplay_connection_status(session_);
@@ -104,6 +104,7 @@ GbaNetplayMatch::Step GbaNetplayMatch::poll() {
             return Step::Idle;
         }
         bool ran=false, replay=false;
+        if (!allow_simulation) return Step::Idle;
         if (driver_) {
             const auto admit=rnet_rb_driver_poll_admit(driver_.get());
             replay=admit==RNET_RB_ADMIT_REPLAY;

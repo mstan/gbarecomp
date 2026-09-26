@@ -240,6 +240,39 @@ An additional original generated-code fixture checks ROM-to-RAM callback entry,
 device-clock agreement and byte-identical reference/batched continuation. A
 240-frame Emerald intro-to-menu segment also matches the previous reference
 snapshot byte for byte with batching enabled.
+Generated dispatch now propagates scheduler and IRQ suspensions through ordinary
+native returns, retaining the explicit guest call/IRQ continuations. Custom
+callbacks keep C++ unwinding. A pure optional RAM-hook predicate lets a game
+exclude generated ARM RAM code from its Thumb flash callbacks. Lookahead is
+bounded to 63 cycles, below the fastest supported 64-cycle cable transfer.
+Immutable dispatch-table lookups are cached; sampler enablement is read once
+instead of scanning the Windows environment on every instance binding.
+
+The 120-frame Emerald battle-menu comparison matches all 1,533,904 bytes against
+the previous exception-based execution, including across Windows/Linux (SHA-256
+`fe1b3d12251a691721695a4f08354f87cf456a07a964c6d71c2b291da936caba`).
+On the development machine, Windows simulation alone measures 146.8 FPS
+(6.81 ms mean, 7.40 ms p95). This is processing capacity, not network FPS.
+The original generated fixture still agrees with the separate mGBA oracle for
+multiplayer at all baud rates and normal 8/32-bit at both clocks.
+
+The application pacer accounts for frame execution, retains its deadline through
+brief jitter, and resets after a long outage. Transport is pumped between frame
+deadlines; replay consumes no presentation slot. GBA matches now start with six
+input-delay frames (~100 ms), configurable from 2 to 20. The shared rollback
+scheduler can adapt that delay; the direct delay-sync admission path cannot.
+At 40 ms latency plus 10 ms jitter in each direction, two frames gave only
+28.9 FPS in delay-sync; six give 59.3 FPS in the Linux Emerald connected room.
+A 600-tick Windows Mario Kart race rollback run gives 58.1–58.6 FPS and identical
+1,402,794-byte states (`3de0d0f3`). These measurements use ordinary predictions,
+not the intentionally corrupted prediction stress mode. They establish short
+headless in-game performance on this machine, not Internet or window/audio
+qualification on other hardware.
+Windows additionally uses a scoped high-resolution waitable timer between polls;
+ordinary `Sleep(1)` rounded toward a 16 ms quantum and reduced Mario Kart
+delay-sync to 48 FPS despite ample CPU capacity. With the timer, the same
+600-tick run reaches 59.1–59.3 FPS and exactly the same final state. The timer
+never affects guest clocks and does not change global system timer policy.
 This path remains opt-in pending commercial-game and broader codegen coverage.
 
 Larger native slices need a proven SIO/MMIO rendezvous boundary and deterministic

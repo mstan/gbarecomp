@@ -140,14 +140,16 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
             instance.timing.cycles = cycle_;
             bind(instance);
             const auto& e=instance.execution;
-            const bool ram_callback=e.ram_dispatch && e.cpu.R[15]>=0x02000000 && e.cpu.R[15]<0x04000000;
-            if (native_slices_ && !e.program_dispatch && !e.immediate_override && !e.read_override &&
-                !ram_callback && !e.force_interp && !e.entry_hook && !e.bios_hook &&
-                !gba::g_rom_read16_override && !gba::g_rom_read32_override) {
+            const bool ram_callback=e.ram_dispatch && e.cpu.R[15]>=0x02000000 && e.cpu.R[15]<0x04000000 &&
+                (!e.ram_dispatch_filter || e.ram_dispatch_filter(e.cpu.R[15],(e.cpu.cpsr&CPSR_T_BIT) ? 1 : 0));
+            const bool generated = !e.program_dispatch && !e.immediate_override && !e.read_override &&
+                !e.force_interp && !e.entry_hook && !e.bios_hook &&
+                !gba::g_rom_read16_override && !gba::g_rom_read32_override;
+            if (native_slices_ && generated && !ram_callback) {
                 // No newly started cable transfer can complete within this
                 // lookahead (normal 8-bit fast clock takes 64 cycles).
                 // Existing device events and the caller's boundary shorten it.
-                auto deadline=cycle_+std::min<std::uint64_t>(target-cycle_,32);
+                auto deadline=cycle_+std::min<std::uint64_t>(target-cycle_,63);
                 for (const auto& machine : machines_) {
                     const auto& device_io=machine->bus.io();
                     auto distance=std::min({machine->ppu.cycles_until_next_event(),
@@ -157,6 +159,7 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
                 }
                 runtime_session_begin_slice(deadline);
             } else runtime_session_begin_instruction();
+            runtime_set_return_yield(native_slices_ && generated && return_yields_);
             try { runtime_dispatch(g_cpu.R[15]); }
             catch (const RuntimeDispatchYield&) { /* all guest residue is explicit */ }
             catch (...) { capture(instance); throw; }

@@ -17,6 +17,9 @@ p.add_argument("state", help="matching paired warm snapshot, produced by the loc
 p.add_argument("inputs", help="relative-frame controller script")
 p.add_argument("--frames", type=int, default=120)
 p.add_argument("--delay", action="store_true", help="use delay-sync instead of rollback")
+p.add_argument("--natural", action="store_true", help="measure ordinary play without forced incorrect predictions")
+p.add_argument("--input-delay", type=int, choices=range(2,21), metavar="2..20", help="override the match's six-frame WAN default; old qualification routes used 2")
+p.add_argument("--min-fps", type=float, default=0, help="require each peer to sustain this forward rate (excludes startup/checkpoint transfer)")
 p.add_argument("--timeout", type=int, default=300, help="simulation deadline in seconds (1..3600); barriers get another 125 seconds")
 p.add_argument("--emerald-trade", action="store_true", help="require a reciprocal slot-zero Emerald trade persisted on both cartridges")
 p.add_argument("--emerald-battle-ko", action="store_true", help="require a cable battle KO delivered to its owner's cartridge")
@@ -45,7 +48,9 @@ with tempfile.TemporaryDirectory(prefix="gba-commercial-net-") as tmp:
                 GBA_LINK_PROBE_NET_PEER=f"127.0.0.1:{port+2+slot}",
                 GBA_LINK_PROBE_NET_ROLLBACK="0" if args.delay else "1",
                 GBA_LINK_PROBE_NET_TIMEOUT_MS=str(args.timeout * 1000),
-                GBA_RB_FORCE_MISPREDICT="7" if slot == 0 and not args.delay else "0")
+                GBA_RB_FORCE_MISPREDICT="7" if slot == 0 and not args.delay and not args.natural else "0")
+            if args.input_delay is not None:
+                env["GBA_LINK_PROBE_NET_DELAY"] = str(args.input_delay)
             log = open(root / f"peer{slot}.log", "w", encoding="utf-8")
             logs.append(log)
             peers.append(subprocess.Popen([args.exe,args.rom,args.bios,str(args.frames),args.save_type],
@@ -60,9 +65,14 @@ with tempfile.TemporaryDirectory(prefix="gba-commercial-net-") as tmp:
             assert "LINK SIMULATOR OVERFLOW" not in report, "latency simulator overflow invalidates qualification"
             match = re.search(r"network agreed tick=(\d+) hash=([0-9a-f]+) replay=(\d+) bytes=(\d+)",report)
             assert match and int(match[1]) == args.frames, "missing exact checkpoint agreement"
-            if not args.delay:
+            if not args.delay and not args.natural:
                 assert int(match[3]) > 0, "rollback was not exercised"
             print(match[0])
+            performance=re.search(r"network performance forward_fps=([\d.]+) work_fps=([\d.]+) work_frames=(\d+)",report)
+            if performance:
+                print(performance[0])
+            if args.min_fps:
+                assert performance and float(performance[1]) >= args.min_fps, "forward frame rate below required minimum"
         left = (root / "peer0.state").read_bytes()
         right = (root / "peer1.state").read_bytes()
         assert left == right, "native cartridge session bytes diverged"

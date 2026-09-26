@@ -208,3 +208,29 @@ flash banks contain the complementary win/loss counters and valid sector
 checksums. These existing longer routes remain reproducible evidence; future
 acceptance focuses on sustained connected gameplay at playable speed, rather
 than requiring full battles, races or rematches.
+
+## Performance qualification
+
+`commercial_loopback.py --natural --min-fps 55 --frames 600` measures ordinary
+network play without deliberately corrupting predictions. The threshold applies
+to each peer's forward rate, including input stalls/rollback but excluding the
+initial large state transfer and final checkpoint transfer. `work_fps` separately
+measures simulation/driver work; it must not be reported as the network frame rate.
+The script still compares the complete final session states under the same
+40 ms latency / 10 ms jitter per direction.
+
+GBA matches now default to six input-delay frames. Use `--input-delay 2` to
+reproduce the older qualification hashes above; delay changes which input lands
+on a given guest frame. The probe's equivalent override is
+`GBA_LINK_PROBE_NET_DELAY`. Six frames leave room for the tested WAN delay and
+jitter; two frames slow direct delay-sync to about 29 FPS. The shared rollback
+driver retains its own adaptive-delay behavior. No SIO transaction is networked.
+
+Recorded with native slices and cooperative returns: Emerald connected-room
+Linux delay-sync gives 59.28–59.33 FPS, 1,533,888 identical bytes (`09227600`).
+Mario Kart Windows rollback gives 58.11–58.55 FPS, 1,402,794 identical bytes
+(`3de0d0f3`), with one naturally corrected frame on each peer. Product
+presentation/audio and other hardware remain separate qualification gates.
+Windows Mario Kart delay-sync also matches that state at 59.13–59.26 FPS after
+using a scoped high-resolution polling timer. Windows Emerald rollback matches
+the Linux Emerald state at 58.63–59.07 FPS; that ordinary run needed no replay.

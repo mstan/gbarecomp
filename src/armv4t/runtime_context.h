@@ -31,6 +31,10 @@ struct RuntimeArmContext {
     RuntimeThumbAluImmediateOverride immediate_override = nullptr;
     RuntimeBusReadOverride read_override = nullptr;
     RuntimeRamDispatchHook ram_dispatch = nullptr;
+    // Optional pure PC/mode predicate: no bus reads or guest mutations. False
+    // guarantees the RAM hook would decline, allowing normal generated RAM
+    // code to retain native batching. nullptr conservatively visits the hook.
+    int (*ram_dispatch_filter)(std::uint32_t, int) = nullptr;
     // Trusted scheduler wiring, not guest state. Runs before a RAM callback can
     // inspect mutable memory, including calls nested inside generated code.
     void (*ram_dispatch_boundary)(std::uint32_t) = nullptr;
@@ -50,4 +54,13 @@ void runtime_restore_arm_context(const RuntimeArmContext&);
 void runtime_set_resumable_context(RuntimeArmContext*);
 bool runtime_has_resumable_context();
 struct RuntimeDispatchYield {};
+// Generated calls already propagate an interrupted PC back to the dispatcher.
+// Ordinary scheduler yields may use that return path, preserving guest return
+// frames instead of cancelling them, including explicit IRQ continuations.
+// Enable only around generated dispatch; callbacks keep the exception path.
+// Not snapshot state.
+// Setting either value clears the previous dispatch's pending suspension.
+void runtime_set_return_yield(bool enabled);
+bool runtime_suspend_dispatch(); // returns true, or throws RuntimeDispatchYield
+bool runtime_dispatch_suspended(); // also restores the suspended guest PC
 } // namespace gbarecomp

@@ -36,6 +36,10 @@ int run(GbaMultiplayerSession& simulation,int slot,unsigned port,unsigned nonce,
     const auto start=rbe_mono_ms();
     GbaNetplayOutput frame;
     while (match.phase()!=GbaNetplayMatch::Phase::CheckpointReady && rbe_mono_ms()-start<95000) {
+        if (match.phase()==GbaNetplayMatch::Phase::Running) {
+            const auto tick=match.next_tick();
+            if (match.poll(false)!=GbaNetplayMatch::Step::Idle || match.next_tick()!=tick) return 23;
+        }
         const auto step=match.poll();
         if (match.phase()==GbaNetplayMatch::Phase::Failed) {
             std::fprintf(stderr,"match: %s\n",match.error().c_str());

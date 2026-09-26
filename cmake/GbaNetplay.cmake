@@ -18,7 +18,7 @@ if(NOT TARGET retcomm_rbengine)
 endif()
 add_library(gbarecomp_netplay STATIC src/runtime/multiplayer_netplay.cpp src/runtime/multiplayer_startup.cpp
     src/runtime/multiplayer_checkpoint.cpp src/runtime/multiplayer_checkpoint_file.cpp
-    src/runtime/multiplayer_match.cpp)
+    src/runtime/multiplayer_match.cpp src/runtime/multiplayer_pacing.cpp)
 target_include_directories(gbarecomp_netplay PUBLIC src/runtime src/armv4t src/gba)
 target_link_libraries(gbarecomp_netplay PUBLIC gbarecomp_runtime recomp_net retcomm_rbengine)
 if(TARGET gba_link_probe)
