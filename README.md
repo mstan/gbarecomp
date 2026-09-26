@@ -239,6 +239,41 @@ Windows, the supplied Clang-MinGW toolchain and automatic ccache/sccache
 integration can reduce large clean builds substantially; see
 [`docs/BUILD_PERFORMANCE.md`](docs/BUILD_PERFORMANCE.md).
 
+## Build and test a browser bundle
+
+The browser target uses Emscripten and pthreads. The recompiler and BIOS must
+be built natively first; the generated game and runtime are then compiled to
+WebAssembly. Install and activate the Emscripten SDK (the current workflow is
+validated with 6.0.9) before running the web build:
+
+```sh
+source ~/emsdk/emsdk_env.sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGBARECOMP_COMPILER_CACHE=OFF
+cmake --build build --target gba_recompile -- -j10
+build/gba_recompile --bios bios/gba_bios.bin --config bios/gba_bios.toml \
+  --out build/generated_bios
+GBARECOMP_CORE="$PWD/build/gba_recompile" python3 tools/cli.py build \
+  --rom /path/to/game.gba --output /path/to/game-recomp \
+  --config /path/to/game.toml --force
+bash packaging/web/build_web.sh /path/to/game-recomp \
+  build/generated_bios /path/to/game.gba bios/gba_bios.bin
+python3 packaging/web/serve.py /path/to/game-recomp/web 8080
+```
+
+Open `http://127.0.0.1:8080/` in a browser. The server supplies the COOP and
+COEP headers required by WebAssembly pthreads. For a quick headless smoke test,
+use `index.html?autostart=1`; the browser must still be allowed to start audio
+through a real user click when autoplay is blocked. The page also supports
+`args=`, `env=`, `rom=`, `bios=`, `sha1=` and `autostart=1` query parameters.
+
+`build_web.sh` accepts an optional fifth argument with the original TOML
+configuration. If omitted, it uses `<project>/game.toml` when present and
+otherwise writes an empty `runtime.toml`; passing a missing explicit file is an
+error. Runtime settings are copied to the bundle, while local ROM/BIOS/save
+paths are omitted. See [`packaging/web/README.md`](packaging/web/README.md) for
+isolated build directories, cache behavior, validation commands and browser
+troubleshooting.
+
 ## Architecture
 
 | Path | Purpose |

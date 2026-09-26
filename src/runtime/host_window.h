@@ -9,6 +9,14 @@
 // aspect-correct viewport; the faithful 240x160 path retains the historical
 // fixed SDL presentation. pump() drains the OS event queue, returns a quit flag
 // and a packed GBA KEYINPUT value (active-low, 1 = released).
+//
+// Browser builds (GBARECOMP_WEB_HOST) implement the same class in
+// host_window_web.cpp without SDL: present() publishes RGB888 into a shared
+// triple buffer consumed by page-owned WebGL (packaging/web/host_web.js),
+// pump() reads an input snapshot plus a command ring, and audio goes to an
+// AudioWorklet ring. Capabilities the browser lacks (gyro, solar keys without
+// bindings, exclusive fullscreen, runtime UI overlay) are reported absent,
+// never simulated. See docs/WEB_WASM_CANVAS_IMPLEMENTATION_PLAN.md.
 
 #pragma once
 
@@ -139,10 +147,27 @@ public:
     // and present.
     void present(const uint8_t* rgb888);
 
-    // Push `count` int16_t mono samples (32.768 kHz) into the audio
-    // output queue. Backend converts to the host device's format.
+    // Push `count` int16_t mono samples into the audio output queue. The SDL
+    // backend configures its resampler for a 65.536 kHz source; the real
+    // mixer rate follows SOUNDBIAS (GbaAudio::sample_rate(), 32.768 to
+    // 262.144 kHz), so rate-aware callers use push_audio_block on the web.
+    // Backend converts to the host device's format.
     // No-op if audio init failed or this build has no SDL2.
     void push_audio_samples(const int16_t* samples, std::size_t count);
+
+#if defined(GBARECOMP_WEB_HOST)
+    // Rate-tagged mono PCM (one SOUNDBIAS rate per block, from
+    // GbaAudio::drain_sample_block). Never blocks the guest: a full ring is
+    // counted as overflow and requests a playback reset.
+    void push_audio_block(const int16_t* samples, std::size_t count, uint32_t rate);
+    // Starts a new playback epoch (pause, state load, overflow). Samples are
+    // not accepted until the AudioWorklet acknowledges the reset.
+    void reset_audio();
+    // True while the page is hidden; the runner holds the guest at the frame
+    // boundary, distinct from the user's own pause toggle.
+    bool auto_paused() const;
+    void report_paused(bool paused);
+#endif
 
     // Service the native window-system queue without consuming input events.
     // Long guest frames use this to remain responsive between presentations.
@@ -214,5 +239,14 @@ void host_haptic_pulse(int duration_ms, float strength);
 // (thread-safe). Lets a policy that claims Back/long-press still offer the
 // menu from a context of its choosing, e.g. Back on the free overworld.
 void host_request_settings_menu();
+
+#if defined(GBARECOMP_WEB_HOST)
+// Persistent browser storage: the page (packaging/web/save_store.js) owns
+// when /saves is synced to IndexedDB; the runtime only reports that it wrote.
+enum class WebStorageWrite : uint32_t { Battery = 1, State = 2 };
+// Worker -> page, non-blocking. Integers only (async proxy). Independent of
+// HostWindow lifetime: the final battery flush runs after HostWindow::close().
+void web_notify_storage_write(WebStorageWrite kind, bool ok);
+#endif
 
 }  // namespace gbarecomp

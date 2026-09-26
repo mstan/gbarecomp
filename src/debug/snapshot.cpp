@@ -17,6 +17,7 @@
 #include "snapshot.h"
 #include "mod_state.h"
 
+#include <filesystem>
 #include <fstream>
 #include <cstdlib>
 #include <unordered_map>
@@ -154,16 +155,39 @@ bool save_state(const char* path, const SnapshotContext& ctx, std::string* err) 
     std::vector<uint8_t> blob;
     if (!save_state_bytes(&blob, ctx, err)) return false;
 
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) {
-        if (err) *err = std::string("snapshot: cannot open for write: ") + path;
-        return false;
+    // Atomic write, same scheme as the runtime battery flush: a crash mid-write
+    // loses only the sibling temp file, never the previous slot contents, and a
+    // browser storage sync can never persist a half-written state.
+    const std::string tmp = std::string(path) + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) {
+            if (err) *err = "snapshot: cannot open for write: " + tmp;
+            return false;
+        }
+        f.write(reinterpret_cast<const char*>(blob.data()),
+                static_cast<std::streamsize>(blob.size()));
+        f.close();
+        if (!f) {
+            if (err) *err = "snapshot: write failed: " + tmp;
+            std::error_code ec;
+            std::filesystem::remove(tmp, ec);
+            return false;
+        }
     }
-    f.write(reinterpret_cast<const char*>(blob.data()),
-            static_cast<std::streamsize>(blob.size()));
-    if (!f) {
-        if (err) *err = std::string("snapshot: write failed: ") + path;
-        return false;
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    if (ec) {
+        // Rare filesystems refuse rename-over; narrow non-atomic fallback.
+        std::error_code ec2;
+        std::filesystem::remove(path, ec2);
+        std::filesystem::rename(tmp, path, ec2);
+        if (ec2) {
+            if (err) *err = std::string("snapshot: rename failed: ") + path +
+                            " (" + ec2.message() + ")";
+            std::filesystem::remove(tmp, ec2);
+            return false;
+        }
     }
     return true;
 }

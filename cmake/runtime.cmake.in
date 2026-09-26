@@ -18,6 +18,8 @@
 
 set(GBARECOMP_CORE_DIR "@CMAKE_CURRENT_SOURCE_DIR@" CACHE PATH "")
 set(GBARECOMP_CORE_BIN_DIR "@CMAKE_CURRENT_BINARY_DIR@" CACHE PATH "")
+# Browser host selection of the core build; the game project must not guess it.
+set(GBARECOMP_CORE_WEB_HOST "@GBARECOMP_WEB_HOST@")
 set(GBARECOMP_HOST_STACK_RESERVE_BYTES "16777216" CACHE STRING
     "Host stack reserve for Windows game executables that link gbarecomp_runtime")
 
@@ -108,6 +110,20 @@ function(gbarecomp_add_runtime_target target_name)
     if(GR_DEFAULT_GAME_CONFIG_PATH)
         target_compile_definitions(${target_name} PRIVATE
             GBARECOMP_DEFAULT_GAME_CONFIG="${GR_DEFAULT_GAME_CONFIG_PATH}")
+    endif()
+
+    if(EMSCRIPTEN)
+        # Generated code needs guaranteed tail calls (see runtime_arm.h).
+        target_compile_options(${target_name} PRIVATE -mtail-call)
+        if(GBARECOMP_CORE_WEB_HOST)
+            target_compile_options(${target_name} PRIVATE -pthread)
+            include("${GBARECOMP_CORE_DIR}/cmake/web_host_link_options.cmake")
+            gbarecomp_web_host_link_options(_gbarecomp_web_host_link_options)
+            target_link_options(${target_name} PRIVATE
+                ${_gbarecomp_web_host_link_options})
+        else()
+            target_link_options(${target_name} PRIVATE -mtail-call)
+        endif()
     endif()
 
     gbarecomp_target_link_host_stack(${target_name} PRIVATE)

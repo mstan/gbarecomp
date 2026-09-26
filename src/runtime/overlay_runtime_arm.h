@@ -68,6 +68,14 @@ static inline void runtime_call_push_return(uint32_t pc) { g_ovl->runtime_call_p
 static inline int  runtime_call_should_return(uint32_t pc) { return g_ovl->runtime_call_should_return(pc); }
 static inline void runtime_call_cancel_return(uint32_t pc) { g_ovl->runtime_call_cancel_return(pc); }
 
+// Guaranteed tail transfers (see runtime_arm.h). Overlays are only ever built
+// natively (gcc as C++, tcc as C), so the shim carries the native expansion
+// alone: byte-for-byte the historical `call; return` text, through the thunks
+// above, with no new callback and no ABI change.
+#define GBARECOMP_TAIL_CALL(fn) fn(); return
+#define GBARECOMP_TAIL_DISPATCH(pc) runtime_dispatch(pc); return
+#define GBARECOMP_TAIL_DISPATCH_WITH_EXCHANGE(pc) runtime_dispatch_with_exchange(pc); return
+
 // ── Timing / scheduling ──
 static inline void runtime_tick(uint32_t c) { g_ovl->runtime_tick(c); }
 static inline int  runtime_should_yield(void) { return g_ovl->runtime_should_yield(); }
@@ -78,6 +86,7 @@ static inline uint32_t runtime_mul_cycles(uint32_t rs, uint32_t sv, uint32_t ex)
 // ── Exceptions / PSR / mode ──
 static inline void runtime_swi(uint32_t imm) { g_ovl->runtime_swi(imm); }
 static inline void runtime_irq(uint32_t ret) { g_ovl->runtime_irq(ret); }
+#define GBARECOMP_TAIL_SWI(imm) runtime_swi(imm); return
 static inline uint32_t runtime_mrs_cpsr(void) { return g_ovl->runtime_mrs_cpsr(); }
 static inline uint32_t runtime_mrs_spsr(void) { return g_ovl->runtime_mrs_spsr(); }
 static inline void runtime_msr_cpsr(uint32_t v, uint32_t m) { g_ovl->runtime_msr_cpsr(v, m); }
