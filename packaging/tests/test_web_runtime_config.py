@@ -48,6 +48,10 @@ class RuntimeConfigTest(unittest.TestCase):
             explicit = root / 'another config.toml'
             explicit.write_text('[save]\nsize = 8192\n')
             output = root / 'web/runtime.toml'
+            # The script needs an expected ROM SHA-1 before it reaches the BIOS
+            # check; a dummy ROM supplies it without a config [rom].sha1.
+            rom = root / 'game.gba'
+            rom.write_bytes(bytes(192))
             env = dict(os.environ, GBARECOMP_WEB_BUILD_DIR=bash_path(root / 'core-build'),
                        GBARECOMP_WEB_GAME_BUILD_DIR=bash_path(root / 'game-build'),
                        GBARECOMP_WEB_OUT_DIR=bash_path(output.parent))
@@ -59,10 +63,10 @@ class RuntimeConfigTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('missing generated BIOS', result.stderr)
                 return output.read_text()
-            self.assertIn('size = 512', run([]))
-            self.assertIn('size = 8192', run(['', '', bash_path(explicit)]))
+            self.assertIn('size = 512', run([bash_path(rom)]))
+            self.assertIn('size = 8192', run([bash_path(rom), '', bash_path(explicit)]))
             default.unlink()
-            self.assertEqual(config.export_config(None), run([]))
+            self.assertEqual(config.export_config(None), run([bash_path(rom)]))
 
     def test_runtime_subset_and_host_paths(self):
         with tempfile.TemporaryDirectory() as directory:
