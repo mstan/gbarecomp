@@ -290,8 +290,9 @@ The following are not implemented/qualified by the fixture tests:
   and paired persistence APIs to product storage and recovery choices; qualify
   process/power-loss behavior and changed-endpoint reconnect. Do not treat
   agreement as proof that both peers' disks completed a write.
-* Emerald trade/battle with durable saves, Mario Kart full multi-cart race and
-  rematch, Steam Deck hardware execution, and sustained real-world loss/jitter tests.
+* Sustained connected gameplay in Emerald and Mario Kart at playable real-time
+  speed, Steam Deck hardware execution, and real-world loss/jitter tests. Full
+  battles, race completion and rematches are not required release gates.
 
 The runtime/host fixtures and both loopback modes pass in Windows MinGW Release
 and Linux x86-64 Release under WSL. This does not qualify the target games or
@@ -330,8 +331,23 @@ rollback, with 40 ms latency and 10 ms jitter in each direction: hash `b6109e3a`
 1,533,888 bytes. The full 3,600-tick Linux network trade also passes under both
 delay-sync and forced rollback: hash `d7ed71cf`, 1,533,880 identical bytes, with
 reciprocal Pokemon identities verified in both newest save banks. The recorded
-rollback peers resimulate 3,274 and 1,999 ticks. Battle, broader platform/performance
-qualification and product persistence/recovery remain separate gates.
+rollback peers resimulate 3,274 and 1,999 ticks.
+
+Emerald also connects into a native Single Battle after that trade. The first
+knockout passes 1,350 ticks of Linux delay-sync and forced rollback with the same
+relay: 1,533,880 identical bytes, hash `a5580339`, and 1,125/746 replay ticks.
+An independent read-only assertion checks PP use and that the defeated Pokemon's
+owner received its new HP state. Local continuation exercises another knockout,
+a voluntary forfeit and return to the Colosseum. Both cartridges save the
+complementary win/loss counters, verified after decryption in RAM and flash.
+The final 1,200-frame result/save segment replays to identical whole-session
+bytes. The 1,350-tick network result/save segment also passes delay-sync and
+rollback: 1,533,852 identical bytes, hash `b94cc88f`, with 1,134/708 replay ticks.
+Both newest save banks contain the complementary win/loss records with all
+sector checksums valid. Broader platform/performance coverage and product
+persistence/recovery remain separate gates. Additional complete gameplay
+sequences are not required; qualification now targets entry into linked
+gameplay, sustained synchronization/connection, and playable speed.
 See `tests/link/scenarios/README.md` for the controller routes, independent
 trade checker and reproduction without distributing cartridge/save assets.
 
@@ -341,7 +357,8 @@ The reproducible 4,845-frame cold-boot route and its limitations are documented
 in `tests/link/scenarios/README.md`. It exposed an unseeded serial callback at
 0802DB5C (descriptor pointer at 080DE1B4), now added to the game's configuration
 on `feature/link-serial-coverage`. Five-frame replay during the linked race
-matches whole-session bytes. Race completion and rematch remain unqualified.
+matches whole-session bytes. Race completion and rematch were not tested and
+are not required for the initial multiplayer release.
 The real-cartridge UDP probe now also runs the native linked race under both
 delay-sync and rollback. The exact 120-tick checkpoints match across both modes
 and Windows/Linux: 1,402,790 bytes, hash `f907c720` for the documented warm grid

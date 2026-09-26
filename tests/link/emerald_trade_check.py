@@ -11,6 +11,7 @@ import struct
 
 ROM_SHA1 = b"f3ae088181bf583e55daf962a92bb46f4f1d07b7"
 SECTOR_SIZES = [0xF2C, 0xF80, 0xF80, 0xF80, 0xF08] + [0xF80] * 8 + [0x7D0]
+FlashReport = collections.namedtuple("FlashReport", "digest generations party battle_stats")
 
 
 class Reader:
@@ -76,7 +77,7 @@ def flash_report(device):
     if len(candidates) != 1:
         raise ValueError("expected one complete Emerald Flash1M image")
     image = candidates[0]
-    banks, saved_parties = [], []
+    banks, saved_parties, battle_stats = [], [], []
     for bank in range(2):
         ids, counters, sections = set(), set(), {}
         for j in range(bank * 14, (bank + 1) * 14):
@@ -96,12 +97,14 @@ def flash_report(device):
         banks.append(counters.pop())
         saveblock = b"".join(sections[i] for i in range(1, 5))
         saved_parties.append(party_identities(saveblock[0x234], saveblock[0x238:0x238 + 600]))
+        key, = struct.unpack_from("<I", sections[0], 0xAC)
+        battle_stats.append(tuple(value ^ key for value in struct.unpack_from("<3I", saveblock, 0x159C + 23 * 4)))
     # Emerald's counter is u32; respect wrap when comparing its two complete banks.
     newest = int(0 < ((banks[1] - banks[0]) & 0xFFFFFFFF) < 0x80000000)
-    return hashlib.sha256(image).hexdigest(), banks, saved_parties[newest]
+    return FlashReport(hashlib.sha256(image).hexdigest(), banks, saved_parties[newest], battle_stats[newest])
 
 
-def read_snapshot(path):
+def read_session(path):
     with pathlib.Path(path).open("rb") as stream:
         data = stream.read(8 * 1024 * 1024 + 1)
     if len(data) > 8 * 1024 * 1024:
@@ -134,20 +137,28 @@ def read_snapshot(path):
         device = r.blob(8 * 1024 * 1024)
         if len(device) < 0x48000:
             raise ValueError("missing canonical EWRAM/IWRAM")
-        party_count = device[0x244E9]  # gPlayerPartyCount, pinned USA symbols
-        if not 2 <= party_count <= 6:
-            raise ValueError("trade party must contain two to six Pokemon")
-        party = party_identities(party_count, device[0x244EC:0x244EC + 600])
-        flash_hash, generations, saved_party = flash_report(device)
         # gLink hardwareError / badChecksum / queueFull / lag and global error.
         iwram = device[0x40000:0x48000]
         if any(iwram[0x3180:0x3184]) or iwram[0x306C]:
             raise ValueError("game reports a cable error")
-        machines.append((party, flash_hash, generations, saved_party))
+        machines.append(device)
     r.blob(4096)
     if r.pos != len(data):
         raise ValueError("trailing paired snapshot bytes")
     return (manifest, inputs, links), cycle, machines
+
+
+def read_snapshot(path):
+    identity, cycle, devices = read_session(path)
+    machines = []
+    for device in devices:
+        party_count = device[0x244E9]  # gPlayerPartyCount, pinned USA symbols
+        if not 2 <= party_count <= 6:
+            raise ValueError("trade party must contain two to six Pokemon")
+        party = party_identities(party_count, device[0x244EC:0x244EC + 600])
+        flash = flash_report(device)
+        machines.append((party, flash.digest, flash.generations, flash.party))
+    return identity, cycle, machines
 
 
 def check_trade(before_path, after_path, slots=(0, 0)):

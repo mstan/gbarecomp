@@ -151,3 +151,60 @@ delay and Windows/Linux rollback runs also agree on every byte: 1,533,888 bytes,
 `b6109e3a`. Both rollback peers resimulate frames. This exercises the game's
 active cable protocol and independent movement; the input segment itself does
 not complete a Pokemon trade.
+
+## Emerald cable battle
+
+`emerald-after-trade-to-battle.inputs` continues from the completed local trade
+at cycle 4,389,000,000. Its 7,780 frames close the Trade Center, reconnect through
+the Single Battle service, save both cartridges, enter the Colosseum and begin
+Salamence versus Torchic. This route is assembled from individually qualified
+native input segments; it has not separately been rerun uninterrupted. The
+result is cycle 6,574,370,880, hash `f644c2a4`. A 700-frame full replay through
+battle entry matches all 1,533,880 snapshot bytes.
+
+From that checkpoint, `emerald-warm-battle-ko.inputs` runs 1,350 frames through
+Headbutt and Torchic's knockout. The read-only checker verifies move PP use,
+the battle master's HP result, its delivery to the owning cartridge's party,
+and healthy cable state. Emerald's second cartridge runs the opponent battle
+controller; its `gBattleMons` is not an independent combat authority.
+
+```sh
+python tests/link/emerald_battle_check.py /tmp/battle-intro.state /tmp/first-ko.state
+```
+
+The two-process harness accepts `--frames 1350 --timeout 900 --emerald-battle-ko`
+with that warm checkpoint and script. Both Linux delay-sync and rollback pass:
+1,533,880 identical bytes, hash `a5580339`, under 40 ms latency plus 10 ms jitter
+per direction. The recorded rollback peers replay 1,125 and 746 ticks. The
+checker rejects an incomplete combat turn instead of accepting matching peers
+as evidence of a knockout.
+
+`emerald-battle-to-result.inputs` continues locally from the battle-intro state
+for 8,500 frames. It knocks out Torchic and Magcargo, sends out Smeargle, then
+the second player voluntarily forfeits. Both return to the Colosseum and save
+complementary win/loss records. This stitched route includes menu delays and
+detours from the individually checked segments. The final cycle is
+8,961,986,880, hash `b2a882d1`, 1,533,896 bytes. It qualifies a forfeit ending,
+not a victory from defeating the entire opposing party.
+
+`emerald-warm-battle-result.inputs` is the final 1,200-frame segment, starting
+at cycle 8,624,911,680 with Smeargle entering battle. Full-segment replay matches
+all bytes through the result save and field return. The result checker verifies
+that each cartridge's encrypted wins/losses/draws counters advance correctly in
+RAM and in the newest complete flash bank, with all 28 sector checksums valid:
+
+```sh
+python tests/link/emerald_battle_check.py /tmp/last-mon.state /tmp/battle-exit.state --result
+```
+
+The equivalent network harness options are
+`--frames 1350 --timeout 900 --emerald-battle-result`, using the last-mon state
+and `emerald-warm-battle-result.inputs`; the extra 150 idle frames let the save
+settle. Public source save files remain unchanged throughout qualification.
+
+Both network modes pass this result/save segment on Linux: 1,533,852 identical
+bytes, hash `b94cc88f`. The rollback peers replay 1,134 and 708 ticks. Both newest
+flash banks contain the complementary win/loss counters and valid sector
+checksums. These existing longer routes remain reproducible evidence; future
+acceptance focuses on sustained connected gameplay at playable speed, rather
+than requiring full battles, races or rematches.

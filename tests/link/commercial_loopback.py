@@ -19,6 +19,8 @@ p.add_argument("--frames", type=int, default=120)
 p.add_argument("--delay", action="store_true", help="use delay-sync instead of rollback")
 p.add_argument("--timeout", type=int, default=300, help="simulation deadline in seconds (1..3600); barriers get another 125 seconds")
 p.add_argument("--emerald-trade", action="store_true", help="require a reciprocal slot-zero Emerald trade persisted on both cartridges")
+p.add_argument("--emerald-battle-ko", action="store_true", help="require a cable battle KO delivered to its owner's cartridge")
+p.add_argument("--emerald-battle-result", action="store_true", help="require complementary cable battle win/loss records in both saves")
 args = p.parse_args()
 if not 1 <= args.timeout <= 3600:
     p.error("--timeout must be 1..3600 seconds")
@@ -67,6 +69,12 @@ with tempfile.TemporaryDirectory(prefix="gba-commercial-net-") as tmp:
         if args.emerald_trade:
             from emerald_trade_check import check_trade
             check_trade(args.state, root / "peer0.state")
+        if args.emerald_battle_ko:
+            from emerald_battle_check import check_battle
+            check_battle(args.state, root / "peer0.state")
+        if args.emerald_battle_result:
+            from emerald_battle_check import check_result
+            check_result(args.state, root / "peer0.state")
         print(f"{'delay-sync' if args.delay else 'rollback'} native cartridge: {len(left)} identical bytes, 40 ms latency / 10 ms jitter per direction")
     except Exception:
         for log in logs:
