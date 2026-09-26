@@ -3622,9 +3622,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // Battery-save auto-flush debounce (outer loop and present-in-place hook).
     // ~1 s at 59.7 Hz.
     constexpr uint64_t kSaveFlushIntervalFrames = 60;
+    uint64_t save_last_flush_frame = ppu.frame_count();
 #if defined(GBARECOMP_WEB_HOST)
     uint64_t host_audio_state_epoch = g_runtime_state_epoch;
-    uint64_t web_save_last_flush = ppu.frame_count();
 #endif
     auto drain_host_audio = [&]() {
         int16_t audio_buf[2048];
@@ -3740,14 +3740,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (present_frame) win.present(live_fb.data());
                 if (phase_active) fp_t2 = FramePhaseRing::now_ns();
                 drain_host_audio();
-#if defined(GBARECOMP_WEB_HOST)
-                // present-in-place may never return to the outer auto-flush.
+                // Windowed present-in-place stays inside one step_once() for
+                // the whole session, so the outer loop's auto-flush below never
+                // runs; flush here with the same dirty gate and debounce.
                 if (bus.save().dirty() &&
-                    frame - web_save_last_flush >= kSaveFlushIntervalFrames) {
+                    frame - save_last_flush_frame >= kSaveFlushIntervalFrames) {
                     flush_save_notify();
-                    web_save_last_flush = frame;
+                    save_last_flush_frame = frame;
                 }
-#endif
                 if (phase_active) fp_t3 = FramePhaseRing::now_ns();
                 pump_host_input();
                 service_host_pause();
@@ -4045,7 +4045,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     int dispatches_since_pump = 0;
     // Battery-save auto-flush debounce (see the loop body).
-    uint64_t save_last_flush_frame = ppu.frame_count();
+    save_last_flush_frame = ppu.frame_count();
     if (input_replay_requested) apply_input_replay();
     if (args.window) pump_host_input();
 
