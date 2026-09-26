@@ -111,6 +111,10 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
             env["GBA_TEST_PEER_PORT"] = str(port+2+slot)
             if mode == "mismatch" and slot == 1:
                 env["GBA_TEST_BOOT_ID"] = "incompatible-runtime-build"
+            if mode == "checkpoint_mismatch" and slot == 1:
+                env["GBA_TEST_CHECKPOINT_CORRUPT"] = "1"
+            if mode == "restart":
+                env["GBA_TEST_RESTART"] = "1"
             if mode == "outage":
                 env["GBA_TEST_OUTAGE_TRIGGER"] = str(root / "outage")
             # Force corrections as well as naturally late rows: verify restored
@@ -126,6 +130,13 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
             assert "program identity mismatch" in (root / "peer0.log").read_text(errors="replace")
             print("startup refused a different runtime/build identity before any guest frame")
             sys.exit(0)
+        if mode == "checkpoint_mismatch":
+            assert not rollback, "checkpoint corruption scenario requires the exact delay-sync tip"
+            assert peers[1].wait(timeout=80) == 14, "guest accepted a different paired checkpoint"
+            assert "checkpoint state digest mismatch" in (root / "peer1.log").read_text(errors="replace")
+            assert not list(root.glob("*.paired")), "a mismatched checkpoint was exported"
+            print("checkpoint barrier rejected a different guest state without exporting either archive")
+            sys.exit(0)
         for peer in peers:
             if peer.wait(timeout=110):
                 raise AssertionError(f"peer exited {peer.returncode}")
@@ -134,6 +145,10 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
         common = timelines[0].keys() & timelines[1].keys()
         assert len(common) >= 60, f"insufficient confirmed history: {len(common)}"
         assert all(timelines[0][t] == timelines[1][t] for t in common), "confirmed simulation timelines diverged"
+        assert (root / "peer0.txt.paired").read_bytes() == (root / "peer1.txt.paired").read_bytes(), "agreed paired archives differ"
+        if mode == "restart":
+            assert (root / "peer0.txt.restart").read_bytes() == (root / "peer1.txt.restart").read_bytes(), "warm restart timelines differ"
+            print("restored the agreed archive on a fresh connection and matched 30 further input ticks")
         if rollback:
             assert all(int(r[0].split()[3]) > 0 for r in reports), "rollback was not exercised by both peers"
         if mode == "outage":

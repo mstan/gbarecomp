@@ -50,6 +50,11 @@ public:
     // on NACK, and quiescence is not a persistence acknowledgement.
     bool retain_confirmed(std::uint32_t confirmed_through);
     const GbaConfirmedCheckpoint& confirmed_checkpoint() const { return confirmed_; }
+    // Freeze an exact boundary for peer agreement. Supply the driver's CURRENT
+    // confirmation watermark, not a cached high-water value. No active episode
+    // or published tick; caller pauses admission throughout the agreement.
+    bool copy_checkpoint(std::uint32_t next_tick, std::uint32_t confirmed_through,
+                         GbaConfirmedCheckpoint& out) const;
     // Only after the old driver/transport has stopped. A new match must agree
     // on this exact checkpoint and start its input timeline again at zero.
     bool restore_confirmed_for_restart();

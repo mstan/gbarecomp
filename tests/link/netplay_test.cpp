@@ -1,4 +1,5 @@
 #include "multiplayer_netplay.h"
+#include "multiplayer_checkpoint.h"
 #include "netplay_fixture.h"
 #include <cstdio>
 #include <cstdlib>
@@ -68,6 +69,10 @@ void confirmed_checkpoint() {
     CHECK(h.retain_confirmed(0));
     CHECK(h.confirmed_checkpoint().next_tick==1);
     CHECK(h.confirmed_checkpoint().state==after_zero);
+    GbaConfirmedCheckpoint exact;
+    CHECK(h.copy_checkpoint(1,0,exact) && exact.state==after_zero && exact.next_tick==1);
+    CHECK(!h.copy_checkpoint(2,0,exact)); // current watermark excludes this boundary
+    CHECK(!h.copy_checkpoint(1,UINT32_MAX,exact));
     CHECK(!h.retain_confirmed(UINT32_MAX));
     CHECK(!h.retain_confirmed(0));
     // Correct a speculative tail. Confirmed storage must neither follow that
@@ -83,6 +88,7 @@ void confirmed_checkpoint() {
     const auto corrected=simulation->save_state();
     CHECK(h.confirmed_checkpoint().next_tick==2);
     CHECK(h.confirmed_checkpoint().state==corrected);
+    CHECK(!h.copy_checkpoint(2,0,exact)); // cached watermark cannot override demotion
     run(2,3);
     api.snap_drop_after(api.ctx,0);
     CHECK(h.restore_confirmed_for_restart());
@@ -95,5 +101,41 @@ void confirmed_checkpoint() {
     CHECK(!h.retain_confirmed(100) && h.return_to_lobby_requested());
     CHECK(h.confirmed_checkpoint().state==corrected);
 }
+void agreement_gate() {
+    using namespace gbarecomp;
+    auto simulation=create(); GbaNetplayHost host(*simulation);
+    RNetConfig config; rnet_config_init_defaults(&config);
+    auto callbacks=host.delay_callbacks(); auto* network=rnet_session_create(&config,&callbacks);
+    CHECK(network);
+    GbaNetplayCheckpointAgreement agreement(host,network,0,"fixture",UINT32_MAX,0);
+    bool refused=false;
+    try { (void)agreement.archive(); } catch (const std::logic_error&) { refused=true; }
+    CHECK(refused);
+    CHECK(agreement.poll(1)==GbaNetplayCheckpointAgreement::Status::Waiting);
+    CHECK(agreement.poll(60001)==GbaNetplayCheckpointAgreement::Status::Failed);
+    refused=false;
+    try { (void)agreement.checkpoint(); } catch (const std::logic_error&) { refused=true; }
+    CHECK(refused);
+    rnet_session_destroy(network);
 }
-int main() { restore_corrected_session(); delay_publication(); confirmed_checkpoint(); std::puts("whole-session netplay host tests passed"); }
+void demoted_candidate() {
+    using namespace gbarecomp;
+    auto simulation=create(true); GbaNetplayHost host(*simulation); const auto api=host.callbacks();
+    RNetRbFrame rows[2]{}; for (auto& row:rows) row.is_valid=1;
+    for (unsigned tick=0;tick<3;++tick) {
+        CHECK(api.snap_save(api.ctx,tick)); rows[0].buttons=tick+1;
+        api.publish(api.ctx,tick,rows,2,0); CHECK(host.run_published_tick());
+    }
+    CHECK(host.retain_confirmed(1));
+    const auto stale=host.confirmed_checkpoint().state;
+    CHECK(!stale.empty());
+    api.resim_begin(api.ctx); CHECK(api.snap_load(api.ctx,1)); api.snap_drop_after(api.ctx,1);
+    CHECK(host.confirmed_checkpoint().state.empty());
+    rows[0].buttons=16;
+    api.publish(api.ctx,1,rows,2,1); CHECK(api.run_tick(api.ctx,1)); api.resim_end(api.ctx);
+    CHECK(host.retain_confirmed(1));
+    CHECK(host.confirmed_checkpoint().state!=stale);
+    CHECK(host.confirmed_checkpoint().state==simulation->save_state());
+}
+}
+int main() { restore_corrected_session(); delay_publication(); confirmed_checkpoint(); agreement_gate(); demoted_candidate(); std::puts("whole-session netplay host tests passed"); }

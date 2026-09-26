@@ -40,6 +40,20 @@ not yet a playable Emerald/Mario Kart netplay release.
   The application must hash-verify its images and supply a build/BIOS/mod identity.
 * The host retains a recovery snapshot independently of rollback-ring eviction,
   and can restore it before restarting a match. It does not write save files.
+  Replaying across that boundary invalidates the cached candidate; a demoted
+  confirmation watermark cannot preserve stale speculative save bytes.
+* `GbaNetplayCheckpointAgreement` freezes an exact confirmed boundary after the
+  old driver stops. Each peer checks its own snapshot against the full digest,
+  exchanges a receipt, and completes a retransmittable ready barrier. A mismatch
+  refuses archive export. Agreed archives include both machines, cable and
+  scheduler with a version, program identity and whole-archive checksum.
+* `gba_store_agreed_checkpoint` writes that pair to one application-selected
+  recovery file using an exclusive adjacent staging file, a flush and atomic
+  replacement (plus a directory flush on POSIX). It never exports individual
+  speculative cartridge saves. The bounded loader rejects corruption and wrong
+  identity without changing the previous decoded state. Cross-peer storage is
+  not an atomic distributed transaction: keep the prior pair until both peers
+  can resume the same agreed archive; do not mix independent cartridge exports.
 * Connection status allows a 60-second silence grace and reports reconnecting
   after two seconds. Keep pumping the existing transport/driver during that
   grace. A six-second complete UDP outage is exercised by a regression test;
@@ -63,6 +77,11 @@ The harness now injects latency/loss in an external UDP relay with a bounded
 queue that fails on overflow. The shared internal 256-packet simulator can
 overflow during large paired-state transfers and deliver packets without the
 requested latency; such a run cannot qualify latency tolerance.
+Loopback tests also compare the complete archives produced by each peer, check
+creation/replacement/failed-write recovery, refuse a deliberately changed guest
+state, and restore an agreed warm state on a fresh transport with a new session
+identity before running thirty further matching input ticks. This test reuses
+the UDP endpoints; changed-endpoint discovery still belongs to the lobby layer.
 
 ## Reference provenance
 
@@ -224,8 +243,11 @@ The following are not implemented/qualified by the fixture tests:
   pin/clock edge cases.
 * Product binding of the startup barrier: verified BIOS/build/mod identity,
   each player's own save, ordered seat-to-machine mapping and RTC seeds.
-* Shared recomp-ui lobby/launcher binding, local view/audio ownership, a
-  60-second pause/reconnect state machine, and confirmed paired save persistence.
+* Shared recomp-ui lobby/launcher binding, local view/audio ownership, and the
+  product's 60-second reconnect/recovery flow. Bind the implemented agreement
+  and paired persistence APIs to product storage and recovery choices; qualify
+  process/power-loss behavior and changed-endpoint reconnect. Do not treat
+  agreement as proof that both peers' disks completed a write.
 * Emerald trade/battle with durable saves, Mario Kart full multi-cart race and
   rematch, Steam Deck hardware execution, and sustained real-world loss/jitter tests.
 

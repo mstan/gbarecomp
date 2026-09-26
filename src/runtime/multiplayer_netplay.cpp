@@ -76,10 +76,27 @@ bool GbaNetplayHost::retain_confirmed(std::uint32_t through) {
     } catch (const std::exception& e) { fail(e.what()); return false; }
 }
 bool GbaNetplayHost::restore_confirmed_for_restart() {
+    if (confirmed_.state.empty()) { fail("recovery candidate was invalidated by rollback"); return false; }
     std::string error;
     if (!simulation_.load_state(confirmed_.state,&error)) { fail(error.c_str()); return false; }
     simulation_.discard_audio_output();
     begin_match();
+    return true;
+}
+bool GbaNetplayHost::copy_checkpoint(std::uint32_t tick,std::uint32_t through,
+                                   GbaConfirmedCheckpoint& out) const {
+    if (published_ || replaying_ || tick>next_tick_ ||
+        (tick && (through==UINT32_MAX || tick-1>through))) return false;
+    std::vector<std::uint8_t> state;
+    if (tick==next_tick_) state=simulation_.save_state();
+    else {
+        std::size_t size=0;
+        const auto* data=rbe_snap_ring_peek(snapshots_,tick,&size);
+        if (data) state.assign(data,data+size);
+        else if (tick==confirmed_.next_tick && !confirmed_.state.empty()) state=confirmed_.state;
+        else return false;
+    }
+    out={tick,std::move(state)};
     return true;
 }
 void GbaNetplayHost::begin_match() {
@@ -109,6 +126,10 @@ int GbaNetplayHost::deserialize(void* ctx,std::uint32_t tick,const std::uint8_t*
     auto& h = host(ctx);
     std::string error;
     if (!h.simulation_.load_state({data,size},&error)) { h.fail(error.c_str()); return 0; }
+    // A driver's NACK may demote a former confirmation watermark. A replay
+    // crossing the retained boundary invalidates that candidate; do not offer
+    // stale save bytes for later agreement merely because its tick is large.
+    if (tick<h.confirmed_.next_tick) h.confirmed_={};
     h.next_tick_ = tick; h.published_ = false;
     h.simulation_.discard_audio_output();
     return 1;
