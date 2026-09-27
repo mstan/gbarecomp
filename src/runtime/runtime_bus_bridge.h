@@ -2,6 +2,7 @@
 // to the recompiled-code runtime.
 
 #pragma once
+#include <cstdint>
 
 namespace gba { class GbaBus; }
 namespace gba { class GbaPpu; }
@@ -23,5 +24,23 @@ void set_active_ppu(gba::GbaPpu* ppu);
 // Retrieve the currently-bound bus / ppu, or nullptr if none.
 gba::GbaBus* active_bus();
 gba::GbaPpu* active_ppu();
+
+struct RuntimeTimingContext {
+    std::uint64_t cycles = 0;
+    std::uint64_t vblank_starts = 0;
+    std::uint64_t yielded_vblank = 0;
+    std::uint64_t pending_cycles = 0;
+    std::int64_t event_budget = 0;
+};
+void runtime_capture_timing_context(RuntimeTimingContext&);
+void runtime_restore_timing_context(const RuntimeTimingContext&);
+// Conservative native execution backend for the local-link qualification
+// harness. CPU instructions accrue cycle debt; the session advances devices
+// for every machine on one timeline. No machine's hardware runs ahead.
+void runtime_session_execution(bool enabled);
+void runtime_session_begin_instruction();
+void runtime_session_begin_slice(std::uint64_t deadline);
+void runtime_session_ram_dispatch_boundary(std::uint32_t pc);
+void runtime_session_tick_devices(std::uint32_t cycles);
 
 }  // namespace gbarecomp

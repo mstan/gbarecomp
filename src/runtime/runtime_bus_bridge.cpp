@@ -6,6 +6,9 @@
 // before any recompiled cart code executes.
 
 #include "../armv4t/runtime_arm.h"
+#include "../armv4t/runtime_context.h"
+#include "runtime_bus_bridge.h"
+#include "multiplayer_slice.h"
 #include "../armv4t/arm_ir.h"
 #include "../armv4t/symbol_lookup.h"
 #include "../gba/gba_bus.h"
@@ -89,6 +92,10 @@ static const bool g_phase_prof = [] {
     return on;
 }();
 static unsigned long long g_runtime_yielded_vblank_start = 0;
+static bool g_session_execution = false;
+static bool g_session_instruction_started = false;
+static bool g_session_slice = false, g_session_slice_stopped = false;
+static std::uint64_t g_session_slice_deadline = 0;
 // Live IRQ-handler nesting depth (defined in armv4t/runtime_arm.cpp: ++ on IRQ
 // entry, -- after the handler unwinds). Used by the vblank-yield guard below to
 // avoid yielding while an IRQ handler is on the host stack.
@@ -211,7 +218,10 @@ static void sampler_loop() {
 }
 
 static void start_sampler() {
-    if (!std::getenv("GBARECOMP_SAMPLE")) return;
+    // Binding an instance is a hot path. Read this launch-time diagnostic
+    // option once: Windows getenv scans/locks the environment on every call.
+    static const bool enabled = std::getenv("GBARECOMP_SAMPLE") != nullptr;
+    if (!enabled) return;
     if (g_sampling.exchange(true)) return;  // start once
     g_sampler = std::thread(sampler_loop);
     std::atexit([] {
@@ -561,9 +571,9 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
             ppu->mark_framebuffer_latched();
             ++g_runtime_vblank_starts;
             bus->io().run_timed_dma(1);   // VBlank-timed DMA
-            if (g_vblank_input_hook) g_vblank_input_hook();
+            if (!g_session_execution && g_vblank_input_hook) g_vblank_input_hook();
         }
-        if (events.frame_completed && g_frame_start_hook) {
+        if (!g_session_execution && events.frame_completed && g_frame_start_hook) {
             g_frame_start_hook();
         }
         if (events.vblank_started && (ds & 0x0008u)) {
@@ -656,6 +666,7 @@ static inline void drain_dma_steal(gba::GbaBus* bus, gba::GbaPpu* ppu) {
 // already accounts for these cycles (runtime_tick debited it as they accrued),
 // so it is left unchanged here.
 extern "C" void runtime_mmio_catch_up(void) {
+    if (g_session_execution) return; // owner has already advanced all devices
     // A shadow/transactional re-run must not materialize the real machine's
     // pending time. The bus observer will reject or diagnose the MMIO access;
     // flushing here first would irreversibly advance PPU/audio/timers despite
@@ -671,6 +682,7 @@ extern "C" void runtime_mmio_catch_up(void) {
 // Recompute the next-event horizon after a config-changing MMIO write (timer
 // reload/control, DISPSTAT, DMA registers, etc. move the next event).
 extern "C" void runtime_resync_horizon(void) {
+    if (g_session_execution) return; // DMA cycle debt is collected by the owner
     // Device stores are suppressed by the shadow transaction's bus observer.
     // Do not drain DMA or rewrite the real scheduler horizon for that rejected
     // store. This also keeps the established shadow-tick promise symmetric with
@@ -687,6 +699,7 @@ extern "C" void runtime_resync_horizon(void) {
 }
 
 extern "C" void runtime_tick(uint32_t cycles) {
+    if (g_session_execution) { g_runtime_cycles += cycles; return; }
     // P6 shadow-tick: a healed shard's validation re-run only accumulates its
     // cycle cost (for the cycle diff); the interpreter pass already pumped the
     // devices / delivered IRQs for this window, so do nothing else here.
@@ -813,6 +826,7 @@ static const bool g_idle_elision_on = [] {
 }  // namespace
 
 extern "C" void runtime_idle_backedge(uint32_t header_pc) {
+    if (g_session_execution) return;
     if (!g_idle_elision_on) return;
     if (g_runtime_shadow_tick) return;  // never alter time during a shadow re-run
 
@@ -943,6 +957,20 @@ void runtime_set_vblank_input_hook(std::function<void()> h) {
 }
 
 extern "C" bool runtime_should_yield(void) {
+    if (g_session_execution) {
+        if (gbarecomp::runtime_dispatch_suspended()) return true;
+        auto* bus = gbarecomp::g_active_bus;
+        const bool safe = g_session_slice && bus && gbarecomp::multiplayer_slice_safe(*bus,g_cpu);
+        if (g_session_instruction_started && (!g_session_slice || g_session_slice_stopped ||
+            !safe || g_runtime_cycles >= g_session_slice_deadline))
+            return gbarecomp::runtime_suspend_dispatch();
+        if (bus && bus->io().irq_pending() && !(g_cpu.cpsr & CPSR_I_BIT)) {
+            runtime_irq(g_cpu.R[15]);
+            if (gbarecomp::runtime_dispatch_suspended()) return true;
+        }
+        g_session_instruction_started = true;
+        if (!safe) g_session_slice_stopped = true;
+    }
     auto* bus = gbarecomp::g_active_bus;
 
     // ── BIOS open-bus prefetch latch (MC-HP-002) ─────────────────────────
@@ -956,6 +984,7 @@ extern "C" bool runtime_should_yield(void) {
     // BIOS. See gba_bus.cpp prefetch_word / the open-bus read paths.
     if (bus && g_cpu.R[15] < 0x00004000u)
         bus->latch_bios_prefetch(g_cpu.R[15], (g_cpu.cpsr & CPSR_T_BIT) != 0);
+    if (g_session_execution) return false;
 
     // Generated direct calls can enter mutable/self-modifying code without
     // crossing runtime_dispatch. Unwind stale AOT at its per-instruction
@@ -1076,3 +1105,55 @@ extern "C" bool runtime_should_yield(void) {
     }
     return halted;
 }
+
+namespace gbarecomp {
+void runtime_capture_timing_context(RuntimeTimingContext& out) {
+    out.cycles = g_runtime_cycles;
+    out.vblank_starts = g_runtime_vblank_starts;
+    out.yielded_vblank = g_runtime_yielded_vblank_start;
+    out.pending_cycles = g_pending_cycles;
+    out.event_budget = g_event_budget;
+}
+void runtime_restore_timing_context(const RuntimeTimingContext& in) {
+    g_runtime_cycles = in.cycles;
+    g_runtime_vblank_starts = in.vblank_starts;
+    g_runtime_yielded_vblank_start = in.yielded_vblank;
+    g_pending_cycles = in.pending_cycles;
+    g_event_budget = in.event_budget;
+    // These are speculative idle proofs, not guest state. Invalidating them
+    // on rebinding prevents one machine's proof being applied to another.
+    g_idle_sites.clear();
+    g_last_mmio_read_addr = g_last_mmio_read_width = g_last_mmio_read_pc = 0;
+    g_vcount_spin_progress = 0;
+    ++g_idle_disturb_epoch;
+    ++g_runtime_state_epoch;
+}
+void runtime_session_execution(bool enabled) {
+    g_session_execution = enabled;
+    g_session_instruction_started = false;
+    g_session_slice = false;
+}
+void runtime_session_begin_instruction() {
+    g_session_instruction_started = false; g_session_slice = false;
+}
+void runtime_session_begin_slice(std::uint64_t deadline) {
+    g_session_instruction_started = false; g_session_slice = true;
+    g_session_slice_stopped = false; g_session_slice_deadline = deadline;
+}
+void runtime_session_ram_dispatch_boundary(std::uint32_t pc) {
+    if (!g_session_execution) return;
+    if (g_session_instruction_started) {
+        // The generated caller already installed any return continuation.
+        // Resume at its target after every machine's devices pay the caller's
+        // cycle debt, before even the callback's validation reads take place.
+        g_cpu.R[15]=pc;
+        throw RuntimeDispatchYield{};
+    }
+    // A callback is trusted native coverage, but not decoded by the batching
+    // classifier. Its generated body runs through the reference safe points.
+    g_session_slice=false;
+}
+void runtime_session_tick_devices(std::uint32_t cycles) {
+    if (g_active_bus && g_active_ppu) tick_devices(g_active_bus, g_active_ppu, cycles);
+}
+} // namespace gbarecomp

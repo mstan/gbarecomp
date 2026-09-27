@@ -37,6 +37,7 @@
 #if defined(RECOMP_LAUNCHER)
 
 #include "runtime.h"
+#include "multiplayer_launch.h"
 #include "../gba/gba_bios.h"
 #if defined(GBARECOMP_ENABLE_MODS)
 #include "mod_runtime.h"
@@ -44,6 +45,9 @@
 
 #include "recomp_launcher.h"    // recomp-ui C ABI (include dir via recomp_ui.cmake)
 #include "launcher_profile.h"   // launcher_profile_apply("gba", ...)
+#if defined(RECOMP_UI_HAS_NETPLAY_HOST)
+#include "launcher_netplay_seam.h"
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -328,6 +332,7 @@ struct SeamConfig {
     int  widescreen = 0;       // legacy fixed-width toggle
     int  aspect_index = 0;     // games with a launcher_aspect vocabulary only
     int  adaptive_view = 0;    // live drawable aspect; fixed aspect is retained
+    int  netplay_view = 0;     // local display, independent of single-player mods
     float gyro_sensitivity = 1.00f;
     int  assist_tools = -1;      // unset -> game's requested default
     int  assist_fast_forward_multiplier = 0; // unset -> game default
@@ -376,6 +381,7 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
         else if (key == "widescreen")    c->widescreen = std::atoi(val.c_str());
         else if (key == "aspect_index")  c->aspect_index = std::atoi(val.c_str());
         else if (key == "adaptive_view") c->adaptive_view = std::atoi(val.c_str());
+        else if (key == "netplay_view") c->netplay_view = std::atoi(val.c_str());
         else if (key == "gyro_sensitivity")
             c->gyro_sensitivity = std::strtof(val.c_str(), nullptr);
         else if (key == "assist_tools") c->assist_tools = std::atoi(val.c_str());
@@ -444,6 +450,7 @@ inline void seam_config_save(const std::string& path, const SeamConfig& c) {
     f << "widescreen = " << c.widescreen << "\n";
     f << "aspect_index = " << c.aspect_index << "\n";
     f << "adaptive_view = " << c.adaptive_view << "\n";
+    f << "netplay_view = " << c.netplay_view << "\n";
     f << "gyro_sensitivity = " << c.gyro_sensitivity << "\n";
     f << "assist_tools = " << c.assist_tools << "\n";
     f << "assist_fast_forward_multiplier = "
@@ -650,7 +657,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     }
     if (const char* env = std::getenv("GBARECOMP_NO_LAUNCHER"))
         if (env[0] && env[0] != '0') skip_once = true;
-    if (headless || (skip_once && !force_launcher)) return 0;
+    if (headless || (skip_once && !force_launcher) || (opts.netplay && opts.netplay->enabled)) return 0;
 
     const std::string dir = exe_dir(args);
     const auto state_path = [&](const char* filename,
@@ -765,6 +772,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     ls.linear_filter = cfg.linear_filter;
     ls.widescreen    = cfg.widescreen;
     ls.adaptive_view = cfg.adaptive_view;
+#if defined(RECOMP_LAUNCHER_HAS_NETPLAY_VIEW) && defined(RECOMP_UI_HAS_NETPLAY_HOST)
+    ls.netplay_view_index = opts.netplay && opts.netplay->view_explicit
+        ? static_cast<int>(opts.netplay->view) : cfg.netplay_view;
+#endif
     ls.enable_audio  = 1;
     ls.audio_freq    = 32768;             // GBA mixer base rate (display only)
     ls.volume        = cfg.volume;
@@ -882,6 +893,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     if (!save_display.empty()) gi.sram_path = save_display.c_str();
 
     std::string title = std::string(gi.name) + " \xE2\x80\x94 Launcher";
+#if defined(RECOMP_UI_HAS_NETPLAY_HOST)
+    try { gbarecomp_seam::configure_netplay(gi,opts,dir); }
+    catch (const std::exception& e) { std::fprintf(stderr,"netplay: %s\n",e.what()); return 1; }
+#endif
 
     char picked_rom[1024] = {0};
     int rc = recomp_launcher_run_window(title.c_str(), &ls, &gi, dir.c_str(),
@@ -889,6 +904,14 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
                                         picked_rom, sizeof(picked_rom));
     if (rc == 1) return 1;    // user closed the launcher: quit without booting
     if (rc != 0) return 0;    // unavailable: fall back to the asset picker
+#if defined(RECOMP_UI_HAS_NETPLAY_HOST)
+#if defined(RECOMP_LAUNCHER_HAS_NETPLAY_VIEW)
+    if (opts.netplay) opts.netplay->view=static_cast<gbarecomp::GbaNetplayView>(ls.netplay_view_index);
+    cfg.netplay_view=ls.netplay_view_index;
+#endif
+    try { gbarecomp_seam::accept_netplay(ls.netplay_launch,opts); }
+    catch (const std::exception& e) { std::fprintf(stderr,"netplay: %s\n",e.what()); return 1; }
+#endif
 
     // ---- persist + translate the committed settings -------------------------
     cfg.scale         = ls.window_scale > 0 ? ls.window_scale : cfg.scale;

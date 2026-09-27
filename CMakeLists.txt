@@ -255,6 +255,9 @@ add_library(gbarecomp_gba STATIC
     src/gba/gba_bus.cpp
     src/gba/gba_matrix_memory.cpp
     src/gba/gba_io.cpp
+    src/gba/gba_serial_device.cpp
+    src/gba/gba_link_hub.cpp
+    src/gba/gba_simulation_state.cpp
     src/gba/gba_irq.cpp
     src/gba/gba_dma.cpp
     src/gba/gba_timers.cpp
@@ -338,6 +341,9 @@ option(GBARECOMP_ENABLE_MODS
     OFF)
 
 add_library(gbarecomp_runtime STATIC
+    src/runtime/multiplayer_config.cpp
+    src/runtime/multiplayer_session.cpp
+    src/runtime/multiplayer_slice.cpp
     src/runtime/runtime.cpp
     src/runtime/save_config.cpp
     src/runtime/bios_hle.cpp
@@ -509,11 +515,11 @@ function(target_link_gbarecomp_runtime_stack target_name)
     gbarecomp_compiler_uses_msvc_linker(_gbarecomp_msvc_linker)
     if(APPLE OR _gbarecomp_msvc_linker)
         target_link_libraries(${target_name} PRIVATE
-            gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
+            ${ARGN} gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
     else()
         target_link_libraries(${target_name} PRIVATE
             -Wl,--start-group
-            gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug
+            ${ARGN} gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug
             -Wl,--end-group)
     endif()
 endfunction()
@@ -526,6 +532,8 @@ function(add_gbarecomp_runtime_stack_test target_name source_file)
     target_link_gbarecomp_runtime_stack(${target_name})
     add_test(NAME ${target_name} COMMAND ${target_name})
 endfunction()
+
+include(cmake/GbaLinkProbe.cmake)
 
 add_executable(gba_scan tools/gba_scan/main.cpp)
 target_link_libraries(gba_scan PRIVATE gbarecomp_armv4t gbarecomp_gba)
@@ -671,6 +679,11 @@ endif()
 # tests — per-subsystem. Run with ctest.
 # ─────────────────────────────────────────────────────────────────────────────
 enable_testing()
+add_executable(link_tests tests/link/test_main.cpp
+    tests/heal_gate/runtime_stubs.cpp src/runtime/multiplayer_config.cpp)
+target_include_directories(link_tests PRIVATE src/runtime)
+target_link_libraries(link_tests PRIVATE gbarecomp_gba)
+add_test(NAME link_tests COMMAND link_tests)
 
 # Portable packaging generation is a Unix-only shell path. Register its smoke
 # test when the small validation toolchain is available, while keeping ordinary
@@ -859,6 +872,9 @@ add_test(NAME presentation_layout_tests COMMAND presentation_layout_tests)
 
 # Touch input: gesture recognizer, hub rings/scripts, key synthesis, JSON.
 add_gbarecomp_runtime_stack_test(touch_input_tests tests/touch_input/test_main.cpp)
+add_gbarecomp_runtime_stack_test(multiplayer_session_tests tests/link/session_test.cpp)
+add_subdirectory(tests/link)
+include(cmake/GbaNetplay.cmake)
 
 # P6 differential-gate primitives (offline; full-RAM snapshot/restore/diff).
 add_executable(heal_gate_tests

@@ -2092,6 +2092,13 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
     }
 }
 
+void HostWindow::set_title(const char* title) {
+    if (!open_ || !impl_ || !title) return;
+    auto* b=static_cast<Backend*>(impl_);
+    b->title=title;
+    SDL_SetWindowTitle(b->window,title);
+}
+
 void HostWindow::close() {
     if (!impl_) { open_ = false; return; }
     auto* b = static_cast<Backend*>(impl_);
@@ -3076,6 +3083,7 @@ bool HostWindow::open(int /*scale*/, int /*base_w*/, int /*base_h*/,
 }
 
 void HostWindow::close() { open_ = false; }
+void HostWindow::set_title(const char*) {}
 
 bool HostWindow::set_surface_size(int /*base_w*/, int /*base_h*/) {
     return false;

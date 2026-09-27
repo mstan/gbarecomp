@@ -1,0 +1,13 @@
+[program]
+entry_pc = 0x08000000
+load_address = 0x08000000
+size = 340
+static_resume_all = true
+
+[identity]
+sha1 = "67f0710258b286a789223f5c42fdfd3b35a62a4b"
+
+[[extra_func]]
+addr = 0x08000128
+mode = "arm"
+name = "ram_dispatch_probe"

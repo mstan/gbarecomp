@@ -2328,6 +2328,7 @@ void GbaPpu::render_scanline(uint32_t y,
                              const uint8_t* vram,
                              const uint8_t* oam,
                              const uint8_t* pal) {
+    if (presentation_) presentation_->scanline(*this, y, dispcnt, io, vram, oam, pal);
     // BG2/BG3 affine coordinates are backed by hidden current-reference
     // registers. With constant PB/PD, ref + y*delta is equivalent. Mario Kart
     // HBlank-DMAs PA/PB/PC/PD/X/Y for every road scanline, however: each X/Y
@@ -2389,6 +2390,14 @@ void GbaPpu::note_affine_reference_write(unsigned bg, bool y_axis) {
     else state.reload_x = true;
 }
 
+void GbaPpu::render_presentation_scanline(const GbaPpu& source, uint32_t y,
+                                          uint16_t dispcnt, const uint8_t* io,
+                                          const uint8_t* vram, const uint8_t* oam,
+                                          const uint8_t* pal) {
+    affine_line_ = source.affine_line_;
+    render_scanline(y, dispcnt, io, vram, oam, pal);
+}
+
 void GbaPpu::latch_framebuffer(uint16_t dispcnt,
                                const uint8_t* io,
                                const uint8_t* vram,
@@ -2401,6 +2410,7 @@ void GbaPpu::latch_framebuffer(uint16_t dispcnt,
 void GbaPpu::mark_framebuffer_latched() {
     std::memcpy(latched_fb_.data(), work_fb_.data(), render_bytes());
     has_latched_fb_ = true;
+    if (presentation_) presentation_->frame_ready();
 }
 
 }  // namespace gba

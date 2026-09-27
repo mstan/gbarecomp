@@ -49,6 +49,7 @@ public:
               bool resize_driven_view = false,
               bool freely_resizable_window = false);
     void close();
+    void set_title(const char* title);
     bool is_open() const { return open_; }
 
     // Resize the logical streaming surface without changing the host window.
