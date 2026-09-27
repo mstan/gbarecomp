@@ -10,7 +10,7 @@ DMA, timers, interrupts, cartridge saves, GPIO devices, and input—and retains 
 safe interpreter/self-healing tier for code that cannot yet be resolved
 statically.
 
-Projects built on GBARecomp already ship with **adaptive widescreen, versioned
+GBARecomp and its game integrations support **adaptive widescreen, versioned
 mods, link-cable netplay, native Wireless Adapter support, GBA screen color
 profiles, save states, host-synchronized RTC, modern motion controls, Android
 support, and cartridge-specific hardware such as
@@ -116,6 +116,9 @@ are distributed between players.
 
 See [multiplayer architecture and validation](docs/MULTIPLAYER.md) and
 [Wireless Adapter implementation, setup and fidelity limits](docs/WIRELESS.md).
+The [mixed-cartridge design](docs/MIXED_CARTRIDGE_MULTIPLAYER.md) records the
+Pokémon cable/wireless compatibility matrix, player-limit distinctions and
+planned manifest negotiation for future cross-version sessions.
 These describe source support; existing game release binaries only include the
 features present at their pinned engine/UI versions.
 

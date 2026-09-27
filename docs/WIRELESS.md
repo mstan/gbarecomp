@@ -47,6 +47,11 @@ Single-Pak multiboot, cross-version cartridges, more than two network players,
 RF interference fidelity and complete accessory compatibility are deferred.
 The adapter parser and deterministic radio model must leave room for them.
 
+The [mixed-cartridge design](MIXED_CARTRIDGE_MULTIPLAYER.md) separates cartridge
+compatibility, RFU association size and Union Room display population, and
+describes the local/LAN/online admission changes needed for future cross-version
+sessions. Those features are not enabled by the current implementation.
+
 ## Qualified on 2026-09-26
 
 Two native Emerald USA instances cold-booted from the previously qualified
