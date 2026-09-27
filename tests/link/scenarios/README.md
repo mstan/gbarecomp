@@ -6,6 +6,11 @@ Rows are relative frame numbers followed by active-high button masks for seats
 zero and one. A row stays active until the next row. Decimal and `0x` masks are
 accepted. Snapshot input starts the script's frame count again at zero.
 
+`emerald-wireless-union-room.inputs` is the 5,485-frame two-Emerald route from
+the private ready saves into Union Room discovery and contact. See
+[`docs/WIRELESS.md`](../../../docs/WIRELESS.md) for device selection, native
+coverage requirements, fixture hashes and the measured network cases.
+
 `GBA_LINK_PROBE_REPLAY_RUN=1` saves the starting paired state, runs the complete
 local input segment, restores its start and repeats every input. It compares
 every final snapshot byte, including cartridge save chips and in-flight cable

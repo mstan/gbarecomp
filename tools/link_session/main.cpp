@@ -65,7 +65,12 @@ int main(int argc, char** argv) {
         GbaSessionConfig config;
         config.machines = {{0,GBA_LINK_PROBE_PROGRAM,GBA_LINK_PROBE_SHA1},
                            {1,GBA_LINK_PROBE_PROGRAM,GBA_LINK_PROBE_SHA1}};
-        config.links = {{GbaLinkMedium::Cable,{0,1}}};
+        auto medium=GbaLinkMedium::Cable;
+        if (const auto* requested=std::getenv("GBA_LINK_PROBE_DEVICE")) {
+            if (std::string_view(requested)=="wireless") medium=GbaLinkMedium::Wireless;
+            else if (std::string_view(requested)!="cable") throw std::runtime_error("unknown probe serial device");
+        }
+        config.links = {{medium,{0,1}}};
         config.input_machines = {0,1};
         session = std::make_unique<GbaMultiplayerSession>(std::move(config));
         if (const auto* slices = std::getenv("GBA_LINK_PROBE_SLICES"))
@@ -132,7 +137,8 @@ int main(int argc, char** argv) {
                     [](auto t,const auto& row) { return t<row.frame; });
                 return after==script.begin() ? std::array<std::uint16_t,2>{} : std::prev(after)->buttons;
             };
-            gba_link_probe_netplay(*session,frames,inputs,GBA_LINK_PROBE_PROGRAM "/native-probe-v1");
+            gba_link_probe_netplay(*session,frames,inputs,std::string(GBA_LINK_PROBE_PROGRAM)+
+                (medium==GbaLinkMedium::Wireless ? "/wireless-probe-v1" : "/native-probe-v1"));
             buttons=inputs(frames-1);
 #else
             throw std::runtime_error("network probe requires GBARECOMP_NETPLAY=ON");

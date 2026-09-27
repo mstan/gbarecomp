@@ -26,9 +26,17 @@ int main() {
     invalid=*launch; invalid.session_id=0; CHECK(rejects(invalid));
     invalid=*launch; invalid.input_delay=21; CHECK(rejects(invalid));
     invalid=*launch; invalid.prediction=17; CHECK(rejects(invalid));
+    invalid=*launch; invalid.medium=GbaLinkMedium::Wireless; CHECK(rejects(invalid));
+    invalid.supported_media=3; validate_gba_netplay_launch(invalid);
+    invalid.medium=static_cast<GbaLinkMedium>(31); CHECK(rejects(invalid));
     invalid=*launch; invalid.peer_endpoint.clear(); CHECK(rejects(invalid));
     invalid.local_seat=0; validate_gba_netplay_launch(invalid); // passive LAN host
     launch->enabled=false;
+    launch->supported_media=3;
+    args={"game","--netplay-device","wireless"};
+    parse_gba_netplay_arguments(args,*launch);
+    CHECK(!launch->enabled && launch->medium==GbaLinkMedium::Wireless);
+    CHECK(args==std::vector<std::string>{"game"});
     args={"game","--netplay-resume","previous.paired","--netplay-checkpoint","next.paired"};
     parse_gba_netplay_arguments(args,*launch);
     CHECK(!launch->enabled && args==std::vector<std::string>{"game"});

@@ -81,14 +81,24 @@ GbaInstance::GbaInstance(GbaMachineDescriptor value) : descriptor(std::move(valu
 }
 GbaMultiplayerSession::GbaMultiplayerSession(GbaSessionConfig config) : config_(std::move(config)) {
     std::string error;
-    if (!validate_cable_mvp(config_, &error)) throw std::invalid_argument(error);
+    if (!validate_multiplayer_mvp(config_, &error)) throw std::invalid_argument(error);
     for (const auto& descriptor : config_.machines)
         machines_.push_back(std::make_unique<GbaInstance>(descriptor));
-    cable_ = std::make_unique<gba::GbaLinkHub>(config_.links[0].machines.size());
+    if (config_.links[0].medium==GbaLinkMedium::Wireless)
+        wireless_=std::make_unique<gba::GbaWirelessDomain>(config_.links[0].machines.size());
+    else cable_ = std::make_unique<gba::GbaLinkHub>(config_.links[0].machines.size());
     for (std::size_t port = 0; port < config_.links[0].machines.size(); ++port)
-        machine(config_.links[0].machines[port]).bus.io().set_serial_device(&cable_->endpoint(port));
+        machine(config_.links[0].machines[port]).bus.io().set_serial_device(
+            wireless_ ? &wireless_->endpoint(port) : &cable_->endpoint(port));
 }
 GbaMultiplayerSession::~GbaMultiplayerSession() = default;
+gba::GbaLinkHub& GbaMultiplayerSession::cable() {
+    if (!cable_) throw std::logic_error("wireless session has no cable");
+    return *cable_;
+}
+std::vector<std::uint8_t> GbaMultiplayerSession::link_state() const {
+    return wireless_ ? wireless_->save_state() : cable_->save_state();
+}
 GbaInstance& GbaMultiplayerSession::machine(GbaMachineId id) {
     for (auto& instance : machines_) if (instance->descriptor.id == id) return *instance;
     throw std::out_of_range("unknown GBA machine ID");
@@ -211,8 +221,8 @@ std::vector<std::uint8_t> GbaMultiplayerSession::save_state() const {
         auto bytes = gba::save_device_state(m.bus,m.ppu);
         a.vector(bytes,4*1024*1024);
     }
-    auto link = cable_->save_state();
-    a.vector(link,4096);
+    auto link = link_state();
+    a.vector(link,1024*1024);
     return a.take();
 }
 bool GbaMultiplayerSession::load_state(std::span<const std::uint8_t> bytes, std::string* error) {
@@ -241,14 +251,15 @@ bool GbaMultiplayerSession::load_state(std::span<const std::uint8_t> bytes, std:
                 throw std::invalid_argument("CPU is behind session timeline");
         }
         std::vector<std::uint8_t> link;
-        a.vector(link,4096);
-        if (a.remaining() || !staged->cable_->load_state(link,error))
+        a.vector(link,1024*1024);
+        if (a.remaining() || !(staged->wireless_ ? staged->wireless_->load_state(link,error) : staged->cable_->load_state(link,error)))
             throw std::invalid_argument("invalid session link state");
-        for (std::size_t i = 0; i < staged->cable_->port_count(); ++i)
-            if (staged->cable_->cycle(i) != staged->cycle_)
+        for (std::size_t i = 0; i < staged->machines_.size(); ++i)
+            if ((staged->wireless_ ? staged->wireless_->cycle(i) : staged->cable_->cycle(i)) != staged->cycle_)
                 throw std::invalid_argument("link and session clocks differ");
         machines_.swap(staged->machines_);
         cable_.swap(staged->cable_);
+        wireless_.swap(staged->wireless_);
         cycle_ = staged->cycle_;
         // Host mirrors survive rollback, but their cached pixels do not.
         // Rewire only after the complete replacement has passed validation.
@@ -286,7 +297,7 @@ std::array<std::uint32_t,3> GbaMultiplayerSession::state_hash_parts() const {
         a.vector(bytes,4*1024*1024);
     }
     manifest(link,config_); link(cycle_);
-    auto bytes = cable_->save_state(); link.vector(bytes,4096);
+    auto bytes = link_state(); link.vector(bytes,1024*1024);
     parts[0] = hash(first.bytes()); parts[1] = hash(rest.bytes()); parts[2] = hash(link.bytes());
     return parts;
 }

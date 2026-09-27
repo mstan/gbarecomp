@@ -44,18 +44,24 @@ bool validate_session_config(const GbaSessionConfig& config, std::string* error)
     }
     return true;
 }
-bool validate_cable_mvp(const GbaSessionConfig& config, std::string* error) {
+bool validate_multiplayer_mvp(const GbaSessionConfig& config, std::string* error) {
     if (!validate_session_config(config, error)) return false;
     if (config.machines.size() != 2 || config.input_machines.size() != 2 || config.links.size() != 1)
-        return fail(error, "initial cable session requires two machines and two input seats");
-    if (config.links[0].medium != GbaLinkMedium::Cable || config.links[0].machines.size() != 2)
-        return fail(error, "wireless adapter support is not implemented");
+        return fail(error, "initial multiplayer session requires two machines and two input seats");
+    if (config.links[0].machines.size() != 2)
+        return fail(error, "both machines must share the selected serial medium");
     for (const auto& machine : config.machines)
         if (machine.boot != GbaBootSource::Cartridge)
             return fail(error, "Single-Pak multiboot is not implemented");
     if (config.machines[0].program_id != config.machines[1].program_id ||
         config.machines[0].rom_sha1 != config.machines[1].rom_sha1)
         return fail(error, "cross-version cartridge linking is not implemented");
+    return true;
+}
+bool validate_cable_mvp(const GbaSessionConfig& config, std::string* error) {
+    if (!validate_multiplayer_mvp(config,error)) return false;
+    if (config.links[0].medium!=GbaLinkMedium::Cable)
+        return fail(error,"session is not a link cable");
     return true;
 }
 } // namespace gbarecomp

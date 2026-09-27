@@ -116,6 +116,39 @@ void ram_dispatch_rendezvous() {
     CHECK(session->save_state()==after);
     callback_cable=nullptr;
 }
+void wireless_session_restore() {
+    using namespace gbarecomp;
+    auto cfg=config(); cfg.links[0].medium=GbaLinkMedium::Wireless;
+    auto session=std::make_unique<GbaMultiplayerSession>(cfg);
+    for (auto id:{10,30}) {
+        auto& io=session->machine(id).bus.io();
+        io.write8(0x301,0); // HALT: only the shared deterministic devices run.
+        io.write16(0x134,0);
+        io.write32(0x120,0x7fff494e);
+        io.write16(0x128,0x5081);
+    }
+    session->run_until(1024);
+    CHECK(session->machine(10).bus.io().read16(0x128)&0x80);
+    const auto mid=session->save_state();
+    session->run_until(2048);
+    for (auto id:{10,30}) {
+        auto& io=session->machine(id).bus.io();
+        CHECK(!(io.read16(0x128)&0x80));
+        CHECK(io.read16(0x202)&0x80);
+        CHECK(io.read32(0x120)==0);
+    }
+    const auto expected=session->save_state();
+    std::string error;
+    CHECK(session->load_state(mid,&error));
+    session->run_until(2048);
+    CHECK(session->save_state()==expected);
+    auto cable=std::make_unique<GbaMultiplayerSession>(config());
+    const auto before=cable->save_state();
+    CHECK(!cable->load_state(expected,&error));
+    CHECK(cable->save_state()==before);
+    CHECK(!session->load_state(before,&error));
+    CHECK(session->save_state()==expected);
+}
 void native_exchange() {
     using namespace gbarecomp;
     g_cpu.R[4] = 0xabcdef01;
@@ -220,5 +253,6 @@ int main() {
     return_yield_continuation();
     exception_continuations(false); exception_continuations(true);
     native_exchange(); ram_dispatch_rendezvous();
+    wireless_session_restore();
     std::puts("native multiplayer session tests passed");
 }

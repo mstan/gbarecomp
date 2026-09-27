@@ -29,6 +29,15 @@ int main() {
     bad=selected; bad.player_count=1; CHECK(refused(bad));
     bad=selected; bad.occupied_mask=1; CHECK(refused(bad));
     bad=selected; bad.max_slots=4; CHECK(refused(bad));
+#if defined(RECOMP_LAUNCHER_HAS_SESSION_VARIANT)
+    bad=selected; bad.session_variant=1; CHECK(refused(bad));
+    opts.netplay->supported_media=3;
+    selected.session_variant=1;
+    gbarecomp_seam::accept_netplay(selected,opts);
+    CHECK(opts.netplay->medium==gbarecomp::GbaLinkMedium::Wireless);
+    bad=selected; bad.session_variant=2; CHECK(refused(bad));
+    selected.session_variant=0;
+#endif
     selected.slot_port_valid=0; selected.local_slot=1; selected.rollback=0;
     gbarecomp_seam::accept_netplay(selected,opts);
     CHECK(opts.netplay->local_seat==1 && opts.netplay->seat_machine[1]==1 && !opts.netplay->rollback);
