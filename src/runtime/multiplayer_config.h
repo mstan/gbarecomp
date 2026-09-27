@@ -36,4 +36,5 @@ bool validate_session_config(const GbaSessionConfig&, std::string* error);
 // Current launch gate. Future hardware can extend capabilities independently
 // from the shape of the manifest or the replicated snapshot container.
 bool validate_cable_mvp(const GbaSessionConfig&, std::string* error);
+bool validate_multiplayer_mvp(const GbaSessionConfig&, std::string* error);
 } // namespace gbarecomp

@@ -53,7 +53,7 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
         throw std::invalid_argument("invalid netplay save hardware");
     GbaSessionConfig config;
     config.machines={{0,launch.program_id,boot.expected_rom_sha1},{1,launch.program_id,boot.expected_rom_sha1}};
-    config.links={{GbaLinkMedium::Cable,{0,1}}};
+    config.links={{launch.medium,{0,1}}};
     config.input_machines={launch.seat_machine[0],launch.seat_machine[1]};
     GbaMultiplayerSession simulation(std::move(config));
     simulation.set_native_slices(true);
@@ -75,7 +75,7 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
     options.prediction=launch.prediction; options.rollback=launch.rollback;
     options.force_turn=launch.force_turn;
     options.planned_finish_tick=boot.finish_tick;
-    options.identity="gba-cable/1:"+launch.program_id+":"+launch.build_identity+":"+
+    options.identity=std::string(launch.medium==GbaLinkMedium::Wireless ? "gba-wireless/1:" : "gba-cable/1:")+launch.program_id+":"+launch.build_identity+":"+
         boot.expected_rom_sha1+":"+boot.bios->sha1_hex()+":"+
         std::to_string(static_cast<unsigned>(boot.save.type))+":"+std::to_string(boot.save.size)+":"+
         std::to_string(launch.seat_machine[0])+":"+std::to_string(launch.seat_machine[1])+":native-lle";

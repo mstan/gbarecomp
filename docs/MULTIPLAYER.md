@@ -5,6 +5,10 @@ Implementation branch: `feature/link-session`. Tracking: central Beads
 The owner verified linked gameplay in both desktop applications, then verified
 Minish Cap and Mega Man Zero single-player against the updated runtime.
 
+The subsequent native Wireless Adapter/Union Room work is described in
+[WIRELESS.md](WIRELESS.md). Cable remains the default; wireless is a separate
+host-selected session device, using the same controller-input netcode.
+
 ## Implemented and checked
 
 * `GbaSerialDevice` connects a native peripheral to one machine's MMIO. The

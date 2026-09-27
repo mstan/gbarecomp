@@ -6,6 +6,7 @@
 #include "gba_bus.h"
 #include "gba_ppu.h"
 #include "gba_link_hub.h"
+#include "gba_wireless.h"
 #include <memory>
 #include <span>
 
@@ -49,13 +50,15 @@ public:
     void set_return_yields(bool enabled) { return_yields_ = enabled; }
     std::uint64_t cycle() const { return cycle_; }
     std::size_t machine_count() const { return machines_.size(); }
-    gba::GbaLinkHub& cable() { return *cable_; }
+    gba::GbaLinkHub& cable();
 private:
     void bind(GbaInstance&);
     void capture(GbaInstance&);
     GbaSessionConfig config_;
     std::vector<std::unique_ptr<GbaInstance>> machines_;
     std::unique_ptr<gba::GbaLinkHub> cable_;
+    std::unique_ptr<gba::GbaWirelessDomain> wireless_;
+    std::vector<std::uint8_t> link_state() const;
     std::uint64_t cycle_ = 0;
     bool native_slices_ = false;
     bool return_yields_ = true;

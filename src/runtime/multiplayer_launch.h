@@ -1,6 +1,7 @@
 #pragma once
 #include "save_config.h"
 #include "multiplayer_view.h"
+#include "multiplayer_config.h"
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -32,6 +33,9 @@ struct GbaNetplayBoot {
 // Launcher-neutral data: shared UI types stay in launcher_seam.h, networking
 // types stay in the adapter. Seats name controllers, not cable positions.
 struct GbaNetplayLaunch {
+    // Game capability; the lobby host chooses one medium for every peer.
+    unsigned supported_media=1u<<static_cast<unsigned>(GbaLinkMedium::Cable);
+    GbaLinkMedium medium=GbaLinkMedium::Cable;
     GbaNetplayViewPolicy view_policy;
     GbaNetplayView view = GbaNetplayView::Native;
     bool view_explicit = false;

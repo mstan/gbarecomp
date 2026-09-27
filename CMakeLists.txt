@@ -257,6 +257,7 @@ add_library(gbarecomp_gba STATIC
     src/gba/gba_io.cpp
     src/gba/gba_serial_device.cpp
     src/gba/gba_link_hub.cpp
+    src/gba/gba_wireless.cpp
     src/gba/gba_simulation_state.cpp
     src/gba/gba_irq.cpp
     src/gba/gba_dma.cpp
@@ -873,6 +874,7 @@ add_test(NAME presentation_layout_tests COMMAND presentation_layout_tests)
 # Touch input: gesture recognizer, hub rings/scripts, key synthesis, JSON.
 add_gbarecomp_runtime_stack_test(touch_input_tests tests/touch_input/test_main.cpp)
 add_gbarecomp_runtime_stack_test(multiplayer_session_tests tests/link/session_test.cpp)
+add_gbarecomp_runtime_stack_test(wireless_tests tests/link/wireless_test.cpp)
 add_subdirectory(tests/link)
 include(cmake/GbaNetplay.cmake)
 

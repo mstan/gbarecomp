@@ -10,6 +10,9 @@ namespace gbarecomp_seam {
 struct NetplayBackend {
     std::shared_ptr<gbarecomp::GbaNetplayLaunch> launch;
     std::string game,version,content,directory;
+#if defined(RECOMP_LAUNCHER_HAS_SESSION_VARIANT)
+    std::vector<RecompNetplaySessionVariant> variants;
+#endif
     ~NetplayBackend() { if (launch) recomp_netplay_host_shutdown(); }
 };
 inline NetplayBackend& netplay_backend() { static NetplayBackend state; return state; }
@@ -28,7 +31,20 @@ inline void configure_netplay(RecompLauncherCGameInfo& gi,const gbarecomp::RunOp
         RecompNetplayHostHooks hooks{};
         hooks.game_name=state.game.c_str(); hooks.game_version=state.version.c_str();
         hooks.content_fingerprint=state.content.c_str(); hooks.platform="gba";
-        hooks.default_lobby_name="GBA Link Cable"; hooks.max_players=2;
+        hooks.default_lobby_name="GBA Multiplayer"; hooks.max_players=2;
+#if defined(RECOMP_LAUNCHER_HAS_SESSION_VARIANT)
+        state.variants.clear();
+        if (opts.netplay->supported_media & (1u<<static_cast<unsigned>(gbarecomp::GbaLinkMedium::Cable)))
+            state.variants.push_back({0,"Link Cable"});
+        if (opts.netplay->supported_media & (1u<<static_cast<unsigned>(gbarecomp::GbaLinkMedium::Wireless)))
+            state.variants.push_back({1,"Wireless Adapter"});
+        hooks.session_variants=state.variants.data();
+        hooks.session_variant_count=static_cast<int>(state.variants.size());
+        hooks.default_session_variant=static_cast<int>(opts.netplay->medium);
+#else
+        if (opts.netplay->supported_media!=1 || opts.netplay->medium!=gbarecomp::GbaLinkMedium::Cable)
+            throw std::runtime_error("wireless lobby selection requires an updated recomp-ui");
+#endif
         hooks.slot_policy=RECOMP_NETPLAY_SLOTS_HOST_FIRST;
         hooks.input_player=RECOMP_NETPLAY_INPUT_AUTO; hooks.ctx=&state;
         hooks.exe_dir_path=[](void* ctx,const char* leaf,char* out,std::size_t size) {
@@ -65,7 +81,14 @@ inline void accept_netplay(const RecompLauncherCNetplayLaunch& selected,const gb
         selected.local_slot<0 || selected.local_slot>1 || selected.max_slots!=2 ||
         (selected.player_count && selected.player_count!=2) ||
         (selected.occupied_mask && selected.occupied_mask!=3))
-        throw std::invalid_argument("this GBA build supports two players over link cable");
+        throw std::invalid_argument("this GBA build supports two multiplayer consoles");
+#if defined(RECOMP_LAUNCHER_HAS_SESSION_VARIANT)
+    if (selected.session_variant<0 || selected.session_variant>1)
+        throw std::invalid_argument("unknown GBA connection type");
+    launch.medium=static_cast<gbarecomp::GbaLinkMedium>(selected.session_variant);
+#else
+    launch.medium=gbarecomp::GbaLinkMedium::Cable;
+#endif
     launch.local_seat=selected.local_slot; launch.session_id=selected.session_id;
     launch.bind_endpoint=selected.bind_hostport; launch.peer_endpoint=selected.peer_hostport;
     launch.input_delay=selected.input_delay; launch.prediction=std::clamp(selected.input_prediction,6,16);

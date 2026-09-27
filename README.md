@@ -11,8 +11,9 @@ safe interpreter/self-healing tier for code that cannot yet be resolved
 statically.
 
 Projects built on GBARecomp already ship with **adaptive widescreen, versioned
-mods, GBA screen color profiles, save states, host-synchronized RTC, modern
-motion controls, Android support, and cartridge-specific hardware such as
+mods, link-cable netplay, native Wireless Adapter support, GBA screen color
+profiles, save states, host-synchronized RTC, modern motion controls, Android
+support, and cartridge-specific hardware such as
 gyroscopes and solar sensors.**
 
 <table>
@@ -82,6 +83,41 @@ authored room buffers in *The Minish Cap*, streamed stage margins in *Mega Man
 Zero* and *Super Mario Advance 2*, race presentation in *Mario Kart: Super
 Circuit*, and large authored field planes in the three *Dragon Ball Z* games.
 The default remains the native GBA view, and the enhanced modes are opt-in.
+
+## Multiplayer: Link Cable and Wireless Adapter
+
+GBARecomp supports **Link Cable** and **Wireless Adapter** multiplayer through
+`recomp-net`, with both delay-sync and whole-session rollback. Each peer runs
+the complete set of virtual GBAs and their local cable or radio domain.
+The network carries player inputs; serial transfers and radio events stay on
+the shared emulated timeline, independent of Internet latency.
+
+| Device | Current validated scope |
+|---|---|
+| **Link Cable** | Two-player, same-game multiplayer in *Pokémon Emerald* and *Mario Kart: Super Circuit*. |
+| **Wireless Adapter** | Two *Pokémon Emerald* instances enter the Union Room, discover one another and initiate contact, with deterministic replay and delay/rollback input netplay. This is an initial RFU implementation; complete wireless battle/trade flows and every adapter command are not yet qualified. |
+
+The game developer declares supported devices. The lobby host selects
+**Lobby Settings → Connection type**, and everyone joins using that device.
+Link Cable remains the default. Connection type is separate from the
+delay-sync/rollback choice and from LAN/Internet transport.
+
+Both peers currently need the same verified ROM and recomp build. Session
+snapshots include every machine, peripheral and scheduler; rollback suppresses
+catch-up audio/video and keeps speculative cartridge saves in memory. Game
+integrations choose whether independent widescreen settings are safe for netplay.
+
+Application sessions currently admit **two players**. The cable hardware model
+has four ports; the wireless domain can represent multiple groups of one parent
+and up to four children. Those hardware limits do not imply that larger online
+lobbies are enabled. Mixed cartridges (such as Emerald ↔ FireRed), Single-Pak
+multiboot and larger sessions remain future work. No ROMs or native game code
+are distributed between players.
+
+See [multiplayer architecture and validation](docs/MULTIPLAYER.md) and
+[Wireless Adapter implementation, setup and fidelity limits](docs/WIRELESS.md).
+These describe source support; existing game release binaries only include the
+features present at their pinned engine/UI versions.
 
 ## Mods
 
