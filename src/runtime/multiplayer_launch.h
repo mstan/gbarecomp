@@ -1,5 +1,6 @@
 #pragma once
 #include "save_config.h"
+#include "multiplayer_view.h"
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -25,12 +26,15 @@ struct GbaNetplayBoot {
     std::filesystem::path rom_path, bios_path;
     int scale=3, fullscreen=0, volume=100;
     std::uint32_t finish_tick=0; // explicit --frames, must agree at startup
-    bool linear_filter=false, sharp_filter=false, show_fps=false;
+    bool linear_filter=false, sharp_filter=false, show_fps=false, affine_filter=false;
 };
 
 // Launcher-neutral data: shared UI types stay in launcher_seam.h, networking
 // types stay in the adapter. Seats name controllers, not cable positions.
 struct GbaNetplayLaunch {
+    GbaNetplayViewPolicy view_policy;
+    GbaNetplayView view = GbaNetplayView::Native;
+    bool view_explicit = false;
     bool enabled=false, rollback=true, force_turn=false;
     unsigned local_seat=0, input_delay=6, prediction=6;
     std::uint32_t session_id=0;

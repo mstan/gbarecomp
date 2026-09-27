@@ -1486,6 +1486,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             boot.screen=args.screen; boot.scale=args.scale; boot.fullscreen=args.fullscreen;
             boot.volume=args.volume; boot.linear_filter=args.linear_filter;
             boot.sharp_filter=args.sharp_filter; boot.show_fps=opts.show_fps_by_default;
+            boot.affine_filter=args.affine_filter;
             if (args.frames_set) {
                 if (args.frames<=0) throw std::invalid_argument("invalid netplay frame limit");
                 boot.finish_tick=static_cast<std::uint32_t>(args.frames);
@@ -2306,6 +2307,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (!opts.extended_view_frame) return;
         ExtendedViewFrameInfo info{};
         info.frame_count = ppu.frame_count();
+        info.state_epoch = g_runtime_state_epoch;
         info.view_width = ppu.render_width();
         info.extra_left = ppu.view_extra_left();
         info.extra_right = ppu.view_extra_right();

@@ -8,6 +8,7 @@ import hashlib
 import os
 import pathlib
 import random
+import re
 import subprocess
 import tempfile
 from udp_relay import UdpRelay, reserve_routes
@@ -21,6 +22,9 @@ p.add_argument("save1")
 p.add_argument("--frames",type=int,default=120)
 p.add_argument("--resume-frames",type=int,default=60)
 p.add_argument("--delay",action="store_true")
+p.add_argument("--view0",choices=["native","16:9","21:9","32:9","adaptive"],default="native")
+p.add_argument("--view1",choices=["native","16:9","21:9","32:9","adaptive"],default="native")
+p.add_argument("--mispredict",action="store_true",help="force rollback correction in the application")
 p.add_argument("--lan-contract",action="store_true",
                help="shared launcher's passive host and ephemeral guest, without the latency relay")
 p.add_argument("--save-type",choices=["flash1m","flash512","eeprom"],default="flash1m")
@@ -57,11 +61,14 @@ with tempfile.TemporaryDirectory(prefix="gba-application-net-") as tmp:
                       "--save",str(saves[seat]),"--frames",str(frames),"--scale","1",
                       "--netplay-bind",bind,"--netplay-peer",peer,
                       "--netplay-seat",str(seat),"--netplay-session",str(nonce),
-                      "--netplay-checkpoint",str(paths[seat])]
+                      "--netplay-checkpoint",str(paths[seat]),
+                      "--netplay-view",args.view0 if seat==0 else args.view1]
                 if resume: argv.extend(["--netplay-resume",str(resume[seat])])
                 if args.delay: argv.append("--netplay-delay-sync")
                 env={k:v for k,v in os.environ.items() if not k.startswith(("GBARECOMP_","GBA_RB_","RNET_RB_","RBE_RB_"))}
                 env.update(SDL_VIDEODRIVER="dummy",SDL_AUDIODRIVER="dummy",SDL_RENDER_DRIVER="software")
+                if args.mispredict and not args.delay and seat==0:
+                    env["GBA_RB_FORCE_MISPREDICT"]="7"
                 log=open(root/f"{label}-peer{seat}.log","w",encoding="utf-8"); logs.append(log)
                 current.append(subprocess.Popen(argv,cwd=root,env=env,stdout=log,stderr=log,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0))
@@ -71,6 +78,9 @@ with tempfile.TemporaryDirectory(prefix="gba-application-net-") as tmp:
             for seat in range(2):
                 report=(root/f"{label}-peer{seat}.log").read_text(errors="replace")
                 assert f"netplay agreed tick={frames}" in report,report[-8000:]
+                if args.mispredict and not args.delay:
+                    replay=re.search(r"netplay replay=(\d+)",report)
+                    assert replay and int(replay[1])>0,"rollback was not exercised"
             assert paths[0].read_bytes()==paths[1].read_bytes(),"application paired archives differ"
             return paths
 
@@ -86,7 +96,7 @@ with tempfile.TemporaryDirectory(prefix="gba-application-net-") as tmp:
             assert relay.delayed>0
         assert before==[hashlib.sha256(s.read_bytes()).digest() for s in saves],"original save changed"
         print(f"actual game application {'delay-sync' if args.delay else 'rollback'}: {args.frames} frames, "
-              f"{len(left)} identical paired-archive bytes; original saves unchanged; SDL dummy video/audio; "
+              f"{len(left)} identical paired-archive bytes; views {args.view0}/{args.view1}; original saves unchanged; SDL dummy video/audio; "
               f"{'passive LAN host/ephemeral guest' if args.lan_contract else '40ms latency/10ms jitter'}")
     except Exception:
         for log in logs: log.flush()

@@ -3,6 +3,22 @@ if(NOT GBARECOMP_NETPLAY)
     return()
 endif()
 include(${CMAKE_CURRENT_LIST_DIR}/GbaNetplayIdentity.cmake)
+# Explicitly built qualification tool: uses the game's real generated code
+# and render callbacks, with user-supplied local assets/warm session state.
+function(gbarecomp_target_netplay_view_probe target adapter)
+    get_target_property(sources ${target} SOURCES)
+    list(FILTER sources EXCLUDE REGEX "(^|/)main\\.cpp$")
+    set(probe ${target}ViewProbe)
+    add_executable(${probe} EXCLUDE_FROM_ALL ${sources} ${adapter}
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tests/link/view_game_probe.cpp")
+    get_target_property(includes ${target} INCLUDE_DIRECTORIES)
+    get_target_property(defines ${target} COMPILE_DEFINITIONS)
+    get_target_property(libraries ${target} LINK_LIBRARIES)
+    target_include_directories(${probe} PRIVATE ${includes})
+    target_compile_definitions(${probe} PRIVATE ${defines})
+    list(FILTER libraries EXCLUDE REGEX "^-Wl,--(start|end)-group$")
+    target_link_gbarecomp_runtime_stack(${probe} ${libraries} gbarecomp_netplay)
+endfunction()
 function(gbarecomp_target_netplay_launcher target)
     if(NOT COMMAND recomp_target_launcher_netplay)
         message(FATAL_ERROR "Netplay requires recomp-ui with the shared netplay backend")
@@ -14,7 +30,8 @@ function(gbarecomp_target_netplay_launcher target)
         add_executable(multiplayer_launcher_seam_tests
             "${engine_root}/tests/link/launcher_seam_test.cpp"
             "${engine_root}/tools/bios_smoke/dispatch_stub.cpp")
-        target_link_gbarecomp_runtime_stack(multiplayer_launcher_seam_tests gbarecomp_netplay recomp_launcher_netplay)
+        target_link_gbarecomp_runtime_stack(multiplayer_launcher_seam_tests
+            gbarecomp_netplay recomp_launcher_netplay ${target})
         add_test(NAME multiplayer_launcher_seam_tests COMMAND multiplayer_launcher_seam_tests)
     endif()
 endfunction()
@@ -35,7 +52,8 @@ endif()
 add_library(gbarecomp_netplay STATIC src/runtime/multiplayer_netplay.cpp src/runtime/multiplayer_startup.cpp
     src/runtime/multiplayer_checkpoint.cpp src/runtime/multiplayer_checkpoint_file.cpp
     src/runtime/multiplayer_match.cpp src/runtime/multiplayer_pacing.cpp
-    src/runtime/multiplayer_launch.cpp src/runtime/multiplayer_runner.cpp)
+    src/runtime/multiplayer_launch.cpp src/runtime/multiplayer_runner.cpp
+    src/runtime/multiplayer_view.cpp)
 target_include_directories(gbarecomp_netplay PUBLIC src/runtime src/armv4t src/gba)
 target_link_libraries(gbarecomp_netplay PUBLIC gbarecomp_runtime recomp_net retcomm_rbengine)
 if(TARGET gba_link_probe)
@@ -48,6 +66,9 @@ target_link_libraries(multiplayer_netplay_tests PRIVATE gbarecomp_netplay)
 add_executable(multiplayer_launch_tests tests/link/launch_test.cpp tools/bios_smoke/dispatch_stub.cpp)
 target_link_gbarecomp_runtime_stack(multiplayer_launch_tests gbarecomp_netplay)
 add_test(NAME multiplayer_launch_tests COMMAND multiplayer_launch_tests)
+add_executable(multiplayer_view_tests tests/link/view_test.cpp tools/bios_smoke/dispatch_stub.cpp)
+target_link_gbarecomp_runtime_stack(multiplayer_view_tests gbarecomp_netplay)
+add_test(NAME multiplayer_view_tests COMMAND multiplayer_view_tests)
 add_executable(multiplayer_netplay_peer tests/link/netplay_peer.cpp tools/bios_smoke/dispatch_stub.cpp)
 target_link_gbarecomp_runtime_stack(multiplayer_netplay_peer)
 target_link_libraries(multiplayer_netplay_peer PRIVATE gbarecomp_netplay)

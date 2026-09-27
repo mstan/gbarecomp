@@ -44,6 +44,25 @@ public:
     GbaPpu();
     ~GbaPpu();
 
+    // Optional host-only mirror. Runs at the actual raster boundary with
+    // read-only device memory; never participates in timing or snapshots.
+    struct PresentationObserver {
+        virtual ~PresentationObserver() = default;
+        virtual void scanline(const GbaPpu&, uint32_t y, uint16_t dispcnt,
+                              const uint8_t* io, const uint8_t* vram,
+                              const uint8_t* oam, const uint8_t* pal) = 0;
+        virtual void frame_ready() = 0;
+        virtual void restored() noexcept = 0;
+    };
+    void set_presentation_observer(PresentationObserver* observer) { presentation_ = observer; }
+    PresentationObserver* presentation_observer() const { return presentation_; }
+    // Compose a separate surface using the source's pre-scanline affine
+    // registers, including HBlank DMA reloads. Does not advance either PPU.
+    void render_presentation_scanline(const GbaPpu& source, uint32_t y,
+                                     uint16_t dispcnt, const uint8_t* io,
+                                     const uint8_t* vram, const uint8_t* oam,
+                                     const uint8_t* pal);
+
     // Events that fired during a tick. The caller routes these to
     // the IRQ controller (gating on the DISPSTAT enable bits the BIOS
     // sets). Keeping events as a return value rather than a callback
@@ -163,6 +182,7 @@ public:
 
 private:
     friend class SimulationStateCodec;
+    PresentationObserver* presentation_ = nullptr; // borrowed; not serialized
     uint32_t scanline_        = 0;   // 0..227
     uint32_t dot_in_scanline_ = 0;   // 0..307 (in dots, not cycles)
     uint32_t cycle_in_dot_    = 0;   // 0..3

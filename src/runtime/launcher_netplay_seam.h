@@ -47,6 +47,13 @@ inline void configure_netplay(RecompLauncherCGameInfo& gi,const gbarecomp::RunOp
         if (recomp_netplay_host_init(&hooks)) throw std::runtime_error("cannot initialize netplay lobby");
     }
     gi.netplay_supported=1; gi.netplay=recomp_netplay_host_callbacks();
+#if defined(RECOMP_LAUNCHER_HAS_NETPLAY_VIEW)
+    static const char* const views[]={"Native (3:2)","16:9","21:9","32:9","Adaptive"};
+    if (opts.netplay->view_policy.supported) {
+        gi.netplay_view_labels=views;
+        gi.num_netplay_view_labels=opts.netplay->view_policy.adaptive_supported ? 5 : 4;
+    }
+#endif
 }
 
 inline void accept_netplay(const RecompLauncherCNetplayLaunch& selected,const gbarecomp::RunOptions& opts) {

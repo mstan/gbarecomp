@@ -250,6 +250,13 @@ bool GbaMultiplayerSession::load_state(std::span<const std::uint8_t> bytes, std:
         machines_.swap(staged->machines_);
         cable_.swap(staged->cable_);
         cycle_ = staged->cycle_;
+        // Host mirrors survive rollback, but their cached pixels do not.
+        // Rewire only after the complete replacement has passed validation.
+        for (std::size_t i = 0; i < machines_.size(); ++i) {
+            auto* observer = staged->machines_[i]->ppu.presentation_observer();
+            machines_[i]->ppu.set_presentation_observer(observer);
+            if (observer) observer->restored();
+        }
         return true;
     } catch (const std::exception& e) {
         if (error) *error = e.what();

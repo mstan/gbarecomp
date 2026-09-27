@@ -31,6 +31,8 @@ struct ExtendedViewFrameInfo {
     std::uint32_t extra_bottom = 0;
     const std::uint8_t* io = nullptr;
     std::size_t io_size = 0;
+    // Changes on restoration, not on multiplayer instance switches.
+    std::uint64_t state_epoch = 0;
 };
 
 // Per-game built-in defaults baked into a game runner at compile time.

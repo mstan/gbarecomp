@@ -12,6 +12,7 @@ bool hex_digest(const std::string& s,std::size_t size) {
 }
 }
 void validate_gba_netplay_launch(const GbaNetplayLaunch& l) {
+    validate_gba_netplay_view(l.view, l.view_policy);
     if (!l.enabled || l.local_seat>1 || !l.session_id || l.input_delay<2 || l.input_delay>20 ||
         l.prediction<6 || l.prediction>16 || l.seat_machine[0]>1 || l.seat_machine[1]>1 ||
         l.seat_machine[0]==l.seat_machine[1] || l.bind_endpoint.empty() ||
@@ -27,6 +28,13 @@ void parse_gba_netplay_arguments(std::vector<std::string>& args,GbaNetplayLaunch
     for (std::size_t i=0;i<args.size();++i) {
         const auto& key=args[i];
         if (i==0 || !key.starts_with("--netplay-")) { kept.push_back(key); continue; }
+        if (key=="--netplay-view") {
+            if (i+1==args.size()) throw std::invalid_argument("missing value for "+key);
+            staged.view=parse_gba_netplay_view(args[++i]);
+            staged.view_explicit=true;
+            validate_gba_netplay_view(staged.view, staged.view_policy);
+            continue;
+        }
         if (key=="--netplay-resume" || key=="--netplay-checkpoint") {
             if (i+1==args.size()) throw std::invalid_argument("missing value for "+key);
             (key=="--netplay-resume" ? staged.resume_path : staged.checkpoint_path)=args[++i];

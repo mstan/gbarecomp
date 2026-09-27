@@ -1,8 +1,9 @@
 # Native GBA link sessions
 
 Implementation branch: `feature/link-session`. Tracking: central Beads
-`beads-mc7.21`. This is an experimental runtime and validation backend. It is
-not yet a playable Emerald/Mario Kart netplay release.
+`beads-mc7.21`. Emerald and Mario Kart have playable two-player cable netplay.
+The owner verified linked gameplay in both desktop applications, then verified
+Minish Cap and Mega Man Zero single-player against the updated runtime.
 
 ## Implemented and checked
 
@@ -187,21 +188,21 @@ KEYINPUT. Omitting it from the digest could incorrectly confirm a predicted
 missing request. Both peers choose the same future boundary only after that
 control confirms; request and outage scenarios exercise this path.
 
-## Opt-in game application
+## Game application
 
-Emerald and Mario Kart builds can enable `GBARECOMP_NETPLAY=ON`. They require
-the engine feature branch, regenerated native code from the games' serial
-coverage branches, and a shared recomp-ui checkout with the netplay backend
-(qualified revision `b9ef2f539be3622eeb0e7d4a2ff33c8edf129667`). Explicit
+Emerald and Mario Kart desktop builds enable `GBARECOMP_NETPLAY` by default;
+the generic engine and Android retain an opt-in default. They require the
+games' regenerated serial coverage and pinned shared recomp-ui netplay backend. Explicit
 `GBARECOMP_ROOT`, `RECOMP_UI_ROOT`, and `GBA_GAME_GENERATED_ROOT` CMake paths
 allow qualification without replacing existing generated corpora or submodule
-pins. Netplay remains off by default.
+pins. `-DGBARECOMP_NETPLAY=OFF` still builds the single-player application.
 
 The shared launcher registers two-player cable rooms and maps input seats to
 cable positions, including a host occupying player two. Runtime entry verifies
 the original cartridge and retail BIOS, exchanges each owner's save and RTC,
 and uses a complete source identity over generated code, game hooks, devices
-and networking. Multiplayer skips plugins and expanded views. The runner owns
+and networking. Multiplayer skips general plugin activation. Only explicitly
+authorized presentation callbacks can build a wider local view. The runner owns
 the local window, input, forward audio/video, pacing and reconnect indication.
 
 For direct IP, both executables use the same nonzero session ID, opposite
@@ -230,6 +231,44 @@ the source cartridge save, ROM or BIOS.
 SDL dummy audio/video, a latency relay, whole-archive comparison, fresh-process
 resume and original-save hash checks. It does not qualify visible monitor
 pacing, audible quality, or Internet lobby/NAT traversal.
+
+### Independent local views
+
+The netplay launcher offers a separate **Your display** choice: Native (3:2),
+16:9, 21:9, 32:9, or Adaptive. Both games authorize these choices; each peer may
+use a different view/window/monitor. Adaptive follows the window's aspect,
+keeping 160 lines and clamping the logical width to 240–576 pixels. Fixed
+choices use 284, 373, and 569 pixels respectively; resizing scales/letterboxes
+that fixed view. Single-player mod/display settings remain independent.
+Direct entry also accepts `--netplay-view native|16:9|21:9|32:9|adaptive`.
+
+`GbaNetplayViewPolicy` is an explicit game capability. Leave `supported` false
+for guest-mutating enhancements; set `adaptive_supported=false` to omit/reject
+adaptive independently of fixed views and single-player policy. These trusted
+callbacks may read active-machine memory and author host pixels only. They do
+not activate the ordinary mod system, camera patches, or Mario Kart's 60fps mod.
+
+Each canonical PPU stays 240×160. A separate local presentation PPU observes
+the real scanline boundaries and copies the pre-line hidden affine references,
+so HBlank road changes render correctly without advancing guest time. Provider
+globals are scoped to this mirror. Window geometry, render caches and wide
+pixels are excluded from hashes/snapshots. Successful restore reattaches the
+observer and invalidates its caches; partial frames use native output until a
+complete wide frame is available. The existing output gate hides replay frames
+and audio. Emerald scenes without authored margins retain their native content.
+
+`multiplayer_view_tests` covers affine raster parity, unchanged canonical
+device state, capability gates and transactional restore. Each game also has
+an explicitly built `<GameTarget>ViewProbe` (ROM, BIOS, paired raw probe state,
+output prefix). It compares every session byte across fixed/adaptive widths,
+live resizing and a 12-frame replay using the actual generated game code and
+render hooks. Mario Kart's linked grid and Emerald's link lobby/overworld pass.
+At 32:9, measured simulation plus rendering throughput was about 154fps and
+105–107fps respectively on the qualification PC, excluding snapshot/network
+overhead. This is headroom evidence, not a portable performance guarantee.
+The actual application loopback harness accepts `--view0`, `--view1`, and
+`--mispredict`; differing views agree identical paired archives and resume under
+injected latency/jitter.
 
 The current product smoke passes Emerald on Windows/Linux and Mario Kart on
 Windows in both admission modes: 120 cold ticks, then 60 further ticks in new
@@ -369,16 +408,17 @@ the MVP validator refuses unsupported launches explicitly.
   per-context dispatch is possible. Peers will need every participating image
   locally. No ROM distribution is provided. Emerald ↔ Emerald remains first.
 
-## Remaining release gates
+## Remaining qualification limits
 
 The following are not implemented/qualified by the fixture tests:
 
 * Native batching and full generated/BIOS interior-resume coverage (including
   exceptional codegen paths), DMA beat/event ordering, and remaining normal-mode
   pin/clock edge cases.
-* Visible launcher host/join and local window/audio qualification on real
-  hardware. Startup identity, owner saves, RTC, seat mapping and the window
-  runner are implemented; automated application smoke uses SDL dummy drivers.
+* The owner has verified visible launcher host/join and linked gameplay in
+  Emerald and Mario Kart on Windows. Automated application smoke additionally
+  uses SDL dummy drivers; other hardware/display/audio combinations remain
+  unqualified.
 * Product recovery UX beyond explicit paired-archive CLI resume, process and
   power-loss qualification, and changed-endpoint discovery through the lobby.
   Agreement does not prove both peers' disks completed a write.
@@ -456,9 +496,8 @@ and Windows/Linux: 1,402,790 bytes, hash `f907c720` for the documented warm grid
 state and `mksc-usa-native-probe` identity. See `tests/link/scenarios/README.md`
 for the opt-in harness; it requires locally supplied images and paired state.
 
-Keep product netplay opt-in until these release gates are satisfied. Track
-task status in Beads, not by checking boxes
-in this architecture document.
+These limits do not imply that the initial two-player desktop cable path is
+unusable. Track outstanding qualification and integration status in Beads.
 
 ## Reproducing validation
 

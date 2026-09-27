@@ -94,12 +94,25 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
             !simulation.load_state(saved.state,&error)) throw std::runtime_error("cannot resume paired session: "+error);
         options.restored_pair=true;
     }
+    std::unique_ptr<GbaNetplayPresentation> presentation;
+    const bool adaptive = launch.view == GbaNetplayView::Adaptive;
+    const unsigned initial_width = gba_netplay_view_width(launch.view);
+    if (launch.view != GbaNetplayView::Native) {
+        presentation = std::make_unique<GbaNetplayPresentation>(launch.view_policy, boot.affine_filter);
+        presentation->request_width(initial_width);
+        simulation.input_machine(launch.local_seat).ppu.set_presentation_observer(presentation.get());
+    }
+    struct DetachPresentation {
+        GbaMultiplayerSession& simulation;
+        unsigned seat;
+        ~DetachPresentation() { simulation.input_machine(seat).ppu.set_presentation_observer(nullptr); }
+    } detach{simulation, launch.local_seat};
     GbaNetplayMatch match(simulation,std::move(options));
     if (rnet_session_start_lan(match.transport(),launch.bind_endpoint.c_str(),launch.peer_endpoint.c_str()))
         throw std::runtime_error("cannot open netplay transport");
     HostWindow window;
-    if (!window.open(boot.scale,240,160,boot.title.c_str(),boot.screen.c_str(),
-            boot.linear_filter,boot.sharp_filter,false,true))
+    if (!window.open(boot.scale,initial_width,160,boot.title.c_str(),boot.screen.c_str(),
+            boot.linear_filter,boot.sharp_filter,adaptive,true))
         throw std::runtime_error("cannot open netplay window");
     window.load_input_config(boot.config_directory.string().c_str(),false);
     window.set_fullscreen(boot.fullscreen); window.set_volume(boot.volume);
@@ -128,6 +141,11 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
         if (events.volume_up) window.set_volume(window.volume()+5);
         if (events.volume_down) window.set_volume(window.volume()-5);
         if (events.toggle_fps) window.set_fps_readout(!window.fps_readout());
+        if (adaptive && presentation) {
+            int width=0, height=0;
+            if (window.drawable_size(&width,&height))
+                presentation->request_width(gba_netplay_view_width(launch.view,width,height));
+        }
         // Pause, turbo, rewind and single-machine load never reach this
         // simulation. A save hotkey requests a confirmed paired save-and-leave.
         const auto now=GbaNetplayPacer::Clock::now();
@@ -142,6 +160,8 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
                 throw std::runtime_error(error);
             std::printf("netplay agreed tick=%u bytes=%zu machine=%u\n",match.checkpoint().next_tick,
                 match.checkpoint().state.size(),launch.seat_machine[launch.local_seat]);
+            std::printf("netplay replay=%llu view=%u\n",static_cast<unsigned long long>(match.replay_ticks()),
+                static_cast<unsigned>(launch.view));
             std::printf("netplay saved pair=%s\n",checkpoint_absolute.string().c_str());
             const auto until=GbaNetplayPacer::Clock::now()+std::chrono::seconds(1);
             while (GbaNetplayPacer::Clock::now()<until) {
@@ -160,7 +180,14 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
         const auto title=boot.title+" - "+status;
         if (title!=previous_title) { window.set_title(title.c_str()); previous_title=title; }
         if (match.take_output(output)) {
-            window.present(output.rgb888.data());
+            // Replayed/catch-up frames never pass take_output. A restore in
+            // mid-raster uses the canonical image until a complete wide frame.
+            const bool wide = presentation && presentation->pixels();
+            const unsigned width = wide ? presentation->width() : 240;
+            if (!window.set_surface_size(width,160))
+                throw std::runtime_error("cannot resize netplay presentation surface");
+            window.set_view_margins((width-240)/2,(width-240)-(width-240)/2,0,0);
+            window.present(wide ? presentation->pixels() : output.rgb888.data());
             window.push_audio_samples(output.audio.data(),output.audio.size());
         }
         if (step==GbaNetplayMatch::Step::Idle) pacer.idle();
