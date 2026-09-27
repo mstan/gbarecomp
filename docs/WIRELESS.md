@@ -1,6 +1,6 @@
 # Native Wireless Adapter / Union Room
 
-Implementation on `feature/wireless-union-room`, tracked by `beads-mc7.23`.
+Tracked by `beads-mc7.23`.
 First acceptance target: two USA Emerald instances enter the Union Room,
 discover one another and initiate an interaction, with deterministic replay.
 No complete battle or trade walkthrough is required for this milestone.
@@ -92,7 +92,7 @@ select `--netplay-device wireless` on both endpoints.
 
 Emerald also needs the five indirect ARM entries in the copied RFU IRQ block
 and the byte-validated native `rfu_STC_fastCopy` callback. Regenerate from this
-branch's `game.toml`; the older cable-only native corpus is insufficient.
+integration's `game.toml`; the older cable-only native corpus is insufficient.
 
 Configure the commercial probe with the normal generated/ROM/program settings
 and `GBARECOMP_LINK_PROBE_SETUP_SOURCE` pointing to Emerald's
