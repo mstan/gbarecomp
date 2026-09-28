@@ -209,6 +209,11 @@ uint32_t        runtime_call_stack_depth(void);
 const uint32_t* runtime_call_stack_data(void);
 void            runtime_call_stack_restore(const uint32_t* entries,
                                            uint32_t depth);
+// Restored entries have no host frame. When the stack is full, a push evicts
+// the older half of those above the IRQ floor (loudly: stderr + trace) instead
+// of aborting; guest returns stay correct because unmatched returns dispatch.
+// Only a stack full of host-backed frames still aborts.
+extern unsigned long long g_runtime_call_return_evictions;
 
 // Structured execution trace. The RUNTIME_TRACE_* kind macros
 // and RuntimeTraceEntry are defined in runtime_arm_types.h. This records

@@ -13,6 +13,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 
 // runtime_dispatch_miss / runtime_unimplemented_op default-abort
@@ -91,6 +92,20 @@ uint32_t g_call_return_depth = 0;
 // to the live depth for the duration of the handler; should_return/cancel_return
 // never look below it. Saved/restored across nested IRQs by runtime_irq().
 uint32_t g_call_return_floor = 0;
+// Entries [0, hostless) have no host C frame waiting on them: they were live
+// when the stack was restored from a context/snapshot, which is only legal
+// outside native dispatch. Suspended multiplayer dispatch keeps such entries
+// as guest continuations (cancel_return is a no-op then), so a call the guest
+// never returns through would otherwise stay forever. They are pure host
+// unwinding hints — every generated return falls back to dispatch when no
+// entry matches — so a full stack evicts the oldest of them instead of
+// aborting. Clamped whenever the depth drops below it.
+uint32_t g_call_return_hostless = 0;
+
+void clamp_call_return_hostless() {
+    if (g_call_return_hostless > g_call_return_depth)
+        g_call_return_hostless = g_call_return_depth;
+}
 
 const char* trace_kind_name(uint32_t kind) {
     switch (kind) {
@@ -914,8 +929,30 @@ extern "C" int runtime_has_static_entry(uint32_t pc, int thumb) {
     return entry != nullptr ? 1 : 0;
 }
 
+extern "C" unsigned long long g_runtime_call_return_evictions = 0;
+
 extern "C" void runtime_call_push_return(uint32_t return_pc) {
     uint32_t pc = return_pc & ~1u;
+    if (g_call_return_depth >= kCallReturnStackSize &&
+        g_call_return_hostless > g_call_return_floor) {
+        // Evict the older half of the host-less run above the IRQ floor. No
+        // IRQ continuation stores an index above the current floor, so only
+        // depth and the host-less mark move.
+        const uint32_t lo = g_call_return_floor;
+        const uint32_t n = (g_call_return_hostless - lo + 1u) / 2u;
+        std::memmove(&g_call_return_stack[lo], &g_call_return_stack[lo + n],
+                     (g_call_return_depth - lo - n) * sizeof(uint32_t));
+        g_call_return_depth -= n;
+        g_call_return_hostless -= n;
+        ++g_runtime_call_return_evictions;
+        if ((g_runtime_call_return_evictions & (g_runtime_call_return_evictions - 1u)) == 0)
+            std::fprintf(stderr,
+                         "runtime_arm: evicted %u host-less call-return "
+                         "entries at return_pc=0x%08X (eviction #%llu)\n",
+                         n, pc, g_runtime_call_return_evictions);
+        if (runtime_trace_enabled())
+            runtime_trace_event(RUNTIME_TRACE_CALL, pc, n, g_call_return_depth, 6u);
+    }
     if (g_call_return_depth >= kCallReturnStackSize) {
         std::fprintf(stderr,
                      "runtime_arm: generated call-return stack overflow "
@@ -942,6 +979,7 @@ extern "C" int runtime_call_should_return(uint32_t target_pc) {
                                     (slot + 1u == g_call_return_depth) ? 2u : 5u);
             }
             g_call_return_depth = slot;
+            clamp_call_return_hostless();
             return 1;
         }
     }
@@ -965,6 +1003,7 @@ extern "C" void runtime_call_cancel_return(uint32_t return_pc) {
             runtime_trace_event(RUNTIME_TRACE_CALL, pc, pc, g_call_return_depth,
                                 4u);
         --g_call_return_depth;
+        clamp_call_return_hostless();
     }
 }
 
@@ -986,6 +1025,8 @@ extern "C" void runtime_call_stack_restore(const uint32_t* entries,
     if (depth > kCallReturnStackSize) depth = kCallReturnStackSize;
     g_call_return_depth = depth;
     for (uint32_t i = 0; i < depth; ++i) g_call_return_stack[i] = entries[i];
+    // Restoring is only legal outside native dispatch: no host frame waits.
+    g_call_return_hostless = depth;
 }
 
 // runtime_dispatch_miss is defined in src/runtime/runtime_arm_default_aborts.cpp
@@ -1176,6 +1217,7 @@ extern "C" void runtime_exception_return(uint32_t new_pc) {
             for (unsigned i = 0; i < 4; ++i) g_cpu.R[i] = frame.preserved[i];
             g_cpu.R[12] = frame.preserved[4];
             g_call_return_depth = frame.return_depth;
+            clamp_call_return_hostless();
             g_call_return_floor = frame.return_floor;
             g_irq_iret_depth = frame.iret_depth;
             --g_irq_nest_depth;
@@ -1459,11 +1501,13 @@ extern "C" void runtime_irq(uint32_t return_address) {
 extern "C" void runtime_init(void* bus_handle) {
     gbarecomp::runtime_arm::g_bus_handle = bus_handle;
     g_call_return_depth = 0;
+    g_call_return_hostless = 0;
 }
 
 extern "C" void runtime_shutdown(void) {
     gbarecomp::runtime_arm::g_bus_handle = nullptr;
     g_call_return_depth = 0;
+    g_call_return_hostless = 0;
 }
 
 namespace gbarecomp {
