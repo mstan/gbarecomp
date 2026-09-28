@@ -29,6 +29,7 @@
 #include "interpreter.h"
 #include "overlay_abi.h"
 #include "runtime_arm.h"
+#include "runtime_context.h"
 #include "stubs.h"
 #include "test_cases.h"
 #include "thumb_decode.h"
@@ -552,6 +553,72 @@ bool run_call_return_stack_cases() {
     return true;
 }
 
+// A restored (host-less) stack that the guest never returns through must not
+// abort a session when it fills: suspended multiplayer dispatch keeps these
+// continuations, and MKSC's far-branch BLs used to leak one per frame.
+bool run_call_return_eviction_cases() {
+    auto fail = [](const char* why) {
+        std::printf("FAIL runtime_call_return_eviction: %s\n", why);
+        runtime_shutdown();
+        return false;
+    };
+    constexpr uint32_t kCap = 1024u;
+    std::vector<uint32_t> leaked(kCap);
+    for (uint32_t i = 0; i < kCap; ++i) leaked[i] = 0x08001000u + i * 4u;
+
+    // Full host-less stack: the next push evicts the older half.
+    runtime_init(nullptr);
+    const unsigned long long before = g_runtime_call_return_evictions;
+    runtime_call_stack_restore(leaked.data(), kCap);
+    runtime_call_push_return(0x08100000u);
+    if (g_runtime_call_return_evictions != before + 1u)
+        return fail("full host-less stack did not evict");
+    if (runtime_call_stack_depth() != kCap / 2u + 1u)
+        return fail("eviction did not drop exactly the older half");
+    const uint32_t* s = runtime_call_stack_data();
+    if (s[0] != leaked[kCap / 2u] || s[kCap / 2u - 1u] != leaked[kCap - 1u] ||
+        s[kCap / 2u] != 0x08100000u)
+        return fail("eviction reordered surviving entries");
+    // Survivors still behave as return hints.
+    if (!runtime_call_should_return(leaked[kCap - 1u]))
+        return fail("surviving newest host-less entry no longer matches");
+
+    // The host-less mark follows the depth down: a return into slot 3 leaves
+    // 3 host-less entries. Filling the rest with host-backed pushes, the next
+    // push may evict only from those 3 (the older 2), never a host frame.
+    runtime_call_stack_restore(leaked.data(), 8u);
+    if (!runtime_call_should_return(leaked[3]))
+        return fail("return into restored frame did not match");
+    for (uint32_t i = 0; i < kCap - 3u; ++i) runtime_call_push_return(0x09000000u + i * 4u);
+    const unsigned long long mid = g_runtime_call_return_evictions;
+    runtime_call_push_return(0x09F00000u);
+    if (g_runtime_call_return_evictions != mid + 1u)
+        return fail("host-less prefix below a full stack was not evicted");
+    s = runtime_call_stack_data();
+    if (runtime_call_stack_depth() != kCap - 1u || s[0] != leaked[2] ||
+        s[1] != 0x09000000u)
+        return fail("eviction touched host-backed frames or kept too many");
+    runtime_shutdown();
+
+    // Entries below the IRQ floor belong to the interrupted mainline and are
+    // never evicted, even when host-less.
+    gbarecomp::RuntimeArmContext ctx;
+    ctx.returns = leaked;
+    ctx.return_floor = kCap - 2u;
+    runtime_init(nullptr);
+    gbarecomp::runtime_restore_arm_context(ctx);
+    const unsigned long long floor_before = g_runtime_call_return_evictions;
+    runtime_call_push_return(0x08200000u);
+    s = runtime_call_stack_data();
+    if (g_runtime_call_return_evictions != floor_before + 1u ||
+        runtime_call_stack_depth() != kCap ||
+        s[kCap - 3u] != leaked[kCap - 3u] || s[kCap - 2u] != leaked[kCap - 1u] ||
+        s[kCap - 1u] != 0x08200000u)
+        return fail("eviction crossed the IRQ floor");
+    runtime_shutdown();
+    return true;
+}
+
 int thumb_alu_imm_test_override(uint32_t pc, uint32_t original,
                                 uint32_t* out) {
     if (pc == 0x0800E2D2u && original == 12u) {
@@ -680,6 +747,7 @@ int main() {
         if (!run_case(kTestCases[i], i)) ++failures;
     }
     if (!run_call_return_stack_cases()) ++failures;
+    if (!run_call_return_eviction_cases()) ++failures;
     if (!run_thumb_alu_immediate_override_cases()) ++failures;
     if (!run_runtime_trace_gate_cases()) ++failures;
     if (!run_overlay_runtime_trace_gate_cases()) ++failures;

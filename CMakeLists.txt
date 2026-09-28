@@ -789,6 +789,10 @@ add_executable(function_finder_tests tests/recompile/function_finder_test.cpp)
 target_link_libraries(function_finder_tests PRIVATE gbarecomp_recompile_core)
 add_test(NAME function_finder_tests COMMAND function_finder_tests)
 
+add_executable(link_branch_tests tests/recompile/link_branch_test.cpp)
+target_link_libraries(link_branch_tests PRIVATE gbarecomp_recompile_core)
+add_test(NAME link_branch_tests COMMAND link_branch_tests)
+
 add_executable(codegen_shards_tests tests/recompile/codegen_shards_test.cpp)
 target_link_libraries(codegen_shards_tests PRIVATE gbarecomp_recompile_core)
 add_test(NAME codegen_shards_tests COMMAND codegen_shards_tests)
