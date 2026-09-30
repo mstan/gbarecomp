@@ -15,6 +15,8 @@ int run(GbaMultiplayerSession& simulation,int slot,unsigned port,unsigned nonce,
         const std::string& output,bool restored=false) {
     GbaNetplayMatchOptions options;
     options.network.local_slot=slot; options.network.session_id=nonce;
+    const auto seats=static_cast<unsigned>(simulation.input_count());
+    options.network.slot_count=static_cast<rnet_u8>(seats); options.network.occupied_mask=(1u<<seats)-1;
     const auto* override_identity=std::getenv("GBA_TEST_BOOT_ID");
     options.identity=override_identity ? override_identity : identity;
     options.build_fingerprint=0x47424103; options.rollback=rollback;
@@ -25,7 +27,8 @@ int run(GbaMultiplayerSession& simulation,int slot,unsigned port,unsigned nonce,
     const auto* routed=std::getenv("GBA_TEST_PEER_PORT");
     const auto peer_port=routed ? std::strtoul(routed,nullptr,10) : port+1-slot;
     const auto bind="127.0.0.1:"+std::to_string(port+slot), peer="127.0.0.1:"+std::to_string(peer_port);
-    if (rnet_session_start_lan(match.transport(),bind.c_str(),peer.c_str())) return 3;
+    if (link_fixture::hub(slot) ? rnet_session_start_lan_hub(match.transport(),bind.c_str()) :
+        rnet_session_start_lan(match.transport(),bind.c_str(),peer.c_str())) return 3;
     std::string error;
     // A runner cannot publish a speculative pair, even before its first poll.
     if (match.store_checkpoint(output+".paired",&error) || std::filesystem::exists(output+".paired")) return 20;
@@ -50,8 +53,7 @@ int run(GbaMultiplayerSession& simulation,int slot,unsigned port,unsigned nonce,
         if (match.connection().phase==GbaConnectionPhase::Reconnecting) saw_reconnecting=true;
         if (saw_reconnecting && match.connection().phase==GbaConnectionPhase::Connected) recovered=true;
         if (step!=GbaNetplayMatch::Step::Idle) {
-            if (simulation.input_machine(0).bus.save().sram_read(1)!=0x90 ||
-                simulation.input_machine(1).bus.save().sram_read(1)!=0x91) return 12;
+            if (!link_fixture::owner_saves_intact(simulation)) return 12;
             const bool replay=step==GbaNetplayMatch::Step::Replay;
             const bool output_ready=match.take_output(frame);
             if (output_ready==replay || (output_ready && (frame.tick+1!=match.next_tick() || frame.machine!=unsigned(slot))) ||
@@ -91,7 +93,9 @@ int main(int argc,char** argv) {
         const int slot=std::atoi(argv[1]);
         const unsigned port=std::strtoul(argv[2],nullptr,10), nonce=std::strtoul(argv[3],nullptr,10);
         const bool rollback=std::atoi(argv[4])!=0;
-        auto simulation=link_fixture::create(true);
+        const auto players=static_cast<unsigned>(link_fixture::players());
+        if (slot<0 || slot>=static_cast<int>(players)) return 2;
+        auto simulation=link_fixture::create(true,false,players);
         simulation->input_machine(slot).bus.save().sram_write(1,0x90+slot);
         const auto status=run(*simulation,slot,port,nonce,rollback,argv[5]);
         if (status || !std::getenv("GBA_TEST_RESTART")) return status;

@@ -1,5 +1,6 @@
 #pragma once
 #include "multiplayer_session.h"
+#include <cstdlib>
 
 namespace link_fixture {
 // Native ABI fixture for transport tests. Each frame's keys travel through the
@@ -38,6 +39,20 @@ inline int program(std::uint32_t pc,int) {
     }
     runtime_tick(1);
     return 1;
+}
+// Two-process harness topology (tests/link/loopback.py): GBA_TEST_PLAYERS
+// consoles; GBA_TEST_HUB makes seat 0 the LAN star every other seat dials.
+inline int players() {
+    const auto* value=std::getenv("GBA_TEST_PLAYERS");
+    const int n=value ? std::atoi(value) : 2;
+    return n>=2 && n<=4 ? n : 2;
+}
+inline bool hub(int slot) { return slot==0 && players()>2 && std::getenv("GBA_TEST_HUB"); }
+// Each seat's owner wrote 0x90+seat to its own cartridge before startup.
+inline bool owner_saves_intact(gbarecomp::GbaMultiplayerSession& s) {
+    for (std::size_t seat=0;seat<s.input_count();++seat)
+        if (s.input_machine(seat).bus.save().sram_read(1)!=0x90+seat) return false;
+    return true;
 }
 // players: consoles on the cable (2..4). reverse_seats maps seat s to port N-1-s.
 inline std::unique_ptr<gbarecomp::GbaMultiplayerSession> create(bool repeat=false,bool reverse_seats=false,

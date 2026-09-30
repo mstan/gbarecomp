@@ -12,15 +12,17 @@
 
 int main(int argc,char** argv) {
     if (argc!=6) return 2; // slot, base port, session nonce, rollback, output
-    int slot=std::atoi(argv[1]),slots=2,delay=2,prediction=6;
+    int slot=std::atoi(argv[1]),slots=link_fixture::players(),delay=2,prediction=6;
     unsigned port=std::strtoul(argv[2],nullptr,10);
     bool rollback=std::atoi(argv[4])!=0;
-    auto simulation=link_fixture::create(true);
+    if (slot<0 || slot>=slots) return 2;
+    auto simulation=link_fixture::create(true,false,static_cast<unsigned>(slots));
     simulation->input_machine(slot).bus.save().sram_write(1,0x90+slot);
     gbarecomp::GbaNetplayHost host(*simulation);
     host.sample_local=[slot](std::uint32_t tick) { return std::uint16_t(((tick/5+slot)%3) ? (1u<<slot) : 0); };
     RNetConfig config; rnet_config_init_defaults(&config);
     config.local_slot=slot; config.input_delay=delay; config.session_id=std::strtoul(argv[3],nullptr,10);
+    config.slot_count=static_cast<rnet_u8>(slots); config.occupied_mask=(1u<<slots)-1;
     auto transport_host=host.delay_callbacks();
     auto* session=rnet_session_create(&config,&transport_host);
     char bind[64],peer[64];
@@ -28,7 +30,11 @@ int main(int argc,char** argv) {
     const auto* routed=std::getenv("GBA_TEST_PEER_PORT");
     const unsigned peer_port=routed ? std::strtoul(routed,nullptr,10) : port+1-slot;
     std::snprintf(peer,sizeof(peer),"127.0.0.1:%u",peer_port);
-    if (!session || rnet_session_start_lan(session,bind,peer)) return 3;
+    const bool hub=link_fixture::hub(slot);
+    const auto start_transport=[&] {
+        return hub ? rnet_session_start_lan_hub(session,bind) : rnet_session_start_lan(session,bind,peer);
+    };
+    if (!session || start_transport()) return 3;
     auto start=rbe_mono_ms();
     while (!rnet_session_is_running(session) && rbe_mono_ms()-start<5000) {
         rnet_session_pump(session); std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -45,9 +51,8 @@ int main(int argc,char** argv) {
         if (result==gbarecomp::GbaNetplayStartup::Status::Ready) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    if (simulation->input_machine(0).bus.save().sram_read(1)!=0x90 ||
-        simulation->input_machine(1).bus.save().sram_read(1)!=0x91) {
-        std::fprintf(stderr,"startup did not preserve both players' individual saves\n"); return 12;
+    if (!link_fixture::owner_saves_intact(*simulation)) {
+        std::fprintf(stderr,"startup did not preserve every player's individual save\n"); return 12;
     }
     host.begin_match();
     RNetRbDriver* driver=nullptr;
@@ -187,7 +192,7 @@ int main(int argc,char** argv) {
         // match even though this test deliberately reuses its UDP endpoints.
         config.session_id++; config.input_delay=2;
         session=rnet_session_create(&config,&transport_host);
-        if (!session || rnet_session_start_lan(session,bind,peer)) return 19;
+        if (!session || start_transport()) return 19;
         gbarecomp::GbaNetplayCheckpointAgreement restored(host,session,slot,
             "link-fixture/runtime-v1/bios-none/mods-none",UINT32_MAX,0);
         for (;;) {
