@@ -10,10 +10,15 @@ enum class GbaConnectionPhase { Connecting, Connected, Reconnecting, TimedOut, P
 struct GbaConnectionStatus {
     GbaConnectionPhase phase;
     std::uint32_t grace_remaining_ms;
+    // Seats (bit i = seat i) behind this phase: the players that left, timed
+    // out, or have been silent long enough to show Reconnecting. 0 otherwise.
+    std::uint32_t seats = 0;
 };
 // Host policy only: it never advances guest clocks or changes cable state.
 // Pump the existing transport/rollback driver during Reconnecting; do not tear
 // down an intact session merely because its latest input has not arrived.
+// Judged per remote seat: in a room of four, one silent console must not
+// hide behind the two that keep talking.
 GbaConnectionStatus gba_netplay_connection_status(const RNetSession*);
 struct GbaConfirmedCheckpoint {
     // All inputs before next_tick are confirmed. The snapshot is the entire
@@ -66,6 +71,7 @@ public:
     // Call after driver.finish_frame(); do not mutate the simulation directly.
     bool take_output(std::size_t local_seat, GbaNetplayOutput&);
     bool replaying() const { return replaying_; }
+    std::size_t seat_count() const { return inputs_.size(); }
     bool return_to_lobby_requested() const { return lobby_requested_; }
     const std::string& error() const { return error_; }
     std::uint32_t next_tick() const { return next_tick_; }
