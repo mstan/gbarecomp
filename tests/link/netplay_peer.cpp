@@ -118,7 +118,18 @@ int main(int argc,char** argv) {
         } else if (host.next_tick()) host.retain_confirmed(host.next_tick()-1);
         if (!replay) std::this_thread::sleep_for(std::chrono::milliseconds(ran ? 16 : 1));
     }
-    if (!drained) { std::fprintf(stderr,"loopback did not drain: tick %u %s\n",host.next_tick(),host.error().c_str()); return 8; }
+    if (!drained) {
+        std::fprintf(stderr,"loopback did not drain: tick %u %s",host.next_tick(),host.error().c_str());
+        if (driver) std::fprintf(stderr," confirmed=%u quiesce=%d episode=%d",rnet_rb_driver_confirmed_through(driver),
+            static_cast<int>(rnet_rb_driver_quiesce_state(driver)),rnet_rb_driver_episode_active(driver));
+        std::fprintf(stderr," tips=");
+        for (int other=0;other<slots;++other) {
+            rnet_u32 tip=0;
+            if (other!=slot && rnet_session_remote_tip(session,other,&tip)) std::fprintf(stderr,"%d:%u ",other,tip);
+        }
+        std::fputc('\n',stderr);
+        return 8;
+    }
     const auto confirmed=driver ? rnet_rb_driver_confirmed_through(driver) : host.next_tick()-1;
     const auto replay_ticks=driver ? rnet_rb_driver_resim_ticks(driver) : 0;
     const auto episodes=driver ? rnet_rb_driver_episode_count(driver) : 0;
