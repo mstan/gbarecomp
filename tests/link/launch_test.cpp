@@ -69,6 +69,18 @@ int main() {
         four.max_players=4;
         parse_gba_netplay_arguments(args,four);
         CHECK(four.enabled && four.player_count==4 && gba_netplay_transport(four)==GbaNetplayTransport::Hub);
+        CHECK(!four.rollback); // three or four consoles default to delay-sync
+        {
+            GbaNetplayLaunch explicit_rollback=four; explicit_rollback.enabled=false;
+            std::vector<std::string> mode={"game","--netplay-players","3","--netplay-rollback","--netplay-bind",
+                "0.0.0.0:5000","--netplay-seat","0","--netplay-session","7"};
+            parse_gba_netplay_arguments(mode,explicit_rollback);
+            CHECK(explicit_rollback.rollback && explicit_rollback.player_count==3);
+            GbaNetplayLaunch two=four; two.enabled=false; two.rollback=false; two.player_count=2;
+            mode={"game","--netplay-bind","0.0.0.0:5000","--netplay-seat","0","--netplay-session","7"};
+            parse_gba_netplay_arguments(mode,two);
+            CHECK(two.rollback && two.player_count==2); // two consoles keep the rollback default
+        }
         CHECK(gba_netplay_seat_identity(four)=="0:1:2:3");
         auto guest=four; guest.local_seat=2; CHECK(rejects(guest)); // a star guest must dial the hub
         guest.peer_endpoint="192.168.1.2:5000"; validate_gba_netplay_launch(guest);
