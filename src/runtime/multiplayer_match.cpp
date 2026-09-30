@@ -78,7 +78,8 @@ GbaNetplayMatch::Step GbaNetplayMatch::poll(bool allow_simulation) {
         connection_=gba_netplay_connection_status(session_);
         if (phase_==Phase::Failed || phase_==Phase::CheckpointReady) return Step::Idle;
         if (connection_.phase==GbaConnectionPhase::TimedOut || connection_.phase==GbaConnectionPhase::PeerLeft)
-            throw std::runtime_error("GBA match peer unavailable");
+            throw std::runtime_error("GBA match peer unavailable: "+gba_netplay_seat_names(connection_.seats)+
+                (connection_.phase==GbaConnectionPhase::PeerLeft ? " left" : " timed out"));
         if (phase_==Phase::Starting) {
             bool ready=false;
             if (startup_) {

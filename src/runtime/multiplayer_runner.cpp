@@ -181,7 +181,7 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
         }
         const auto connection=match.connection();
         const auto status=connection.phase==GbaConnectionPhase::Reconnecting ?
-            "Reconnecting ("+std::to_string((connection.grace_remaining_ms+999)/1000)+"s)" :
+            "Reconnecting "+gba_netplay_seat_names(connection.seats)+" ("+std::to_string((connection.grace_remaining_ms+999)/1000)+"s)" :
             match.phase()==GbaNetplayMatch::Phase::Starting ? std::string("Connecting") :
             (closing || (match.checkpoint_pending() && !boot.finish_tick)) ?
                 std::string("Saving and leaving - close again to discard") :

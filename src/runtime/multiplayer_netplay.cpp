@@ -11,12 +11,24 @@ namespace gbarecomp {
 GbaConnectionStatus gba_netplay_connection_status(const RNetSession* session) {
     constexpr std::uint32_t grace=60000, show_after=2000;
     if (!session) return {GbaConnectionPhase::Connecting,grace};
-    if (rnet_session_peer_disconnected(session,0)) return {GbaConnectionPhase::PeerLeft,0};
-    if (!rnet_session_is_running(session)) return {GbaConnectionPhase::Connecting,grace};
     RNetSessionStats stats{}; rnet_session_get_stats(session,&stats);
-    if (stats.last_peer_rx_age_ms>=grace) return {GbaConnectionPhase::TimedOut,0};
-    return {stats.last_peer_rx_age_ms>=show_after ? GbaConnectionPhase::Reconnecting : GbaConnectionPhase::Connected,
-        grace-static_cast<std::uint32_t>(stats.last_peer_rx_age_ms)};
+    const unsigned seats=std::min<unsigned>(stats.slot_count,RNET_MAX_SLOTS);
+    const std::uint32_t remote=((1u<<seats)-1)&~(1u<<stats.local_slot);
+    if (const auto gone=rnet_session_peer_gone_mask(session)&remote) return {GbaConnectionPhase::PeerLeft,0,gone};
+    if (rnet_session_peer_disconnected(session,0)) return {GbaConnectionPhase::PeerLeft,0,remote};
+    if (!rnet_session_is_running(session)) return {GbaConnectionPhase::Connecting,grace};
+    std::uint64_t worst=0; std::uint32_t late=0, lost=0;
+    for (unsigned seat=0;seat<seats;++seat) {
+        if (!(remote&(1u<<seat))) continue;
+        auto age=rnet_session_peer_rx_age_ms(session,static_cast<int>(seat));
+        if (age==RNET_PEER_RX_NEVER) age=stats.last_peer_rx_age_ms; // running, not yet heard directly
+        worst=std::max(worst,age);
+        if (age>=show_after) late|=1u<<seat;
+        if (age>=grace) lost|=1u<<seat;
+    }
+    if (lost) return {GbaConnectionPhase::TimedOut,0,lost};
+    return {late ? GbaConnectionPhase::Reconnecting : GbaConnectionPhase::Connected,
+        grace-static_cast<std::uint32_t>(worst),late};
 }
 namespace {
 constexpr std::uint32_t kSnapshotHeader=0x314e4247;
