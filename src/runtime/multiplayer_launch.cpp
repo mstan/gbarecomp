@@ -51,6 +51,7 @@ std::string gba_netplay_seat_identity(const GbaNetplayLaunch& launch) {
         identity+=(seat ? ":" : "")+std::to_string(launch.seat_machine[seat]);
     return identity;
 }
+bool gba_netplay_default_rollback(unsigned players) { return players<=2; }
 GbaNetplayTransport gba_netplay_transport(const GbaNetplayLaunch& l) {
     if (l.force_input_relay) return GbaNetplayTransport::Relay;
     if (l.player_count<=2) return GbaNetplayTransport::Pair;
@@ -60,6 +61,7 @@ void parse_gba_netplay_arguments(std::vector<std::string>& args,GbaNetplayLaunch
     auto staged=launch;
     std::vector<std::string> kept;
     unsigned fields=0, ports_given=0;
+    bool mode_given=false;
     for (std::size_t i=0;i<args.size();++i) {
         const auto& key=args[i];
         if (i==0 || !key.starts_with("--netplay-")) { kept.push_back(key); continue; }
@@ -86,7 +88,8 @@ void parse_gba_netplay_arguments(std::vector<std::string>& args,GbaNetplayLaunch
             continue;
         }
         staged.enabled=true;
-        if (key=="--netplay-delay-sync") { staged.rollback=false; continue; }
+        if (key=="--netplay-delay-sync") { staged.rollback=false; mode_given=true; continue; }
+        if (key=="--netplay-rollback") { staged.rollback=true; mode_given=true; continue; }
         if (key=="--netplay-relay") { staged.force_input_relay=true; continue; }
         if (i+1==args.size()) throw std::invalid_argument("missing value for "+key);
         const auto& value=args[++i];
@@ -121,6 +124,9 @@ void parse_gba_netplay_arguments(std::vector<std::string>& args,GbaNetplayLaunch
         else throw std::invalid_argument("unknown option "+key);
     }
     if (staged.enabled) {
+        // Both modes run at every cable size; unless one is named, two seats
+        // default to rollback and three or four to delay-sync.
+        if (!mode_given) staged.rollback=gba_netplay_default_rollback(staged.player_count);
         // A pair host and a star hub may listen without a peer; transport
         // validation below decides which seats must name one.
         if ((fields&13)!=13) throw std::invalid_argument("direct netplay requires bind, seat and session");

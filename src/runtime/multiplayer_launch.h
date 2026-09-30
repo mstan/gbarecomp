@@ -80,6 +80,10 @@ enum class GbaNetplayTransport {
     HubGuest   // 3+ seats, other seats without a relay: start_lan(bind, seat 0)
 };
 GbaNetplayTransport gba_netplay_transport(const GbaNetplayLaunch&);
+// Default mode when none is chosen: rollback for two consoles, delay-sync
+// for three or four (every client simulates all consoles; see MULTIPLAYER.md).
+// Both modes are supported at every size; an explicit choice always wins.
+bool gba_netplay_default_rollback(unsigned players);
 // Seat -> cable port list folded into the exact session identity.
 std::string gba_netplay_seat_identity(const GbaNetplayLaunch&);
 // Optional direct-IP entry; strips only --netplay-* options. Both endpoints
