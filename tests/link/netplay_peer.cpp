@@ -58,7 +58,7 @@ int main(int argc,char** argv) {
         cfg.input_delay=&delay; cfg.input_prediction=&prediction;
         cfg.replay_mode=RNET_RB_REPLAY_INCREMENTAL;
         cfg.part_names[0]="GBA0"; cfg.part_names[1]="other-GBAs"; cfg.part_names[2]="cable-and-scheduler";
-        cfg.snap_depth=gbarecomp::GbaNetplayHost::kSnapshotDepth;
+        cfg.snap_depth=host.snapshot_depth();
         cfg.log_prefix="gba_rb"; cfg.env_alias="GBA_RB";
         rnet_rb_driver_set_identity(driver,0x47424101,0x12345678);
         auto callbacks=host.callbacks();

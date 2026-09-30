@@ -274,11 +274,13 @@ bool GbaMultiplayerSession::load_state(std::span<const std::uint8_t> bytes, std:
         return false;
     }
 }
-std::uint32_t GbaMultiplayerSession::state_hash() const {
-    const auto bytes = save_state();
+std::uint32_t GbaMultiplayerSession::state_digest(std::span<const std::uint8_t> bytes) {
     std::uint32_t hash = 2166136261u;
     for (auto byte : bytes) hash = (hash ^ byte) * 16777619u;
     return hash;
+}
+std::uint32_t GbaMultiplayerSession::state_hash() const {
+    return state_digest(save_state());
 }
 std::array<std::uint32_t,3> GbaMultiplayerSession::state_hash_parts() const {
     auto hash = [](std::span<const std::uint8_t> bytes) {
