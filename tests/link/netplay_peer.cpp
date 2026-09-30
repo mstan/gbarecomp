@@ -120,8 +120,12 @@ int main(int argc,char** argv) {
     }
     if (!drained) {
         std::fprintf(stderr,"loopback did not drain: tick %u %s",host.next_tick(),host.error().c_str());
-        if (driver) std::fprintf(stderr," confirmed=%u quiesce=%d episode=%d",rnet_rb_driver_confirmed_through(driver),
-            static_cast<int>(rnet_rb_driver_quiesce_state(driver)),rnet_rb_driver_episode_active(driver));
+        if (driver) {
+            char state[256];
+            rnet_rb_driver_debug_state(driver, state, sizeof(state));
+            std::fprintf(stderr," confirmed=%u quiesce=%d episode=%d %s",rnet_rb_driver_confirmed_through(driver),
+                static_cast<int>(rnet_rb_driver_quiesce_state(driver)),rnet_rb_driver_episode_active(driver),state);
+        }
         std::fprintf(stderr," tips=");
         for (int other=0;other<slots;++other) {
             rnet_u32 tip=0;

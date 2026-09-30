@@ -51,6 +51,7 @@ class UdpRelay:
         self.outage_started = None
         self.dropped = self.delayed = self.peak = 0
         self.upload_acks_dropped = self.ready_acks_dropped = 0
+        self.commit_hole_dropped = self.commit_hole_requested = 0
         self.errors = []
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -125,6 +126,14 @@ class UdpRelay:
                         self.dropped += 1
                         continue
                     for dest in destinations:
+                        if self.mode == "commit_hole" and len(packet) >= 22:
+                            kind = struct.unpack_from("<H",packet,4)[0]
+                            if sender == 1 and kind == 20 and packet[12] == 6 and packet[11] == 0 and struct.unpack_from("<I",packet,18)[0] == 58:
+                                self.commit_hole_requested += 1
+                            if sender == 0 and dest == 1 and kind == 24 and struct.unpack_from("<I",packet,12)[0] == 58 and not self.commit_hole_requested:
+                                self.commit_hole_dropped += 1
+                                self.dropped += 1
+                                continue
                         if len(pending) >= 8192:
                             raise RuntimeError("UDP simulation queue overflow; latency result invalid")
                         self.delayed += 1

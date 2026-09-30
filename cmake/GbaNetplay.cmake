@@ -120,6 +120,8 @@ if(Python3_Interpreter_FOUND)
             $<TARGET_FILE:${peer}> ${rollback} ${scenario} ${players} ${topology})
         set_tests_properties(${name} PROPERTIES TIMEOUT 150)
     endfunction()
+    gbarecomp_netplay_n_loopback(multiplayer_rollback_missing_commit_4p_loopback multiplayer_netplay_peer
+        1 commit_hole 4 sfu)
     foreach(players 3 4)
         if(players EQUAL 3)
             set(topology hub)
@@ -159,8 +161,4 @@ if(Python3_Interpreter_FOUND)
                 1 ${scenario} ${players} ${topology})
         endforeach()
     endforeach()
-    # Known recomp-net defect beads-3qv.1.10: the INPUT retransmit floor is one
-    # max-over-seats ack, so a four-seat outage can lose a seat's rows for
-    # good (all peers stall). Kept registered and visible, not silently absent.
-    set_tests_properties(multiplayer_rollback_outage_4p_loopback PROPERTIES DISABLED TRUE)
 endif()

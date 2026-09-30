@@ -48,7 +48,7 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
                 env["GBA_TEST_OUTAGE_TRIGGER"] = str(root / "outage")
             # Force corrections as well as naturally late rows: verify restored
             # state matters, not just that idle peers reach the same final PC.
-            env["GBA_RB_FORCE_MISPREDICT"] = "7" if rollback and slot == 0 else "0"
+            env["GBA_RB_FORCE_MISPREDICT"] = "7" if rollback and slot == 0 and mode != "commit_hole" else "0"
             log = open(root / f"peer{slot}.log", "w", encoding="utf-8")
             logs.append(log)
             peers.append(subprocess.Popen([exe, str(slot), str(port), str(nonce), str(rollback), str(root / f"peer{slot}.txt")],
@@ -82,7 +82,7 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
             restarts = {(root / f"peer{i}.txt.restart").read_bytes() for i in range(players)}
             assert len(restarts) == 1, "warm restart timelines differ"
             print("restored the agreed archive on a fresh connection and matched 30 further input ticks")
-        if rollback:
+        if rollback and mode != "commit_hole":
             assert all(int(r[0].split()[3]) > 0 for r in reports), "rollback was not exercised by both peers"
         if mode in ("outage", "request_outage"):
             assert not relay.errors, relay.errors
@@ -93,6 +93,9 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
         if mode == "startup_loss":
             assert relay.upload_acks_dropped > 0 and relay.ready_acks_dropped == 3, "startup loss was not exercised"
             print("startup survived lost upload ACKs and lost ready replies")
+        if mode == "commit_hole":
+            assert relay.commit_hole_dropped > 0 and relay.commit_hole_requested > 0, "missing FRAME_COMMIT recovery was not exercised"
+            print(f"recovered the missing seat-0 FRAME_COMMIT at tick 58 ({relay.commit_hole_dropped} copies held)")
         assert not relay.errors, relay.errors
         assert relay.delayed > 0 and relay.peak > 0, "latency injection was not exercised"
         if mode == "loss":
