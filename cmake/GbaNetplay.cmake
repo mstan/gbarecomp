@@ -10,7 +10,8 @@ function(gbarecomp_target_netplay_view_probe target adapter)
     list(FILTER sources EXCLUDE REGEX "(^|/)main\\.cpp$")
     set(probe ${target}ViewProbe)
     add_executable(${probe} EXCLUDE_FROM_ALL ${sources} ${adapter}
-        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tests/link/view_game_probe.cpp")
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tests/link/view_game_probe.cpp"
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tools/link_session/netplay_probe.cpp")
     get_target_property(includes ${target} INCLUDE_DIRECTORIES)
     get_target_property(defines ${target} COMPILE_DEFINITIONS)
     get_target_property(libraries ${target} LINK_LIBRARIES)

@@ -10,12 +10,23 @@ namespace gbarecomp_seam {
 struct NetplayBackend {
     std::shared_ptr<gbarecomp::GbaNetplayLaunch> launch;
     std::string game,version,content,directory;
+    std::vector<const char*> view_labels;
 #if defined(RECOMP_LAUNCHER_HAS_SESSION_VARIANT)
     std::vector<RecompNetplaySessionVariant> variants;
 #endif
     ~NetplayBackend() { if (launch) recomp_netplay_host_shutdown(); }
 };
 inline NetplayBackend& netplay_backend() { static NetplayBackend state; return state; }
+
+inline int netplay_view_index(gbarecomp::GbaNetplayView view,const gbarecomp::GbaNetplayViewPolicy& policy) {
+    const auto views=gbarecomp::gba_netplay_available_views(policy);
+    const auto found=std::find(views.begin(),views.end(),view);
+    return found==views.end() ? 0 : static_cast<int>(found-views.begin());
+}
+inline gbarecomp::GbaNetplayView netplay_view_at(int index,const gbarecomp::GbaNetplayViewPolicy& policy) {
+    const auto views=gbarecomp::gba_netplay_available_views(policy);
+    return index>=0 && index<static_cast<int>(views.size()) ? views[index] : gbarecomp::GbaNetplayView::Native;
+}
 
 inline void configure_netplay(RecompLauncherCGameInfo& gi,const gbarecomp::RunOptions& opts,
                               const std::string& directory) {
@@ -75,8 +86,11 @@ inline void configure_netplay(RecompLauncherCGameInfo& gi,const gbarecomp::RunOp
 #if defined(RECOMP_LAUNCHER_HAS_NETPLAY_VIEW)
     static const char* const views[]={"Native (3:2)","16:9","21:9","32:9","Adaptive"};
     if (opts.netplay->view_policy.supported) {
-        gi.netplay_view_labels=views;
-        gi.num_netplay_view_labels=opts.netplay->view_policy.adaptive_supported ? 5 : 4;
+        state.view_labels.clear();
+        for (auto view:gbarecomp::gba_netplay_available_views(opts.netplay->view_policy))
+            state.view_labels.push_back(views[static_cast<unsigned>(view)]);
+        gi.netplay_view_labels=state.view_labels.data();
+        gi.num_netplay_view_labels=static_cast<int>(state.view_labels.size());
     }
 #endif
 }

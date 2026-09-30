@@ -2,6 +2,7 @@
 #include "gba_ppu.h"
 #include <memory>
 #include <string_view>
+#include <vector>
 
 namespace gbarecomp {
 struct ExtendedViewFrameInfo;
@@ -29,6 +30,7 @@ struct GbaNetplayViewPolicy {
 };
 GbaNetplayView parse_gba_netplay_view(std::string_view);
 void validate_gba_netplay_view(GbaNetplayView, const GbaNetplayViewPolicy&);
+std::vector<GbaNetplayView> gba_netplay_available_views(const GbaNetplayViewPolicy&);
 // Fixed views ignore the drawable. Adaptive follows the drawable aspect and
 // clamps to [240, min(max_width, GbaPpu::kMaxRenderWidth)].
 unsigned gba_netplay_view_width(GbaNetplayView, int drawable_width = 0, int drawable_height = 0,

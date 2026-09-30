@@ -773,8 +773,9 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     ls.widescreen    = cfg.widescreen;
     ls.adaptive_view = cfg.adaptive_view;
 #if defined(RECOMP_LAUNCHER_HAS_NETPLAY_VIEW) && defined(RECOMP_UI_HAS_NETPLAY_HOST)
-    ls.netplay_view_index = opts.netplay && opts.netplay->view_explicit
-        ? static_cast<int>(opts.netplay->view) : cfg.netplay_view;
+    if (opts.netplay) ls.netplay_view_index=gbarecomp_seam::netplay_view_index(
+        opts.netplay->view_explicit ? opts.netplay->view : static_cast<gbarecomp::GbaNetplayView>(cfg.netplay_view),
+        opts.netplay->view_policy);
 #endif
     ls.enable_audio  = 1;
     ls.audio_freq    = 32768;             // GBA mixer base rate (display only)
@@ -906,8 +907,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     if (rc != 0) return 0;    // unavailable: fall back to the asset picker
 #if defined(RECOMP_UI_HAS_NETPLAY_HOST)
 #if defined(RECOMP_LAUNCHER_HAS_NETPLAY_VIEW)
-    if (opts.netplay) opts.netplay->view=static_cast<gbarecomp::GbaNetplayView>(ls.netplay_view_index);
-    cfg.netplay_view=ls.netplay_view_index;
+    if (opts.netplay) {
+        opts.netplay->view=gbarecomp_seam::netplay_view_at(ls.netplay_view_index,opts.netplay->view_policy);
+        cfg.netplay_view=static_cast<int>(opts.netplay->view);
+    }
 #endif
     try { gbarecomp_seam::accept_netplay(ls.netplay_launch,opts); }
     catch (const std::exception& e) { std::fprintf(stderr,"netplay: %s\n",e.what()); return 1; }

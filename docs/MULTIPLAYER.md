@@ -566,6 +566,39 @@ unusable. Track outstanding qualification and integration status in Beads.
 
 ## Reproducing validation
 
+### Kirby four-player presentation and performance
+
+The desktop runner draws one local host mirror, including when the selected
+view is native. All canonical consoles still advance PPU timing, affine
+reference accumulators, DMA and interrupts. Their native pixel buffers stay
+zero, so remote pixel rendering is avoided and every peer hashes the same
+state regardless of local window geometry. Restore preserves this host policy;
+a mid-raster restore waits for a complete host frame before presenting again.
+
+The game's immediate capture hook must opt in as an observer to retain native
+instruction batching. Such hooks must return zero and leave guest registers
+and memory untouched. The Thumb slice classifier caches by actual opcode,
+with live register/PC address checks; RAM modifications invalidate naturally.
+
+Kirby 16:9 qualification: four processes, 3,000 linked-gameplay frames, 40 ms
+latency / 10 ms jitter each direction, input delay 10, 59.47–59.53 forward fps
+on Ryzen 7 9800X3D. All final 2,674,424 state bytes agree. The game's checked-in
+controller scripts build a fresh four-human-player room checkpoint without
+editing guest RAM. The view probe also compares every canonical state against
+native during fixed-width and adaptive-resize runs, including 12-frame replay.
+
+Build the game's `KirbyAmazingMirrorRecompViewProbe` target. Its arguments are
+`ROM BIOS raw-state-or-cold output-prefix [players [prepare-frames [inputs]]]`.
+Prepare 2,760 cold frames with `tests/netplay-start-4p.inputs`; then run
+`tests/link/view_network_loopback.py` from this engine with that warm `.state`
+file, `--widths 284,284,284,284 --frames 3000 --input-delay 10 --min-fps 59`
+and the game's `tests/netplay-movement-4p.inputs`. The harness requires local
+licensed images and records each peer's log and exact final state.
+
+Six frames of delay were insufficient for that injected latency/jitter,
+despite adequate simulation speed. Delay must cover the connection's delivery
+variation; the display choice does not change this requirement.
+
 Configure/build the ordinary native engine, then build `link_tests`,
 `multiplayer_session_tests` and `codegen_tests`. With `arm-none-eabi-gcc` and
 `arm-none-eabi-objcopy` available (devkitARM is detected on Windows), the

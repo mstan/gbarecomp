@@ -17,6 +17,10 @@ struct GbaInstance {
     RuntimeTimingContext timing;
     gba::GbaBus bus;
     gba::GbaPpu ppu;
+    // Trusted presentation-only immediate hook: must return zero and leave
+    // guest CPU/memory untouched. Opt in only after differential qualification.
+    // Allows generated instruction batching with an observation callback.
+    bool immediate_override_is_observer = false;
     explicit GbaInstance(GbaMachineDescriptor descriptor);
 };
 

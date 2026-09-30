@@ -142,7 +142,7 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
     static std::uint64_t profile_frames = 0;
     const bool profile = profile_enabled && (++profile_frames % 60 == 0);
     const auto profile_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
-    std::chrono::nanoseconds cpu_time{0}, schedule_time{0}, device_time{0};
+    std::chrono::nanoseconds cpu_time{0}, schedule_time{0}, device_time{0}, binding_time{0};
     std::uint64_t dispatches = 0, passes = 0;
     unsigned zero_cycle_passes = 0;
     while (cycle_ < target) {
@@ -161,11 +161,13 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
                 continue;
             }
             instance.timing.cycles = cycle_;
+            auto bind_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
             bind(instance);
+            if (profile) binding_time += ProfileClock::now() - bind_start;
             const auto& e=instance.execution;
             const bool ram_callback=e.ram_dispatch && e.cpu.R[15]>=0x02000000 && e.cpu.R[15]<0x04000000 &&
                 (!e.ram_dispatch_filter || e.ram_dispatch_filter(e.cpu.R[15],(e.cpu.cpsr&CPSR_T_BIT) ? 1 : 0));
-            const bool generated = !e.program_dispatch && !e.immediate_override && !e.read_override &&
+            const bool generated = !e.program_dispatch && (!e.immediate_override || instance.immediate_override_is_observer) && !e.read_override &&
                 !e.force_interp && !e.entry_hook && !e.bios_hook &&
                 !gba::g_rom_read16_override && !gba::g_rom_read32_override;
             if (native_slices_ && generated && !ram_callback) {
@@ -187,7 +189,9 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
             try { runtime_dispatch(g_cpu.R[15]); }
             catch (const RuntimeDispatchYield&) { /* all guest residue is explicit */ }
             catch (...) { capture(instance); throw; }
+            bind_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
             capture(instance);
+            if (profile) binding_time += ProfileClock::now() - bind_start;
             instance.timing.cycles += io.take_dma_steal_cycles();
         }
         if (profile) cpu_time += ProfileClock::now() - cpu_start;
@@ -217,10 +221,14 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
         const auto device_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
         for (auto& ptr : machines_) {
             auto& instance = *ptr;
+            auto bind_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
             bind(instance);
+            if (profile) binding_time += ProfileClock::now() - bind_start;
             runtime_session_tick_devices(delta);
             instance.bus.rtc().advance_emulated_clock(delta);
+            bind_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
             capture(instance);
+            if (profile) binding_time += ProfileClock::now() - bind_start;
             instance.timing.cycles += instance.bus.io().take_dma_steal_cycles();
         }
         if (profile) {
@@ -233,9 +241,9 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
         const auto ms = [](auto duration) {
             return std::chrono::duration<double, std::milli>(duration).count();
         };
-        std::fprintf(stderr, "[session:profile] machines=%zu frame=%llu total_ms=%.3f cpu_ms=%.3f schedule_ms=%.3f devices_ms=%.3f dispatches=%llu passes=%llu\n",
+        std::fprintf(stderr, "[session:profile] machines=%zu frame=%llu total_ms=%.3f cpu_ms=%.3f schedule_ms=%.3f devices_ms=%.3f binding_ms=%.3f dispatches=%llu passes=%llu\n",
             machines_.size(), static_cast<unsigned long long>(profile_frames), ms(ProfileClock::now() - profile_start),
-            ms(cpu_time), ms(schedule_time), ms(device_time),
+            ms(cpu_time), ms(schedule_time), ms(device_time), ms(binding_time),
             static_cast<unsigned long long>(dispatches), static_cast<unsigned long long>(passes));
     }
 }
@@ -272,12 +280,14 @@ bool GbaMultiplayerSession::load_state(std::span<const std::uint8_t> bytes, std:
             to.bus.set_bios(from.bus.bios());
             if (from.bus.rom_ptr()) to.bus.set_rom(from.bus.rom_ptr(),from.bus.rom_size());
             to.execution = from.execution; // retain trusted program callbacks
+            to.immediate_override_is_observer = from.immediate_override_is_observer;
             execution_state(a,to.execution);
             a(to.timing.cycles,to.timing.vblank_starts);
             std::vector<std::uint8_t> device;
             a.vector(device,4*1024*1024);
             if (!gba::load_device_state(to.bus,to.ppu,device))
                 throw std::invalid_argument("invalid GBA device state");
+            to.ppu.set_rasterization_enabled(from.ppu.rasterization_enabled());
             if (!to.bus.io().halted() && to.timing.cycles < staged->cycle_)
                 throw std::invalid_argument("CPU is behind session timeline");
         }

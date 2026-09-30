@@ -64,6 +64,7 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
     simulation.set_native_slices(true);
     for (unsigned id=0;id<players;++id) {
         auto& m=simulation.machine(id);
+        m.ppu.set_rasterization_enabled(false);
         m.bus.set_bios(boot.bios); m.bus.set_rom(boot.rom->data(),boot.rom->size());
         configure_save(m.bus.save(),boot.save);
         if (launch.setup_instance) launch.setup_instance(m);
@@ -104,11 +105,9 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
     const bool adaptive = launch.view == GbaNetplayView::Adaptive;
     const unsigned initial_width = gba_netplay_view_width(launch.view, 0, 0,
                                                           launch.view_policy.max_width);
-    if (launch.view != GbaNetplayView::Native) {
-        presentation = std::make_unique<GbaNetplayPresentation>(launch.view_policy, boot.affine_filter);
-        presentation->request_width(initial_width);
-        simulation.input_machine(launch.local_seat).ppu.set_presentation_observer(presentation.get());
-    }
+    presentation = std::make_unique<GbaNetplayPresentation>(launch.view_policy, boot.affine_filter);
+    presentation->request_width(initial_width);
+    simulation.input_machine(launch.local_seat).ppu.set_presentation_observer(presentation.get());
     struct DetachPresentation {
         GbaMultiplayerSession& simulation;
         unsigned seat;
@@ -191,14 +190,15 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
         const auto title=boot.title+" - "+status;
         if (title!=previous_title) { window.set_title(title.c_str()); previous_title=title; }
         if (match.take_output(output)) {
-            // Replayed/catch-up frames never pass take_output. A restore in
-            // mid-raster uses the canonical image until a complete wide frame.
-            const bool wide = presentation && presentation->pixels();
-            const unsigned width = wide ? presentation->width() : 240;
-            if (!window.set_surface_size(width,160))
-                throw std::runtime_error("cannot resize netplay presentation surface");
-            window.set_view_margins((width-240)/2,(width-240)-(width-240)/2,0,0);
-            window.present(wide ? presentation->pixels() : output.rgb888.data());
+            // A mid-raster restore waits for a complete host image. Canonical
+            // consoles intentionally retain no pixels; audio still advances.
+            if (const auto* pixels=presentation->pixels()) {
+                const unsigned width=presentation->width();
+                if (!window.set_surface_size(width,160))
+                    throw std::runtime_error("cannot resize netplay presentation surface");
+                window.set_view_margins((width-240)/2,(width-240)-(width-240)/2,0,0);
+                window.present(pixels);
+            }
             window.push_audio_samples(output.audio.data(),output.audio.size());
         }
         if (step==GbaNetplayMatch::Step::Idle) pacer.idle();

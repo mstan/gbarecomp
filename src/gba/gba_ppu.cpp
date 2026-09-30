@@ -1998,7 +1998,8 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
                 if ((pixel.color & 0x8000) || pixel.priority > 3 ||
                     (!layer_enabled(x, 4) && !g_ws_authored_margin_layers)) continue;
                 submit(x, pixel.color, pixel.priority * 256 + (pixel.order & 127), 4,
-                       false, (second_targets & (1u << 4)) != 0);
+                       pixel.semi_transparent && blend_enabled(x),
+                       (second_targets & (1u << 4)) != 0);
             }
         }
     }
@@ -2364,6 +2365,7 @@ void GbaPpu::render_scanline(uint32_t y,
         state.y += pd;
     }
 
+    if (!rasterization_enabled_) return;
     if (!view_expanded()) {
         render_scanline_internal(work_fb_.data(), y, dispcnt,
                                  affine_io.data(), vram, oam, pal,
@@ -2408,9 +2410,18 @@ void GbaPpu::latch_framebuffer(uint16_t dispcnt,
 }
 
 void GbaPpu::mark_framebuffer_latched() {
-    std::memcpy(latched_fb_.data(), work_fb_.data(), render_bytes());
+    if (rasterization_enabled_)
+        std::memcpy(latched_fb_.data(), work_fb_.data(), render_bytes());
     has_latched_fb_ = true;
     if (presentation_) presentation_->frame_ready();
+}
+
+void GbaPpu::set_rasterization_enabled(bool enabled) {
+    rasterization_enabled_ = enabled;
+    if (!enabled) {
+        std::fill(work_fb_.begin(),work_fb_.end(),0);
+        std::fill(latched_fb_.begin(),latched_fb_.end(),0);
+    }
 }
 
 }  // namespace gba

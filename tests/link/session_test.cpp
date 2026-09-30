@@ -1,10 +1,37 @@
 #include "multiplayer_session.h"
+#include "multiplayer_slice.h"
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 
 #define CHECK(expr) do { if (!(expr)) { std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr); std::exit(1); } } while (0)
 namespace {
+void slice_classification_cache() {
+    auto bus=std::make_unique<gba::GbaBus>();
+    ArmCpuState cpu{}; cpu.cpsr=CPSR_T_BIT; cpu.R[15]=0x02000000;
+    auto safe=[&] { return gbarecomp::multiplayer_slice_safe(*bus,cpu); };
+    for(unsigned word=0;word<0x4800;++word) {
+        bus->write16(0x02000000,word); CHECK(safe());
+    }
+    // Same opcode, live base register changed from RAM to a device.
+    bus->write16(0x02000000,0x6808); cpu.R[1]=0x02000100; CHECK(safe());
+    cpu.R[1]=0x04000128; CHECK(!safe());
+    cpu.R[1]=0x02000100; CHECK(safe());
+    // Self-modified RAM and undefined/SWI encodings must never reuse a safe hit.
+    bus->write16(0x02000000,0xdf00); CHECK(!safe());
+    bus->write16(0x02000000,0xe800); CHECK(!safe());
+    bus->write16(0x02000000,0x6808); CHECK(safe());
+    // Literal LDR's address uses the current PC, even with opcode-keyed IR.
+    std::array<std::uint8_t,512> rom{};
+    rom[0xBC]=rom[0xFC]=0; rom[0xBD]=rom[0xFD]=0x48;
+    bus->set_rom(rom.data(),rom.size());
+    cpu.R[15]=0x080000FC; CHECK(safe());
+    cpu.R[15]=0x080000BC; CHECK(!safe()); // cartridge GPIO, not plain ROM
+    cpu.cpsr=0; cpu.R[15]=0x02000000;
+    bus->write32(0x02000000,0xe5910000); CHECK(safe());
+    cpu.R[1]=0x04000128; CHECK(!safe());
+    bus->write32(0x02000000,0xef000000); CHECK(!safe());
+}
 void return_yield_continuation() {
     using namespace gbarecomp;
     RuntimeArmContext original, guest;
@@ -333,6 +360,7 @@ void exception_continuations(bool return_yield) {
 }
 }
 int main() {
+    slice_classification_cache();
     return_yield_continuation();
     exception_continuations(false); exception_continuations(true);
     native_exchange(); native_exchange_n(3); native_exchange_n(4); ram_dispatch_rendezvous();

@@ -18,6 +18,7 @@ void raster() {
     // A game that opts into the engine's full capacity (50:9 and beyond).
     GbaNetplayPresentation mirror({true,true,nullptr,nullptr,nullptr,gba::GbaPpu::kMaxRenderWidth});
     observed->set_presentation_observer(&mirror);
+    observed->set_rasterization_enabled(false);
     // Affine BG2, a wrapped colorful tilemap. Writes below emulate changing
     // road matrices and hidden-reference reloads on individual HBlanks.
     std::array<std::uint8_t,0x400> io{};
@@ -45,7 +46,10 @@ void raster() {
         for (auto* p:{native.get(),observed.get(),reference.get()}) p->mark_framebuffer_latched();
         CHECK(mirror.pixels() && mirror.width()==width);
         CHECK(std::memcmp(mirror.pixels(),reference->latched_framebuffer(),width*160*3)==0);
+        // Pixel production changes no hardware timing or affine registers.
+        native->set_rasterization_enabled(false);
         CHECK(gba::save_device_state(*bus,*native)==gba::save_device_state(*bus,*observed));
+        native->set_rasterization_enabled(true);
     }
     // External provider state must not leak into/out of the mirror.
     gba::g_ws_pillarbox=1;
@@ -61,6 +65,8 @@ void restores() {
     c.machines={{0,"fixture",std::string(40,'a')},{1,"fixture",std::string(40,'a')}};
     c.links={{GbaLinkMedium::Cable,{0,1}}}; c.input_machines={0,1};
     GbaMultiplayerSession session(c);
+    session.machine(1).immediate_override_is_observer=true;
+    session.machine(1).ppu.set_rasterization_enabled(false);
     GbaNetplayPresentation mirror({true,true});
     auto& ppu=session.machine(1).ppu;
     ppu.set_presentation_observer(&mirror);
@@ -71,6 +77,10 @@ void restores() {
     CHECK(&ppu==&session.machine(1).ppu);
     CHECK(session.machine(1).ppu.presentation_observer()==&mirror);
     CHECK(session.load_state(snapshot,&error));
+    CHECK(session.machine(1).immediate_override_is_observer);
+    CHECK(!session.machine(1).ppu.rasterization_enabled());
+    CHECK(session.machine(0).ppu.rasterization_enabled());
+    CHECK(!session.machine(0).immediate_override_is_observer);
     CHECK(session.machine(1).ppu.presentation_observer()==&mirror);
     CHECK(!session.machine(0).ppu.presentation_observer());
     CHECK(session.save_state()==snapshot);
@@ -108,8 +118,11 @@ int main() {
         return false;
     };
     GbaNetplayViewPolicy narrow=policy; narrow.max_width=400;
+    CHECK((gba_netplay_available_views(narrow)==std::vector{GbaNetplayView::Native,GbaNetplayView::Wide16x9,GbaNetplayView::Wide21x9,GbaNetplayView::Adaptive}));
     CHECK(!rejects(GbaNetplayView::Wide21x9,narrow) && rejects(GbaNetplayView::Wide32x9,narrow));
     CHECK(!rejects(GbaNetplayView::Adaptive,narrow));
+    narrow.max_width=284; narrow.adaptive_supported=false;
+    CHECK((gba_netplay_available_views(narrow)==std::vector{GbaNetplayView::Native,GbaNetplayView::Wide16x9}));
     narrow.max_width=239; CHECK(rejects(GbaNetplayView::Native,narrow));
     narrow.max_width=gba::GbaPpu::kMaxRenderWidth+1; CHECK(rejects(GbaNetplayView::Native,narrow));
     {

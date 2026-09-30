@@ -56,6 +56,11 @@ public:
     };
     void set_presentation_observer(PresentationObserver* observer) { presentation_ = observer; }
     PresentationObserver* presentation_observer() const { return presentation_; }
+    // Timing-only canonical consoles retain all PPU events/affine state and
+    // invoke their observer, but keep native pixel buffers zero. Every console
+    // in a network match uses this policy; only its host mirror draws pixels.
+    void set_rasterization_enabled(bool enabled);
+    bool rasterization_enabled() const { return rasterization_enabled_; }
     // Compose a separate surface using the source's pre-scanline affine
     // registers, including HBlank DMA reloads. Does not advance either PPU.
     void render_presentation_scanline(const GbaPpu& source, uint32_t y,
@@ -185,6 +190,7 @@ public:
 private:
     friend class SimulationStateCodec;
     PresentationObserver* presentation_ = nullptr; // borrowed; not serialized
+    bool rasterization_enabled_ = true; // host configuration, not serialized
     uint32_t scanline_        = 0;   // 0..227
     uint32_t dot_in_scanline_ = 0;   // 0..307 (in dots, not cycles)
     uint32_t cycle_in_dot_    = 0;   // 0..3
@@ -287,6 +293,7 @@ struct WsMarginObjPixel {
     std::uint16_t color = 0x8000;
     std::uint8_t priority = 3;
     std::uint8_t order = 127;
+    bool semi_transparent = false;
 };
 extern "C" const WsMarginObjPixel* (*g_ws_obj_margin_provider)(
     int screen_y, int* hardware_left, int* width);
