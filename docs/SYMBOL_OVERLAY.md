@@ -100,8 +100,9 @@ back to `map`.
 ### What stays out of the importer
 
 Per-game knowledge does not belong in a shared tool. Runtime code copies are
-expressible generically (`--code-copy-pair BUF=SRC:mode`, resolved by symbol
-name), and reviewed dispatch-miss seeds belong in the game's own `game.toml`
+expressible generically (`--code-copy-pair BUF=SRC:mode[:size]`, resolved by
+symbol name; `:size` is required when the buffer is a linker-placed NOTYPE
+symbol with `st_size` 0, and must agree with `st_size` when both exist), and reviewed dispatch-miss seeds belong in the game's own `game.toml`
 where a human already signed off on them.
 
 Address-derived placeholder names (`sub_8001ADC`) are kept by default: they

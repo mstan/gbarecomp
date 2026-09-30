@@ -279,7 +279,9 @@ null. `gba_mod_set_view_width(width)` requests a fixed/initial logical width
 both the adaptive and fixed-width requests. Disabling a mod-owned view restores
 240 pixels even when an old CLI or environment setting requests expansion.
 
-The expanded PPU supports up to 576 horizontal pixels, including 32:9 at 569.
+The expanded PPU supports up to 896 horizontal pixels (`GbaPpu::kMaxRenderWidth`),
+including 32:9 at 569 and 50:9 at 889. This is engine capacity only: each game
+still opts in through `RunOptions::max_view_width` / `max_resize_view_width`.
 The default game limit remains 240. A game may publish read-only RGB555 OBJ
 margin rows through `g_ws_obj_margin_provider`; the compositor never consumes
 them inside native X 0..239. `g_ws_authored_margin_layers` exempts these authored

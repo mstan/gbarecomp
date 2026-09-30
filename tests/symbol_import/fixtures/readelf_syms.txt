@@ -1,4 +1,4 @@
-Symbol table '.symtab' contains 24 entries:
+Symbol table '.symtab' contains 28 entries:
    Num:    Value  Size Type    Bind   Vis      Ndx Name
      0: 00000000     0 NOTYPE  LOCAL  DEFAULT  UND
      1: 02000000     0 SECTION LOCAL  DEFAULT    1 ewram
@@ -24,3 +24,7 @@ Symbol table '.symtab' contains 24 entries:
     21: 03005ca0     0 NOTYPE  LOCAL  DEFAULT  ABS gSoundInfo
     22: 0a000000     0 NOTYPE  LOCAL  DEFAULT  ABS OFF_THE_MEMORY_MAP
     23: 00000000     0 NOTYPE  GLOBAL DEFAULT  UND undefined_import
+    24: 03000100    64 OBJECT  GLOBAL DEFAULT    2 gSizedCodeBuf
+    25: 03000200     0 NOTYPE  GLOBAL DEFAULT    2 gLinkerPlacedBuf
+    26: 02010000     0 NOTYPE  GLOBAL DEFAULT    1 gEwramLabelGlobal
+    27: 08003000     0 NOTYPE  GLOBAL DEFAULT    3 gRomLabelNotData
