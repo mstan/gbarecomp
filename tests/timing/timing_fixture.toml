@@ -1,0 +1,577 @@
+# Original CPU timing fixture (timing_fixture.S). Kernel entries at the ROM
+# copy and at both RAM copies; the driver and the kernels reach them by BX.
+[program]
+entry_pc = 0x08000000
+load_address = 0x08000000
+size = 1504
+static_resume_all = true
+
+[identity]
+sha1 = "4c72e6c79d1ed883df95fdaeb0e9ec3a362b417d"
+
+[[code_copy]]
+runtime_start = 0x03000000
+source_start  = 0x080001B0
+size          = 0x430
+name          = "iwram_kernels"
+
+[[code_copy]]
+runtime_start = 0x02000000
+source_start  = 0x080001B0
+size          = 0x430
+name          = "ewram_kernels"
+
+[[extra_func]]
+addr = 0x080001B0
+mode = "arm"
+name = "a_alu_rom"
+
+[[extra_func]]
+addr = 0x080001DC
+mode = "arm"
+name = "a_loop_rom"
+
+[[extra_func]]
+addr = 0x080001F4
+mode = "arm"
+name = "a_ldr_iwram_rom"
+
+[[extra_func]]
+addr = 0x08000218
+mode = "arm"
+name = "a_ldr_ewram_rom"
+
+[[extra_func]]
+addr = 0x0800023C
+mode = "arm"
+name = "a_ldr_rom_rom"
+
+[[extra_func]]
+addr = 0x0800025C
+mode = "arm"
+name = "a_ldrh_io_rom"
+
+[[extra_func]]
+addr = 0x0800027C
+mode = "arm"
+name = "a_ldrb_sram_rom"
+
+[[extra_func]]
+addr = 0x0800029C
+mode = "arm"
+name = "a_str_iwram_rom"
+
+[[extra_func]]
+addr = 0x080002C0
+mode = "arm"
+name = "a_strh_ewram_rom"
+
+[[extra_func]]
+addr = 0x080002E4
+mode = "arm"
+name = "a_ldm_stm_iwram_rom"
+
+[[extra_func]]
+addr = 0x08000308
+mode = "arm"
+name = "a_mul_small_rom"
+
+[[extra_func]]
+addr = 0x0800032C
+mode = "arm"
+name = "a_mul_large_rom"
+
+[[extra_func]]
+addr = 0x08000350
+mode = "arm"
+name = "a_umull_smlal_rom"
+
+[[extra_func]]
+addr = 0x08000374
+mode = "arm"
+name = "a_swp_rom"
+
+[[extra_func]]
+addr = 0x08000390
+mode = "arm"
+name = "a_bl_rom"
+
+[[extra_func]]
+addr = 0x080003B4
+mode = "arm"
+name = "a_leaf_rom"
+
+[[extra_func]]
+addr = 0x080003B8
+mode = "arm"
+name = "a_bx_thumb_rom"
+
+[[extra_func]]
+addr = 0x080003E4
+mode = "arm"
+name = "a_cond_fail_rom"
+
+[[extra_func]]
+addr = 0x08000414
+mode = "arm"
+name = "a_alu_pc_rom"
+
+[[extra_func]]
+addr = 0x08000438
+mode = "arm"
+name = "a_ldr_iwram_mul_rom"
+
+[[extra_func]]
+addr = 0x08000480
+mode = "thumb"
+name = "t_leaf_rom"
+
+[[extra_func]]
+addr = 0x08000482
+mode = "thumb"
+name = "t_alu_rom"
+
+[[extra_func]]
+addr = 0x0800049A
+mode = "thumb"
+name = "t_loop_rom"
+
+[[extra_func]]
+addr = 0x080004A8
+mode = "thumb"
+name = "t_ldr_iwram_rom"
+
+[[extra_func]]
+addr = 0x080004BA
+mode = "thumb"
+name = "t_ldr_ewram_rom"
+
+[[extra_func]]
+addr = 0x080004CC
+mode = "thumb"
+name = "t_ldr_rom_rom"
+
+[[extra_func]]
+addr = 0x080004DE
+mode = "thumb"
+name = "t_ldrh_io_rom"
+
+[[extra_func]]
+addr = 0x080004F0
+mode = "thumb"
+name = "t_str_iwram_rom"
+
+[[extra_func]]
+addr = 0x08000502
+mode = "thumb"
+name = "t_push_pop_rom"
+
+[[extra_func]]
+addr = 0x08000512
+mode = "thumb"
+name = "t_mul_rom"
+
+[[extra_func]]
+addr = 0x08000526
+mode = "thumb"
+name = "t_bl_rom"
+
+[[extra_func]]
+addr = 0x08000542
+mode = "thumb"
+name = "t_bl_pop_pc_rom"
+
+[[extra_func]]
+addr = 0x08000556
+mode = "thumb"
+name = "t_pop_leaf_rom"
+
+[[extra_func]]
+addr = 0x0800055A
+mode = "thumb"
+name = "t_bx_arm_rom"
+
+[[extra_func]]
+addr = 0x08000572
+mode = "thumb"
+name = "t_call_r4_rom"
+
+[[extra_func]]
+addr = 0x08000574
+mode = "thumb"
+name = "t_ldr_pcrel_rom"
+
+[[extra_func]]
+addr = 0x08000584
+mode = "thumb"
+name = "t_cond_branch_rom"
+
+[[extra_func]]
+addr = 0x03000000
+mode = "arm"
+name = "a_alu_iwram"
+
+[[extra_func]]
+addr = 0x0300002C
+mode = "arm"
+name = "a_loop_iwram"
+
+[[extra_func]]
+addr = 0x03000044
+mode = "arm"
+name = "a_ldr_iwram_iwram"
+
+[[extra_func]]
+addr = 0x03000068
+mode = "arm"
+name = "a_ldr_ewram_iwram"
+
+[[extra_func]]
+addr = 0x0300008C
+mode = "arm"
+name = "a_ldr_rom_iwram"
+
+[[extra_func]]
+addr = 0x030000AC
+mode = "arm"
+name = "a_ldrh_io_iwram"
+
+[[extra_func]]
+addr = 0x030000CC
+mode = "arm"
+name = "a_ldrb_sram_iwram"
+
+[[extra_func]]
+addr = 0x030000EC
+mode = "arm"
+name = "a_str_iwram_iwram"
+
+[[extra_func]]
+addr = 0x03000110
+mode = "arm"
+name = "a_strh_ewram_iwram"
+
+[[extra_func]]
+addr = 0x03000134
+mode = "arm"
+name = "a_ldm_stm_iwram_iwram"
+
+[[extra_func]]
+addr = 0x03000158
+mode = "arm"
+name = "a_mul_small_iwram"
+
+[[extra_func]]
+addr = 0x0300017C
+mode = "arm"
+name = "a_mul_large_iwram"
+
+[[extra_func]]
+addr = 0x030001A0
+mode = "arm"
+name = "a_umull_smlal_iwram"
+
+[[extra_func]]
+addr = 0x030001C4
+mode = "arm"
+name = "a_swp_iwram"
+
+[[extra_func]]
+addr = 0x030001E0
+mode = "arm"
+name = "a_bl_iwram"
+
+[[extra_func]]
+addr = 0x03000204
+mode = "arm"
+name = "a_leaf_iwram"
+
+[[extra_func]]
+addr = 0x03000208
+mode = "arm"
+name = "a_bx_thumb_iwram"
+
+[[extra_func]]
+addr = 0x03000234
+mode = "arm"
+name = "a_cond_fail_iwram"
+
+[[extra_func]]
+addr = 0x03000264
+mode = "arm"
+name = "a_alu_pc_iwram"
+
+[[extra_func]]
+addr = 0x03000288
+mode = "arm"
+name = "a_ldr_iwram_mul_iwram"
+
+[[extra_func]]
+addr = 0x030002D0
+mode = "thumb"
+name = "t_leaf_iwram"
+
+[[extra_func]]
+addr = 0x030002D2
+mode = "thumb"
+name = "t_alu_iwram"
+
+[[extra_func]]
+addr = 0x030002EA
+mode = "thumb"
+name = "t_loop_iwram"
+
+[[extra_func]]
+addr = 0x030002F8
+mode = "thumb"
+name = "t_ldr_iwram_iwram"
+
+[[extra_func]]
+addr = 0x0300030A
+mode = "thumb"
+name = "t_ldr_ewram_iwram"
+
+[[extra_func]]
+addr = 0x0300031C
+mode = "thumb"
+name = "t_ldr_rom_iwram"
+
+[[extra_func]]
+addr = 0x0300032E
+mode = "thumb"
+name = "t_ldrh_io_iwram"
+
+[[extra_func]]
+addr = 0x03000340
+mode = "thumb"
+name = "t_str_iwram_iwram"
+
+[[extra_func]]
+addr = 0x03000352
+mode = "thumb"
+name = "t_push_pop_iwram"
+
+[[extra_func]]
+addr = 0x03000362
+mode = "thumb"
+name = "t_mul_iwram"
+
+[[extra_func]]
+addr = 0x03000376
+mode = "thumb"
+name = "t_bl_iwram"
+
+[[extra_func]]
+addr = 0x03000392
+mode = "thumb"
+name = "t_bl_pop_pc_iwram"
+
+[[extra_func]]
+addr = 0x030003A6
+mode = "thumb"
+name = "t_pop_leaf_iwram"
+
+[[extra_func]]
+addr = 0x030003AA
+mode = "thumb"
+name = "t_bx_arm_iwram"
+
+[[extra_func]]
+addr = 0x030003C2
+mode = "thumb"
+name = "t_call_r4_iwram"
+
+[[extra_func]]
+addr = 0x030003C4
+mode = "thumb"
+name = "t_ldr_pcrel_iwram"
+
+[[extra_func]]
+addr = 0x030003D4
+mode = "thumb"
+name = "t_cond_branch_iwram"
+
+[[extra_func]]
+addr = 0x02000000
+mode = "arm"
+name = "a_alu_ewram"
+
+[[extra_func]]
+addr = 0x0200002C
+mode = "arm"
+name = "a_loop_ewram"
+
+[[extra_func]]
+addr = 0x02000044
+mode = "arm"
+name = "a_ldr_iwram_ewram"
+
+[[extra_func]]
+addr = 0x02000068
+mode = "arm"
+name = "a_ldr_ewram_ewram"
+
+[[extra_func]]
+addr = 0x0200008C
+mode = "arm"
+name = "a_ldr_rom_ewram"
+
+[[extra_func]]
+addr = 0x020000AC
+mode = "arm"
+name = "a_ldrh_io_ewram"
+
+[[extra_func]]
+addr = 0x020000CC
+mode = "arm"
+name = "a_ldrb_sram_ewram"
+
+[[extra_func]]
+addr = 0x020000EC
+mode = "arm"
+name = "a_str_iwram_ewram"
+
+[[extra_func]]
+addr = 0x02000110
+mode = "arm"
+name = "a_strh_ewram_ewram"
+
+[[extra_func]]
+addr = 0x02000134
+mode = "arm"
+name = "a_ldm_stm_iwram_ewram"
+
+[[extra_func]]
+addr = 0x02000158
+mode = "arm"
+name = "a_mul_small_ewram"
+
+[[extra_func]]
+addr = 0x0200017C
+mode = "arm"
+name = "a_mul_large_ewram"
+
+[[extra_func]]
+addr = 0x020001A0
+mode = "arm"
+name = "a_umull_smlal_ewram"
+
+[[extra_func]]
+addr = 0x020001C4
+mode = "arm"
+name = "a_swp_ewram"
+
+[[extra_func]]
+addr = 0x020001E0
+mode = "arm"
+name = "a_bl_ewram"
+
+[[extra_func]]
+addr = 0x02000204
+mode = "arm"
+name = "a_leaf_ewram"
+
+[[extra_func]]
+addr = 0x02000208
+mode = "arm"
+name = "a_bx_thumb_ewram"
+
+[[extra_func]]
+addr = 0x02000234
+mode = "arm"
+name = "a_cond_fail_ewram"
+
+[[extra_func]]
+addr = 0x02000264
+mode = "arm"
+name = "a_alu_pc_ewram"
+
+[[extra_func]]
+addr = 0x02000288
+mode = "arm"
+name = "a_ldr_iwram_mul_ewram"
+
+[[extra_func]]
+addr = 0x020002D0
+mode = "thumb"
+name = "t_leaf_ewram"
+
+[[extra_func]]
+addr = 0x020002D2
+mode = "thumb"
+name = "t_alu_ewram"
+
+[[extra_func]]
+addr = 0x020002EA
+mode = "thumb"
+name = "t_loop_ewram"
+
+[[extra_func]]
+addr = 0x020002F8
+mode = "thumb"
+name = "t_ldr_iwram_ewram"
+
+[[extra_func]]
+addr = 0x0200030A
+mode = "thumb"
+name = "t_ldr_ewram_ewram"
+
+[[extra_func]]
+addr = 0x0200031C
+mode = "thumb"
+name = "t_ldr_rom_ewram"
+
+[[extra_func]]
+addr = 0x0200032E
+mode = "thumb"
+name = "t_ldrh_io_ewram"
+
+[[extra_func]]
+addr = 0x02000340
+mode = "thumb"
+name = "t_str_iwram_ewram"
+
+[[extra_func]]
+addr = 0x02000352
+mode = "thumb"
+name = "t_push_pop_ewram"
+
+[[extra_func]]
+addr = 0x02000362
+mode = "thumb"
+name = "t_mul_ewram"
+
+[[extra_func]]
+addr = 0x02000376
+mode = "thumb"
+name = "t_bl_ewram"
+
+[[extra_func]]
+addr = 0x02000392
+mode = "thumb"
+name = "t_bl_pop_pc_ewram"
+
+[[extra_func]]
+addr = 0x020003A6
+mode = "thumb"
+name = "t_pop_leaf_ewram"
+
+[[extra_func]]
+addr = 0x020003AA
+mode = "thumb"
+name = "t_bx_arm_ewram"
+
+[[extra_func]]
+addr = 0x020003C2
+mode = "thumb"
+name = "t_call_r4_ewram"
+
+[[extra_func]]
+addr = 0x020003C4
+mode = "thumb"
+name = "t_ldr_pcrel_ewram"
+
+[[extra_func]]
+addr = 0x020003D4
+mode = "thumb"
+name = "t_cond_branch_ewram"

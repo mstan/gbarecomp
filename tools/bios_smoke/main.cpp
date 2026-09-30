@@ -705,29 +705,9 @@ int main(int argc, char** argv) {
         return true;
     };
 
-    // TCP debug server mode. Open the listener, hand it the live
-    // CPU/bus/PPU plus the step callback, block until the client
-    // disconnects. No --frames / --window logic in this path; the
-    // client drives execution explicitly via `step` commands.
-    if (args.tcp_port > 0) {
-        gbarecomp::debug::TcpDebugServer server;
-        gbarecomp::debug::TcpDebugServer::Context srv_ctx;
-        srv_ctx.cpu = &cpu;
-        srv_ctx.bus = &bus;
-        srv_ctx.ppu = &ppu;
-        srv_ctx.step      = step_one_frame;
-        srv_ctx.step_inst = run_one_cpu_step;
-        srv_ctx.savestate_load = do_savestate_load;
-        srv_ctx.fp_save        = fp_save;
-        srv_ctx.irq_entries        = &irq_entries;
-        srv_ctx.swi_entries        = &swi_entries;
-        srv_ctx.halt_steps         = &halt_steps;
-        srv_ctx.vblank_irqs_raised = &vblank_irqs_raised;
-        srv_ctx.steps              = &taken;
-        srv_ctx.cycles_elapsed     = &cycles_elapsed;
-        srv_ctx.last_step_cycles   = &last_step_cycles;
-        srv_ctx.sync_frames        = &vblank_count;
-        server.run(args.tcp_port, srv_ctx);
+    // IRQ/SWI logs (GBARECOMP_IRQ_LOG / GBARECOMP_SWI_LOG) are saved on every
+    // exit path: the TCP server and the bounded --steps/--frames run.
+    auto save_logs = [&]() {
         if (irq_log_on) {
             const char* p = std::getenv("GBARECOMP_IRQ_LOG");
             // Interp writes a sibling file (…_interp.csv) so it never clobbers
@@ -761,6 +741,32 @@ int main(int argc, char** argv) {
                             path.c_str(), swi_log.size());
             }
         }
+    };
+
+    // TCP debug server mode. Open the listener, hand it the live
+    // CPU/bus/PPU plus the step callback, block until the client
+    // disconnects. No --frames / --window logic in this path; the
+    // client drives execution explicitly via `step` commands.
+    if (args.tcp_port > 0) {
+        gbarecomp::debug::TcpDebugServer server;
+        gbarecomp::debug::TcpDebugServer::Context srv_ctx;
+        srv_ctx.cpu = &cpu;
+        srv_ctx.bus = &bus;
+        srv_ctx.ppu = &ppu;
+        srv_ctx.step      = step_one_frame;
+        srv_ctx.step_inst = run_one_cpu_step;
+        srv_ctx.savestate_load = do_savestate_load;
+        srv_ctx.fp_save        = fp_save;
+        srv_ctx.irq_entries        = &irq_entries;
+        srv_ctx.swi_entries        = &swi_entries;
+        srv_ctx.halt_steps         = &halt_steps;
+        srv_ctx.vblank_irqs_raised = &vblank_irqs_raised;
+        srv_ctx.steps              = &taken;
+        srv_ctx.cycles_elapsed     = &cycles_elapsed;
+        srv_ctx.last_step_cycles   = &last_step_cycles;
+        srv_ctx.sync_frames        = &vblank_count;
+        server.run(args.tcp_port, srv_ctx);
+        save_logs();
         return 0;
     }
 
@@ -899,6 +905,8 @@ int main(int argc, char** argv) {
                     static_cast<unsigned long long>(seed_other),
                     args.emit_target_seeds.c_str());
     }
+
+    save_logs();
 
     // Final-state summary always prints, including under --quiet, so
     // long runs can be benchmarked / regression-checked without

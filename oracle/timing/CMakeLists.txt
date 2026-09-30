@@ -1,0 +1,16 @@
+# Standalone validation tool; never linked into the native runtime. Point this
+# at the documented pinned mGBA source and separately built static library.
+cmake_minimum_required(VERSION 3.20)
+project(gba_timing_oracle LANGUAGES C)
+set(MGBA_SOURCE "" CACHE PATH "Pinned mGBA reference source")
+set(MGBA_BUILD "" CACHE PATH "Matching mGBA build directory")
+add_executable(gba_timing_oracle main.c)
+target_include_directories(gba_timing_oracle PRIVATE ${MGBA_SOURCE}/include ${MGBA_BUILD}/include)
+target_compile_definitions(gba_timing_oracle PRIVATE NDEBUG ENABLE_DIRECTORIES ENABLE_VFS_FD)
+target_link_libraries(gba_timing_oracle PRIVATE ${MGBA_BUILD}/libmgba.a)
+if(WIN32)
+    target_link_libraries(gba_timing_oracle PRIVATE ws2_32 shlwapi winmm ole32 uuid)
+else()
+    find_package(Threads REQUIRED)
+    target_link_libraries(gba_timing_oracle PRIVATE Threads::Threads m)
+endif()

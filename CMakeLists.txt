@@ -881,6 +881,7 @@ add_gbarecomp_runtime_stack_test(touch_input_tests tests/touch_input/test_main.c
 add_gbarecomp_runtime_stack_test(multiplayer_session_tests tests/link/session_test.cpp)
 add_gbarecomp_runtime_stack_test(wireless_tests tests/link/wireless_test.cpp)
 add_subdirectory(tests/link)
+add_subdirectory(tests/timing)
 include(cmake/GbaNetplay.cmake)
 
 # P6 differential-gate primitives (offline; full-RAM snapshot/restore/diff).
