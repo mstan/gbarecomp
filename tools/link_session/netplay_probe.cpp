@@ -23,9 +23,10 @@ unsigned number(const char* name,unsigned maximum) {
 }
 }
 void gba_link_probe_netplay(gbarecomp::GbaMultiplayerSession& simulation,unsigned frames,
-    const std::function<std::array<std::uint16_t,2>(std::uint32_t)>& input,const std::string& identity) {
+    const std::function<std::array<std::uint16_t,4>(std::uint32_t)>& input,const std::string& identity) {
     using namespace gbarecomp;
-    const auto seat=number("GBA_LINK_PROBE_NET_SEAT",1);
+    const auto seats=static_cast<unsigned>(simulation.input_count());
+    const auto seat=number("GBA_LINK_PROBE_NET_SEAT",seats-1);
     const auto nonce=number("GBA_LINK_PROBE_NET_SESSION",UINT32_MAX);
     if (!nonce || frames<2) throw std::invalid_argument("network probe needs a nonzero session ID and at least two frames");
     const auto* mode=std::getenv("GBA_LINK_PROBE_NET_ROLLBACK");
@@ -34,6 +35,7 @@ void gba_link_probe_netplay(gbarecomp::GbaMultiplayerSession& simulation,unsigne
     if (timeout<1000) throw std::invalid_argument("network probe simulation deadline must be 1 second to 1 hour");
     GbaNetplayMatchOptions options;
     options.network.local_slot=seat; options.network.session_id=nonce;
+    options.network.slot_count=static_cast<rnet_u8>(seats); options.network.occupied_mask=(1u<<seats)-1;
     if (std::getenv("GBA_LINK_PROBE_NET_DELAY"))
         options.network.input_delay=number("GBA_LINK_PROBE_NET_DELAY",20);
     options.identity=identity; options.build_fingerprint=0x47424102;
@@ -41,7 +43,12 @@ void gba_link_probe_netplay(gbarecomp::GbaMultiplayerSession& simulation,unsigne
     options.restored_pair=simulation.cycle()!=0;
     GbaNetplayMatch match(simulation,std::move(options));
     match.sample_local=[&](std::uint32_t tick) { return input(tick)[seat]; };
-    if (rnet_session_start_lan(match.transport(),required("GBA_LINK_PROBE_NET_BIND"),required("GBA_LINK_PROBE_NET_PEER")))
+    // Three or more seats without GBA_LINK_PROBE_NET_PEER on seat 0: that
+    // seat is the LAN star hub every other seat dials.
+    const auto* peer=std::getenv("GBA_LINK_PROBE_NET_PEER");
+    const bool hub=seats>2 && seat==0 && (!peer || !*peer);
+    if (hub ? rnet_session_start_lan_hub(match.transport(),required("GBA_LINK_PROBE_NET_BIND")) :
+              rnet_session_start_lan(match.transport(),required("GBA_LINK_PROBE_NET_BIND"),required("GBA_LINK_PROBE_NET_PEER")))
         throw std::runtime_error("cannot start network probe transport");
     match.finish_at(frames); // harness has agreed the same target on both peers
     std::uint64_t started=0;
