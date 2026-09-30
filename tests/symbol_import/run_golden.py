@@ -15,7 +15,11 @@ to cover the cases that actually bit us on real decomps:
     table yields no data ranges and `auto` must fall back to the link map;
   * link-map section names long enough that ld wraps them onto their own
     line (.rodata.wave_167), which a naive line parser silently drops;
-  * a FUNC symbol that lands inside a data range, which must be dropped.
+  * a FUNC symbol that lands inside a data range, which must be dropped;
+  * runtime code copies: a buffer whose extent is its st_size, and a
+    linker-placed NOTYPE buffer (st_size 0) whose extent is given explicitly
+    as BUF=SRC:mode:size. An explicit size that disagrees with a non-zero
+    st_size must be rejected.
 
 Regenerate the goldens with `--update` after an intentional format change,
 and read the diff before committing it.
@@ -51,6 +55,8 @@ def run(out_dir: Path) -> None:
         "--syms", str(FIXTURES / "readelf_syms.txt"),
         "--sections", str(FIXTURES / "readelf_sections.txt"),
         "--map", str(FIXTURES / "link.map"),
+        "--code-copy-pair", "gSizedCodeBuf=AgbMain:thumb",
+        "--code-copy-pair", "gLinkerPlacedBuf=start_vector:arm:0x80",
         "--out", str(out_dir),
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -64,11 +70,31 @@ def run(out_dir: Path) -> None:
         raise SystemExit("expected a warning about the missing --rom")
 
 
+def check_rejects_size_conflict(out_dir: Path) -> None:
+    cmd = [
+        sys.executable, str(IMPORTER),
+        "--id", "TEST",
+        "--syms", str(FIXTURES / "readelf_syms.txt"),
+        "--sections", str(FIXTURES / "readelf_sections.txt"),
+        "--map", str(FIXTURES / "link.map"),
+        "--code-copy-pair", "gSizedCodeBuf=AgbMain:thumb:0x44",
+        "--out", str(out_dir),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode == 0 or "disagrees" not in proc.stderr:
+        print(proc.stdout)
+        print(proc.stderr, file=sys.stderr)
+        raise SystemExit("expected a conflicting explicit code-copy size "
+                         "to be rejected")
+
+
 def main() -> int:
     update = "--update" in sys.argv[1:]
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
         run(out)
+        with tempfile.TemporaryDirectory() as tmp2:
+            check_rejects_size_conflict(Path(tmp2))
         if update:
             GOLDEN.mkdir(parents=True, exist_ok=True)
             for name in OUTPUTS:
