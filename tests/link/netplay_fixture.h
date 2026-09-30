@@ -15,9 +15,10 @@ inline int program(std::uint32_t pc,int) {
     case 3: if (g_cpu.R[0]==0x1111) bus_write_u16(0x04000128,0x2083); break;
     case 4: if (bus_read_u16(0x04000128)&0x80) g_cpu.R[15]=pc; break;
     case 5: {
-        const auto words=bus_read_u32(0x04000120);
+        const auto words=bus_read_u32(0x04000120), high=bus_read_u32(0x04000124);
         bus_write_u32(0x02000000,words);
-        bus_write_u32(0x02000008,(bus_read_u32(0x02000008)^words)*16777619u);
+        bus_write_u32(0x02000004,high); // ports 2/3 on a larger cable, else ffffffff
+        bus_write_u32(0x02000008,(((bus_read_u32(0x02000008)^words)*16777619u)^high)*16777619u);
         bus_write_u8(0x0e000000,~bus_read_u16(0x04000130)&0xff);
         break;
     }
@@ -38,14 +39,19 @@ inline int program(std::uint32_t pc,int) {
     runtime_tick(1);
     return 1;
 }
-inline std::unique_ptr<gbarecomp::GbaMultiplayerSession> create(bool repeat=false,bool reverse_seats=false) {
+// players: consoles on the cable (2..4). reverse_seats maps seat s to port N-1-s.
+inline std::unique_ptr<gbarecomp::GbaMultiplayerSession> create(bool repeat=false,bool reverse_seats=false,
+                                                                 unsigned players=2) {
     using namespace gbarecomp;
     GbaSessionConfig c;
-    c.machines={{0,"net-test",std::string(40,'a')},{1,"net-test",std::string(40,'a')}};
-    c.links={{GbaLinkMedium::Cable,{0,1}}}; c.input_machines={0,1};
-    if (reverse_seats) c.input_machines={1,0};
+    c.links={{GbaLinkMedium::Cable,{}}};
+    for (unsigned port=0;port<players;++port) {
+        c.machines.push_back({port,"net-test",std::string(40,'a')});
+        c.links[0].machines.push_back(port);
+        c.input_machines.push_back(reverse_seats ? players-1-port : port);
+    }
     auto s=std::make_unique<GbaMultiplayerSession>(c);
-    for (unsigned port=0;port<2;++port) {
+    for (unsigned port=0;port<players;++port) {
         auto& m=s->machine(port);
         m.execution.program_dispatch=program; m.execution.cpu.R[15]=0x08000000;
         m.execution.cpu.R[0]=(port+1)*0x1111; m.execution.cpu.R[2]=repeat;
