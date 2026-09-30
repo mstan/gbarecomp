@@ -254,6 +254,31 @@ void n_player_host(unsigned players) {
     api.publish(api.ctx,3,rows,static_cast<int>(players)-1,0);
     CHECK(h.return_to_lobby_requested() && !h.run_published_tick());
 }
+// Delay-sync publication at three and four seats: every seat's sample reaches
+// its own machine, a short or malformed row is refused before simulation.
+void n_player_delay(unsigned players) {
+    using namespace gbarecomp;
+    auto simulation=create(true,true,players); GbaNetplayHost h(*simulation); auto api=h.delay_callbacks();
+    RNetInputSample samples[4]{};
+    for (unsigned tick=0;tick<3;++tick) {
+        for (unsigned seat=0;seat<players;++seat) {
+            samples[seat]={}; samples[seat].tick=tick; samples[seat].size=2; samples[seat].valid=1;
+            samples[seat].bytes[0]=static_cast<std::uint8_t>((tick+1)<<seat);
+        }
+        api.publish(tick,samples,static_cast<int>(players),api.ctx); CHECK(h.run_published_tick());
+    }
+    auto expected=create(true,true,players);
+    for (unsigned tick=0;tick<3;++tick) {
+        std::vector<std::uint16_t> row;
+        for (unsigned seat=0;seat<players;++seat) row.push_back(static_cast<std::uint16_t>(((tick+1)<<seat)&0xff));
+        expected->run_frame(row);
+    }
+    CHECK(h.next_tick()==3 && simulation->save_state()==expected->save_state());
+    for (unsigned seat=0;seat<players;++seat)
+        CHECK(simulation->input_machine(seat).bus.save().sram_read(0)==((3u<<seat)&0xff));
+    samples[players-1].size=1; api.publish(3,samples,static_cast<int>(players),api.ctx);
+    CHECK(h.return_to_lobby_requested() && !h.run_published_tick() && h.next_tick()==3);
+}
 // The agreed boundary outlives the rollback ring, is recaptured by a replay
 // across it, and a correction before it withdraws the old candidate.
 void pinned_checkpoint() {
@@ -292,4 +317,4 @@ void pinned_checkpoint() {
     CHECK(h.error().empty());
 }
 }
-int main() { n_player_host(3); n_player_host(4); pinned_checkpoint(); admission_pacing(); confirmed_session_control(); restore_corrected_session(); delay_publication(); local_output(); confirmed_checkpoint(); agreement_gate(); demoted_candidate(); std::puts("whole-session netplay host tests passed"); }
+int main() { n_player_host(3); n_player_host(4); n_player_delay(3); n_player_delay(4); pinned_checkpoint(); admission_pacing(); confirmed_session_control(); restore_corrected_session(); delay_publication(); local_output(); confirmed_checkpoint(); agreement_gate(); demoted_candidate(); std::puts("whole-session netplay host tests passed"); }

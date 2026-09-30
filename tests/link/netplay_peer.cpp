@@ -12,6 +12,7 @@
 
 int main(int argc,char** argv) {
     if (argc!=6) return 2; // slot, base port, session nonce, rollback, output
+    std::setvbuf(stderr,nullptr,_IONBF,0); // logs must survive a harness kill
     int slot=std::atoi(argv[1]),slots=link_fixture::players(),delay=2,prediction=6;
     unsigned port=std::strtoul(argv[2],nullptr,10);
     bool rollback=std::atoi(argv[4])!=0;
