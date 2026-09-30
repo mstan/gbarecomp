@@ -15,7 +15,8 @@ void raster() {
     auto native=std::make_unique<gba::GbaPpu>();
     auto observed=std::make_unique<gba::GbaPpu>();
     auto reference=std::make_unique<gba::GbaPpu>();
-    GbaNetplayPresentation mirror({true,true});
+    // A game that opts into the engine's full capacity (50:9 and beyond).
+    GbaNetplayPresentation mirror({true,true,nullptr,nullptr,nullptr,gba::GbaPpu::kMaxRenderWidth});
     observed->set_presentation_observer(&mirror);
     // Affine BG2, a wrapped colorful tilemap. Writes below emulate changing
     // road matrices and hidden-reference reloads on individual HBlanks.
@@ -25,7 +26,7 @@ void raster() {
     w16(0x0c,0x2080); // 256-color affine BG, wrap
     for (unsigned i=0;i<96*1024;++i) bus->vram_ptr()[i]=(i*17+i/19)&255;
     for (unsigned i=0;i<512;++i) bus->pal_ptr()[i]=(i*29)&255;
-    for (const unsigned width : {284u,373u,569u,576u,240u,317u}) {
+    for (const unsigned width : {284u,373u,569u,576u,889u,gba::GbaPpu::kMaxRenderWidth,240u,317u}) {
         mirror.request_width(width);
         const auto extra=width-240;
         reference->set_view_margins(extra/2,extra-extra/2,0,0);
@@ -88,8 +89,41 @@ int main() {
     CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,1920,1080)==284);
     CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,3440,1440)==382);
     CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,5120,1440)==569);
+    // Default game ceiling: raising engine capacity never widens a game
+    // that did not opt in.
     CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,9999,1)==576);
     CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,100,500)==240);
+    CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,5000,900)==576);
+    // Opted-in ceilings, bounded by engine capacity.
+    CHECK(gba::GbaPpu::kMaxRenderWidth==896);
+    CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,5000,900,896)==889);
+    CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,9999,1,896)==896);
+    CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,9999,1,100000)==gba::GbaPpu::kMaxRenderWidth);
+    CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,1920,1080,480)==284);
+    CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,5120,1440,480)==480);
+    CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,0,0,260)==260);
+    CHECK(gba_netplay_view_width(GbaNetplayView::Wide32x9,9999,1,300)==569);
+    const auto rejects=[](GbaNetplayView view,const GbaNetplayViewPolicy& p) {
+        try { validate_gba_netplay_view(view,p); } catch (const std::invalid_argument&) { return true; }
+        return false;
+    };
+    GbaNetplayViewPolicy narrow=policy; narrow.max_width=400;
+    CHECK(!rejects(GbaNetplayView::Wide21x9,narrow) && rejects(GbaNetplayView::Wide32x9,narrow));
+    CHECK(!rejects(GbaNetplayView::Adaptive,narrow));
+    narrow.max_width=239; CHECK(rejects(GbaNetplayView::Native,narrow));
+    narrow.max_width=gba::GbaPpu::kMaxRenderWidth+1; CHECK(rejects(GbaNetplayView::Native,narrow));
+    {
+        GbaNetplayPresentation fixed({true,true});
+        bool too_wide=false;
+        try { fixed.request_width(577); } catch (const std::invalid_argument&) { too_wide=true; }
+        CHECK(too_wide);
+        fixed.request_width(576);
+        GbaNetplayPresentation wide({true,true,nullptr,nullptr,nullptr,896});
+        wide.request_width(889); wide.request_width(896);
+        too_wide=false;
+        try { wide.request_width(897); } catch (const std::invalid_argument&) { too_wide=true; }
+        CHECK(too_wide);
+    }
     GbaNetplayLaunch launch; launch.view_policy=policy;
     std::vector<std::string> args={"game","--netplay-view","adaptive","--launcher"};
     parse_gba_netplay_arguments(args,launch);

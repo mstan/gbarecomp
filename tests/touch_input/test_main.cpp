@@ -3,6 +3,7 @@
 // the mini JSON reader.
 
 #include "gba_io.h"
+#include "gba_ppu.h"
 #include "input_synth.h"
 #include "mini_json.h"
 #include "presentation_layout.h"
@@ -326,7 +327,9 @@ void test_hub_script_and_rings() {
 
 void test_density_geometry() {
     auto geo = [](int dw, int dh, float ppmm, float zoom) {
-        return density_driven_view_geometry(dw, dh, ppmm, 0.30f, zoom, 569, 854, 576, 864);
+        return density_driven_view_geometry(dw, dh, ppmm, 0.30f, zoom, 569, 854,
+                                            gba::GbaPpu::kMaxRenderWidth,
+                                            gba::GbaPpu::kMaxRenderHeight);
     };
     auto aspect_ok = [](const ViewGeometry& g, int dw, int dh) {
         const double view = static_cast<double>(g.width) / g.height;

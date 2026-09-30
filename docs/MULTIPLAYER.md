@@ -284,14 +284,18 @@ pacing, audible quality, or Internet lobby/NAT traversal.
 The netplay launcher offers a separate **Your display** choice: Native (3:2),
 16:9, 21:9, 32:9, or Adaptive. Both games authorize these choices; each peer may
 use a different view/window/monitor. Adaptive follows the window's aspect,
-keeping 160 lines and clamping the logical width to 240–576 pixels. Fixed
+keeping 160 lines and clamping the logical width to 240 pixels through the game's
+`GbaNetplayViewPolicy::max_width` (default 576, the pre-896 engine ceiling every
+existing policy was validated at; at most `GbaPpu::kMaxRenderWidth`, 896). Fixed
 choices use 284, 373, and 569 pixels respectively; resizing scales/letterboxes
 that fixed view. Single-player mod/display settings remain independent.
 Direct entry also accepts `--netplay-view native|16:9|21:9|32:9|adaptive`.
 
 `GbaNetplayViewPolicy` is an explicit game capability. Leave `supported` false
 for guest-mutating enhancements; set `adaptive_supported=false` to omit/reject
-adaptive independently of fixed views and single-player policy. These trusted
+adaptive independently of fixed views and single-player policy. Raise `max_width`
+only after qualifying the game's providers at that width; a fixed view wider than
+it is rejected. These trusted
 callbacks may read active-machine memory and author host pixels only. They do
 not activate the ordinary mod system, camera patches, or Mario Kart's 60fps mod.
 

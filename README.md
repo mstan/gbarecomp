@@ -62,7 +62,8 @@ the faithful 240×160 viewport toward its validated maximum while retaining the
 original 160-line height.
 
 The framework provides live resize policy, a wider PPU presentation surface,
-launcher integration, and validation tools. Each game still owns the parts
+launcher integration, and validation tools. The shared surface reaches 896×160
+(enough for 50:9); each game sets its own ceiling within it. Each game still owns the parts
 only its engine understands: background streaming, room or field boundaries,
 actor visibility, sprite clipping, camera policy, menus, and HUD placement.
 Unsupported scenes can remain at their authentic width.

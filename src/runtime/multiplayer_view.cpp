@@ -15,22 +15,34 @@ GbaNetplayView parse_gba_netplay_view(std::string_view name) {
     if (name == "adaptive") return GbaNetplayView::Adaptive;
     throw std::invalid_argument("netplay view must be native, 16:9, 21:9, 32:9 or adaptive");
 }
+namespace {
+// The game's validated ceiling, bounded by what the engine can store.
+std::uint32_t netplay_max_width(std::uint32_t game_max) {
+    return std::clamp<std::uint32_t>(game_max, 240, gba::GbaPpu::kMaxRenderWidth);
+}
+}
 void validate_gba_netplay_view(GbaNetplayView view, const GbaNetplayViewPolicy& policy) {
     if (view > GbaNetplayView::Adaptive ||
         (view != GbaNetplayView::Native && !policy.supported) ||
         (view == GbaNetplayView::Adaptive && !policy.adaptive_supported))
         throw std::invalid_argument("this game does not authorize that netplay view");
+    if (policy.max_width < 240 || policy.max_width > gba::GbaPpu::kMaxRenderWidth)
+        throw std::invalid_argument("netplay view policy maximum width is out of range");
+    if (view != GbaNetplayView::Adaptive && gba_netplay_view_width(view) > policy.max_width)
+        throw std::invalid_argument("this game does not authorize a netplay view that wide");
 }
-unsigned gba_netplay_view_width(GbaNetplayView view, int w, int h) {
+unsigned gba_netplay_view_width(GbaNetplayView view, int w, int h, std::uint32_t max_width) {
     switch (view) {
     case GbaNetplayView::Native: return 240;
     case GbaNetplayView::Wide16x9: return 284;
     case GbaNetplayView::Wide21x9: return 373;
     case GbaNetplayView::Wide32x9: return 569;
-    case GbaNetplayView::Adaptive:
-        if (w <= 0 || h <= 0) return 284;
+    case GbaNetplayView::Adaptive: {
+        const std::uint32_t maximum = netplay_max_width(max_width);
+        if (w <= 0 || h <= 0) return std::min<std::uint32_t>(284, maximum);
         return static_cast<unsigned>(std::clamp<std::int64_t>(
-            (std::int64_t(w) * 160 + h / 2) / h, 240, gba::GbaPpu::kMaxRenderWidth));
+            (std::int64_t(w) * 160 + h / 2) / h, 240, maximum));
+    }
     }
     throw std::invalid_argument("invalid netplay view");
 }
@@ -88,7 +100,7 @@ GbaNetplayPresentation::~GbaNetplayPresentation() {
     if (impl_->initialized && impl_->policy.reset) impl_->policy.reset();
 }
 void GbaNetplayPresentation::request_width(unsigned width) {
-    if (width < 240 || width > gba::GbaPpu::kMaxRenderWidth ||
+    if (width < 240 || width > netplay_max_width(impl_->policy.max_width) ||
         (width > 240 && !impl_->policy.supported))
         throw std::invalid_argument("unsupported netplay presentation width");
     impl_->requested = width; // applied at scanline zero, never mid-frame
