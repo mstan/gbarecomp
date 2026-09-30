@@ -122,11 +122,13 @@ public:
     // advance VCOUNT, HBlank DMA, or affine scanline accumulators.
     // These margins are present-time host state and are NEVER serialized into
     // the snapshot (the save format is unchanged).
-    // Horizontal capacity includes 32:9 (569x160). Individual games still
-    // advertise their own ceilings; native rendering remains the default.
-    static constexpr uint32_t kMaxExtraX = 168;
+    // Horizontal capacity includes 32:9 (569x160) and 50:9 (889x160).
+    // Individual games still advertise their own ceilings (RunOptions
+    // max_view_width / max_resize_view_width, GbaNetplayViewPolicy::max_width);
+    // this is only the engine's storage capacity. Native remains the default.
+    static constexpr uint32_t kMaxExtraX = 328;
     static constexpr uint32_t kMaxExtraY = 352;
-    static constexpr uint32_t kMaxRenderWidth  = kScreenWidth  + 2u * kMaxExtraX;  // 576
+    static constexpr uint32_t kMaxRenderWidth  = kScreenWidth  + 2u * kMaxExtraX;  // 896
     static constexpr uint32_t kMaxRenderHeight = kScreenHeight + 2u * kMaxExtraY;  // 864
     static constexpr std::size_t kMaxFramebufferBytes =
         static_cast<std::size_t>(kMaxRenderWidth) * kMaxRenderHeight * 3;

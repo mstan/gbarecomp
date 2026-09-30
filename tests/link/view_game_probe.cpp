@@ -47,7 +47,7 @@ int main(int argc,char** argv) {
                 session.machine(0).ppu.set_presentation_observer(&presentation);
             const auto width_at=[&](unsigned frame) {
                 return mode==GbaNetplayView::Adaptive ?
-                    std::array<unsigned,6>{240,284,382,569,317,576}[(frame/12)%6] : gba_netplay_view_width(mode);
+                    std::array<unsigned,6>{240,284,382,569,317,game.view_policy.max_width}[(frame/12)%6] : gba_netplay_view_width(mode);
             };
             const std::array<std::uint16_t,2> input{};
             double simulation_ms=0; unsigned replays=0;
