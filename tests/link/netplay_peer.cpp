@@ -72,7 +72,10 @@ int main(int argc,char** argv) {
     }
     std::map<std::uint32_t,std::uint32_t> timeline;
     start=rbe_mono_ms(); bool drained=false, saw_reconnecting=false, recovered=false;
-    while (rbe_mono_ms()-start<55000) {
+    // Four concurrent four-seat cases run sixteen peer processes under CTest.
+    // Leave enough wall time for the correction-heavy synthetic route.
+    const auto drain_timeout_ms = slots == 4 ? 90000u : 55000u;
+    while (rbe_mono_ms()-start<drain_timeout_ms) {
         rnet_session_pump(session);
         const auto connection=gbarecomp::gba_netplay_connection_status(session);
         if (connection.phase==gbarecomp::GbaConnectionPhase::Reconnecting) saw_reconnecting=true;

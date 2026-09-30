@@ -67,7 +67,7 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
             print("checkpoint barrier rejected a different guest state without exporting either archive")
             sys.exit(0)
         for peer in peers:
-            if peer.wait(timeout=110):
+            if peer.wait(timeout=130 if players == 4 else 110):
                 raise AssertionError(f"peer exited {peer.returncode}")
         reports = [(root / f"peer{i}.txt").read_text().splitlines() for i in range(players)]
         timelines = [dict(line.split() for line in r[1:]) for r in reports]

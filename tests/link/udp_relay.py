@@ -130,7 +130,10 @@ class UdpRelay:
                             kind = struct.unpack_from("<H",packet,4)[0]
                             if sender == 1 and kind == 20 and packet[12] == 6 and packet[11] == 0 and struct.unpack_from("<I",packet,18)[0] == 58:
                                 self.commit_hole_requested += 1
-                            if sender == 0 and dest == 1 and kind == 24 and struct.unpack_from("<I",packet,12)[0] == 58 and not self.commit_hole_requested:
+                            # Hold the whole seat-0 commit tail from tick 58.
+                            # A later matching digest can otherwise heal a
+                            # single lost commit before a request is needed.
+                            if sender == 0 and dest == 1 and kind == 24 and struct.unpack_from("<I",packet,12)[0] >= 58 and not self.commit_hole_requested:
                                 self.commit_hole_dropped += 1
                                 self.dropped += 1
                                 continue
