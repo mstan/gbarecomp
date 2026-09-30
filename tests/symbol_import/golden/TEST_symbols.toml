@@ -9,6 +9,32 @@
 # program : Synthetic Test Program
 # sources : map
 
+[[code_copy]]
+runtime_start = 0x03000100
+source_start = 0x08000100
+size = 0x40
+name = "gSizedCodeBuf"
+note = "decomp: AgbMain is copied here at runtime"
+
+[[extra_func]]
+addr = 0x03000100
+mode = "thumb"
+name = "gsizedcodebuf_entry"
+note = "entry of the gSizedCodeBuf code_copy"
+
+[[code_copy]]
+runtime_start = 0x03000200
+source_start = 0x080000C0
+size = 0x80
+name = "gLinkerPlacedBuf"
+note = "decomp: start_vector is copied here at runtime"
+
+[[extra_func]]
+addr = 0x03000200
+mode = "arm"
+name = "glinkerplacedbuf_entry"
+note = "entry of the gLinkerPlacedBuf code_copy"
+
 [[data_range]]
 start = 0x08002000
 end = 0x08003300
