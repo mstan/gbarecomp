@@ -119,11 +119,30 @@ No mGBA source is linked into the native targets. `oracle/link` is an optional,
 separate reference frontend linked to an externally built mGBA library.
 
 The original fixture agrees with mGBA on received words, final SIOCNT/IDs and
-serial IRQ at all four baud rates after a startup settling interval. This is
-**not** an instruction-by-instruction cycle-equivalence claim. Native unit
-tests check each documented duration and event boundary independently.
-The same original ROM now covers normal 8/32-bit transfers at both clocks.
-Those cases agree on received data, control fields excluding pin SI, and IRQs.
+serial IRQ at all four baud rates after a startup settling interval, for
+**2, 3 and 4 consoles** on one cable (`compare.py`, `--players N`). Every port
+receives all N words (unused slots `ffff`), the slave bit and ID (`port<<4`)
+match, and the 3/4-console columns of `kTransferCycles` are confirmed: the
+oracle's `--timing` probe reads the master's start write and the scheduled
+completion event, and native and mGBA spans agree (native samples up to a few
+cycles late; mGBA completes every port at the same instant, skew 0). Reference
+spans, baud 0..3: 2 players 63427/16241/10998/5755, 3 players
+94884/24104/16241/8376, 4 players 125829/31457/20972/10486. This is **not** an
+instruction-by-instruction cycle-equivalence claim: the fixture's startup delay
+loop starts the transfer at ~24.6k cycles natively but ~164k in mGBA (still
+unexplained, cause not yet investigated), so absolute cycle counts are not
+compared, only the transfer span and the observable results. Native unit tests check each
+documented duration and event boundary independently.
+The same original ROM also covers normal 8/32-bit transfers at both clocks for
+2, 3 and 4 consoles as a forward daisy chain (port N receives port N-1's word;
+the fixture marks every non-owner as external-clock through r0 bit 13). Those
+cases agree on received data, control fields excluding pin SI, and IRQs.
+SIOCNT bit 6 (multiplayer error) is never set by mGBA `1d201b2` either:
+`include/mgba/internal/gba/sio.h:52` only declares it, nothing in `src/` uses
+the accessors, `src/gba/sio.c:179-182` masks written bits with `0xFF83` and
+only carries bits 2-7 of the previous value, and `sio/lockstep.c` sets only
+Ready (`:859`), Slave (`:956`, `:991`), Busy (`:968`) and ID (`:990`). The
+native cable's never-set error bit therefore matches the reference.
 The forward wiring is also documented in
 [GBA Communications Information](https://www.akkit.org/info/gba_comms.html).
 
@@ -357,7 +376,7 @@ the previous exception-based execution, including across Windows/Linux (SHA-256
 On the development machine, Windows simulation alone measures 146.8 FPS
 (6.81 ms mean, 7.40 ms p95). This is processing capacity, not network FPS.
 The original generated fixture still agrees with the separate mGBA oracle for
-multiplayer at all baud rates and normal 8/32-bit at both clocks.
+multiplayer at all baud rates and normal 8/32-bit at both clocks, for 2-4 consoles.
 
 The application pacer accounts for frame execution, retains its deadline through
 brief jitter, and resets after a long outage. Transport is pumped between frame
@@ -526,6 +545,29 @@ standalone CMake project with `MGBA_SOURCE` and `MGBA_BUILD` pointing to those
 matching trees. Set `GBARECOMP_LINK_ORACLE_EXE` in the native build to the resulting
 executable; `link_mgba_differential` then compares separate processes. None of
 these oracle dependencies are required for the default native build.
+
+Recipe used for the 2/3/4-console result (MSYS2 mingw64 on PATH, Ninja; a
+sparse-checkout source tree needs `git sparse-checkout disable`):
+
+```sh
+git -C _mgba_ref worktree add --detach _mgba_ref_1d201b2 1d201b22a86d31dfb3bc75145403711f6762015f
+cmake -S _mgba_ref_1d201b2 -B _mgba_ref_1d201b2/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DLIBMGBA_ONLY=ON -DBUILD_STATIC=ON -DBUILD_SHARED=OFF -DUSE_FFMPEG=OFF -DUSE_ZLIB=OFF \
+  -DUSE_PNG=OFF -DUSE_LIBZIP=OFF -DUSE_MINIZIP=OFF -DUSE_SQLITE3=OFF -DUSE_ELF=OFF \
+  -DUSE_LZMA=OFF -DUSE_EPOXY=OFF -DUSE_DISCORD_RPC=OFF -DBUILD_QT=OFF -DBUILD_SDL=OFF \
+  -DBUILD_GL=OFF -DBUILD_GLES2=OFF -DBUILD_GLES3=OFF
+cmake --build _mgba_ref_1d201b2/build --parallel 4
+cmake -S oracle/link -B build-link-oracle -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DMGBA_SOURCE=<abs>/_mgba_ref_1d201b2 -DMGBA_BUILD=<abs>/_mgba_ref_1d201b2/build
+cmake --build build-link-oracle
+cmake -S . -B build -DGBARECOMP_LINK_ORACLE_EXE=<abs>/build-link-oracle/gba_link_oracle.exe
+ctest --test-dir build -R 'link_rom_tests|link_mgba_differential' --output-on-failure
+```
+
+The oracle CLI is `gba_link_oracle <rom> [--players 2..4] [--normal|--immediate]
+[--timing]`; `link_rom_tests <rom>` accepts `--trace|--normal|--timing|--hashes`
+and `--players N`. The differential needs a CPython 3 (the devkitPro MSYS2
+`python` rejects `C:\` paths).
 
 The commercial probe is opt-in and reads cartridge saves without writing them:
 
