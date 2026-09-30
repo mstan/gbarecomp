@@ -43,18 +43,27 @@ host-selected session device, using the same controller-input netcode.
   Replay, stalled admission and duplicate reads cannot emit output. Skipped
   forward frames discard their old audio; other machines never feed the local
   speaker queue. The opt-in product window consumes this interface.
-* `GbaNetplayStartup` uses recomp-net's existing MEMCARD upload and BOOT transfer
-  operations. Each seat contributes its own save image and RTC seed. The host
-  assembles the two-machine state; identity/owner receipts and a state-digest
-  barrier precede input admission. Images and native executable code stay local.
-  The application must hash-verify its images and supply a build/BIOS/mod identity.
+* `GbaNetplayStartup` (2..4 seats) uses recomp-net's MEMCARD upload and BOOT
+  transfer operations. Every peer builds the same cold system locally; each
+  seat contributes only its own save image and RTC seed. Every guest uploads
+  concurrently; seat 0 broadcasts the assembled set of all owner packets (about
+  N x the save size, not N-1 copies of a multi-MB snapshot), each guest checks
+  its own packet in it byte-for-byte, every peer applies all packets in seat
+  order, and an N-party state-digest probe precedes input admission. Images and
+  native executable code stay local. The application must hash-verify its
+  images and supply a build/BIOS/mod identity.
 * The host retains a recovery snapshot independently of rollback-ring eviction,
   and can restore it before restarting a match. It does not write save files.
   Replaying across that boundary invalidates the cached candidate; a demoted
   confirmation watermark cannot preserve stale speculative save bytes.
 * `GbaNetplayCheckpointAgreement` compares an exact confirmed boundary while
-  both drivers can still correct. Each peer checks its snapshot against the full digest,
-  exchanges a receipt, and completes a retransmittable ready barrier. A mismatch
+  every driver can still correct. Seat 0 first runs a zero-size arrival probe
+  (an inbound STATE transfer stalls recomp-net admission, so a seat one tick
+  short of the boundary must not receive the proposal yet), then broadcasts the
+  proposal; each seat checks its own snapshot against the full digest and
+  returns a receipt, and an N-party ready barrier completes it. The boundary's
+  snapshot is pinned, so a slow agreement does not depend on rollback-ring
+  reach. A mismatch
   refuses archive export. Agreed archives include both machines, cable and
   scheduler with a version, program identity and whole-archive checksum.
   After bilateral agreement, the match drains rollback and checks that the
@@ -67,8 +76,9 @@ host-selected session device, using the same controller-input netcode.
   identity without changing the previous decoded state. Cross-peer storage is
   not an atomic distributed transaction: keep the prior pair until both peers
   can resume the same agreed archive; do not mix independent cartridge exports.
-* Connection status allows a 60-second silence grace and reports reconnecting
-  after two seconds. Keep pumping the existing transport/driver during that
+* Connection status is judged per remote seat (a silent console cannot hide
+  behind talking ones) and names the player; it allows a 60-second silence
+  grace and reports reconnecting after two seconds. Keep pumping the existing transport/driver during that
   grace. A six-second complete UDP outage is exercised by a regression test;
   this is recovery on the existing connection, not fresh-endpoint reconnect.
 
@@ -220,8 +230,12 @@ games' regenerated serial coverage and pinned shared recomp-ui netplay backend. 
 allow qualification without replacing existing generated corpora or submodule
 pins. `-DGBARECOMP_NETPLAY=OFF` still builds the single-player application.
 
-The shared launcher registers two-player cable rooms and maps input seats to
-cable positions, including a host occupying player two. Runtime entry verifies
+The shared launcher registers cable rooms of up to the game's
+`GbaNetplayLaunch::max_players` (default 2; recomp-ui
+`netplay_max_players`) and maps input seats to dense cable positions by lobby
+seat rank (recomp-ui `recomp_launcher_netplay_dense_position`), including a
+host occupying player two. Online rooms dial the lobby UDP relay; LAN/direct
+rooms stay two seats in the shared backend. Runtime entry verifies
 the original cartridge and retail BIOS, exchanges each owner's save and RTC,
 and uses a complete source identity over generated code, game hooks, devices
 and networking. Multiplayer skips general plugin activation. Only explicitly
@@ -236,8 +250,14 @@ EmeraldRecomp --rom emerald.gba --bios gba_bios.bin --save player0.sav --netplay
 EmeraldRecomp --rom emerald.gba --bios gba_bios.bin --save player1.sav --netplay-bind 127.0.0.1:5001 --netplay-peer 127.0.0.1:5000 --netplay-seat 1 --netplay-session 123
 ```
 
-Rollback is the direct-IP default. Both peers may add `--netplay-delay-sync`
-and choose `--netplay-delay 2..20` (default six). `--frames N` is an optional
+Rollback is the direct-IP default for two consoles, delay-sync for three or
+four; `--netplay-rollback` / `--netplay-delay-sync` choose explicitly, and both
+modes are supported at every size. All peers may choose `--netplay-delay
+2..20` (default six). `--netplay-players N` (up to the game's `max_players`)
+sets the cable size; `--netplay-ports a,b,..` maps seats to cable ports. With
+three or four direct-IP consoles seat 0 is the LAN star (bind only, no peer)
+and every other seat names seat 0 as its peer; `--netplay-relay` instead dials
+a lobby-style UDP relay from every seat. `--frames N` is an optional
 qualification limit which must agree at startup.
 
 Closing once or pressing a configured save hotkey (default Shift+F1) requests
@@ -335,10 +355,24 @@ runner must freeze feature configuration and image wiring before agreement.
 
 Measured two-machine fixture snapshot: 1,271,662 bytes (about 1.21 MiB), without
 flash/SRAM. Two 128 KiB Emerald flash chips bring this to about 1.46 MiB;
-120 such full snapshots are about 175.5 MiB. Four equivalents would be about
-2.93 MiB/snapshot and 351 MiB/history, an extrapolation pending four-machine
-session support. The cable payload is 101 bytes for two ports, 147 for four
-(GLNK version 2, including normal-serial state).
+120 such full snapshots are about 175.5 MiB. Measured fixture snapshots at three
+and four machines: 1,907,447 and 2,543,232 bytes; Kirby & the Amazing Mirror
+(32 KiB SRAM) 1,337,240 / 2,005,814 / 2,674,388 bytes at 2/3/4 consoles, so a
+four-console 120-tick history is about 306 MiB. The history depth stays 120
+ticks at every size: digest-detected corrections load far behind the tip (a
+26-tick rewind was measured at P=6, D=5, 40 ms), so depth is a time budget, not
+a function of delay/prediction or player count. The cable payload is 101 bytes
+for two ports, 147 for four (GLNK version 2, including normal-serial state).
+
+Kirby, headless, native slices, 1,200 frames of cold boot and attract (ms per
+frame, mean): 2 consoles 10.2, 3 consoles 15.4-15.8, 4 consoles 20.9-21.2 --
+about 5.2 ms per console, several times single-player cost. Per rollback tick at
+four consoles one boundary serialization (1.3 ms) and digest (2.3 ms) are paid
+once (shared by snapshot and digest); `load_state` per correction costs
+38-40 ms because it validates by constructing a complete staged session. Four
+local processes each simulating all four Kirby consoles (one box, so 16
+consoles of work) agree byte-identically in both modes; delay-sync forwards
+26 fps per process there, rollback with forced corrections 8.9 fps.
 ROMs, BIOS and native code are shared and are not multiplied by history depth.
 The loaded-save Emerald probe measured 1,533,848 bytes at its tested boundary;
 continuation depth and identity-string lengths account for the small difference
@@ -414,7 +448,7 @@ Machine IDs, image/program identities, boot source, input seats and link media
 are separate. The manifest supports more machines than one physical cable;
 the MVP validator refuses unsupported launches explicitly.
 
-* Cable: maximum four attached consoles, two initially.
+* Cable: maximum four attached consoles; 2..4 supported (wireless stays two).
 * Wireless: a future adapter implements its local serial protocol and connects
   to a separate deterministic radio-domain coordinator. An RFU group permits
   one parent and four children; Emerald's eight visible Union Room leaders are
