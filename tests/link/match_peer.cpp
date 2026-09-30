@@ -39,7 +39,21 @@ int run(GbaMultiplayerSession& simulation,int slot,unsigned port,unsigned nonce,
     bool saw_reconnecting=false,recovered=false;
     const auto start=rbe_mono_ms();
     GbaNetplayOutput frame;
+    std::uint64_t heartbeat=start;
     while (match.phase()!=GbaNetplayMatch::Phase::CheckpointReady && rbe_mono_ms()-start<95000) {
+        if (rbe_mono_ms()-heartbeat>=5000) {
+            // Survives a harness kill: shows where a stalled seat is stuck.
+            heartbeat=rbe_mono_ms();
+            RNetSessionStats stats{}; rnet_session_get_stats(match.transport(),&stats);
+            std::fprintf(stderr,"peer heartbeat seat=%d tick=%u phase=%d connection=%d stall=%s tips=",slot,
+                match.next_tick(),static_cast<int>(match.phase()),static_cast<int>(match.connection().phase),
+                rnet_admit_stall_name(stats.last_stall));
+            for (int other=0;other<static_cast<int>(simulation.input_count());++other) {
+                rnet_u32 tip=0;
+                if (other!=slot && rnet_session_remote_tip(match.transport(),other,&tip)) std::fprintf(stderr,"%d:%u ",other,tip);
+            }
+            std::fputc('\n',stderr);
+        }
         if (match.phase()==GbaNetplayMatch::Phase::Running) {
             const auto tick=match.next_tick();
             if (requested && slot==1 && tick>=20) match.request_checkpoint();
@@ -89,6 +103,7 @@ int run(GbaMultiplayerSession& simulation,int slot,unsigned port,unsigned nonce,
 }
 int main(int argc,char** argv) {
     if (argc!=6) return 2;
+    std::setvbuf(stderr,nullptr,_IONBF,0); // logs must survive a harness kill
     try {
         const int slot=std::atoi(argv[1]);
         const unsigned port=std::strtoul(argv[2],nullptr,10), nonce=std::strtoul(argv[3],nullptr,10);
