@@ -37,6 +37,10 @@ inline void configure_netplay(RecompLauncherCGameInfo& gi,const gbarecomp::RunOp
         // stays the engine-wide ceiling; LAN/direct rooms stay two seats.
         hooks.netplay_max_players=static_cast<int>(opts.netplay->max_players);
 #endif
+#if defined(RECOMP_NETPLAY_HOST_HAS_DELAY_SYNC_FROM_PLAYERS)
+        // Three or four cable consoles start in delay-sync; two keep rollback.
+        hooks.netplay_delay_sync_from_players=opts.netplay->max_players>2 ? 3 : 0;
+#endif
 #if defined(RECOMP_LAUNCHER_HAS_SESSION_VARIANT)
         state.variants.clear();
         if (opts.netplay->supported_media & (1u<<static_cast<unsigned>(gbarecomp::GbaLinkMedium::Cable)))
