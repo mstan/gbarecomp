@@ -11,8 +11,9 @@ gba::GbaLinkHub* callback_cable=nullptr;
 unsigned callback_visits=0;
 int ram_callback(std::uint32_t pc,int thumb) {
     CHECK(pc==0x03000000 && !thumb);
-    CHECK(g_runtime_cycles==6);
-    CHECK(callback_cable->cycle(0)==6 && callback_cable->cycle(1)==6);
+    // Five GamePak ARM fetches add 20 wait cycles after the cycle-model fix.
+    CHECK(g_runtime_cycles==26);
+    CHECK(callback_cable->cycle(0)==26 && callback_cable->cycle(1)==26);
     ++callback_visits;
     CHECK(!runtime_should_yield());
     ++g_cpu.R[0];
@@ -34,13 +35,13 @@ void native_ram_boundary(const std::vector<std::uint8_t>& rom) {
     }
     const auto cold=session->save_state();
     callback_cable=&session->cable(); callback_visits=0;
-    session->run_until(32); CHECK(callback_visits==2);
+    session->run_until(128); CHECK(callback_visits==2);
     const auto reference=session->save_state();
     std::string error; CHECK(session->load_state(cold,&error));
     callback_cable=&session->cable(); callback_visits=0;
     session->set_native_slices(true);
     session->run_until(6); CHECK(callback_visits==0);
-    session->run_until(32); CHECK(callback_visits==2);
+    session->run_until(128); CHECK(callback_visits==2);
     CHECK(session->save_state()==reference);
     for (auto id:{0,1}) CHECK(session->machine(id).bus.read32(0x02000000)==42);
     callback_cable=nullptr;
