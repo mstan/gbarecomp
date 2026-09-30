@@ -2,6 +2,9 @@
 #include "gba_simulation_state.h"
 #include "simulation_archive.h"
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 
@@ -132,8 +135,18 @@ void GbaMultiplayerSession::run_frame(std::span<const std::uint16_t> buttons) {
 void GbaMultiplayerSession::run_until(std::uint64_t target) {
     if (target < cycle_) throw std::invalid_argument("session clock cannot run backwards");
     ExecutionScope scope;
+    // Sample one in 60 session frames when profiling is requested. Ordinary
+    // sessions take no clock reads inside the scheduler loop.
+    using ProfileClock = std::chrono::steady_clock;
+    static const bool profile_enabled = std::getenv("GBA_SESSION_PROFILE") != nullptr;
+    static std::uint64_t profile_frames = 0;
+    const bool profile = profile_enabled && (++profile_frames % 60 == 0);
+    const auto profile_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
+    std::chrono::nanoseconds cpu_time{0}, schedule_time{0}, device_time{0};
+    std::uint64_t dispatches = 0, passes = 0;
     unsigned zero_cycle_passes = 0;
     while (cycle_ < target) {
+        const auto cpu_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
         // Simultaneous CPU edges have stable manifest order. Every device is
         // already at cycle_, so even a transfer begun by either CPU sees the
         // peer's state at that same time, never a host scheduling artifact.
@@ -170,12 +183,15 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
                 runtime_session_begin_slice(deadline);
             } else runtime_session_begin_instruction();
             runtime_set_return_yield(native_slices_ && generated && return_yields_);
+            if (profile) ++dispatches;
             try { runtime_dispatch(g_cpu.R[15]); }
             catch (const RuntimeDispatchYield&) { /* all guest residue is explicit */ }
             catch (...) { capture(instance); throw; }
             capture(instance);
             instance.timing.cycles += io.take_dma_steal_cycles();
         }
+        if (profile) cpu_time += ProfileClock::now() - cpu_start;
+        const auto schedule_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
         std::uint64_t next = target;
         for (auto& ptr : machines_) {
             auto& instance = *ptr;
@@ -186,6 +202,7 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
                 io.cycles_until_next_timer_event(), io.cycles_until_next_sio_event()});
             next = std::min(next, cycle_ + event);
         }
+        if (profile) schedule_time += ProfileClock::now() - schedule_start;
         if (next == cycle_) {
             // An IRQ entry/return consumed no emulated cycles; the next
             // iteration executes its continuation at this same timestamp.
@@ -197,6 +214,7 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
         zero_cycle_passes = 0;
         if (next < cycle_) throw std::logic_error("GBA session lost cycle debt");
         const auto delta = static_cast<std::uint32_t>(next - cycle_);
+        const auto device_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
         for (auto& ptr : machines_) {
             auto& instance = *ptr;
             bind(instance);
@@ -205,7 +223,20 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
             capture(instance);
             instance.timing.cycles += instance.bus.io().take_dma_steal_cycles();
         }
+        if (profile) {
+            device_time += ProfileClock::now() - device_start;
+            ++passes;
+        }
         cycle_ = next;
+    }
+    if (profile) {
+        const auto ms = [](auto duration) {
+            return std::chrono::duration<double, std::milli>(duration).count();
+        };
+        std::fprintf(stderr, "[session:profile] machines=%zu frame=%llu total_ms=%.3f cpu_ms=%.3f schedule_ms=%.3f devices_ms=%.3f dispatches=%llu passes=%llu\n",
+            machines_.size(), static_cast<unsigned long long>(profile_frames), ms(ProfileClock::now() - profile_start),
+            ms(cpu_time), ms(schedule_time), ms(device_time),
+            static_cast<unsigned long long>(dispatches), static_cast<unsigned long long>(passes));
     }
 }
 
