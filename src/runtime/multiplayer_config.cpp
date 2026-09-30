@@ -46,16 +46,23 @@ bool validate_session_config(const GbaSessionConfig& config, std::string* error)
 }
 bool validate_multiplayer_mvp(const GbaSessionConfig& config, std::string* error) {
     if (!validate_session_config(config, error)) return false;
-    if (config.machines.size() != 2 || config.input_machines.size() != 2 || config.links.size() != 1)
-        return fail(error, "initial multiplayer session requires two machines and two input seats");
-    if (config.links[0].machines.size() != 2)
-        return fail(error, "both machines must share the selected serial medium");
-    for (const auto& machine : config.machines)
+    const auto count = config.machines.size();
+    if (count < 2 || count > kGbaMaxSessionPlayers || config.input_machines.size() != count ||
+        config.links.size() != 1)
+        return fail(error, "multiplayer session requires two to four machines, one input seat each");
+    if (config.links[0].machines.size() != count)
+        return fail(error, "every machine must share the selected serial medium");
+    // RFU domains are structurally larger, but only the two-adapter exchange
+    // is qualified. A 3-4 adapter radio session stays refused until tested.
+    if (config.links[0].medium == GbaLinkMedium::Wireless && count != 2)
+        return fail(error, "wireless adapter sessions are qualified for two machines only");
+    for (const auto& machine : config.machines) {
         if (machine.boot != GbaBootSource::Cartridge)
             return fail(error, "Single-Pak multiboot is not implemented");
-    if (config.machines[0].program_id != config.machines[1].program_id ||
-        config.machines[0].rom_sha1 != config.machines[1].rom_sha1)
-        return fail(error, "cross-version cartridge linking is not implemented");
+        if (machine.program_id != config.machines[0].program_id ||
+            machine.rom_sha1 != config.machines[0].rom_sha1)
+            return fail(error, "cross-version cartridge linking is not implemented");
+    }
     return true;
 }
 bool validate_cable_mvp(const GbaSessionConfig& config, std::string* error) {

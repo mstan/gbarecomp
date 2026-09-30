@@ -198,6 +198,30 @@ void topology() {
     CHECK(!validate_cable_mvp(config, &error));
     config.links[0].medium = GbaLinkMedium::Cable;
     CHECK(!validate_session_config(config, &error));
+    // Same-cartridge cable sessions: two to four consoles, every one seated
+    // and attached, and every one the same program image (not only 0 vs 1).
+    for (unsigned players = 3; players <= 5; ++players) {
+        GbaSessionConfig n;
+        for (unsigned i = 0; i < players; ++i) {
+            n.machines.push_back({i, "kirby", std::string(40, 'b')});
+            n.input_machines.push_back(players - 1 - i);
+        }
+        std::vector<GbaMachineId> ports;
+        for (unsigned i = 0; i < players; ++i) ports.push_back(i);
+        n.links.push_back({GbaLinkMedium::Cable, ports});
+        CHECK(validate_cable_mvp(n, &error) == (players <= 4));
+        if (players > 4) continue;
+        auto bad = n; bad.machines[players - 1].rom_sha1 = std::string(40, 'c');
+        CHECK(validate_session_config(bad, &error) && !validate_multiplayer_mvp(bad, &error));
+        bad = n; bad.machines[players - 1].program_id = "kirby-jp";
+        CHECK(!validate_multiplayer_mvp(bad, &error));
+        bad = n; bad.input_machines.pop_back();
+        CHECK(validate_session_config(bad, &error) && !validate_multiplayer_mvp(bad, &error));
+        bad = n; bad.links[0].machines.pop_back();
+        CHECK(validate_session_config(bad, &error) && !validate_multiplayer_mvp(bad, &error));
+        bad = n; bad.links[0].medium = GbaLinkMedium::Wireless;
+        CHECK(validate_session_config(bad, &error) && !validate_multiplayer_mvp(bad, &error));
+    }
 }
 }
 int main() {
