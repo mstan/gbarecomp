@@ -314,6 +314,8 @@ bool load_state_bytes(const uint8_t* data, std::size_t size,
     { SnapshotReader r = reader_for(TAG_CPU);   deserialize_cpu(r); }
     { SnapshotReader r = reader_for(TAG_BUS);   ctx.bus->deserialize(r); }
     { SnapshotReader r = reader_for(TAG_IO);    ctx.bus->io().deserialize(r); }
+    // WAITCNT arrived with the IO page; re-derive the bus wait-state table.
+    ctx.bus->refresh_waitstates();
     { SnapshotReader r = reader_for(TAG_AUDIO); ctx.bus->audio().deserialize(r); }
     { SnapshotReader r = reader_for(TAG_SAVE);  ctx.bus->save().deserialize(r); }
     { SnapshotReader r = reader_for(TAG_PPU);   ctx.ppu->deserialize(r); }

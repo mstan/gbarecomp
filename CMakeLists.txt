@@ -253,6 +253,7 @@ set_property(TARGET gbarecomp_recompile_core PROPERTY POSITION_INDEPENDENT_CODE 
 add_library(gbarecomp_gba STATIC
     src/gba/gba_memory.cpp
     src/gba/gba_bus.cpp
+    src/gba/gba_waitstates.cpp
     src/gba/gba_matrix_memory.cpp
     src/gba/gba_io.cpp
     src/gba/gba_serial_device.cpp
@@ -942,12 +943,14 @@ add_executable(codegen_tests
     tests/codegen/test_cases.cpp
     tests/codegen/overlay_runtime_compile_smoke.cpp
     tests/codegen/stubs.cpp
+    src/gba/gba_waitstates.cpp
     ${CODEGEN_TESTS_GENFILE}
 )
 target_include_directories(codegen_tests PRIVATE
     tests/codegen
     src/runtime
-    src/armv4t)
+    src/armv4t
+    src/gba)
 target_link_libraries(codegen_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME codegen_tests COMMAND codegen_tests)
 

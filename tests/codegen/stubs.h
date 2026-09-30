@@ -5,7 +5,14 @@
 
 #include <cstdint>
 
+#include "runtime_arm_types.h"
+
 namespace codegen_test {
+
+// Wait-state table shared by both sides of the diff: generated code reads it
+// through g_runtime_waits, the interpreter's FlatBus through code_wait /
+// prefetch_stall. The runner configures it per pass.
+extern RuntimeWaitTable& g_waits;
 
 // Re-seed the singleton bus before each test. `size` bytes starting
 // at `base`. Also resets dispatch / SWI / unimplemented recorders.

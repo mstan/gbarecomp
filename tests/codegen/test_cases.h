@@ -69,3 +69,11 @@ extern const std::size_t kTestCasesCount;
 using TestFn = void (*)(void);
 extern "C" const TestFn       kTestFns[];
 extern "C" const unsigned     kTestFnsCount;
+
+// The same corpus relocated into cartridge ROM, where fetch wait states and
+// the prefetch buffer apply (one entry per kTestCases slot, emitted at
+// rom_relocated_pc(pc)). Data addresses stay put, below the cartridge.
+inline uint32_t rom_relocated_pc(uint32_t pc) {
+    return pc < 0x08000000u ? pc + 0x08000000u : pc;
+}
+extern "C" const TestFn       kRomTestFns[];

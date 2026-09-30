@@ -130,7 +130,7 @@ they never pause/step two emulators into lockstep to "synchronize observers"
 
 ## Axis 2 — Cycle / timing  ← ACTIVE
 
-**Status: PARTIAL → cycle-accurate vs the in-tree interpreter, NOT yet vs HW.**
+**Status: PARTIAL → CPU/bus timing equals mGBA (timing fixture); NOT yet vs HW.**
 
 - [x] Master guest clock `g_runtime_cycles`, advanced every recompiled
   instruction — `runtime_bus_bridge.cpp:564`. Per-instruction cost = fixed base
@@ -140,21 +140,22 @@ they never pause/step two emulators into lockstep to "synchronize observers"
 - [x] Region/bus-width-aware memory cost — `GbaBus::access_cycles`
   `gba_bus.cpp:433-466` (IWRAM/OAM/IO=1, VRAM/PAL 16-bit, EWRAM +2, ROM
   N16=5/S16=3/N32=8/S32=6). Branch pipeline refill +2 folded into base.
-- [ ] **GAP 1 — dynamic WAITCNT.** Waitstates hardcoded to power-on default
-  0x0000 (`gba_bus.cpp:422,455`). Games that reprogram WAITCNT (most do — sets
-  ROM to 3/1 + prefetch) diverge in cycle counts. Cross-ref GBATEK §"WAITCNT";
-  validate native-vs-NBA Δcycles over a WAITCNT-sensitive region.
-- [ ] **GAP 2 — no prefetch-buffer (pipeline) timing.** `prefetch_word`
-  (`gba_bus.cpp:83`) synthesizes open-bus values only, not ROM sequential-
-  prefetch *timing*. NBA models this; we don't. Cross-ref GBATEK §"GamePak
-  Prefetch"; this is the single biggest HW-cycle divergence source.
+- [x] **GAP 0 — opcode-fetch wait states** (found via beads-mc7.32): every
+  fetch was charged as a zero-wait 1S, so cartridge/EWRAM code ran several
+  times too fast. Now S/N/refill fetch waits per code region
+  (`Bus::code_wait`, `g_runtime_waits`); docs/CPU_TIMING.md.
+- [x] **GAP 1 — dynamic WAITCNT** + internal memory control (EWRAM waits),
+  `gba_waitstates.{h,cpp}`; data, DMA and fetch costs follow them.
+- [x] **GAP 2 — prefetch-buffer timing**: mGBA `GBAMemoryStall` model
+  (`runtime_wait_model.h`). Gate: `timing_mgba_differential`, 495 timer
+  measurements equal mGBA 1d201b22 exactly. Not yet validated vs NBA/HW.
 - [ ] **Validation method (the ruler):** port the PSX `cyc_watch` pattern —
   always-on block-leader cycle sampler, arm ONE guest-PC anchor on recomp + read
   `GetTimestampNow()` on NBA, free-run both, diff per `hit_index` by **deltas**
   (consecutive same-anchor hits cancel the boot offset). NO pause/step.
 
-**Gap:** WAITCNT + prefetch ⇒ cannot be true-GREEN vs hardware yet.
-**Lever:** implement dynamic WAITCNT + a prefetch-timing model, gate vs NBA Δcyc.
+**Gap:** matches mGBA, not yet vs hardware/NBA; PPU VRAM contention unmodeled.
+**Lever:** run the timing fixture on NBA / hardware; model VRAM stalls.
 
 ## Axis 3 — Interrupt / event timing
 

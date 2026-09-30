@@ -122,6 +122,16 @@ The original fixture agrees with mGBA on received words, final SIOCNT/IDs and
 serial IRQ at all four baud rates after a startup settling interval. This is
 **not** an instruction-by-instruction cycle-equivalence claim. Native unit
 tests check each documented duration and event boundary independently.
+The fixture's CPU path does match mGBA cycle for cycle (docs/CPU_TIMING.md):
+the 4096-iteration ARM settle loop from ROM costs 155648 cycles in both, and
+the master's start write begins at cycle 155777 when the ready bit is seen
+on the first poll (`link_rom_tests --start` samples 155778, the first cycle
+after it). mGBA's begins 8172 cycles later, exactly 227 extra 36-cycle polls
+of SIOCNT's ready bit: its
+lockstep coordinator only propagates the peers' MODE_SET at
+`LOCKSTEP_INTERVAL` (4096-cycle) syncs (`src/gba/sio/lockstep.c:13`). On
+hardware the ready bit is the SD line, high as soon as every console is in
+multiplayer mode, which the native cable reports immediately.
 The same original ROM now covers normal 8/32-bit transfers at both clocks.
 Those cases agree on received data, control fields excluding pin SI, and IRQs.
 The forward wiring is also documented in

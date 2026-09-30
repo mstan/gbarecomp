@@ -73,7 +73,7 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
     header_stage = build_root / "framework" / "include"
     header_stage.mkdir(parents=True)
-    for name in ("runtime_arm.h", "runtime_arm_types.h"):
+    for name in ("runtime_arm.h", "runtime_arm_types.h", "runtime_wait_inline.h", "runtime_wait_model.h"):
         shutil.copy2(root / "src" / "armv4t" / name, header_stage / name)
     core_header_stage = build_root / CORE_RUNTIME_TYPES
     core_header_stage.parent.mkdir(parents=True, exist_ok=True)

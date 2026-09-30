@@ -21,10 +21,20 @@ extern "C" int (*g_rom_read16_override)(std::uint32_t, std::uint16_t,
 extern "C" int (*g_rom_read32_override)(std::uint32_t, std::uint32_t,
                                          std::uint32_t*) = nullptr;
 
+namespace {
+// The bus whose wait-state table currently lives in the runtime's live copy
+// (at most one). Cleared by that bus's destructor, so the runtime never
+// unbinds a destroyed bus.
+GbaBus* g_wait_table_owner = nullptr;
+}  // namespace
+
 GbaBus::GbaBus() {
     io_dispatch_.set_audio(&audio_);
+    waits_reset(*waits_);
 }
-GbaBus::~GbaBus() = default;
+GbaBus::~GbaBus() {
+    if (g_wait_table_owner == this) g_wait_table_owner = nullptr;
+}
 
 void GbaBus::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     w.bytes(ewram_.data(), ewram_.size());
@@ -37,6 +47,11 @@ void GbaBus::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     w.u64(unmapped_count_);
     rtc_.serialize(w);
     matrix_.serialize(w);
+    // Wait states: WAITCNT itself lives in the IO page; the EWRAM wait is
+    // the last ACCEPTED memory-control setting (a rejected write keeps it).
+    w.u32(memctl_);
+    w.u32(waits_->n16[0x2]);
+    w.u32(waits_->last_prefetched_pc);
 }
 
 void GbaBus::deserialize(gbarecomp::debug::SnapshotReader& r) {
@@ -54,6 +69,79 @@ void GbaBus::deserialize(gbarecomp::debug::SnapshotReader& r) {
     if (r.remaining() != 0) {
         matrix_.deserialize(r);
     }
+    // Older snapshots predate the wait-state model: power-on EWRAM control
+    // and an empty prefetch buffer. WAITCNT is re-derived after the IO page
+    // loads (refresh_waitstates, called by the snapshot orchestrator).
+    waits_reset(*waits_);
+    memctl_ = 0x0D000020u;
+    if (r.remaining() != 0) {
+        memctl_ = r.u32();
+        const uint32_t ewram_wait = r.u32();
+        if (ewram_wait >= 1u && ewram_wait <= 15u)
+            waits_->n16[0x2] = static_cast<uint8_t>(ewram_wait);
+        waits_->last_prefetched_pc = r.u32();
+    }
+    refresh_waitstates();
+}
+
+GbaBus* GbaBus::wait_table_owner() { return g_wait_table_owner; }
+
+void GbaBus::bind_wait_table(RuntimeWaitTable* live) {
+    if (live) {
+        if (g_wait_table_owner && g_wait_table_owner != this)
+            g_wait_table_owner->bind_wait_table(nullptr);
+        if (waits_ != live) {
+            *live = *waits_;
+            waits_ = live;
+        }
+        g_wait_table_owner = this;
+        return;
+    }
+    if (waits_ != &own_waits_) {
+        own_waits_ = *waits_;
+        waits_ = &own_waits_;
+    }
+    if (g_wait_table_owner == this) g_wait_table_owner = nullptr;
+}
+
+void GbaBus::refresh_waitstates() {
+    const uint8_t* io = io_dispatch_.raw();
+    waits_apply_waitcnt(*waits_, static_cast<uint16_t>(io[0x204] | (io[0x205] << 8)));
+    // EWRAM entries follow the accepted wait (n16[2]; 1..15 by construction).
+    waits_apply_memctl(*waits_, (15u - (waits_->n16[0x2] & 0xFu)) << 24);
+}
+
+namespace {
+bool is_memctl(std::size_t off) {
+    const std::size_t o = off & 0xFFFFu;
+    return o >= 0x800u && o < 0x804u;
+}
+}  // namespace
+
+uint32_t GbaBus::memctl_read(uint32_t off, uint8_t width) const {
+    const uint32_t shift = 8u * (off & 3u);
+    const uint32_t v = memctl_ >> shift;
+    return width == 1 ? (v & 0xFFu) : width == 2 ? (v & 0xFFFFu) : v;
+}
+
+void GbaBus::memctl_write(uint32_t off, uint32_t value, uint8_t width) {
+    const uint32_t shift = 8u * (off & 3u);
+    const uint32_t mask = (width == 1 ? 0xFFu : width == 2 ? 0xFFFFu
+                                                           : 0xFFFFFFFFu) << shift;
+    memctl_ = (memctl_ & ~mask) | ((value << shift) & mask);
+    if (mask & 0xFF000000u) waits_apply_memctl(*waits_, memctl_);
+}
+
+// WAITCNT (4000204h) is the only IO register the bus itself interprets.
+// Bits 13 and 15 are read-only zero on a GBA cartridge (mGBA io.c masks
+// writes with 0x5FFF).
+void GbaBus::note_io_write(uint32_t off, uint8_t width) {
+    if (off + width <= 0x204u || off > 0x205u) return;
+    const uint8_t* io = io_dispatch_.raw();
+    const uint16_t raw = static_cast<uint16_t>(io[0x204] | (io[0x205] << 8));
+    const uint16_t masked = static_cast<uint16_t>(raw & 0x5FFFu);
+    if (masked != raw) io_dispatch_.write16(0x204u, masked);
+    waits_apply_waitcnt(*waits_, masked);
 }
 
 namespace {
@@ -157,6 +245,8 @@ uint8_t GbaBus::read8(uint32_t addr) {
         }
         case Region::Io:
             if (write_observer_) write_observer_->on_bus_read(addr);
+            if (is_memctl(off))
+                return static_cast<uint8_t>(memctl_read(static_cast<uint32_t>(off), 1));
             return io_dispatch_.read8(static_cast<uint32_t>(off));
         case Region::Save:
             if (save_.sram_enabled())
@@ -213,6 +303,8 @@ uint16_t GbaBus::read16(uint32_t addr) {
         }
         case Region::Io:
             if (write_observer_) write_observer_->on_bus_read(addr);
+            if (is_memctl(off))
+                return static_cast<uint16_t>(memctl_read(static_cast<uint32_t>(off), 2));
             return io_dispatch_.read16(static_cast<uint32_t>(off));
         case Region::Save:
             if (save_.sram_enabled()) {
@@ -280,6 +372,7 @@ uint32_t GbaBus::read32(uint32_t addr) {
         }
         case Region::Io:
             if (write_observer_) write_observer_->on_bus_read(addr);
+            if (is_memctl(off)) return memctl_read(static_cast<uint32_t>(off), 4);
             return io_dispatch_.read32(static_cast<uint32_t>(off));
         case Region::Save:
             if (save_.sram_enabled()) {
@@ -366,7 +459,12 @@ void GbaBus::write8(uint32_t addr, uint8_t v) {
             log_unmapped(addr, v, true, 1);
             return;
         case Region::Io:
+            if (is_memctl(off)) {
+                memctl_write(static_cast<uint32_t>(off), v, 1);
+                return;
+            }
             io_dispatch_.write8(static_cast<uint32_t>(off), v);
+            note_io_write(static_cast<uint32_t>(off), 1);
             return;
         case Region::Save:
             if (save_.sram_enabled()) {
@@ -418,7 +516,12 @@ void GbaBus::write16(uint32_t addr, uint16_t v) {
             log_unmapped(addr, v, true, 2);
             return;
         case Region::Io:
+            if (is_memctl(off)) {
+                memctl_write(static_cast<uint32_t>(off), v, 2);
+                return;
+            }
             io_dispatch_.write16(static_cast<uint32_t>(off), v);
+            note_io_write(static_cast<uint32_t>(off), 2);
             return;
         case Region::Save:
             if (save_.sram_enabled()) {
@@ -472,7 +575,12 @@ void GbaBus::write32(uint32_t addr, uint32_t v) {
             log_unmapped(addr, v, true, 4);
             return;
         case Region::Io:
+            if (is_memctl(off)) {
+                memctl_write(static_cast<uint32_t>(off), v, 4);
+                return;
+            }
             io_dispatch_.write32(static_cast<uint32_t>(off), v);
+            note_io_write(static_cast<uint32_t>(off), 4);
             return;
         case Region::Save:
             if (save_.sram_enabled()) {
@@ -494,55 +602,14 @@ void GbaBus::write32(uint32_t addr, uint32_t v) {
     }
 }
 
-// Per-region access-cycle table. Sources:
-//   * GBATEK § "GBA Memory Map"
-//   * GBATEK § "GBA Cycle Times"
-//   * ARM7TDMI TRM § "Memory Access Cycles"
-//
-// Cycle counts assume default WAITCNT (0x0000). Bus width and
-// waitstate combine: every 16-bit-bus region costs 2 cycles per
-// 32-bit access (two consecutive halfword bus cycles); EWRAM adds
-// 2 waitstates on top of that.
-//
-// `sequential` is the ARM7TDMI "S" cycle (an access immediately
-// following another in the same area). For ARM/THUMB on the GBA
-// most regions have S=N=1 for 16-bit and 1S=1N=1 / 2S=2N=2 for
-// 32-bit, but ROM with WAITCNT > 0 gets a faster S than N. We use
-// the same value for S/N in regions where they match and split
-// only where they don't (ROM).
+// Per-region access cost: one base bus cycle plus the region's wait states
+// for the access width and sequentiality, from the live wait-state table
+// (WAITCNT for ROM/SRAM, internal memory control for EWRAM; fixed bus
+// widths elsewhere). Sources: GBATEK "GBA Memory Map", "GBA System
+// Control"; mGBA 1d201b22 memory.c. See gba_waitstates.h.
 uint32_t GbaBus::access_cycles(uint32_t addr, uint8_t width,
                                bool sequential) const {
-    // 8-bit accesses use the same cycle count as 16-bit on hardware
-    // (regions with 16-bit data buses still complete a single
-    // halfword cycle for either width).
-    uint8_t w = (width == 4) ? 4 : 2;
-    uint32_t region = (addr >> 24) & 0xFu;
-    switch (region) {
-        case 0x0:  // BIOS  (32-bit bus, 0 wait)
-        case 0x3:  // IWRAM (32-bit bus, 0 wait)
-        case 0x7:  // OAM   (32-bit bus, 0 wait)
-            return 1;
-        case 0x4:  // IO (32-bit bus, 0 wait)
-            return 1;
-        case 0x5:  // PAL   (16-bit bus, 0 wait)
-        case 0x6:  // VRAM  (16-bit bus, 0 wait)
-            return (w == 4) ? 2u : 1u;
-        case 0x2:  // EWRAM (16-bit bus, 2 wait states)
-            return (w == 4) ? 6u : 3u;
-        case 0x8: case 0x9:  // ROM WS0
-        case 0xA: case 0xB:  // ROM WS1
-        case 0xC: case 0xD:  // ROM WS2
-            // Default WAITCNT 0x0000. mGBA's waitstate tables store
-            // the external wait component (N16=4, S16=2, N32=7,
-            // S32=5); the data-access helper needs the full bus
-            // access cost, so add the one base bus cycle here.
-            if (w == 4) return sequential ? 6u : 8u;
-            return sequential ? 3u : 5u;
-        case 0xE:  // SRAM / Flash region — 8-bit bus, ~5 cycles
-            return 5;
-        default:
-            return 1;
-    }
+    return waits_access_cycles(*waits_, addr, width, sequential);
 }
 
 void GbaBus::log_unmapped(uint32_t addr, uint32_t value, bool is_write, uint8_t width) {

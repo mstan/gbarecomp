@@ -56,14 +56,16 @@ Write-Host "Staged toolchain-free overlay compiler: $TccExe"
 
 # Stage the overlay shim headers the runtime's tcc/gcc command compiles each
 # healed function against. On a source-less player box overlay_compile.cpp falls
-# back to <exe>/overlay_toolchain/include. The three headers #include each other
+# back to <exe>/overlay_toolchain/include. The shim headers #include each other
 # by filename, so flattening them into one dir resolves cleanly.
 $Inc = Join-Path $Toolchain "include"
 New-Item -ItemType Directory -Force $Inc | Out-Null
 $headers = @(
     (Join-Path $EngineRoot "src\runtime\overlay_runtime_arm.h"),
     (Join-Path $EngineRoot "src\runtime\overlay_abi.h"),
-    (Join-Path $EngineRoot "src\armv4t\runtime_arm_types.h")
+    (Join-Path $EngineRoot "src\armv4t\runtime_arm_types.h"),
+    (Join-Path $EngineRoot "src\armv4t\runtime_wait_inline.h"),
+    (Join-Path $EngineRoot "src\armv4t\runtime_wait_model.h")
 )
 foreach ($hh in $headers) {
     if (-not (Test-Path $hh)) { throw "overlay shim header missing: $hh" }

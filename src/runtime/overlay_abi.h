@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-#define GBA_OVERLAY_ABI_VERSION 5u
+#define GBA_OVERLAY_ABI_VERSION 6u
 
 typedef struct GbaOverlayCallbacks {
     uint32_t abi_version;  // must equal GBA_OVERLAY_ABI_VERSION
@@ -103,6 +103,13 @@ typedef struct GbaOverlayCallbacks {
     // ABI v5: generated bodies gate diagnostic trace calls before crossing the
     // host callback boundary.
     unsigned* runtime_trace_enabled;
+
+    // ABI v6: opcode-fetch wait states + GamePak prefetch. The host's live
+    // table (&g_runtime_waits), read in place, never copied.
+    RuntimeWaitTable* runtime_waits;
+    uint32_t (*runtime_exception_return_refill)(uint32_t target_pc);
+    uint32_t (*runtime_prefetch_stall_delta)(uint32_t wait, uint32_t pc,
+                                             uint32_t thumb);
 } GbaOverlayCallbacks;
 
 // Exported by every overlay DLL:

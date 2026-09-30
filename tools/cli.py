@@ -14,7 +14,7 @@ import time
 
 
 VERSION = "0.2.0"
-HEADERS = ("runtime_arm.h", "runtime_arm_types.h")
+HEADERS = ("runtime_arm.h", "runtime_arm_types.h", "runtime_wait_inline.h", "runtime_wait_model.h")
 CORE_RUNTIME_TYPES = Path("external/arm-recomp-core/profiles/armv4t_gba/runtime_arm_types.h")
 
 
