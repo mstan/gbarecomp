@@ -208,6 +208,15 @@ def parse_symbols(path: pathlib.Path, rom_lo: int, rom_hi: int):
             if (region_for(value) not in ("other", "bios")
                     and not name.endswith(".o")):
                 data.append((value, size, name))
+        elif (typ == "NOTYPE" and _bind == "GLOBAL"
+              and region_for(value) in ("ewram", "iwram")):
+            # A decomp whose RAM layout still lives in assembly declares its
+            # globals as plain global labels inside the RAM sections (katam:
+            # `gCurLevelInfo:` in ewram/iwram .space blocks). They carry no
+            # STT_OBJECT type or size but name real RAM, exactly like the
+            # OBJECT case; ROM-side NOTYPE labels are code/data labels and are
+            # deliberately not treated as data symbols.
+            data.append((value, size, name))
 
     return funcs, data, mapping, by_name
 
@@ -527,7 +536,7 @@ def main() -> int:
         seen_data.setdefault(addr, (size, name))
     with (args.out / "imported_data_symbols.tsv").open(
             "w", encoding="utf-8", newline="\n") as fh:
-        fh.write("# addr\tregion\tsize\tname  (STT_OBJECT, plus absolute "
+        fh.write("# addr\tregion\tsize\tname  (STT_OBJECT, global RAM labels, plus absolute "
                  "symbols landing in a GBA region)\n")
         for addr, (size, name) in sorted(seen_data.items()):
             fh.write(f"0x{addr:08X}\t{region_for(addr)}\t0x{size:X}\t{name}\n")
