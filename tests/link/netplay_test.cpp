@@ -214,5 +214,82 @@ void demoted_candidate() {
     CHECK(!host.checkpoint_unchanged(accepted));
     CHECK(host.confirmed_checkpoint().state==simulation->save_state());
 }
+// Three and four consoles through the same host callbacks: every seat's row
+// reaches its own machine, a correction replays to exactly the direct run,
+// output follows the seat mapping, and a short publication is refused.
+void n_player_host(unsigned players) {
+    using namespace gbarecomp;
+    auto simulation=create(true,true,players); GbaNetplayHost h(*simulation); const auto api=h.callbacks();
+    RNetRbFrame rows[4]{};
+    for (auto& row:rows) row.is_valid=1;
+    const auto run=[&](unsigned tick,unsigned base,bool replay) {
+        for (unsigned seat=0;seat<players;++seat) rows[seat].buttons=static_cast<std::uint16_t>(base<<seat);
+        if (!replay) CHECK(api.snap_save(api.ctx,tick));
+        api.publish(api.ctx,tick,rows,static_cast<int>(players),replay ? 1 : 0);
+        CHECK(replay ? api.run_tick(api.ctx,tick)!=0 : h.run_published_tick());
+    };
+    run(0,1,false); run(1,2,false); run(2,1,false);
+    // Every console saw port 2 (and port 3 on a four-port cable).
+    for (unsigned port=0;port<players;++port) {
+        const auto high=simulation->machine(port).bus.read32(0x02000004);
+        CHECK((high&0xffff)!=0xffff && ((high>>16)==0xffff)==(players==3));
+    }
+    GbaNetplayOutput output;
+    CHECK(h.take_output(0,output) && output.machine==players-1 && output.tick==2);
+    api.resim_begin(api.ctx); CHECK(api.snap_load(api.ctx,1)); api.snap_drop_after(api.ctx,1);
+    run(1,4,true); run(2,8,true);
+    api.resim_end(api.ctx);
+    CHECK(!h.take_output(0,output) && h.next_tick()==3 && h.error().empty());
+    auto expected=create(true,true,players);
+    for (unsigned base:{1u,4u,8u}) {
+        std::vector<std::uint16_t> inputs;
+        for (unsigned seat=0;seat<players;++seat) inputs.push_back(static_cast<std::uint16_t>(base<<seat));
+        expected->run_frame(inputs);
+    }
+    CHECK(simulation->save_state()==expected->save_state());
+    CHECK(api.digest_master(api.ctx)==expected->state_hash());
+    for (unsigned port=0;port<players;++port) // seat N-1-p's corrected keys
+        CHECK(simulation->machine(port).bus.save().sram_read(0)==((8u<<(players-1-port))&0xff));
+    CHECK(api.snap_save(api.ctx,3));
+    api.publish(api.ctx,3,rows,static_cast<int>(players)-1,0);
+    CHECK(h.return_to_lobby_requested() && !h.run_published_tick());
 }
-int main() { admission_pacing(); confirmed_session_control(); restore_corrected_session(); delay_publication(); local_output(); confirmed_checkpoint(); agreement_gate(); demoted_candidate(); std::puts("whole-session netplay host tests passed"); }
+// The agreed boundary outlives the rollback ring, is recaptured by a replay
+// across it, and a correction before it withdraws the old candidate.
+void pinned_checkpoint() {
+    using namespace gbarecomp;
+    auto simulation=create(true); GbaNetplayHost h(*simulation); const auto api=h.callbacks();
+    CHECK(h.snapshot_depth()==GbaNetplayHost::kSnapshotDepth);
+    h.pin_checkpoint(2);
+    RNetRbFrame rows[2]{}; for (auto& row:rows) row.is_valid=1;
+    std::vector<std::uint8_t> at_two;
+    const unsigned last=h.snapshot_depth()+8;
+    for (unsigned tick=0;tick<last;++tick) {
+        if (tick==2) at_two=simulation->save_state();
+        CHECK(api.snap_save(api.ctx,tick)); rows[0].buttons=static_cast<std::uint16_t>(tick&0xff);
+        api.publish(api.ctx,tick,rows,2,0); CHECK(h.run_published_tick());
+    }
+    CHECK(!api.snap_has(api.ctx,2)); // evicted from the rollback ring
+    GbaConfirmedCheckpoint pinned;
+    CHECK(h.copy_checkpoint(2,last-1,pinned) && pinned.next_tick==2 && pinned.state==at_two);
+    CHECK(h.checkpoint_unchanged(pinned));
+    CHECK(!h.copy_checkpoint(3,last-1,pinned)); // only the pinned boundary survives
+    // A correction starting before the boundary withdraws it until the
+    // corrected run passes the boundary again, then pins the new bytes.
+    h.pin_checkpoint(last-3);
+    CHECK(api.snap_save(api.ctx,last));
+    rows[0].buttons=1; api.publish(api.ctx,last,rows,2,0); CHECK(h.run_published_tick());
+    CHECK(h.copy_checkpoint(last-3,last,pinned)); const auto accepted=pinned;
+    api.resim_begin(api.ctx); CHECK(api.snap_load(api.ctx,last-4)); api.snap_drop_after(api.ctx,last-4);
+    CHECK(!h.checkpoint_unchanged(accepted));
+    for (unsigned tick=last-4;tick<=last;++tick) {
+        if (tick!=last-4) CHECK(api.snap_save(api.ctx,tick));
+        rows[0].buttons=0x200; api.publish(api.ctx,tick,rows,2,1); CHECK(api.run_tick(api.ctx,tick));
+    }
+    api.resim_end(api.ctx);
+    CHECK(h.copy_checkpoint(last-3,last,pinned) && pinned.state!=accepted.state);
+    CHECK(!h.checkpoint_unchanged(accepted) && h.checkpoint_unchanged(pinned));
+    CHECK(h.error().empty());
+}
+}
+int main() { n_player_host(3); n_player_host(4); pinned_checkpoint(); admission_pacing(); confirmed_session_control(); restore_corrected_session(); delay_publication(); local_output(); confirmed_checkpoint(); agreement_gate(); demoted_candidate(); std::puts("whole-session netplay host tests passed"); }
