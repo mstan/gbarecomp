@@ -84,6 +84,7 @@ private:
     GbaConnectionStatus connection_{GbaConnectionPhase::Connecting,60000};
     std::string error_;
     int seat_ = 0, slots_ = 2, delay_ = 2, prediction_ = 6;
+    std::uint32_t occupied_ = 3;
     std::uint32_t finish_tick_ = 0;
     std::uint64_t replay_ticks_ = 0;
     bool checkpoint_requested_=false;
