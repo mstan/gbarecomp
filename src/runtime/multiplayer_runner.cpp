@@ -51,13 +51,18 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
         throw std::invalid_argument("netplay asset verification failed");
     if (!valid_save_size(boot.save.type,boot.save.size))
         throw std::invalid_argument("invalid netplay save hardware");
+    const unsigned players=launch.player_count;
     GbaSessionConfig config;
-    config.machines={{0,launch.program_id,boot.expected_rom_sha1},{1,launch.program_id,boot.expected_rom_sha1}};
-    config.links={{launch.medium,{0,1}}};
-    config.input_machines={launch.seat_machine[0],launch.seat_machine[1]};
+    GbaLinkGroup link{launch.medium,{}};
+    for (unsigned id=0;id<players;++id) {
+        config.machines.push_back({id,launch.program_id,boot.expected_rom_sha1});
+        link.machines.push_back(id); // machine ID == cable port
+        config.input_machines.push_back(launch.seat_machine[id]);
+    }
+    config.links={std::move(link)};
     GbaMultiplayerSession simulation(std::move(config));
     simulation.set_native_slices(true);
-    for (unsigned id=0;id<2;++id) {
+    for (unsigned id=0;id<players;++id) {
         auto& m=simulation.machine(id);
         m.bus.set_bios(boot.bios); m.bus.set_rom(boot.rom->data(),boot.rom->size());
         configure_save(m.bus.save(),boot.save);
@@ -71,14 +76,15 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
     options.network.local_slot=launch.local_seat;
     options.network.session_id=launch.session_id;
     options.network.input_delay=launch.input_delay;
-    options.network.occupied_mask=3;
+    options.network.slot_count=static_cast<rnet_u8>(players);
+    options.network.occupied_mask=(1u<<players)-1;
     options.prediction=launch.prediction; options.rollback=launch.rollback;
     options.force_turn=launch.force_turn;
     options.planned_finish_tick=boot.finish_tick;
     options.identity=std::string(launch.medium==GbaLinkMedium::Wireless ? "gba-wireless/1:" : "gba-cable/1:")+launch.program_id+":"+launch.build_identity+":"+
         boot.expected_rom_sha1+":"+boot.bios->sha1_hex()+":"+
         std::to_string(static_cast<unsigned>(boot.save.type))+":"+std::to_string(boot.save.size)+":"+
-        std::to_string(launch.seat_machine[0])+":"+std::to_string(launch.seat_machine[1])+":native-lle";
+        gba_netplay_seat_identity(launch)+":native-lle";
     const auto identity_digest=gba::sha1(reinterpret_cast<const std::uint8_t*>(options.identity.data()),options.identity.size());
     options.build_fingerprint=std::uint32_t(identity_digest.bytes[0])|
         (std::uint32_t(identity_digest.bytes[1])<<8)|(std::uint32_t(identity_digest.bytes[2])<<16)|
@@ -108,7 +114,10 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
         ~DetachPresentation() { simulation.input_machine(seat).ppu.set_presentation_observer(nullptr); }
     } detach{simulation, launch.local_seat};
     GbaNetplayMatch match(simulation,std::move(options));
-    if (rnet_session_start_lan(match.transport(),launch.bind_endpoint.c_str(),launch.peer_endpoint.c_str()))
+    const auto transport=gba_netplay_transport(launch);
+    if ((transport==GbaNetplayTransport::Hub ?
+            rnet_session_start_lan_hub(match.transport(),launch.bind_endpoint.c_str()) :
+            rnet_session_start_lan(match.transport(),launch.bind_endpoint.c_str(),launch.peer_endpoint.c_str())))
         throw std::runtime_error("cannot open netplay transport");
     HostWindow window;
     if (!window.open(boot.scale,initial_width,160,boot.title.c_str(),boot.screen.c_str(),

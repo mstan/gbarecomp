@@ -7,14 +7,18 @@ namespace gbarecomp {
 GbaNetplayMatch::GbaNetplayMatch(GbaMultiplayerSession& simulation, GbaNetplayMatchOptions options)
     : simulation_(simulation), options_(std::move(options)), host_(simulation) {
     const auto& n=options_.network;
-    if (simulation.input_count()!=2 || n.slot_count!=2 || n.local_slot>=2 ||
-        n.wire_slot || (n.occupied_mask && n.occupied_mask!=3) || !n.session_id ||
+    const auto seats=simulation.input_count();
+    const auto full=(1u<<seats)-1;
+    // Seats are dense: the launcher compacts lobby seats before this point.
+    if (seats<2 || seats>kGbaMaxSessionPlayers || n.slot_count!=seats || n.local_slot>=seats ||
+        n.wire_slot || (n.occupied_mask && n.occupied_mask!=full) || !n.session_id ||
         n.input_delay<2 || n.input_delay>20 || options_.prediction<6 || options_.prediction>16 ||
         !options_.build_fingerprint || options_.identity.empty())
-        throw std::invalid_argument("invalid two-player cable match configuration");
+        throw std::invalid_argument("invalid GBA cable match configuration");
     if (!options_.restored_pair && simulation.cycle())
         throw std::invalid_argument("an advanced session requires paired checkpoint startup");
-    seat_=n.local_slot; delay_=n.input_delay; prediction_=options_.prediction;
+    seat_=n.local_slot; slots_=static_cast<int>(seats); occupied_=full;
+    delay_=n.input_delay; prediction_=options_.prediction;
     // Refuse mismatched admission policies before either peer can simulate.
     const auto handshake_identity=options_.identity+"|gba-match/2:"+std::to_string(options_.build_fingerprint)+":"+
         std::to_string(n.protocol_magic)+":"+std::to_string(delay_)+":"+
@@ -48,8 +52,8 @@ void GbaNetplayMatch::start_driver() {
         RNetRbDriverConfig cfg{};
         cfg.session=&session_; cfg.local_slot=&seat_; cfg.slot_count=&slots_;
         cfg.input_delay=&delay_; cfg.input_prediction=&prediction_;
-        cfg.force_turn=options_.force_turn; cfg.occupied_mask=3;
-        cfg.replay_mode=RNET_RB_REPLAY_INCREMENTAL; cfg.snap_depth=GbaNetplayHost::kSnapshotDepth;
+        cfg.force_turn=options_.force_turn; cfg.occupied_mask=occupied_;
+        cfg.replay_mode=RNET_RB_REPLAY_INCREMENTAL; cfg.snap_depth=host_.snapshot_depth();
         cfg.part_names[0]="GBA0"; cfg.part_names[1]="other-GBAs"; cfg.part_names[2]="cable-and-scheduler";
         cfg.log_prefix="gba_match_rb"; cfg.env_alias="GBA_RB";
         rnet_rb_driver_set_identity(driver_.get(),options_.build_fingerprint,simulation_.state_hash());
@@ -99,8 +103,10 @@ GbaNetplayMatch::Step GbaNetplayMatch::poll(bool allow_simulation) {
         const auto through=driver_ ? rnet_rb_driver_confirmed_through(driver_.get()) : host_.next_tick()-1;
         if (!finish_tick_ && (!driver_ || through!=0)) {
             if (const auto request=host_.checkpoint_request(through)) {
-                // Leave time for both peers to observe the confirmed control
-                // row (D<=20, prediction<=16), within the 120-frame history.
+                // Leave time for every peer to observe the confirmed control
+                // row (D<=20, prediction<=16) before simulating the boundary.
+                // The host pins that boundary's snapshot, so agreement latency
+                // does not depend on the rollback ring's reach.
                 // A pathological late observation fails closed: never save a
                 // different boundary or a speculative cartridge independently.
                 if (*request>UINT32_MAX-64) throw std::runtime_error("checkpoint tick overflow");
@@ -164,6 +170,7 @@ void GbaNetplayMatch::finish_at(std::uint32_t tick) {
         (phase_!=Phase::Starting && phase_!=Phase::Running))
         throw std::invalid_argument("checkpoint requires one agreed future input boundary");
     finish_tick_=tick;
+    host_.pin_checkpoint(tick);
     std::fprintf(stderr,"gba checkpoint planned seat=%d target=%u sim=%u\n",seat_,tick,host_.next_tick());
 }
 void GbaNetplayMatch::request_checkpoint() {

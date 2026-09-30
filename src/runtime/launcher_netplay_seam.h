@@ -31,7 +31,10 @@ inline void configure_netplay(RecompLauncherCGameInfo& gi,const gbarecomp::RunOp
         RecompNetplayHostHooks hooks{};
         hooks.game_name=state.game.c_str(); hooks.game_version=state.version.c_str();
         hooks.content_fingerprint=state.content.c_str(); hooks.platform="gba";
-        hooks.default_lobby_name="GBA Multiplayer"; hooks.max_players=2;
+        hooks.default_lobby_name="GBA Multiplayer";
+        // The game's cable capability. recomp-ui clamps online rooms to it
+        // (LAN/direct rooms stay two seats in the shared backend).
+        hooks.max_players=static_cast<int>(opts.netplay->max_players);
 #if defined(RECOMP_LAUNCHER_HAS_SESSION_VARIANT)
         state.variants.clear();
         if (opts.netplay->supported_media & (1u<<static_cast<unsigned>(gbarecomp::GbaLinkMedium::Cable)))
@@ -72,16 +75,42 @@ inline void configure_netplay(RecompLauncherCGameInfo& gi,const gbarecomp::RunOp
 #endif
 }
 
+// HOST_FIRST session slots arrive dense (host = slot 0, then ascending lobby
+// seat); slot_port[] names each slot's lobby seat, which may be sparse (P1,
+// P3, P4 in a four-seat room). Cable ports are those seats' ranks, 0..N-1.
+inline void compact_netplay_ports(const RecompLauncherCNetplayLaunch& selected,unsigned players,
+                                  gbarecomp::GbaNetplayLaunch& launch) {
+    if (!selected.slot_port_valid) {
+        for (unsigned slot=0;slot<players;++slot) launch.seat_machine[slot]=slot;
+        return;
+    }
+    constexpr int seats=static_cast<int>(sizeof(selected.slot_port)/sizeof(selected.slot_port[0]));
+    for (unsigned slot=0;slot<players;++slot) {
+        const int seat=selected.slot_port[slot];
+        if (seat<0 || seat>=seats) throw std::invalid_argument("netplay seat has no lobby player");
+        unsigned rank=0;
+        for (unsigned other=0;other<players;++other) {
+            if (other==slot) continue;
+            if (selected.slot_port[other]==seat) throw std::invalid_argument("two netplay seats share a lobby player");
+            if (selected.slot_port[other]<seat) ++rank;
+        }
+        launch.seat_machine[slot]=rank;
+    }
+}
 inline void accept_netplay(const RecompLauncherCNetplayLaunch& selected,const gbarecomp::RunOptions& opts) {
     if (!opts.netplay) return;
     auto& launch=*opts.netplay;
     launch.enabled=selected.enabled!=0;
     if (!launch.enabled) return;
+    const int capacity=static_cast<int>(launch.max_players);
+    const int players=selected.player_count ? selected.player_count : selected.max_slots;
+    const std::uint32_t dense=players>=2 && players<=31 ? (1u<<players)-1 : 0;
     if (selected.is_spectator || selected.host_spectates || selected.lobby_kind ||
-        selected.local_slot<0 || selected.local_slot>1 || selected.max_slots!=2 ||
-        (selected.player_count && selected.player_count!=2) ||
-        (selected.occupied_mask && selected.occupied_mask!=3))
-        throw std::invalid_argument("this GBA build supports two multiplayer consoles");
+        selected.max_slots<2 || selected.max_slots>capacity || players<2 || players>selected.max_slots ||
+        selected.local_slot<0 || selected.local_slot>=players ||
+        (selected.occupied_mask && selected.occupied_mask!=dense))
+        throw std::invalid_argument("this GBA build links "+std::to_string(capacity)+
+            " or fewer consoles, one player per console");
 #if defined(RECOMP_LAUNCHER_HAS_SESSION_VARIANT)
     if (selected.session_variant<0 || selected.session_variant>1)
         throw std::invalid_argument("unknown GBA connection type");
@@ -89,12 +118,15 @@ inline void accept_netplay(const RecompLauncherCNetplayLaunch& selected,const gb
 #else
     launch.medium=gbarecomp::GbaLinkMedium::Cable;
 #endif
+    launch.player_count=static_cast<unsigned>(players);
     launch.local_seat=selected.local_slot; launch.session_id=selected.session_id;
     launch.bind_endpoint=selected.bind_hostport; launch.peer_endpoint=selected.peer_hostport;
     launch.input_delay=selected.input_delay; launch.prediction=std::clamp(selected.input_prediction,6,16);
     launch.rollback=selected.rollback!=0; launch.force_turn=selected.force_turn!=0;
-    for (unsigned slot=0;slot<2;++slot)
-        launch.seat_machine[slot]=selected.slot_port_valid ? selected.slot_port[slot] : slot;
+    // The launch's own transport statement: online rooms dial the lobby UDP
+    // relay; its absence with 3+ seats is a host-relayed LAN star.
+    launch.force_input_relay=selected.force_input_relay!=0;
+    compact_netplay_ports(selected,launch.player_count,launch);
     launch.pump_lobby=[] {
         if (auto* callbacks=recomp_netplay_host_callbacks(); callbacks && callbacks->pump)
             callbacks->pump(callbacks->ctx);
