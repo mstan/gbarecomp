@@ -173,11 +173,13 @@ def main():
                 s = c.call(cmd="emu_screenshot" if args.oracle
                            else "screenshot")
                 write_png(f"{args.shot_dir}/step_{i+1:05d}.png",
-                          bytes.fromhex(s["data"]))
+                          bytes.fromhex(s["data"]),
+                          s.get("w") or 240, s.get("h") or 160)
         print(json.dumps({"ok": True, "stepped": args.n}))
     elif args.cmd == "shot":
         s = c.call(cmd="emu_screenshot" if args.oracle else "screenshot")
-        write_png(args.path, bytes.fromhex(s["data"]))
+        write_png(args.path, bytes.fromhex(s["data"]),
+                  s.get("w") or 240, s.get("h") or 160)
         print(json.dumps({"ok": True, "path": args.path, "w": s.get("w"),
                           "h": s.get("h")}))
     elif args.cmd == "regs":
