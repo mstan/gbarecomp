@@ -31,10 +31,12 @@ inline void configure_netplay(RecompLauncherCGameInfo& gi,const gbarecomp::RunOp
         RecompNetplayHostHooks hooks{};
         hooks.game_name=state.game.c_str(); hooks.game_version=state.version.c_str();
         hooks.content_fingerprint=state.content.c_str(); hooks.platform="gba";
-        hooks.default_lobby_name="GBA Multiplayer";
-        // The game's cable capability. recomp-ui clamps online rooms to it
-        // (LAN/direct rooms stay two seats in the shared backend).
-        hooks.max_players=static_cast<int>(opts.netplay->max_players);
+        hooks.default_lobby_name="GBA Multiplayer"; hooks.max_players=2;
+#if defined(RECOMP_NETPLAY_HOST_HAS_NETPLAY_MAX_PLAYERS)
+        // This title's online seats: the game's cable capability. max_players
+        // stays the engine-wide ceiling; LAN/direct rooms stay two seats.
+        hooks.netplay_max_players=static_cast<int>(opts.netplay->max_players);
+#endif
 #if defined(RECOMP_LAUNCHER_HAS_SESSION_VARIANT)
         state.variants.clear();
         if (opts.netplay->supported_media & (1u<<static_cast<unsigned>(gbarecomp::GbaLinkMedium::Cable)))
@@ -77,9 +79,17 @@ inline void configure_netplay(RecompLauncherCGameInfo& gi,const gbarecomp::RunOp
 
 // HOST_FIRST session slots arrive dense (host = slot 0, then ascending lobby
 // seat); slot_port[] names each slot's lobby seat, which may be sparse (P1,
-// P3, P4 in a four-seat room). Cable ports are those seats' ranks, 0..N-1.
+// P3, P4 in a four-seat room). Cable ports are those seats' ranks, 0..N-1:
+// recomp-ui's shared dense-position rule where available, else the same rank.
 inline void compact_netplay_ports(const RecompLauncherCNetplayLaunch& selected,unsigned players,
                                   gbarecomp::GbaNetplayLaunch& launch) {
+#if defined(RECOMP_LAUNCHER_HAS_NETPLAY_DENSE_POSITION)
+    for (unsigned slot=0;slot<players;++slot) {
+        const int port=recomp_launcher_netplay_dense_position(&selected,static_cast<int>(slot));
+        if (port<0) throw std::invalid_argument("netplay seat has no lobby player");
+        launch.seat_machine[slot]=static_cast<unsigned>(port); // duplicates refused by validation
+    }
+#else
     if (!selected.slot_port_valid) {
         for (unsigned slot=0;slot<players;++slot) launch.seat_machine[slot]=slot;
         return;
@@ -96,6 +106,7 @@ inline void compact_netplay_ports(const RecompLauncherCNetplayLaunch& selected,u
         }
         launch.seat_machine[slot]=rank;
     }
+#endif
 }
 inline void accept_netplay(const RecompLauncherCNetplayLaunch& selected,const gbarecomp::RunOptions& opts) {
     if (!opts.netplay) return;
