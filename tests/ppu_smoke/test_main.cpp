@@ -176,12 +176,14 @@ void test_authored_portrait_geometry_and_composition() {
         std::fprintf(stderr, "adaptive presenter left a reduced-ratio border or failed downscale\n"); std::exit(1);
     }
     using gbarecomp::resize_driven_view_geometry;
-    auto geometry = resize_driven_view_geometry(540, 960, 569, 854, 576, 864);
+    constexpr uint32_t kEngineW = gba::GbaPpu::kMaxRenderWidth;
+    constexpr uint32_t kEngineH = gba::GbaPpu::kMaxRenderHeight;
+    auto geometry = resize_driven_view_geometry(540, 960, 569, 854, kEngineW, kEngineH);
     if (geometry.width != 240 || geometry.height != 427 ||
         geometry.extra_top != 133 || geometry.extra_bottom != 134 ||
-        resize_driven_view_geometry(540, 960, 569, 160, 576, 864).height != 160 ||
-        resize_driven_view_geometry(1, 100000, 569, 854, 576, 864).height != 854 ||
-        resize_driven_view_geometry(0, 960, 569, 854, 576, 864).height != 160) {
+        resize_driven_view_geometry(540, 960, 569, 160, kEngineW, kEngineH).height != 160 ||
+        resize_driven_view_geometry(1, 100000, 569, 854, kEngineW, kEngineH).height != 854 ||
+        resize_driven_view_geometry(0, 960, 569, 854, kEngineW, kEngineH).height != 160) {
         std::fprintf(stderr, "portrait aspect/capability policy failed\n"); std::exit(1);
     }
     Fixture f;
@@ -290,8 +292,19 @@ void test_extended_view_geometry_and_clamp() {
         std::fprintf(stderr, "32:9 odd-width geometry mismatch\n");
         std::exit(1);
     }
+    ppu.set_view_margins(324, 325, 0, 0);
+    if (ppu.render_width() != 889 || ppu.view_extra_left() != 324 ||
+        ppu.view_extra_right() != 325 || ppu.render_bytes() != 889u * 160u * 3u) {
+        std::fprintf(stderr, "50:9 odd-width geometry mismatch\n");
+        std::exit(1);
+    }
+    static_assert(gba::GbaPpu::kMaxExtraX == 328 &&
+                  gba::GbaPpu::kMaxRenderWidth == 896,
+                  "engine horizontal capacity must cover 50:9 (889x160)");
     ppu.set_view_margins(1000, 1000, 7, 9);
     if (ppu.render_width() != gba::GbaPpu::kMaxRenderWidth ||
+        ppu.view_extra_left() != gba::GbaPpu::kMaxExtraX ||
+        ppu.view_extra_right() != gba::GbaPpu::kMaxExtraX ||
         ppu.render_height() != 176 ||
         ppu.view_extra_top() != 7 || ppu.view_extra_bottom() != 9) {
         std::fprintf(stderr, "extended-view clamp mismatch\n");
@@ -329,8 +342,23 @@ void test_extended_view_capability_policy() {
         std::exit(1);
     }
     g = resolve_view_geometry(600, 600, false, kEngineMax);
-    if (g.width != 576 || g.extra_left != 168 || g.extra_right != 168) {
-        std::fprintf(stderr, "576x160 engine capacity was not enforced\n");
+    if (g.width != 600 || g.extra_left != 180 || g.extra_right != 180) {
+        std::fprintf(stderr, "opted-in 600x160 geometry mismatch\n");
+        std::exit(1);
+    }
+    g = resolve_view_geometry(889, 896, false, kEngineMax);
+    if (g.width != 889 || g.extra_left != 324 || g.extra_right != 325) {
+        std::fprintf(stderr, "opted-in 50:9 889x160 geometry mismatch\n");
+        std::exit(1);
+    }
+    g = resolve_view_geometry(2000, 2000, false, kEngineMax);
+    if (g.width != 896 || g.extra_left != 328 || g.extra_right != 328) {
+        std::fprintf(stderr, "896x160 engine capacity was not enforced\n");
+        std::exit(1);
+    }
+    g = resolve_view_geometry(2000, 569, false, kEngineMax);
+    if (g.width != 569) {
+        std::fprintf(stderr, "per-game 32:9 maximum was not enforced\n");
         std::exit(1);
     }
     g = resolve_view_geometry(288, 240, true, kEngineMax);
@@ -378,6 +406,28 @@ void test_resize_driven_view_policy() {
             std::exit(1);
         }
     }
+    // Engine capacity: a 50:9 drawable reaches 889 only when the game allows
+    // it; games validated at narrower ceilings keep their clamp.
+    constexpr uint32_t kEngineMax = gba::GbaPpu::kMaxRenderWidth;
+    const Case wide_cases[] = {
+        {5000, 900, 896, 889}, {5000, 900, 576, 576}, {5000, 900, 569, 569},
+        {5000, 900, 480, 480}, {20000, 900, 2000, 896}, {3840, 1080, 896, 569},
+    };
+    for (const Case& c : wide_cases) {
+        if (resize_driven_view_width(c.w, c.h, c.max, kEngineMax) != c.expected) {
+            std::fprintf(stderr, "resize-driven wide view policy mismatch %dx%d max %u\n",
+                         c.w, c.h, c.max);
+            std::exit(1);
+        }
+    }
+    const auto wide_geometry =
+        gbarecomp::resize_driven_view_geometry(5000, 900, 896, 160, kEngineMax,
+                                               gba::GbaPpu::kMaxRenderHeight);
+    if (wide_geometry.width != 889 || wide_geometry.extra_left != 324 ||
+        wide_geometry.extra_right != 325 || wide_geometry.height != 160) {
+        std::fprintf(stderr, "resize-driven 50:9 geometry mismatch\n");
+        std::exit(1);
+    }
 }
 
 void test_extended_view_preserves_authentic_center() {
@@ -402,7 +452,7 @@ void test_extended_view_preserves_authentic_center() {
 
     std::vector<uint8_t> wide(gba::GbaPpu::kMaxFramebufferBytes, 0);
     const std::size_t authentic_stride = gba::GbaPpu::kScreenWidth * 3u;
-    for (const uint32_t extra : {24u, 72u, 120u, 168u}) {
+    for (const uint32_t extra : {24u, 72u, 120u, 168u, 324u, gba::GbaPpu::kMaxExtraX}) {
         f.ppu.set_view_margins(extra, extra, 0, 0);
         std::fill(wide.begin(), wide.end(), 0);
         f.ppu.render(wide.data(), dispcnt, f.io.data(), f.vram.data(),
@@ -418,6 +468,25 @@ void test_extended_view_preserves_authentic_center() {
                              "authentic row %u\n",
                              f.ppu.render_width(), y);
                 std::exit(1);
+            }
+            // Margins continue the 256-pixel-wrapping BG0 map out to the full
+            // render width: every margin column whose wrapped map X is also
+            // visible natively must match that native column. This covers the
+            // outermost columns of the widest (engine-capacity) render.
+            for (uint32_t x = 0; x < f.ppu.render_width(); ++x) {
+                const int hx = static_cast<int>(x) - static_cast<int>(extra);
+                const int map_x = ((hx + 13) % 256 + 256) % 256;
+                const int native_x = map_x - 13;
+                if (native_x < 0 || native_x >= static_cast<int>(gba::GbaPpu::kScreenWidth))
+                    continue;
+                if (std::memcmp(wide.data() + y * wide_stride + x * 3u,
+                                expected + static_cast<std::size_t>(native_x) * 3u, 3) != 0) {
+                    std::fprintf(stderr,
+                                 "extended-view %ux160 margin column %u row %u "
+                                 "does not continue the BG map\n",
+                                 f.ppu.render_width(), x, y);
+                    std::exit(1);
+                }
             }
         }
     }

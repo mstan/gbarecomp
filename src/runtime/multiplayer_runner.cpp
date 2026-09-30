@@ -96,7 +96,8 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
     }
     std::unique_ptr<GbaNetplayPresentation> presentation;
     const bool adaptive = launch.view == GbaNetplayView::Adaptive;
-    const unsigned initial_width = gba_netplay_view_width(launch.view);
+    const unsigned initial_width = gba_netplay_view_width(launch.view, 0, 0,
+                                                          launch.view_policy.max_width);
     if (launch.view != GbaNetplayView::Native) {
         presentation = std::make_unique<GbaNetplayPresentation>(launch.view_policy, boot.affine_filter);
         presentation->request_width(initial_width);
@@ -144,7 +145,8 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
         if (adaptive && presentation) {
             int width=0, height=0;
             if (window.drawable_size(&width,&height))
-                presentation->request_width(gba_netplay_view_width(launch.view,width,height));
+                presentation->request_width(gba_netplay_view_width(launch.view,width,height,
+                    launch.view_policy.max_width));
         }
         // Pause, turbo, rewind and single-machine load never reach this
         // simulation. A save hotkey requests a confirmed paired save-and-leave.

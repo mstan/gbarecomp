@@ -105,7 +105,8 @@ original code path. A game opts in by setting `RunOptions::max_view_width` above
 240, and the user selects a total logical width with `[video].view_width`,
 `--view-width`, or `GBARECOMP_VIEW_WIDTH`. Unsupported games clamp to 240, so a
 stale preference cannot change them. The older `widescreen=N` spelling remains
-a compatibility alias for `240 + 2*N`.
+a compatibility alias for `240 + 2*N`. Engine capacity is `GbaPpu::kMaxRenderWidth`,
+896 pixels (50:9 is 889); a game's `max_view_width` above that clamps to it.
 
 The shared surface is only the mechanical capability. Each opted-in game still
 owns scene policy and any camera, tile-streaming, spawn, or culling changes
