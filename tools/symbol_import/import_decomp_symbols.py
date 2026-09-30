@@ -208,6 +208,15 @@ def parse_symbols(path: pathlib.Path, rom_lo: int, rom_hi: int):
             if (region_for(value) not in ("other", "bios")
                     and not name.endswith(".o")):
                 data.append((value, size, name))
+        elif (typ == "NOTYPE" and _bind == "GLOBAL"
+              and region_for(value) in ("ewram", "iwram")):
+            # A decomp whose RAM layout still lives in assembly declares its
+            # globals as plain global labels inside the RAM sections (katam:
+            # `gCurLevelInfo:` in ewram/iwram .space blocks). They carry no
+            # STT_OBJECT type or size but name real RAM, exactly like the
+            # OBJECT case; ROM-side NOTYPE labels are code/data labels and are
+            # deliberately not treated as data symbols.
+            data.append((value, size, name))
 
     return funcs, data, mapping, by_name
 
@@ -279,21 +288,38 @@ def ranges_from_mapping_symbols(mapping, rom_lo: int, rom_hi: int):
 
 
 def parse_code_copy_pairs(specs, by_name):
-    """Resolve --code-copy-pair BUF=SRC[:mode] against the symbol table.
+    """Resolve --code-copy-pair BUF=SRC[:mode[:size]] against the symbol table.
 
     Code that is copied to RAM at runtime and executed there is invisible to
     static discovery: the destination holds no bytes in the ROM image. A decomp
     names both ends (an IWRAM buffer object and the ROM source function), so
     the pair is enough to emit a [[code_copy]] plus an entry seed.
+
+    The copy extent is the buffer's st_size. A buffer the linker script places
+    by address (`gIntrMainBuf = .;`) is a NOTYPE symbol with st_size 0, so its
+    C-declared extent never reaches the ELF; `:size` supplies it explicitly
+    (e.g. katam's `u32 gIntrMainBuf[0x80]` -> `:0x200`). When the ELF does
+    carry a size, an explicit one must agree with it — two disagreeing sources
+    of evidence are an error, not a preference.
     """
     out = []
     for spec in specs or []:
-        mode = "arm"
-        body = spec
-        if ":" in body:
-            body, mode = body.rsplit(":", 1)
-        if "=" not in body:
-            raise SystemExit(f"--code-copy-pair must be BUF=SRC[:mode]: {spec}")
+        parts = spec.split(":")
+        if len(parts) > 3 or "=" not in parts[0]:
+            raise SystemExit(
+                f"--code-copy-pair must be BUF=SRC[:mode[:size]]: {spec}")
+        body = parts[0]
+        mode = parts[1] if len(parts) > 1 and parts[1] else "arm"
+        if mode not in ("arm", "thumb"):
+            raise SystemExit(f"--code-copy-pair {spec}: mode must be arm|thumb")
+        explicit = None
+        if len(parts) == 3:
+            try:
+                explicit = int(parts[2], 0)
+            except ValueError:
+                raise SystemExit(f"--code-copy-pair {spec}: bad size {parts[2]!r}")
+            if explicit <= 0:
+                raise SystemExit(f"--code-copy-pair {spec}: size must be > 0")
         buf_name, src_name = body.split("=", 1)
         buf = by_name.get(buf_name)
         src = by_name.get(src_name)
@@ -303,9 +329,16 @@ def parse_code_copy_pairs(specs, by_name):
                   f"skipped", file=sys.stderr)
             continue
         buf_addr, buf_size = buf
+        if explicit is not None:
+            if buf_size and buf_size != explicit:
+                raise SystemExit(
+                    f"--code-copy-pair {spec}: explicit size 0x{explicit:X} "
+                    f"disagrees with {buf_name} st_size 0x{buf_size:X}")
+            buf_size = explicit
         if buf_size == 0:
             print(f"warn: --code-copy-pair {spec}: {buf_name} has size 0; "
-                  f"skipped (no extent to copy)", file=sys.stderr)
+                  f"skipped (no extent to copy; pass BUF=SRC:mode:size)",
+                  file=sys.stderr)
             continue
         out.append((buf_addr, src[0] & ~1, buf_size, mode, buf_name, src_name))
     return out
@@ -379,8 +412,9 @@ def main() -> int:
                     help="where data ranges come from (repeatable; "
                          "default auto)")
     ap.add_argument("--code-copy-pair", action="append", default=[],
-                    metavar="BUF=SRC[:mode]",
-                    help="runtime code copy, by symbol name (repeatable)")
+                    metavar="BUF=SRC[:mode[:size]]",
+                    help="runtime code copy, by symbol name (repeatable); "
+                         "size is required when BUF has st_size 0")
     ap.add_argument("--rom-base", default="0x08000000")
     ap.add_argument("--rom-end", default="0x09FFFFFF")
     ap.add_argument("--strip-placeholder-names", action="store_true",
@@ -502,7 +536,7 @@ def main() -> int:
         seen_data.setdefault(addr, (size, name))
     with (args.out / "imported_data_symbols.tsv").open(
             "w", encoding="utf-8", newline="\n") as fh:
-        fh.write("# addr\tregion\tsize\tname  (STT_OBJECT, plus absolute "
+        fh.write("# addr\tregion\tsize\tname  (STT_OBJECT, global RAM labels, plus absolute "
                  "symbols landing in a GBA region)\n")
         for addr, (size, name) in sorted(seen_data.items()):
             fh.write(f"0x{addr:08X}\t{region_for(addr)}\t0x{size:X}\t{name}\n")
