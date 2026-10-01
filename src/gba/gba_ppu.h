@@ -263,6 +263,11 @@ extern "C" int (*g_ws_affine_filter_provider)(int bg, int screen_y);
 // established fail-closed window/savestate behavior. On lets provider-sourced
 // regular BG margins continue independently beside native HUD/dialog windows.
 extern "C" int g_ws_authored_margin_layers;
+// Host-only placement of native X=0 within an expanded canvas. Negative keeps
+// the configured left margin; otherwise clamped to [0, render_width - 240].
+// All BG, OBJ, window and authored-margin coordinates share this origin.
+// The native renderer ignores it; it is never serialized as guest state.
+extern "C" int g_ws_native_view_left;
 extern "C" int g_ws_pillarbox;  // Step C policy: black margins on non-field screens
 extern "C" int g_ws_pillarbox_left;
 extern "C" int g_ws_pillarbox_right;

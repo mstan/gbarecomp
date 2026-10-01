@@ -308,6 +308,13 @@ observer and invalidates its caches; partial frames use native output until a
 complete wide frame is available. The existing output gate hides replay frames
 and audio. Emerald scenes without authored margins retain their native content.
 
+Games may set `g_ws_native_view_left` during their frame callback to place native
+X=0 within the expanded canvas. Negative keeps the configured origin; other
+values are clamped to the available horizontal margin. BG, OBJ, window masks
+and authored margin layers share that origin. This is a presentation policy,
+scoped to the local mirror and absent from guest snapshots. Kirby uses it in
+both single-player and netplay to anchor widened views to room boundaries.
+
 `multiplayer_view_tests` covers affine raster parity, unchanged canonical
 device state, capability gates and transactional restore. Each game also has
 an explicitly built `<GameTarget>ViewProbe` (ROM, BIOS, paired raw probe state,
