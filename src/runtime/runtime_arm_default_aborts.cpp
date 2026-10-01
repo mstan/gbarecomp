@@ -742,6 +742,14 @@ struct ForceInterpBus : armv4t::Bus {
     uint32_t access_cycles(uint32_t a, uint8_t w, bool s) const override {
         return raw->access_cycles(a, w, s);
     }
+    // Fetch waits and the prefetch buffer are bus timing state, not data
+    // accesses: forward to the real bus exactly like access_cycles.
+    uint32_t code_wait(uint32_t pc, bool t, bool s) const override {
+        return raw->code_wait(pc, t, s);
+    }
+    int32_t prefetch_stall(int32_t w, uint32_t pc, bool t) override {
+        return raw->prefetch_stall(w, pc, t);
+    }
 };
 }  // namespace
 

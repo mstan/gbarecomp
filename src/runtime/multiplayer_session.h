@@ -17,6 +17,10 @@ struct GbaInstance {
     RuntimeTimingContext timing;
     gba::GbaBus bus;
     gba::GbaPpu ppu;
+    // Trusted presentation-only immediate hook: must return zero and leave
+    // guest CPU/memory untouched. Opt in only after differential qualification.
+    // Allows generated instruction batching with an observation callback.
+    bool immediate_override_is_observer = false;
     explicit GbaInstance(GbaMachineDescriptor descriptor);
 };
 
@@ -38,6 +42,8 @@ public:
     // afterwards. Failure leaves all live state and wiring untouched.
     bool load_state(std::span<const std::uint8_t>, std::string* error);
     std::uint32_t state_hash() const;
+    // state_hash() of already serialized save_state() bytes.
+    static std::uint32_t state_digest(std::span<const std::uint8_t>);
     std::array<std::uint32_t,3> state_hash_parts() const;
     void discard_audio_output();
     std::size_t input_count() const { return config_.input_machines.size(); }

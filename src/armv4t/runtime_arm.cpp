@@ -1183,6 +1183,19 @@ extern "C" void runtime_msr_spsr(uint32_t value, uint32_t mask) {
 extern "C" uint32_t g_irq_nest_depth;
 extern "C" uint32_t g_irq_iret_depth;
 
+// Refill waits of an exception return, charged before it restores CPSR: the
+// target region's N+S fetch pair in the instruction set of the current mode's
+// SPSR (the state being restored). Interpreter::step charges the same after
+// its exception_return, from the restored CPSR.T.
+extern "C" uint32_t runtime_exception_return_refill(uint32_t target_pc) {
+    const uint32_t mode = g_cpu.cpsr & 0x1Fu;
+    uint32_t psr = g_cpu.cpsr;
+    if (mode != 0x10u && mode != 0x1Fu)
+        psr = g_cpu.banked_spsr[mode_to_bank(g_cpu.cpsr)];
+    return runtime_refill_cycles(target_pc & ~1u,
+                                 (psr & CPSR_T_BIT) ? 1u : 0u);
+}
+
 extern "C" void runtime_exception_return(uint32_t new_pc) {
     uint32_t old_cpsr = g_cpu.cpsr;
     uint32_t old_mode = old_cpsr & 0x1Fu;
@@ -1280,6 +1293,18 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     runtime_swi_log_record(swi_imm, return_address, g_cpu.R[0], g_cpu.R[1],
                            g_cpu.R[2], g_cpu.R[14], bus_read_u32(0x03007FF8u));
 
+    // Wait states of the SWI instruction's own opcode fetch in the calling
+    // code region (the generated code leaves the whole SWI cost to us).
+    uint32_t swi_fetch = 0u;
+    {
+        const bool thumb = (saved_cpsr & CPSR_T_BIT) != 0;
+        const uint32_t region =
+            (return_address - (thumb ? 2u : 4u)) >> 24;
+        if (region <= 0xFu)
+            swi_fetch = thumb ? g_runtime_waits.s16[region]
+                              : g_runtime_waits.s32[region];
+    }
+
     // ── BIOS HLE (opt-in alternative to the recompiled/LLE BIOS) ────────
     // When an HLE handler is installed and it services this SWI, the guest
     // resumes at LR (already in g_cpu.R[15], set by the SWI codegen) with NO
@@ -1293,7 +1318,12 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     if (g_bios_hle_hook) {
         bool thumb = (saved_cpsr & CPSR_T_BIT) != 0;
         uint32_t swi_num = thumb ? (swi_imm & 0xFFu) : ((swi_imm >> 16) & 0xFFu);
-        if (g_bios_hle_hook(swi_num)) return;
+        // The hook ticks the service's cost; the SWI instruction itself
+        // still took its 1S fetch (mGBA charges the same under HLE).
+        if (g_bios_hle_hook(swi_num)) {
+            runtime_tick(1u + swi_fetch);
+            return;
+        }
     }
 
     // Switch to SVC mode. SPSR_svc gets the pre-SWI CPSR. LR_svc gets
@@ -1316,12 +1346,14 @@ extern "C" void runtime_swi(uint32_t swi_imm) {
     g_cpu.R[15]                 = 0x00000008u;
 
     // Charge the SWI instruction's own cost (instr_cycle_base(SWI) = 3:
-    // 2S+1N). Ticked here — AFTER CPSR.I is masked above — so a VBlank/
-    // timer IRQ that becomes pending during these 3 cycles stays masked
-    // until the handler re-enables it, matching the interpreter oracle
-    // (enter_swi sets I=1, then pump_step(3), then the next-boundary IRQ
-    // check sees I=1). The recompiled SWI codegen does not tick this op.
-    runtime_tick(3u);
+    // 2S+1N, the refill into the zero-wait BIOS vector) plus its own opcode
+    // fetch's wait states (swi_fetch above). Ticked here — AFTER
+    // CPSR.I is masked above — so a VBlank/timer IRQ that becomes pending
+    // during these cycles stays masked until the handler re-enables it,
+    // matching the interpreter oracle (enter_swi sets I=1, then pump_step,
+    // then the next-boundary IRQ check sees I=1). The recompiled SWI
+    // codegen does not tick this op.
+    runtime_tick(3u + swi_fetch);
 
     runtime_dispatch(0x00000008u);
 }

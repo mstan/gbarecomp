@@ -26,6 +26,7 @@
 #include "gba_solar.h"
 #include "gba_rtc.h"
 #include "gba_save.h"
+#include "gba_waitstates.h"
 
 namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
@@ -75,6 +76,9 @@ class GbaBus : public MemoryBus {
 public:
     GbaBus();
     ~GbaBus() override;
+    // The wait-state table may be bound to the runtime's live copy.
+    GbaBus(const GbaBus&) = delete;
+    GbaBus& operator=(const GbaBus&) = delete;
 
     // Wire up the BIOS image. Reads from 0x00000000..0x00003FFF go
     // through `bios->read*()` only while BIOS access is enabled. Pass
@@ -206,6 +210,29 @@ public:
     uint32_t access_cycles(uint32_t addr, uint8_t width,
                            bool sequential) const override;
 
+    // Opcode-fetch wait states and the GamePak prefetch buffer
+    // (gba_waitstates.h), the interpreter's view of the same table the
+    // generated code reads through g_runtime_waits.
+    uint32_t code_wait(uint32_t pc, bool thumb,
+                       bool sequential) const override {
+        return waits_code(*waits_, pc, thumb, sequential);
+    }
+    int32_t prefetch_stall(int32_t wait, uint32_t pc, bool thumb) override {
+        return waits_prefetch_stall(*waits_, wait, pc, thumb);
+    }
+    // Live wait-state table (WAITCNT, EWRAM control, prefetch state).
+    RuntimeWaitTable* wait_table() { return waits_; }
+    const RuntimeWaitTable& wait_table() const { return *waits_; }
+    // While this bus is the active one, its table lives in the runtime's
+    // g_runtime_waits (read by generated code with a single load);
+    // otherwise in the bus. bind moves the current state into `live`
+    // (nullptr moves it back). Only gbarecomp::set_active_bus calls this.
+    void bind_wait_table(RuntimeWaitTable* live);
+    static GbaBus* wait_table_owner();
+    // Re-derive the table from the IO page's WAITCNT and the accepted EWRAM
+    // wait, after anything replaced them wholesale (state load).
+    void refresh_waitstates();
+
     void log_unmapped(uint32_t addr,
                       uint32_t value,
                       bool is_write,
@@ -262,6 +289,14 @@ private:
     uint32_t       bios_prefetch_ = 0;   // latched BIOS open-bus value
     uint32_t       open_bus_pc_   = 0;   // live PC for unmapped open-bus
     bool           open_bus_thumb_ = false;
+    // Wait states + prefetch state; internal memory control (4000800h,
+    // mirrored every 64 KB) as last written.
+    RuntimeWaitTable own_waits_{};
+    RuntimeWaitTable* waits_ = &own_waits_;
+    uint32_t       memctl_ = 0x0D000020u;
+    uint32_t memctl_read(uint32_t off, uint8_t width) const;
+    void memctl_write(uint32_t off, uint32_t value, uint8_t width);
+    void note_io_write(uint32_t off, uint8_t width);
 
     std::array<uint8_t, 256 * 1024> ewram_{};
     std::array<uint8_t,  32 * 1024> iwram_{};

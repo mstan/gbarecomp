@@ -31,6 +31,14 @@ void validate_gba_netplay_view(GbaNetplayView view, const GbaNetplayViewPolicy& 
     if (view != GbaNetplayView::Adaptive && gba_netplay_view_width(view) > policy.max_width)
         throw std::invalid_argument("this game does not authorize a netplay view that wide");
 }
+std::vector<GbaNetplayView> gba_netplay_available_views(const GbaNetplayViewPolicy& policy) {
+    std::vector<GbaNetplayView> result{GbaNetplayView::Native};
+    if (!policy.supported) return result;
+    for (const auto view : {GbaNetplayView::Wide16x9,GbaNetplayView::Wide21x9,GbaNetplayView::Wide32x9})
+        if (gba_netplay_view_width(view)<=policy.max_width) result.push_back(view);
+    if (policy.adaptive_supported) result.push_back(GbaNetplayView::Adaptive);
+    return result;
+}
 unsigned gba_netplay_view_width(GbaNetplayView view, int w, int h, std::uint32_t max_width) {
     switch (view) {
     case GbaNetplayView::Native: return 240;

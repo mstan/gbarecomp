@@ -11,12 +11,24 @@ namespace gbarecomp {
 GbaConnectionStatus gba_netplay_connection_status(const RNetSession* session) {
     constexpr std::uint32_t grace=60000, show_after=2000;
     if (!session) return {GbaConnectionPhase::Connecting,grace};
-    if (rnet_session_peer_disconnected(session,0)) return {GbaConnectionPhase::PeerLeft,0};
-    if (!rnet_session_is_running(session)) return {GbaConnectionPhase::Connecting,grace};
     RNetSessionStats stats{}; rnet_session_get_stats(session,&stats);
-    if (stats.last_peer_rx_age_ms>=grace) return {GbaConnectionPhase::TimedOut,0};
-    return {stats.last_peer_rx_age_ms>=show_after ? GbaConnectionPhase::Reconnecting : GbaConnectionPhase::Connected,
-        grace-static_cast<std::uint32_t>(stats.last_peer_rx_age_ms)};
+    const unsigned seats=std::min<unsigned>(stats.slot_count,RNET_MAX_SLOTS);
+    const std::uint32_t remote=((1u<<seats)-1)&~(1u<<stats.local_slot);
+    if (const auto gone=rnet_session_peer_gone_mask(session)&remote) return {GbaConnectionPhase::PeerLeft,0,gone};
+    if (rnet_session_peer_disconnected(session,0)) return {GbaConnectionPhase::PeerLeft,0,remote};
+    if (!rnet_session_is_running(session)) return {GbaConnectionPhase::Connecting,grace};
+    std::uint64_t worst=0; std::uint32_t late=0, lost=0;
+    for (unsigned seat=0;seat<seats;++seat) {
+        if (!(remote&(1u<<seat))) continue;
+        auto age=rnet_session_peer_rx_age_ms(session,static_cast<int>(seat));
+        if (age==RNET_PEER_RX_NEVER) age=stats.last_peer_rx_age_ms; // running, not yet heard directly
+        worst=std::max(worst,age);
+        if (age>=show_after) late|=1u<<seat;
+        if (age>=grace) lost|=1u<<seat;
+    }
+    if (lost) return {GbaConnectionPhase::TimedOut,0,lost};
+    return {late ? GbaConnectionPhase::Reconnecting : GbaConnectionPhase::Connected,
+        grace-static_cast<std::uint32_t>(worst),late};
 }
 namespace {
 constexpr std::uint32_t kSnapshotHeader=0x314e4247;
@@ -51,6 +63,18 @@ GbaNetplayHost::GbaNetplayHost(GbaMultiplayerSession& simulation)
     confirmed_.state=simulation_.save_state(); // agreed cold state, before tick zero
     snapshots_ = rbe_snap_ring_create(kSnapshotDepth);
     if (!snapshots_) throw std::bad_alloc();
+}
+const std::vector<std::uint8_t>& GbaNetplayHost::current_state() const {
+    if (cached_generation_!=generation_ || cached_cycle_!=simulation_.cycle()) {
+        cached_generation_=UINT64_MAX; // stays invalid if serialization throws
+        cached_state_=simulation_.save_state();
+        cached_hash_=GbaMultiplayerSession::state_digest(cached_state_);
+        cached_generation_=generation_; cached_cycle_=simulation_.cycle();
+    }
+    return cached_state_;
+}
+void GbaNetplayHost::pin_checkpoint(std::uint32_t tick) {
+    pinned_tick_=tick; pinned_state_.clear();
 }
 GbaNetplayHost::~GbaNetplayHost() { rbe_snap_ring_destroy(snapshots_); }
 int GbaNetplayHost::save_snapshot(std::uint32_t tick) {
@@ -118,13 +142,16 @@ bool GbaNetplayHost::copy_state_at(std::uint32_t tick,std::vector<std::uint8_t>&
             const auto bytes=snapshot_state({data,size},tick,request);
             state.assign(bytes.begin(),bytes.end());
         }
+        else if (tick==pinned_tick_ && !pinned_state_.empty()) state=pinned_state_;
         else if (tick==confirmed_.next_tick && !confirmed_.state.empty()) state=confirmed_.state;
         else return false;
     }
     return true;
 }
 void GbaNetplayHost::begin_match() {
+    mutated(); // bootstrap installed a new agreed state outside the driver
     auto state=simulation_.save_state();
+    pinned_state_.clear(); // a planned boundary (pinned_tick_) survives
     next_tick_=0; published_=replaying_=lobby_requested_=false;
     output_ready_=false; simulation_.discard_audio_output();
     error_.clear(); snapshot_ticks_.clear(); rbe_snap_ring_clear(snapshots_);
@@ -144,11 +171,15 @@ int GbaNetplayHost::serialize(void* ctx,std::uint32_t tick,std::uint8_t** out,st
         if (tick != h.next_tick_) throw std::logic_error("snapshot tick is not the simulation boundary");
         gba::SimulationArchive<false> archive;
         archive.identity(kSnapshotHeader); archive.identity(tick); archive(h.checkpoint_request_tick_);
-        auto state = h.simulation_.save_state();
-        archive.blob(state,state.size()); state=archive.take();
-        auto* data = static_cast<std::uint8_t*>(std::malloc(state.size()));
+        // Header, then the state bytes verbatim (SimulationArchive::blob is
+        // unframed): build the ring's buffer in place from the shared copy.
+        const auto& header = archive.bytes();
+        const auto& state = h.current_state();
+        auto* data = static_cast<std::uint8_t*>(std::malloc(header.size()+state.size()));
         if (!data) return 0;
-        std::memcpy(data,state.data(),state.size()); *out = data; *size = state.size();
+        std::memcpy(data,header.data(),header.size());
+        std::memcpy(data+header.size(),state.data(),state.size());
+        *out = data; *size = header.size()+state.size();
         return 1;
     } catch (const std::exception& e) { h.fail(e.what()); return 0; }
 }
@@ -156,10 +187,15 @@ int GbaNetplayHost::deserialize(void* ctx,std::uint32_t tick,const std::uint8_t*
     auto& h = host(ctx);
     std::string error;
     std::uint32_t request;
+    h.mutated(); // even a refused load must not leave a trusted cache behind
     try {
         const auto state=snapshot_state({data,size},tick,request);
         if (!h.simulation_.load_state(state,&error)) { h.fail(error.c_str()); return 0; }
     } catch (const std::exception& e) { h.fail(e.what()); return 0; }
+    h.mutated();
+    // The corrected run recomputes a later pinned boundary; loading the
+    // boundary itself restores exactly the bytes already pinned.
+    if (tick<h.pinned_tick_) h.pinned_state_.clear();
     // A driver's NACK may demote a former confirmation watermark. A replay
     // crossing the retained boundary invalidates that candidate; do not offer
     // stale save bytes for later agreement merely because its tick is large.
@@ -186,7 +222,12 @@ bool GbaNetplayHost::run_published_tick() {
     if (!published_ || lobby_requested_) return false;
     try {
         output_ready_=false; simulation_.discard_audio_output();
+        // Captured from every run (live or replay) that starts at the pinned
+        // boundary, so the copy always describes the latest timeline.
+        if (next_tick_==pinned_tick_) pinned_state_=current_state();
+        mutated();
         simulation_.run_frame(inputs_);
+        mutated();
         if (published_checkpoint_request_ && checkpoint_request_tick_==UINT32_MAX)
             checkpoint_request_tick_=next_tick_;
         if (replaying_) simulation_.discard_audio_output();
@@ -221,6 +262,7 @@ RNetRbHost GbaNetplayHost::callbacks() {
     result.snap_drop_after = [](void* c,std::uint32_t t) {
         auto& h=host(c); rbe_snap_ring_drop_after(h.snapshots_,t);
         std::erase_if(h.snapshot_ticks_,[&](auto tick) { return tick>t; });
+        if (h.pinned_tick_>t && h.pinned_tick_!=UINT32_MAX) h.pinned_state_.clear();
     };
     result.publish = [](void* c,std::uint32_t t,const RNetRbFrame* r,int n,int replay) { host(c).publish(t,r,n,replay!=0); };
     result.run_tick = [](void* c,std::uint32_t t) -> int {
@@ -229,12 +271,12 @@ RNetRbHost GbaNetplayHost::callbacks() {
     result.resim_begin = [](void* c) { auto& h=host(c); h.replaying_=true; h.output_ready_=false; h.simulation_.discard_audio_output(); };
     result.resim_end = [](void* c) { auto& h=host(c); h.simulation_.discard_audio_output(); h.replaying_=false; };
     result.digest_master = [](void* c) -> std::uint32_t {
-        try { return host(c).with_control_digest(host(c).simulation_.state_hash()); }
+        try { auto& h=host(c); h.current_state(); return h.with_control_digest(h.cached_hash_); }
         catch (const std::exception& e) { host(c).fail(e.what()); return 0; }
     };
     result.digest_parts = [](void* c,RNetRbDigestParts* p) {
         *p = {};
-        try { auto& h=host(c); auto& s=h.simulation_; p->master=h.with_control_digest(s.state_hash()); auto parts=s.state_hash_parts();
+        try { auto& h=host(c); auto& s=h.simulation_; h.current_state(); p->master=h.with_control_digest(h.cached_hash_); auto parts=s.state_hash_parts();
               for (unsigned i=0;i<3;++i) p->part[i]=parts[i];
               p->part[2]=h.with_control_digest(p->part[2]); }
         catch (const std::exception& e) { host(c).fail(e.what()); }

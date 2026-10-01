@@ -29,6 +29,7 @@ extern const GbaOverlayCallbacks* g_ovl;
 #define g_runtime_break_pc (*g_ovl->runtime_break_pc)
 #define g_runtime_fn_entry_hook (*g_ovl->runtime_fn_entry_hook)
 #define g_runtime_trace_enabled (*g_ovl->runtime_trace_enabled)
+#define g_runtime_waits (*g_ovl->runtime_waits)
 
 // CPSR flag accessors (generated code uses cpsr_c for ADC/SBC carry-in).
 static inline uint32_t cpsr_n(void) { return (g_ovl->cpu->cpsr & CPSR_N_BIT) ? 1u : 0u; }
@@ -74,6 +75,9 @@ static inline int  runtime_should_yield(void) { return g_ovl->runtime_should_yie
 static inline void runtime_idle_backedge(uint32_t pc) { g_ovl->runtime_idle_backedge(pc); }
 static inline uint32_t runtime_mem_cycles(uint32_t a, uint32_t w, uint32_t s) { return g_ovl->runtime_mem_cycles(a, w, s); }
 static inline uint32_t runtime_mul_cycles(uint32_t rs, uint32_t sv, uint32_t ex) { return g_ovl->runtime_mul_cycles(rs, sv, ex); }
+static inline uint32_t runtime_exception_return_refill(uint32_t pc) { return g_ovl->runtime_exception_return_refill(pc); }
+static inline uint32_t runtime_prefetch_stall_delta(uint32_t w, uint32_t pc, uint32_t t) { return g_ovl->runtime_prefetch_stall_delta(w, pc, t); }
+#include "runtime_wait_inline.h"  // runtime_refill_cycles, runtime_prefetch_adjust
 
 // ── Exceptions / PSR / mode ──
 static inline void runtime_swi(uint32_t imm) { g_ovl->runtime_swi(imm); }

@@ -43,18 +43,27 @@ host-selected session device, using the same controller-input netcode.
   Replay, stalled admission and duplicate reads cannot emit output. Skipped
   forward frames discard their old audio; other machines never feed the local
   speaker queue. The opt-in product window consumes this interface.
-* `GbaNetplayStartup` uses recomp-net's existing MEMCARD upload and BOOT transfer
-  operations. Each seat contributes its own save image and RTC seed. The host
-  assembles the two-machine state; identity/owner receipts and a state-digest
-  barrier precede input admission. Images and native executable code stay local.
-  The application must hash-verify its images and supply a build/BIOS/mod identity.
+* `GbaNetplayStartup` (2..4 seats) uses recomp-net's MEMCARD upload and BOOT
+  transfer operations. Every peer builds the same cold system locally; each
+  seat contributes only its own save image and RTC seed. Every guest uploads
+  concurrently; seat 0 broadcasts the assembled set of all owner packets (about
+  N x the save size, not N-1 copies of a multi-MB snapshot), each guest checks
+  its own packet in it byte-for-byte, every peer applies all packets in seat
+  order, and an N-party state-digest probe precedes input admission. Images and
+  native executable code stay local. The application must hash-verify its
+  images and supply a build/BIOS/mod identity.
 * The host retains a recovery snapshot independently of rollback-ring eviction,
   and can restore it before restarting a match. It does not write save files.
   Replaying across that boundary invalidates the cached candidate; a demoted
   confirmation watermark cannot preserve stale speculative save bytes.
 * `GbaNetplayCheckpointAgreement` compares an exact confirmed boundary while
-  both drivers can still correct. Each peer checks its snapshot against the full digest,
-  exchanges a receipt, and completes a retransmittable ready barrier. A mismatch
+  every driver can still correct. Seat 0 first runs a zero-size arrival probe
+  (an inbound STATE transfer stalls recomp-net admission, so a seat one tick
+  short of the boundary must not receive the proposal yet), then broadcasts the
+  proposal; each seat checks its own snapshot against the full digest and
+  returns a receipt, and an N-party ready barrier completes it. The boundary's
+  snapshot is pinned, so a slow agreement does not depend on rollback-ring
+  reach. A mismatch
   refuses archive export. Agreed archives include both machines, cable and
   scheduler with a version, program identity and whole-archive checksum.
   After bilateral agreement, the match drains rollback and checks that the
@@ -67,8 +76,9 @@ host-selected session device, using the same controller-input netcode.
   identity without changing the previous decoded state. Cross-peer storage is
   not an atomic distributed transaction: keep the prior pair until both peers
   can resume the same agreed archive; do not mix independent cartridge exports.
-* Connection status allows a 60-second silence grace and reports reconnecting
-  after two seconds. Keep pumping the existing transport/driver during that
+* Connection status is judged per remote seat (a silent console cannot hide
+  behind talking ones) and names the player; it allows a 60-second silence
+  grace and reports reconnecting after two seconds. Keep pumping the existing transport/driver during that
   grace. A six-second complete UDP outage is exercised by a regression test;
   this is recovery on the existing connection, not fresh-endpoint reconnect.
 
@@ -119,11 +129,34 @@ No mGBA source is linked into the native targets. `oracle/link` is an optional,
 separate reference frontend linked to an externally built mGBA library.
 
 The original fixture agrees with mGBA on received words, final SIOCNT/IDs and
-serial IRQ at all four baud rates after a startup settling interval. This is
-**not** an instruction-by-instruction cycle-equivalence claim. Native unit
-tests check each documented duration and event boundary independently.
-The same original ROM now covers normal 8/32-bit transfers at both clocks.
-Those cases agree on received data, control fields excluding pin SI, and IRQs.
+serial IRQ at all four baud rates after a startup settling interval, for
+**2, 3 and 4 consoles** on one cable (`compare.py`, `--players N`). Every port
+receives all N words (unused slots `ffff`), the slave bit and ID (`port<<4`)
+match, and the 3/4-console columns of `kTransferCycles` are confirmed: the
+oracle's `--timing` probe reads the master's start write and the scheduled
+completion event, and native and mGBA spans agree (native samples up to a few
+cycles late; mGBA completes every port at the same instant, skew 0). Reference
+spans, baud 0..3: 2 players 63427/16241/10998/5755, 3 players
+94884/24104/16241/8376, 4 players 125829/31457/20972/10486. The fixture's
+4096-iteration ARM settle loop now costs 155648 cycles in both native and
+mGBA (see `docs/CPU_TIMING.md`). The master starts at cycle 155777 natively
+when the ready bit first appears (`link_rom_tests --start` samples 155778);
+mGBA starts 8172 cycles later, after 227 additional 36-cycle SIOCNT polls.
+Its lockstep coordinator propagates peer MODE_SET at 4096-cycle syncs, while
+the native cable reports the ready SD line immediately. Thus the transfer
+span and observable results are compared, and the remaining startup offset
+is accounted for. Native unit tests also check each documented duration and
+event boundary.
+The same original ROM also covers normal 8/32-bit transfers at both clocks for
+2, 3 and 4 consoles as a forward daisy chain (port N receives port N-1's word;
+the fixture marks every non-owner as external-clock through r0 bit 13). Those
+cases agree on received data, control fields excluding pin SI, and IRQs.
+SIOCNT bit 6 (multiplayer error) is never set by mGBA `1d201b2` either:
+`include/mgba/internal/gba/sio.h:52` only declares it, nothing in `src/` uses
+the accessors, `src/gba/sio.c:179-182` masks written bits with `0xFF83` and
+only carries bits 2-7 of the previous value, and `sio/lockstep.c` sets only
+Ready (`:859`), Slave (`:956`, `:991`), Busy (`:968`) and ID (`:990`). The
+native cable's never-set error bit therefore matches the reference.
 The forward wiring is also documented in
 [GBA Communications Information](https://www.akkit.org/info/gba_comms.html).
 
@@ -201,8 +234,12 @@ games' regenerated serial coverage and pinned shared recomp-ui netplay backend. 
 allow qualification without replacing existing generated corpora or submodule
 pins. `-DGBARECOMP_NETPLAY=OFF` still builds the single-player application.
 
-The shared launcher registers two-player cable rooms and maps input seats to
-cable positions, including a host occupying player two. Runtime entry verifies
+The shared launcher registers cable rooms of up to the game's
+`GbaNetplayLaunch::max_players` (default 2; recomp-ui
+`netplay_max_players`) and maps input seats to dense cable positions by lobby
+seat rank (recomp-ui `recomp_launcher_netplay_dense_position`), including a
+host occupying player two. Online rooms dial the lobby UDP relay; LAN/direct
+rooms stay two seats in the shared backend. Runtime entry verifies
 the original cartridge and retail BIOS, exchanges each owner's save and RTC,
 and uses a complete source identity over generated code, game hooks, devices
 and networking. Multiplayer skips general plugin activation. Only explicitly
@@ -217,8 +254,14 @@ EmeraldRecomp --rom emerald.gba --bios gba_bios.bin --save player0.sav --netplay
 EmeraldRecomp --rom emerald.gba --bios gba_bios.bin --save player1.sav --netplay-bind 127.0.0.1:5001 --netplay-peer 127.0.0.1:5000 --netplay-seat 1 --netplay-session 123
 ```
 
-Rollback is the direct-IP default. Both peers may add `--netplay-delay-sync`
-and choose `--netplay-delay 2..20` (default six). `--frames N` is an optional
+Rollback is the direct-IP default for two consoles, delay-sync for three or
+four; `--netplay-rollback` / `--netplay-delay-sync` choose explicitly, and both
+modes are supported at every size. All peers may choose `--netplay-delay
+2..20` (default six). `--netplay-players N` (up to the game's `max_players`)
+sets the cable size; `--netplay-ports a,b,..` maps seats to cable ports. With
+three or four direct-IP consoles seat 0 is the LAN star (bind only, no peer)
+and every other seat names seat 0 as its peer; `--netplay-relay` instead dials
+a lobby-style UDP relay from every seat. `--frames N` is an optional
 qualification limit which must agree at startup.
 
 Closing once or pressing a configured save hotkey (default Shift+F1) requests
@@ -320,10 +363,24 @@ runner must freeze feature configuration and image wiring before agreement.
 
 Measured two-machine fixture snapshot: 1,271,662 bytes (about 1.21 MiB), without
 flash/SRAM. Two 128 KiB Emerald flash chips bring this to about 1.46 MiB;
-120 such full snapshots are about 175.5 MiB. Four equivalents would be about
-2.93 MiB/snapshot and 351 MiB/history, an extrapolation pending four-machine
-session support. The cable payload is 101 bytes for two ports, 147 for four
-(GLNK version 2, including normal-serial state).
+120 such full snapshots are about 175.5 MiB. Measured fixture snapshots at three
+and four machines: 1,907,447 and 2,543,232 bytes; Kirby & the Amazing Mirror
+(32 KiB SRAM) 1,337,240 / 2,005,814 / 2,674,388 bytes at 2/3/4 consoles, so a
+four-console 120-tick history is about 306 MiB. The history depth stays 120
+ticks at every size: digest-detected corrections load far behind the tip (a
+26-tick rewind was measured at P=6, D=5, 40 ms), so depth is a time budget, not
+a function of delay/prediction or player count. The cable payload is 101 bytes
+for two ports, 147 for four (GLNK version 2, including normal-serial state).
+
+Kirby, headless, native slices, 1,200 frames of cold boot and attract (ms per
+frame, mean): 2 consoles 10.2, 3 consoles 15.4-15.8, 4 consoles 20.9-21.2 --
+about 5.2 ms per console, several times single-player cost. Per rollback tick at
+four consoles one boundary serialization (1.3 ms) and digest (2.3 ms) are paid
+once (shared by snapshot and digest); `load_state` per correction costs
+38-40 ms because it validates by constructing a complete staged session. Four
+local processes each simulating all four Kirby consoles (one box, so 16
+consoles of work) agree byte-identically in both modes; delay-sync forwards
+26 fps per process there, rollback with forced corrections 8.9 fps.
 ROMs, BIOS and native code are shared and are not multiplied by history depth.
 The loaded-save Emerald probe measured 1,533,848 bytes at its tested boundary;
 continuation depth and identity-string lengths account for the small difference
@@ -361,7 +418,7 @@ the previous exception-based execution, including across Windows/Linux (SHA-256
 On the development machine, Windows simulation alone measures 146.8 FPS
 (6.81 ms mean, 7.40 ms p95). This is processing capacity, not network FPS.
 The original generated fixture still agrees with the separate mGBA oracle for
-multiplayer at all baud rates and normal 8/32-bit at both clocks.
+multiplayer at all baud rates and normal 8/32-bit at both clocks, for 2-4 consoles.
 
 The application pacer accounts for frame execution, retains its deadline through
 brief jitter, and resets after a long outage. Transport is pumped between frame
@@ -399,7 +456,7 @@ Machine IDs, image/program identities, boot source, input seats and link media
 are separate. The manifest supports more machines than one physical cable;
 the MVP validator refuses unsupported launches explicitly.
 
-* Cable: maximum four attached consoles, two initially.
+* Cable: maximum four attached consoles; 2..4 supported (wireless stays two).
 * Wireless: a future adapter implements its local serial protocol and connects
   to a separate deterministic radio-domain coordinator. An RFU group permits
   one parent and four children; Emerald's eight visible Union Room leaders are
@@ -509,6 +566,39 @@ unusable. Track outstanding qualification and integration status in Beads.
 
 ## Reproducing validation
 
+### Kirby four-player presentation and performance
+
+The desktop runner draws one local host mirror, including when the selected
+view is native. All canonical consoles still advance PPU timing, affine
+reference accumulators, DMA and interrupts. Their native pixel buffers stay
+zero, so remote pixel rendering is avoided and every peer hashes the same
+state regardless of local window geometry. Restore preserves this host policy;
+a mid-raster restore waits for a complete host frame before presenting again.
+
+The game's immediate capture hook must opt in as an observer to retain native
+instruction batching. Such hooks must return zero and leave guest registers
+and memory untouched. The Thumb slice classifier caches by actual opcode,
+with live register/PC address checks; RAM modifications invalidate naturally.
+
+Kirby 16:9 qualification: four processes, 3,000 linked-gameplay frames, 40 ms
+latency / 10 ms jitter each direction, input delay 10, 59.47–59.53 forward fps
+on Ryzen 7 9800X3D. All final 2,674,424 state bytes agree. The game's checked-in
+controller scripts build a fresh four-human-player room checkpoint without
+editing guest RAM. The view probe also compares every canonical state against
+native during fixed-width and adaptive-resize runs, including 12-frame replay.
+
+Build the game's `KirbyAmazingMirrorRecompViewProbe` target. Its arguments are
+`ROM BIOS raw-state-or-cold output-prefix [players [prepare-frames [inputs]]]`.
+Prepare 2,760 cold frames with `tests/netplay-start-4p.inputs`; then run
+`tests/link/view_network_loopback.py` from this engine with that warm `.state`
+file, `--widths 284,284,284,284 --frames 3000 --input-delay 10 --min-fps 59`
+and the game's `tests/netplay-movement-4p.inputs`. The harness requires local
+licensed images and records each peer's log and exact final state.
+
+Six frames of delay were insufficient for that injected latency/jitter,
+despite adequate simulation speed. Delay must cover the connection's delivery
+variation; the display choice does not change this requirement.
+
 Configure/build the ordinary native engine, then build `link_tests`,
 `multiplayer_session_tests` and `codegen_tests`. With `arm-none-eabi-gcc` and
 `arm-none-eabi-objcopy` available (devkitARM is detected on Windows), the
@@ -530,6 +620,29 @@ standalone CMake project with `MGBA_SOURCE` and `MGBA_BUILD` pointing to those
 matching trees. Set `GBARECOMP_LINK_ORACLE_EXE` in the native build to the resulting
 executable; `link_mgba_differential` then compares separate processes. None of
 these oracle dependencies are required for the default native build.
+
+Recipe used for the 2/3/4-console result (MSYS2 mingw64 on PATH, Ninja; a
+sparse-checkout source tree needs `git sparse-checkout disable`):
+
+```sh
+git -C _mgba_ref worktree add --detach _mgba_ref_1d201b2 1d201b22a86d31dfb3bc75145403711f6762015f
+cmake -S _mgba_ref_1d201b2 -B _mgba_ref_1d201b2/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DLIBMGBA_ONLY=ON -DBUILD_STATIC=ON -DBUILD_SHARED=OFF -DUSE_FFMPEG=OFF -DUSE_ZLIB=OFF \
+  -DUSE_PNG=OFF -DUSE_LIBZIP=OFF -DUSE_MINIZIP=OFF -DUSE_SQLITE3=OFF -DUSE_ELF=OFF \
+  -DUSE_LZMA=OFF -DUSE_EPOXY=OFF -DUSE_DISCORD_RPC=OFF -DBUILD_QT=OFF -DBUILD_SDL=OFF \
+  -DBUILD_GL=OFF -DBUILD_GLES2=OFF -DBUILD_GLES3=OFF
+cmake --build _mgba_ref_1d201b2/build --parallel 4
+cmake -S oracle/link -B build-link-oracle -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DMGBA_SOURCE=<abs>/_mgba_ref_1d201b2 -DMGBA_BUILD=<abs>/_mgba_ref_1d201b2/build
+cmake --build build-link-oracle
+cmake -S . -B build -DGBARECOMP_LINK_ORACLE_EXE=<abs>/build-link-oracle/gba_link_oracle.exe
+ctest --test-dir build -R 'link_rom_tests|link_mgba_differential' --output-on-failure
+```
+
+The oracle CLI is `gba_link_oracle <rom> [--players 2..4] [--normal|--immediate]
+[--timing]`; `link_rom_tests <rom>` accepts `--trace|--normal|--timing|--hashes`
+and `--players N`. The differential needs a CPython 3 (the devkitPro MSYS2
+`python` rejects `C:\` paths).
 
 The commercial probe is opt-in and reads cartridge saves without writing them:
 

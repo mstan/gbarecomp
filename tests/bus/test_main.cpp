@@ -14,6 +14,7 @@
 #include "gba_bus.h"
 #include "gba_save.h"
 #include "gba_ppu.h"
+#include "gba_simulation_state.h"
 #include "mod_state.h"
 #include "snapshot.h"
 
@@ -534,6 +535,88 @@ void test_eeprom_persistence_bytes_and_dirty() {
 
 }  // namespace
 
+// WAITCNT / internal memory control drive every bus cost: data accesses
+// (incl. DMA), opcode fetches and the GamePak prefetch state, which all
+// save-state paths carry (GBATEK "GBA System Control"; mGBA memory.c).
+void test_waitstates() {
+    const char* t = "waitstates";
+    gba::GbaBus bus;
+    check_eq(t, "rom_n32", bus.access_cycles(0x08000000u, 4, false), 8u);
+    check_eq(t, "rom_s32", bus.access_cycles(0x08000000u, 4, true), 6u);
+    check_eq(t, "rom_n16", bus.access_cycles(0x08000000u, 2, false), 5u);
+    check_eq(t, "rom_s16", bus.access_cycles(0x08000000u, 2, true), 3u);
+    check_eq(t, "ws2_s16", bus.access_cycles(0x0C000000u, 2, true), 9u);
+    check_eq(t, "sram", bus.access_cycles(0x0E000000u, 4, true), 5u);
+    check_eq(t, "ewram32", bus.access_cycles(0x02000000u, 4, false), 6u);
+    check_eq(t, "iwram32", bus.access_cycles(0x03000000u, 4, false), 1u);
+    check_eq(t, "vram32", bus.access_cycles(0x06000000u, 4, false), 2u);
+    check_eq(t, "fetch_thumb_rom_s", bus.code_wait(0x08000000u, true, true), 2u);
+    check_eq(t, "fetch_arm_rom_n", bus.code_wait(0x08000000u, false, false), 7u);
+    check_eq(t, "fetch_iwram", bus.code_wait(0x03000000u, false, false), 0u);
+    check_eq(t, "no_prefetch", bus.prefetch_stall(2, 0x08000100u, true), 2);
+
+    // Bit 15 (and 13) read as zero; ROM 3/1, SRAM 8, prefetch on.
+    bus.write16(0x04000204u, 0xC317u);
+    check_eq(t, "waitcnt_masked", bus.read16(0x04000204u), 0x4317u);
+    check_eq(t, "ws0_n16", bus.access_cycles(0x08000000u, 2, false), 4u);
+    check_eq(t, "ws0_s16", bus.access_cycles(0x09000000u, 2, true), 2u);
+    check_eq(t, "ws0_n32", bus.access_cycles(0x08000000u, 4, false), 6u);
+    check_eq(t, "ws1_n16", bus.access_cycles(0x0A000000u, 2, false), 5u);
+    check_eq(t, "ws2_n16", bus.access_cycles(0x0D000000u, 2, false), 9u);
+    check_eq(t, "sram8", bus.access_cycles(0x0E000000u, 1, false), 9u);
+    check_eq(t, "fetch_thumb_3_1", bus.code_wait(0x08000000u, true, true), 1u);
+    // mGBA GBAMemoryStall: a 2-cycle IWRAM load by THUMB ROM code at 3/1
+    // becomes -2 (the N fetch turns S, one prefetched halfword is free).
+    check_eq(t, "prefetch_stall", bus.prefetch_stall(2, 0x08000100u, true), -2);
+    check_eq(t, "prefetched_pc", bus.wait_table()->last_prefetched_pc, 0x08000104u);
+    // A byte write to the high half toggles the prefetch buffer alone.
+    bus.write8(0x04000205u, 0x03u);
+    check_eq(t, "prefetch_off", bus.prefetch_stall(2, 0x08000100u, true), 2);
+    bus.write8(0x04000205u, 0x43u);
+
+    // Internal memory control: reset value, mirrors every 64 KiB, EWRAM wait
+    // 15 - bits 24-27; 0 wait states (0Fh) is rejected like mGBA does.
+    check_eq(t, "memctl_reset", bus.read32(0x04000800u), 0x0D000020u);
+    bus.write32(0x04010800u, 0x0E000020u);
+    check_eq(t, "memctl_mirror", bus.read32(0x04000800u), 0x0E000020u);
+    check_eq(t, "ewram1_32", bus.access_cycles(0x02000000u, 4, false), 4u);
+    check_eq(t, "ewram1_16", bus.access_cycles(0x02000000u, 2, true), 2u);
+    check_eq(t, "fetch_ewram1", bus.code_wait(0x02000000u, true, true), 1u);
+    bus.write8(0x04000803u, 0x0Fu);
+    check_eq(t, "memctl_written", bus.read32(0x04000800u), 0x0F000020u);
+    check_eq(t, "ewram_zero_rejected", bus.access_cycles(0x02000000u, 2, true), 2u);
+
+    // Save state (bus + IO sections, then the orchestrator's refresh).
+    gbarecomp::debug::SnapshotWriter bw, iw;
+    bus.serialize(bw);
+    bus.io().serialize(iw);
+    gba::GbaBus restored;
+    gbarecomp::debug::SnapshotReader br(bw.buffer().data(), bw.buffer().size());
+    gbarecomp::debug::SnapshotReader ir(iw.buffer().data(), iw.buffer().size());
+    restored.deserialize(br);
+    restored.io().deserialize(ir);
+    restored.refresh_waitstates();
+    check_eq(t, "snap_memctl", restored.read32(0x04000800u), 0x0F000020u);
+    check_eq(t, "snap_ewram", restored.access_cycles(0x02000000u, 4, true), 4u);
+    check_eq(t, "snap_ws0", restored.access_cycles(0x08000000u, 2, false), 4u);
+    check_eq(t, "snap_prefetched_pc", restored.wait_table()->last_prefetched_pc,
+             0x08000104u);
+    check_eq(t, "snap_prefetch", restored.wait_table()->prefetch, 1u);
+
+    // Multiplayer/netplay device state.
+    gba::GbaPpu ppu, ppu2;
+    bus.rtc().set_emulated_clock(0);  // sessions always run the emulated RTC
+    const auto blob = gba::save_device_state(bus, ppu);
+    gba::GbaBus staged;
+    staged.rtc().set_emulated_clock(0);
+    check_bool(t, "sim_load", gba::load_device_state(staged, ppu2, blob), true);
+    check_eq(t, "sim_memctl", staged.read32(0x04000800u), 0x0F000020u);
+    check_eq(t, "sim_ewram", staged.access_cycles(0x02000000u, 4, true), 4u);
+    check_eq(t, "sim_ws0", staged.access_cycles(0x08000000u, 2, false), 4u);
+    check_eq(t, "sim_prefetched_pc", staged.wait_table()->last_prefetched_pc,
+             0x08000104u);
+}
+
 int main() {
     test_minishcap_like();
     test_corrupt_header();
@@ -550,6 +633,7 @@ int main() {
     test_flash1m_beats_flash();
     test_eeprom_8k_read_write();
     test_eeprom_persistence_bytes_and_dirty();
+    test_waitstates();
     if (failures) {
         std::printf("\n%d failure(s)\n", failures);
         return 1;

@@ -108,6 +108,35 @@ int emit(FILE* f, const char* out_path) {
         }
     }
 
+    // Cartridge-ROM relocation of every case (test_cases.h
+    // rom_relocated_pc): the same shape executing from 0x08xxxxxx, where
+    // opcode-fetch wait states and the GamePak prefetch buffer apply. The
+    // runner diffs these against the interpreter under several WAITCNT
+    // settings (cycle parity of Bus::code_wait / prefetch_stall).
+    for (std::size_t i = 0; i < kTestCasesCount; ++i) {
+        TestCase tc = kTestCases[i];
+        tc.pc = rom_relocated_pc(tc.pc);
+        armv4t::Instr ins = decode_one(tc);
+        armv4t::CodegenCtx ctx{};
+        ctx.current_function_addr = tc.pc;
+        ctx.alu_immediate_override_pcs =
+            &thumb_alu_immediate_override_pcs;
+        bool not_implemented = false;
+        std::string body = armv4t::ArmCodegen::emit_instr(
+            ins, ctx, &not_implemented);
+        std::fprintf(f,
+            "// [rom %zu] %s pc=0x%08X\n"
+            "extern \"C\" void tc_rom_%zu(void) {\n"
+            "%s"
+            "}\n\n",
+            i, tc.name, tc.pc, i, body.c_str());
+    }
+    std::fprintf(f, "extern \"C\" const TestFn kRomTestFns[] = {\n");
+    for (std::size_t i = 0; i < kTestCasesCount; ++i) {
+        std::fprintf(f, "    &tc_rom_%zu,\n", i);
+    }
+    std::fprintf(f, "};\n\n");
+
     // Lookup table.
     std::fprintf(f,
         "extern \"C\" const TestFn kTestFns[] = {\n");

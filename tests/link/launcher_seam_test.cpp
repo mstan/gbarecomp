@@ -57,5 +57,43 @@ int main() {
     gbarecomp_seam::accept_netplay(selected,opts);
     CHECK(opts.netplay->bind_endpoint=="0.0.0.0:0" && opts.netplay->prediction==6 && !opts.netplay->rollback);
     selected.enabled=0; gbarecomp_seam::accept_netplay(selected,opts); CHECK(!opts.netplay->enabled);
+    // A four-console game in an online relayed room. Session slots are dense
+    // (host first), lobby seats sparse: seats {0,2,3} -> cable ports {0,1,2}.
+    opts.netplay->max_players=4;
+    RecompLauncherCNetplayLaunch room{};
+    room.enabled=1; room.session_id=77; room.max_slots=4; room.player_count=3; room.occupied_mask=7;
+    room.input_delay=6; room.input_prediction=10; room.rollback=1; room.force_input_relay=1;
+    room.slot_port_valid=1; room.slot_port[0]=2; room.slot_port[1]=0; room.slot_port[2]=3;
+    std::snprintf(room.bind_hostport,sizeof(room.bind_hostport),"0.0.0.0:0");
+    std::snprintf(room.peer_hostport,sizeof(room.peer_hostport),"198.51.100.4:9000");
+    for (int slot=0;slot<3;++slot) {
+        room.local_slot=slot;
+        gbarecomp_seam::accept_netplay(room,opts);
+        const auto& l=*opts.netplay;
+        CHECK(l.enabled && l.player_count==3 && l.local_seat==unsigned(slot) && l.force_input_relay);
+        CHECK(l.seat_machine[0]==1 && l.seat_machine[1]==0 && l.seat_machine[2]==2);
+        CHECK(gbarecomp::gba_netplay_transport(l)==gbarecomp::GbaNetplayTransport::Relay);
+    }
+    room.player_count=4; room.occupied_mask=15; room.slot_port[3]=1;
+    gbarecomp_seam::accept_netplay(room,opts);
+    CHECK(opts.netplay->player_count==4 && opts.netplay->seat_machine[3]==1);
+    // Two players in a four-seat room keep the two-console session.
+    room.player_count=2; room.occupied_mask=3; room.local_slot=1;
+    gbarecomp_seam::accept_netplay(room,opts);
+    CHECK(opts.netplay->player_count==2 && opts.netplay->seat_machine[0]==1 && opts.netplay->seat_machine[1]==0);
+    room.player_count=4; room.occupied_mask=15;
+    auto wrong=room; wrong.occupied_mask=0b1011; CHECK(refused(wrong)); // SEAT-policy sparse slots
+    wrong=room; wrong.local_slot=4; CHECK(refused(wrong));
+    wrong=room; wrong.slot_port[3]=2; CHECK(refused(wrong));
+    wrong=room; wrong.slot_port[2]=-1; CHECK(refused(wrong));
+    wrong=room; wrong.max_slots=5; wrong.player_count=5; wrong.occupied_mask=31; CHECK(refused(wrong));
+    wrong=room; wrong.host_spectates=1; CHECK(refused(wrong));
+    wrong=room; wrong.force_input_relay=0; wrong.local_slot=0; wrong.peer_hostport[0]=0;
+    gbarecomp_seam::accept_netplay(wrong,opts); // LAN star host (direct-IP launches only today)
+    CHECK(gbarecomp::gba_netplay_transport(*opts.netplay)==gbarecomp::GbaNetplayTransport::Hub);
+    opts.netplay->max_players=3;
+    CHECK(refused(room)); // four seats exceed a three-console title
+    room.max_slots=3; room.player_count=3; room.occupied_mask=7; gbarecomp_seam::accept_netplay(room,opts);
+    CHECK(opts.netplay->player_count==3);
     std::puts("shared launcher seat/policy bridge tests passed");
 }

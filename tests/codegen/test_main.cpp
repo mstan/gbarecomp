@@ -33,6 +33,7 @@
 #include "stubs.h"
 #include "test_cases.h"
 #include "thumb_decode.h"
+#include "gba_waitstates.h"
 
 extern "C" int overlay_runtime_trace_gate_compile_smoke(
     const GbaOverlayCallbacks* callbacks);
@@ -91,6 +92,15 @@ struct FlatBus : armv4t::Bus {
         p[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
         p[2] = static_cast<uint8_t>((v >> 16) & 0xFF);
         p[3] = static_cast<uint8_t>((v >> 24) & 0xFF);
+    }
+    // Fetch waits + prefetch come from the same table the generated side
+    // reads through g_runtime_waits (stubs.cpp), exactly as the real GbaBus
+    // and the runtime share gba::GbaBus::wait_table().
+    uint32_t code_wait(uint32_t pc, bool thumb, bool seq) const override {
+        return gba::waits_code(codegen_test::g_waits, pc, thumb, seq);
+    }
+    int32_t prefetch_stall(int32_t wait, uint32_t pc, bool thumb) override {
+        return gba::waits_prefetch_stall(codegen_test::g_waits, wait, pc, thumb);
     }
 };
 
@@ -419,7 +429,29 @@ void diff_state(const TestCase& tc,
 
 // ── Main per-case runner ───────────────────────────────────────────
 
-bool run_case(const TestCase& tc, std::size_t idx) {
+// Wait-state configuration a pass runs under. `overlap` seeds the prefetch
+// buffer just ahead of each instruction (exercising GBAMemoryStall's
+// previous-loads path) instead of far away.
+struct WaitConfig {
+    const char* name;
+    uint16_t waitcnt;
+    uint32_t memctl;
+    bool overlap;
+};
+
+void apply_wait_config(const WaitConfig& wc, const TestCase& tc) {
+    gba::waits_reset(codegen_test::g_waits);
+    gba::waits_apply_waitcnt(codegen_test::g_waits, wc.waitcnt);
+    gba::waits_apply_memctl(codegen_test::g_waits, wc.memctl);
+    codegen_test::g_waits.last_prefetched_pc =
+        wc.overlap ? tc.pc + (tc.thumb ? 4u : 8u) + 6u : 0u;
+}
+
+const WaitConfig kPowerOn = {"power-on", 0x0000u, 0x0D000020u, false};
+
+bool run_case(const TestCase& tc, std::size_t idx, TestFn fn,
+              const WaitConfig& wc) {
+    apply_wait_config(wc, tc);
     BusGeom geom = default_bus_geom();
     if (tc.mem_size) {
         geom = BusGeom{tc.mem_base, tc.mem_size};
@@ -441,8 +473,11 @@ bool run_case(const TestCase& tc, std::size_t idx) {
 
     uint32_t saved_pc = cpu_interp.R[15];
     uint32_t interp_cycles = 0;
+    const RuntimeWaitTable waits_before = codegen_test::g_waits;
     auto r = armv4t::Interpreter::step(cpu_interp, bus_interp, ins,
                                        &interp_cycles);
+    const uint32_t interp_prefetched = codegen_test::g_waits.last_prefetched_pc;
+    codegen_test::g_waits = waits_before;  // recomp starts from the same state
     if (r == armv4t::Interpreter::Result::NotImplemented) {
         std::printf("FAIL [%zu] %s: interpreter NotImplemented for "
                     "this instruction shape — fix the interpreter or "
@@ -472,7 +507,7 @@ bool run_case(const TestCase& tc, std::size_t idx) {
             tc.mem_init[k].addr, tc.mem_init[k].value);
     }
 
-    kTestFns[idx]();
+    fn();
 
     // Check for unimplemented op aborts.
     if (codegen_test::g_unimplemented_called) {
@@ -498,8 +533,13 @@ bool run_case(const TestCase& tc, std::size_t idx) {
     // region-specific waitstates live in gba::GbaBus and are checked by
     // the differential oracle, not here.
     if (codegen_test::g_ticked_cycles != interp_cycles) {
-        note(d, "cycles: interp=%u recomp=%llu", interp_cycles,
+        note(d, "cycles [%s pc=0x%08X]: interp=%u recomp=%llu", wc.name,
+             tc.pc, interp_cycles,
              static_cast<unsigned long long>(codegen_test::g_ticked_cycles));
+    }
+    if (codegen_test::g_waits.last_prefetched_pc != interp_prefetched) {
+        note(d, "prefetch buffer [%s]: interp=0x%08X recomp=0x%08X", wc.name,
+             interp_prefetched, codegen_test::g_waits.last_prefetched_pc);
     }
     // runtime_tick can synchronously deliver an IRQ. BX must therefore expose
     // the destination instruction-set mode before ticking, not merely before
@@ -744,8 +784,30 @@ int main() {
 
     int failures = 0;
     for (std::size_t i = 0; i < kTestCasesCount; ++i) {
-        if (!run_case(kTestCases[i], i)) ++failures;
+        if (!run_case(kTestCases[i], i, kTestFns[i], kPowerOn)) ++failures;
     }
+    // Cartridge-ROM relocations under the WAITCNT settings games use: the
+    // power-on 4/2, the common 3/1 with and without the prefetch buffer,
+    // the fastest 2/1 with a prefetch buffer already running ahead, and
+    // 8/1 with a 1-wait EWRAM. Cycles and the prefetch position must match
+    // the interpreter (Bus::code_wait / prefetch_stall) exactly.
+    const WaitConfig kRomConfigs[] = {
+        {"rom power-on", 0x0000u, 0x0D000020u, false},
+        {"rom 3/1 prefetch", 0x4317u, 0x0D000020u, false},
+        {"rom 3/1", 0x0317u, 0x0D000020u, false},
+        {"rom 2/1 prefetch overlap", 0x4318u, 0x0D000020u, true},
+        {"rom 8/1 prefetch ewram1", 0x401Cu, 0x0E000020u, false},
+    };
+    std::size_t rom_runs = 0;
+    for (const WaitConfig& wc : kRomConfigs) {
+        for (std::size_t i = 0; i < kTestCasesCount; ++i) {
+            TestCase tc = kTestCases[i];
+            tc.pc = rom_relocated_pc(tc.pc);
+            ++rom_runs;
+            if (!run_case(tc, i, kRomTestFns[i], wc)) ++failures;
+        }
+    }
+    std::printf("codegen_tests: %zu cartridge-ROM wait-state runs\n", rom_runs);
     if (!run_call_return_stack_cases()) ++failures;
     if (!run_call_return_eviction_cases()) ++failures;
     if (!run_thumb_alu_immediate_override_cases()) ++failures;

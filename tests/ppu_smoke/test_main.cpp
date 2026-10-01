@@ -790,9 +790,10 @@ void test_extended_view_obj_native_clip_is_opt_in() {
     gba::g_ws_obj_native_clip = 0;
 }
 
+bool margin_object_semitransparent = false;
 const gba::WsMarginObjPixel* margin_object_row(int, int* left, int* width) {
     static std::array<gba::WsMarginObjPixel, 288> row;
-    row.fill({0x001f, 2, 0});
+    row.fill({0x001f, 2, 0, margin_object_semitransparent});
     *left = -24; *width = 288;
     return row.data();
 }
@@ -825,6 +826,13 @@ void test_authored_margin_objects_preserve_center_and_depth() {
     expect_pixel(wide.data(),255,0,0,"WINOUT culled authored NPC margin");
     expect_pixel(wide.data()+24*3,0,0,255,"authored NPC window policy leaked into native center");
     gba::g_ws_authored_margin_layers = 0;
+    margin_object_semitransparent = true;
+    store16(&f.io[0x50], 0x0100); // BG0 is second target; OBJ mode forces alpha.
+    store16(&f.io[0x52], 0x0808);
+    f.ppu.render(wide.data(),0x1100,f.io.data(),f.vram.data(),f.oam.data(),f.pal.data());
+    expect_pixel(wide.data(),132,0,132,"authored semitransparent OBJ lost alpha");
+    expect_pixel(wide.data()+24*3,0,0,255,"authored alpha changed native center");
+    margin_object_semitransparent = false;
     f.ppu.render(wide.data(),0x0100,f.io.data(),f.vram.data(),f.oam.data(),f.pal.data());
     expect_pixel(wide.data(),0,0,255,"authored NPC ignored OBJ disable");
     f.ppu.set_view_margins(0,0,0,0);

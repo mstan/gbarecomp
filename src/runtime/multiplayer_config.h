@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -8,6 +9,8 @@ namespace gbarecomp {
 // IDs name machines in a session, independently of controller seats, cable
 // positions, RFU parent/child slots, or Union Room discovery entries.
 using GbaMachineId = std::uint32_t;
+// Current same-cartridge session ceiling: the four-port multiplayer cable.
+inline constexpr std::size_t kGbaMaxSessionPlayers = 4;
 enum class GbaBootSource : std::uint8_t { Cartridge, Multiboot };
 enum class GbaLinkMedium : std::uint8_t { Cable, Wireless };
 

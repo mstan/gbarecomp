@@ -137,6 +137,17 @@ static unsigned long long g_vcount_spin_progress = 0;
 extern "C" unsigned          g_runtime_shadow_tick   = 0;
 extern "C" unsigned long long g_runtime_shadow_cycles = 0;
 
+// Opcode-fetch wait-state table read by generated code (runtime_arm.h): the
+// live copy of the active bus's table (GbaBus::bind_wait_table), power-on
+// values while no bus is active.
+static RuntimeWaitTable power_on_waits() {
+    RuntimeWaitTable t{};
+    gba::waits_reset(t);
+    return t;
+}
+// Declared extern "C" in runtime_arm.h.
+RuntimeWaitTable g_runtime_waits = power_on_waits();
+
 namespace gbarecomp {
 
 static gba::GbaBus* g_active_bus = nullptr;
@@ -253,6 +264,12 @@ void sync_bios_access() {
 
 void set_active_bus(gba::GbaBus* bus) {
     g_active_bus = bus;
+    if (bus) {
+        bus->bind_wait_table(&g_runtime_waits);
+    } else if (gba::GbaBus* owner = gba::GbaBus::wait_table_owner()) {
+        owner->bind_wait_table(nullptr);
+        gba::waits_reset(g_runtime_waits);
+    }
     start_sampler();  // no-op unless GBARECOMP_SAMPLE is set
 }
 
@@ -494,6 +511,16 @@ extern "C" uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
     return bus ? bus->access_cycles(addr, static_cast<uint8_t>(width),
                                     sequential != 0u)
                : 1u;
+}
+
+extern "C" uint32_t runtime_prefetch_stall_delta(uint32_t wait, uint32_t pc,
+                                                 uint32_t thumb) {
+    const int32_t w = static_cast<int32_t>(wait);
+    if (g_runtime_shadow_tick) {
+        RuntimeWaitTable scratch = g_runtime_waits;
+        return static_cast<uint32_t>(rwt_prefetch_stall(&scratch, w, pc, thumb) - w);
+    }
+    return static_cast<uint32_t>(rwt_prefetch_stall(&g_runtime_waits, w, pc, thumb) - w);
 }
 
 extern "C" uint32_t runtime_mul_cycles(uint32_t rs_value,
@@ -800,6 +827,9 @@ namespace {
 struct IdleSite {
     uint32_t regs[15];                 // R0-R14 at the previous back-edge
     uint32_t cpsr;                     // full CPSR at the previous back-edge
+    // GamePak prefetch-buffer position: part of the timing state, so a loop
+    // is only a fixed point when every iteration starts from the same one.
+    uint32_t prefetched_pc;
     unsigned long long last_cycles;    // g_runtime_cycles at previous back-edge
     unsigned long long last_epoch;     // g_idle_disturb_epoch at previous edge
     unsigned long long period;         // measured per-iteration cycle cost
@@ -845,7 +875,8 @@ extern "C" void runtime_idle_backedge(uint32_t header_pc) {
     const bool vcount_only_disturbance =
         vcount_poll && s.valid && epoch == (s.last_epoch + 1ull);
 
-    bool regs_match = s.valid && s.cpsr == g_cpu.cpsr;
+    bool regs_match = s.valid && s.cpsr == g_cpu.cpsr &&
+                      s.prefetched_pc == g_runtime_waits.last_prefetched_pc;
     if (regs_match) {
         for (int i = 0; i < 15; ++i) {
             if (s.regs[i] != g_cpu.R[i]) { regs_match = false; break; }
@@ -899,6 +930,7 @@ extern "C" void runtime_idle_backedge(uint32_t header_pc) {
     // period.
     for (int i = 0; i < 15; ++i) s.regs[i] = g_cpu.R[i];
     s.cpsr = g_cpu.cpsr;
+    s.prefetched_pc = g_runtime_waits.last_prefetched_pc;
     s.last_cycles = g_runtime_cycles;
     s.last_epoch  = g_idle_disturb_epoch;
     s.valid = true;

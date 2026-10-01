@@ -75,6 +75,11 @@ public:
         a.blob(b.ewram_,b.ewram_.size()); a.blob(b.iwram_,b.iwram_.size());
         a.blob(b.pal_,b.pal_.size()); a.blob(b.vram_,b.vram_.size()); a.blob(b.oam_,b.oam_.size());
         a(b.last_fetched_,b.bios_access_enabled_,b.bios_prefetch_,b.open_bus_pc_,b.open_bus_thumb_);
+        // Wait states: WAITCNT is in the IO page below; memory control, the
+        // accepted EWRAM wait and the prefetch-buffer position are bus state.
+        a(b.memctl_,b.waits_->n16[0x2],b.waits_->last_prefetched_pc);
+        if (b.waits_->n16[0x2] == 0 || b.waits_->n16[0x2] > 15)
+            throw std::invalid_argument("invalid EWRAM wait state");
         auto& i = b.io_dispatch_;
         a.blob(i.io_,i.io_.size());
         a(i.halted_,i.host_keyinput_,i.synth_keyinput_,i.timer_reload_,i.timer_counter_,
@@ -103,7 +108,9 @@ bool load_device_state(GbaBus& bus, GbaPpu& ppu, std::span<const std::uint8_t> b
     try {
         SimulationArchive<true> archive(bytes);
         SimulationStateCodec::visit(archive,bus,ppu);
-        return archive.remaining() == 0;
+        if (archive.remaining() != 0) return false;
+        bus.refresh_waitstates();
+        return true;
     } catch (const std::invalid_argument&) { return false; }
 }
 } // namespace gba

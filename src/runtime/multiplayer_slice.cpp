@@ -3,6 +3,8 @@
 #include "thumb_decode.h"
 #include "gba_bus.h"
 #include <unordered_map>
+#include <array>
+#include <memory>
 
 namespace gbarecomp {
 namespace {
@@ -36,18 +38,31 @@ bool multiplayer_slice_safe(const gba::GbaBus& bus,const ArmCpuState& cpu) {
     const auto pc=cpu.R[15]; const bool thumb=cpu.cpsr&CPSR_T_BIT;
     std::uint32_t word;
     if (!opcode(bus,pc,thumb,word)) return false;
-    // Decoded IR is a disposable cache, keyed by actual bytes as well as PC.
-    // RAM code changes and different cartridges cannot reuse stale metadata.
+    // Thumb formats 1..5 contain only ALU/register/branch operations. These
+    // dominate ordinary game code and need no decoded-memory metadata.
+    if (thumb && word < 0x4800u) return true;
+    // Classification depends on opcode bits and live registers, not on the
+    // decode PC. Thumb's finite opcode space permits direct lookup instead of
+    // hashing the guest PC at every generated instruction. Read actual bytes
+    // first so RAM code changes and different cartridges remain isolated.
     struct Cached { std::uint32_t word; Instr instruction; };
     static std::unordered_map<std::uint64_t,Cached> cache;
-    const auto key=(std::uint64_t(pc)<<1)|thumb;
-    auto found=cache.find(key);
-    if (found==cache.end() || found->second.word!=word) {
-        if (cache.size()>16384) cache.clear();
-        auto decoded=thumb ? ThumbDecoder::decode(static_cast<std::uint16_t>(word),pc) : ArmDecoder::decode(word,pc);
-        found=cache.insert_or_assign(key,Cached{word,std::move(decoded)}).first;
+    static std::array<std::unique_ptr<Instr>,65536> thumb_cache;
+    const Instr* instruction;
+    if (thumb) {
+        auto& slot=thumb_cache[word];
+        if (!slot) slot=std::make_unique<Instr>(ThumbDecoder::decode(static_cast<std::uint16_t>(word),0));
+        instruction=slot.get();
+    } else {
+        const auto key=std::uint64_t(word);
+        auto found=cache.find(key);
+        if (found==cache.end()) {
+            if (cache.size()>16384) cache.clear();
+            found=cache.insert_or_assign(key,Cached{word,ArmDecoder::decode(word,0)}).first;
+        }
+        instruction=&found->second.instruction;
     }
-    const auto& i=found->second.instruction;
+    const auto& i=*instruction;
     if (i.is_undefined) return false;
     const auto reg=[&](unsigned n) { return n==15 ? pc+(thumb ? 4u : 8u) : cpu.R[n]; };
     switch (i.op) {

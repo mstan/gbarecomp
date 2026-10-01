@@ -12,15 +12,18 @@
 
 int main(int argc,char** argv) {
     if (argc!=6) return 2; // slot, base port, session nonce, rollback, output
-    int slot=std::atoi(argv[1]),slots=2,delay=2,prediction=6;
+    std::setvbuf(stderr,nullptr,_IONBF,0); // logs must survive a harness kill
+    int slot=std::atoi(argv[1]),slots=link_fixture::players(),delay=2,prediction=6;
     unsigned port=std::strtoul(argv[2],nullptr,10);
     bool rollback=std::atoi(argv[4])!=0;
-    auto simulation=link_fixture::create(true);
+    if (slot<0 || slot>=slots) return 2;
+    auto simulation=link_fixture::create(true,false,static_cast<unsigned>(slots));
     simulation->input_machine(slot).bus.save().sram_write(1,0x90+slot);
     gbarecomp::GbaNetplayHost host(*simulation);
     host.sample_local=[slot](std::uint32_t tick) { return std::uint16_t(((tick/5+slot)%3) ? (1u<<slot) : 0); };
     RNetConfig config; rnet_config_init_defaults(&config);
     config.local_slot=slot; config.input_delay=delay; config.session_id=std::strtoul(argv[3],nullptr,10);
+    config.slot_count=static_cast<rnet_u8>(slots); config.occupied_mask=(1u<<slots)-1;
     auto transport_host=host.delay_callbacks();
     auto* session=rnet_session_create(&config,&transport_host);
     char bind[64],peer[64];
@@ -28,7 +31,11 @@ int main(int argc,char** argv) {
     const auto* routed=std::getenv("GBA_TEST_PEER_PORT");
     const unsigned peer_port=routed ? std::strtoul(routed,nullptr,10) : port+1-slot;
     std::snprintf(peer,sizeof(peer),"127.0.0.1:%u",peer_port);
-    if (!session || rnet_session_start_lan(session,bind,peer)) return 3;
+    const bool hub=link_fixture::hub(slot);
+    const auto start_transport=[&] {
+        return hub ? rnet_session_start_lan_hub(session,bind) : rnet_session_start_lan(session,bind,peer);
+    };
+    if (!session || start_transport()) return 3;
     auto start=rbe_mono_ms();
     while (!rnet_session_is_running(session) && rbe_mono_ms()-start<5000) {
         rnet_session_pump(session); std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -45,9 +52,8 @@ int main(int argc,char** argv) {
         if (result==gbarecomp::GbaNetplayStartup::Status::Ready) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    if (simulation->input_machine(0).bus.save().sram_read(1)!=0x90 ||
-        simulation->input_machine(1).bus.save().sram_read(1)!=0x91) {
-        std::fprintf(stderr,"startup did not preserve both players' individual saves\n"); return 12;
+    if (!link_fixture::owner_saves_intact(*simulation)) {
+        std::fprintf(stderr,"startup did not preserve every player's individual save\n"); return 12;
     }
     host.begin_match();
     RNetRbDriver* driver=nullptr;
@@ -58,7 +64,7 @@ int main(int argc,char** argv) {
         cfg.input_delay=&delay; cfg.input_prediction=&prediction;
         cfg.replay_mode=RNET_RB_REPLAY_INCREMENTAL;
         cfg.part_names[0]="GBA0"; cfg.part_names[1]="other-GBAs"; cfg.part_names[2]="cable-and-scheduler";
-        cfg.snap_depth=gbarecomp::GbaNetplayHost::kSnapshotDepth;
+        cfg.snap_depth=host.snapshot_depth();
         cfg.log_prefix="gba_rb"; cfg.env_alias="GBA_RB";
         rnet_rb_driver_set_identity(driver,0x47424101,0x12345678);
         auto callbacks=host.callbacks();
@@ -66,7 +72,10 @@ int main(int argc,char** argv) {
     }
     std::map<std::uint32_t,std::uint32_t> timeline;
     start=rbe_mono_ms(); bool drained=false, saw_reconnecting=false, recovered=false;
-    while (rbe_mono_ms()-start<55000) {
+    // Four concurrent four-seat cases run sixteen peer processes under CTest.
+    // Leave enough wall time for the correction-heavy synthetic route.
+    const auto drain_timeout_ms = slots == 4 ? 90000u : 55000u;
+    while (rbe_mono_ms()-start<drain_timeout_ms) {
         rnet_session_pump(session);
         const auto connection=gbarecomp::gba_netplay_connection_status(session);
         if (connection.phase==gbarecomp::GbaConnectionPhase::Reconnecting) saw_reconnecting=true;
@@ -112,7 +121,22 @@ int main(int argc,char** argv) {
         } else if (host.next_tick()) host.retain_confirmed(host.next_tick()-1);
         if (!replay) std::this_thread::sleep_for(std::chrono::milliseconds(ran ? 16 : 1));
     }
-    if (!drained) { std::fprintf(stderr,"loopback did not drain: tick %u %s\n",host.next_tick(),host.error().c_str()); return 8; }
+    if (!drained) {
+        std::fprintf(stderr,"loopback did not drain: tick %u %s",host.next_tick(),host.error().c_str());
+        if (driver) {
+            char state[256];
+            rnet_rb_driver_debug_state(driver, state, sizeof(state));
+            std::fprintf(stderr," confirmed=%u quiesce=%d episode=%d %s",rnet_rb_driver_confirmed_through(driver),
+                static_cast<int>(rnet_rb_driver_quiesce_state(driver)),rnet_rb_driver_episode_active(driver),state);
+        }
+        std::fprintf(stderr," tips=");
+        for (int other=0;other<slots;++other) {
+            rnet_u32 tip=0;
+            if (other!=slot && rnet_session_remote_tip(session,other,&tip)) std::fprintf(stderr,"%d:%u ",other,tip);
+        }
+        std::fputc('\n',stderr);
+        return 8;
+    }
     const auto confirmed=driver ? rnet_rb_driver_confirmed_through(driver) : host.next_tick()-1;
     const auto replay_ticks=driver ? rnet_rb_driver_resim_ticks(driver) : 0;
     const auto episodes=driver ? rnet_rb_driver_episode_count(driver) : 0;
@@ -187,7 +211,7 @@ int main(int argc,char** argv) {
         // match even though this test deliberately reuses its UDP endpoints.
         config.session_id++; config.input_delay=2;
         session=rnet_session_create(&config,&transport_host);
-        if (!session || rnet_session_start_lan(session,bind,peer)) return 19;
+        if (!session || start_transport()) return 19;
         gbarecomp::GbaNetplayCheckpointAgreement restored(host,session,slot,
             "link-fixture/runtime-v1/bios-none/mods-none",UINT32_MAX,0);
         for (;;) {

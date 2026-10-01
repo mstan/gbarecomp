@@ -10,10 +10,15 @@ enum class GbaConnectionPhase { Connecting, Connected, Reconnecting, TimedOut, P
 struct GbaConnectionStatus {
     GbaConnectionPhase phase;
     std::uint32_t grace_remaining_ms;
+    // Seats (bit i = seat i) behind this phase: the players that left, timed
+    // out, or have been silent long enough to show Reconnecting. 0 otherwise.
+    std::uint32_t seats = 0;
 };
 // Host policy only: it never advances guest clocks or changes cable state.
 // Pump the existing transport/rollback driver during Reconnecting; do not tear
 // down an intact session merely because its latest input has not arrived.
+// Judged per remote seat: in a room of four, one silent console must not
+// hide behind the two that keep talking.
 GbaConnectionStatus gba_netplay_connection_status(const RNetSession*);
 struct GbaConfirmedCheckpoint {
     // All inputs before next_tick are confirmed. The snapshot is the entire
@@ -33,9 +38,20 @@ struct GbaNetplayOutput {
 // interface. Construct after agreed ROMs, individual saves and RTC seeds load.
 class GbaNetplayHost {
 public:
+    // Rollback reach in ticks (the driver snapshots every tick by default).
+    // NOT derivable from delay+prediction: digest-detected mismatches load
+    // well behind the tip (measured: a 26-tick rewind at P=6, D=5, 40 ms),
+    // and an unreachable load tick silently refuses the correction. Reach is
+    // a time budget (~2 s) independent of the machine count; memory is
+    // depth x snapshot size (2.54 MB per four-console fixture snapshot).
     static constexpr std::uint32_t kSnapshotDepth = 120;
     static constexpr std::uint16_t kCheckpointRequest = 0x400;
     explicit GbaNetplayHost(GbaMultiplayerSession&);
+    std::uint32_t snapshot_depth() const { return kSnapshotDepth; }
+    // Retain the exact state at this future boundary however far the live
+    // simulation runs past it. Replays re-capture it; a load before it drops
+    // the copy until the corrected run reaches it again.
+    void pin_checkpoint(std::uint32_t next_tick);
     ~GbaNetplayHost();
     GbaNetplayHost(const GbaNetplayHost&) = delete;
     GbaNetplayHost& operator=(const GbaNetplayHost&) = delete;
@@ -55,6 +71,7 @@ public:
     // Call after driver.finish_frame(); do not mutate the simulation directly.
     bool take_output(std::size_t local_seat, GbaNetplayOutput&);
     bool replaying() const { return replaying_; }
+    std::size_t seat_count() const { return inputs_.size(); }
     bool return_to_lobby_requested() const { return lobby_requested_; }
     const std::string& error() const { return error_; }
     std::uint32_t next_tick() const { return next_tick_; }
@@ -84,6 +101,17 @@ public:
 private:
     GbaMultiplayerSession& simulation_;
     RbeSnapRing* snapshots_ = nullptr;
+    // Serialized current state shared by the driver's digest and the next
+    // snapshot of the same boundary: one full save_state per tick, not two.
+    // Keyed by a mutation generation AND the session clock.
+    std::uint64_t generation_ = 0;
+    mutable std::uint64_t cached_generation_ = UINT64_MAX, cached_cycle_ = 0;
+    mutable std::vector<std::uint8_t> cached_state_;
+    mutable std::uint32_t cached_hash_ = 0;
+    const std::vector<std::uint8_t>& current_state() const;
+    void mutated() { ++generation_; }
+    std::uint32_t pinned_tick_ = UINT32_MAX;
+    std::vector<std::uint8_t> pinned_state_;
     std::vector<std::uint16_t> inputs_;
     std::uint32_t next_tick_ = 0;
     bool published_ = false, replaying_ = false, lobby_requested_ = false;

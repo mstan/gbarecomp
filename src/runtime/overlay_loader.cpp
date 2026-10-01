@@ -290,6 +290,9 @@ void fill_callbacks() {
     g_callbacks.runtime_idle_backedge = runtime_idle_backedge;
     g_callbacks.runtime_mem_cycles = runtime_mem_cycles;
     g_callbacks.runtime_mul_cycles = runtime_mul_cycles;
+    g_callbacks.runtime_waits      = &g_runtime_waits;
+    g_callbacks.runtime_exception_return_refill = runtime_exception_return_refill;
+    g_callbacks.runtime_prefetch_stall_delta = runtime_prefetch_stall_delta;
 
     g_callbacks.runtime_swi                  = runtime_swi;
     g_callbacks.runtime_irq                  = runtime_irq;

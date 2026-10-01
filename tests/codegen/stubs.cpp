@@ -22,8 +22,28 @@
 #include <vector>
 
 #include "arm_ir.h"
+#include "gba_waitstates.h"
 #include "runtime_arm.h"
 #include "stubs.h"
+
+static RuntimeWaitTable power_on_waits() {
+    RuntimeWaitTable t{};
+    gba::waits_reset(t);
+    return t;
+}
+// Declared extern "C" in runtime_arm.h.
+RuntimeWaitTable g_runtime_waits = power_on_waits();
+
+namespace codegen_test {
+RuntimeWaitTable& g_waits = g_runtime_waits;
+}  // namespace codegen_test
+
+extern "C" uint32_t runtime_prefetch_stall_delta(uint32_t wait, uint32_t pc,
+                                                 uint32_t thumb) {
+    const int32_t w = static_cast<int32_t>(wait);
+    return static_cast<uint32_t>(
+        rwt_prefetch_stall(&codegen_test::g_waits, w, pc, thumb) - w);
+}
 
 namespace {
 

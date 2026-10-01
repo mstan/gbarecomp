@@ -16,6 +16,7 @@ p.add_argument("save_type")
 p.add_argument("state", help="matching paired warm snapshot, produced by the local probe")
 p.add_argument("inputs", help="relative-frame controller script")
 p.add_argument("--frames", type=int, default=120)
+p.add_argument("--players", type=int, choices=range(2,5), default=2, metavar="2..4", help="consoles on the cable (state and input script must match)")
 p.add_argument("--delay", action="store_true", help="use delay-sync instead of rollback")
 p.add_argument("--natural", action="store_true", help="measure ordinary play without forced incorrect predictions")
 p.add_argument("--input-delay", type=int, choices=range(2,21), metavar="2..20", help="override the match's six-frame WAN default; old qualification routes used 2")
@@ -32,20 +33,20 @@ for name in ("exe", "rom", "bios", "state", "inputs"):
 
 with tempfile.TemporaryDirectory(prefix="gba-commercial-net-") as tmp:
     root = pathlib.Path(tmp)
-    port, sockets = reserve_routes()
+    port, sockets = reserve_routes(args.players)
     relay = UdpRelay(port,sockets)
     nonce = random.randrange(1, 2**31)
     peers, logs = [], []
     try:
         relay.start()
-        for slot in range(2):
+        for slot in range(args.players):
             env = {k: v for k, v in os.environ.items() if not k.startswith(
                 ("GBA_LINK_PROBE_", "RNET_RB_", "GBA_RB_", "RNET_SIM_", "RBE_RB_"))}
             env.update(GBA_LINK_PROBE_STATE_IN=args.state, GBA_LINK_PROBE_INPUTS=args.inputs,
                 GBA_LINK_PROBE_STATE_OUT=str(root / f"peer{slot}.state"),
                 GBA_LINK_PROBE_SLICES="1", GBA_LINK_PROBE_NET_SEAT=str(slot),
                 GBA_LINK_PROBE_NET_SESSION=str(nonce), GBA_LINK_PROBE_NET_BIND=f"127.0.0.1:{port+slot}",
-                GBA_LINK_PROBE_NET_PEER=f"127.0.0.1:{port+2+slot}",
+                GBA_LINK_PROBE_NET_PEER=f"127.0.0.1:{port+args.players+slot}", GBA_LINK_PROBE_PLAYERS=str(args.players),
                 GBA_LINK_PROBE_NET_ROLLBACK="0" if args.delay else "1",
                 GBA_LINK_PROBE_NET_TIMEOUT_MS=str(args.timeout * 1000),
                 GBA_RB_FORCE_MISPREDICT="7" if slot == 0 and not args.delay and not args.natural else "0")
@@ -58,7 +59,7 @@ with tempfile.TemporaryDirectory(prefix="gba-commercial-net-") as tmp:
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0))
         for peer in peers:
             assert peer.wait(timeout=args.timeout + 125) == 0, f"cartridge peer exited {peer.returncode}"
-        reports = [(root / f"peer{i}.log").read_text(errors="replace") for i in range(2)]
+        reports = [(root / f"peer{i}.log").read_text(errors="replace") for i in range(args.players)]
         assert not relay.errors, relay.errors
         assert relay.delayed > 0 and relay.peak > 0, "latency injection was not exercised"
         for report in reports:
@@ -73,9 +74,9 @@ with tempfile.TemporaryDirectory(prefix="gba-commercial-net-") as tmp:
                 print(performance[0])
             if args.min_fps:
                 assert performance and float(performance[1]) >= args.min_fps, "forward frame rate below required minimum"
-        left = (root / "peer0.state").read_bytes()
-        right = (root / "peer1.state").read_bytes()
-        assert left == right, "native cartridge session bytes diverged"
+        states = [(root / f"peer{i}.state").read_bytes() for i in range(args.players)]
+        left = states[0]
+        assert all(state == left for state in states), "native cartridge session bytes diverged"
         if args.emerald_trade:
             from emerald_trade_check import check_trade
             check_trade(args.state, root / "peer0.state")
@@ -85,7 +86,7 @@ with tempfile.TemporaryDirectory(prefix="gba-commercial-net-") as tmp:
         if args.emerald_battle_result:
             from emerald_battle_check import check_result
             check_result(args.state, root / "peer0.state")
-        print(f"{'delay-sync' if args.delay else 'rollback'} native cartridge: {len(left)} identical bytes, 40 ms latency / 10 ms jitter per direction")
+        print(f"{args.players} consoles {'delay-sync' if args.delay else 'rollback'} native cartridge: {len(left)} identical bytes, 40 ms latency / 10 ms jitter per direction")
     except Exception:
         for log in logs:
             log.flush()

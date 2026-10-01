@@ -129,6 +129,26 @@ uint32_t runtime_mem_cycles(uint32_t addr, uint32_t width,
 uint32_t runtime_mul_cycles(uint32_t rs_value, uint32_t signed_variant,
                             uint32_t extra);
 
+// ── Opcode-fetch wait states + GamePak prefetch ────────────────────
+// instr_cycle_base charges every fetch as a zero-wait 1S. Generated code
+// adds the real fetch waits of the code region: S per instruction, N after
+// a data access or a multiply, and the refill N+S pair in the target region
+// after a PC write — the same terms Interpreter::step adds through
+// Bus::code_wait (see arm_ir.h next_fetch_nonsequential). `g_runtime_waits`
+// is the active bus's table (WAITCNT + EWRAM control): the active
+// gba::GbaBus keeps its live state here (bind_wait_table), so generated
+// code reads it with a single load.
+extern RuntimeWaitTable g_runtime_waits;
+// Refill waits for an exception return (MOVS pc / LDM ^): the restored
+// instruction set is the current mode's SPSR.T, read before the restore.
+uint32_t runtime_exception_return_refill(uint32_t target_pc);
+// rwt_prefetch_stall(g_runtime_waits, wait) - wait for the cartridge
+// instruction at `pc` (runtime_wait_model.h). A shadow re-run (widescreen
+// sidecar draws, gate validation) evaluates on a copy so the guest stays
+// bit-identical.
+uint32_t runtime_prefetch_stall_delta(uint32_t wait, uint32_t pc,
+                                      uint32_t thumb);
+
 // ── Shifter helpers ────────────────────────────────────────────────
 // Generated code uses these for data-processing operand2 shifts and
 // for register-shifted-by-register cases. They update the shifter
@@ -450,6 +470,10 @@ void runtime_unimplemented_op(const char* op_name, uint32_t pc);
 
 void runtime_init(void* bus_handle);
 void runtime_shutdown(void);
+
+// Inline fetch-wait helpers (runtime_refill_cycles, runtime_prefetch_adjust)
+// shared verbatim with the Stage-2 overlay shim.
+#include "runtime_wait_inline.h"
 
 #ifdef __cplusplus
 }  // extern "C"
