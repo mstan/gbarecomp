@@ -9,6 +9,52 @@
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"line %d: %s\n",__LINE__,#x); std::exit(1); } } while (0)
 using namespace gbarecomp;
 namespace {
+int anchor_left = -1;
+void anchor_frame(const ExtendedViewFrameInfo*) { gba::g_ws_native_view_left = anchor_left; }
+void anchored_raster() {
+    auto bus=std::make_unique<gba::GbaBus>();
+    bus->rtc().set_emulated_clock(0);
+    auto source=std::make_unique<gba::GbaPpu>();
+    auto canonical=std::make_unique<gba::GbaPpu>();
+    auto reference=std::make_unique<gba::GbaPpu>();
+    GbaNetplayPresentation mirror({true,false,nullptr,anchor_frame});
+    mirror.request_width(284);
+    source->set_rasterization_enabled(false);
+    canonical->set_rasterization_enabled(false);
+    source->set_presentation_observer(&mirror);
+    std::array<std::uint8_t,0x400> registers{};
+    auto* io=registers.data();
+    const auto w16=[](std::uint8_t* p,unsigned n) { p[0]=n; p[1]=n>>8; };
+    // Colorful text BG, OBJ and a window edge must move together. The
+    // reference uses real asymmetric PPU margins, with no policy override.
+    w16(io+0x08,0x0100); w16(io+0x40,0x1060); w16(io+0x44,0x00a0);
+    w16(io+0x48,0x003f); w16(io+0x4a,0x0001);
+    for(unsigned i=0;i<96*1024;++i) bus->vram_ptr()[i]=(i*17+i/19)&255;
+    for(unsigned i=0;i<1024;++i) bus->pal_ptr()[i]=(i*29)&255;
+    for(unsigned i=0;i<128;++i) w16(bus->oam_ptr()+8*i,0x0200);
+    w16(bus->oam_ptr(),20); w16(bus->oam_ptr()+2,40); w16(bus->oam_ptr()+4,0);
+    for(const int requested : {-1,0,11,22,44,1000}) {
+        anchor_left=requested;
+        const unsigned left=requested<0 ? 22 : std::min(requested,44);
+        reference->set_view_margins(left,44-left,0,0);
+        for(unsigned y=0;y<160;++y) {
+            gba::g_ws_native_view_left=13; // an unrelated presentation's policy
+            source->render_scanline(y,0x3100,io,bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
+            canonical->render_scanline(y,0x3100,io,bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
+            CHECK(gba::g_ws_native_view_left==13);
+            gba::g_ws_native_view_left=-1;
+            reference->render_scanline(y,0x3100,io,bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
+        }
+        source->mark_framebuffer_latched(); reference->mark_framebuffer_latched();
+        canonical->mark_framebuffer_latched();
+        CHECK(mirror.pixels());
+        CHECK(std::memcmp(mirror.pixels(),reference->latched_framebuffer(),284*160*3)==0);
+        CHECK(gba::save_device_state(*bus,*source)==gba::save_device_state(*bus,*canonical));
+        mirror.restored();
+    }
+    source->set_presentation_observer(nullptr);
+    gba::g_ws_native_view_left=-1;
+}
 void raster() {
     auto bus=std::make_unique<gba::GbaBus>();
     bus->rtc().set_emulated_clock(0);
@@ -142,6 +188,6 @@ int main() {
     parse_gba_netplay_arguments(args,launch);
     CHECK(!launch.enabled && launch.view==GbaNetplayView::Adaptive && launch.view_explicit);
     CHECK((args==std::vector<std::string>{"game","--launcher"}));
-    raster(); restores();
+    raster(); anchored_raster(); restores();
     std::puts("netplay presentation: raster parity, canonical state, restore and capability gates passed");
 }

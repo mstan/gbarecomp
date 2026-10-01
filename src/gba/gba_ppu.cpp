@@ -3,6 +3,7 @@
 #include "gba_ppu.h"
 #include "foreign_presentation_internal.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -28,6 +29,7 @@ extern "C" unsigned g_ws_bg_xy_provider_layers = 0xFu;
 extern "C" int g_ws_affine_filter_enabled = 0;
 extern "C" int (*g_ws_affine_filter_provider)(int, int) = nullptr;
 extern "C" int g_ws_authored_margin_layers = 0;
+extern "C" int g_ws_native_view_left = -1;
 
 // Widescreen pillarbox (Step C policy): when nonzero, the wide path renders the
 // margin columns (outside the central 240) as solid black instead of extended
@@ -1328,6 +1330,8 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
                           uint32_t out_w, uint32_t ox, uint32_t oy = 0) {
     constexpr uint32_t kVanW = GbaPpu::kScreenWidth;   // 240
     constexpr uint32_t kVanH = GbaPpu::kScreenHeight;  // 160
+    if (g_ws_native_view_left >= 0)
+        ox = std::min(static_cast<uint32_t>(g_ws_native_view_left), out_w - kVanW);
     const bool native_row = y >= 0 && y < static_cast<int>(kVanH);
     uint8_t* row = rgb + (y + static_cast<int>(oy)) * out_w * 3;
     if (!native_row && (!g_ws_authored_margin_layers || !g_ws_tilemap_provider || g_ws_pillarbox)) {

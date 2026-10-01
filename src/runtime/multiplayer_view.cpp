@@ -63,6 +63,7 @@ namespace {
     X(gba::g_ws_bg_x_provider_layers) X(gba::g_ws_bg_xy_provider) \
     X(gba::g_ws_bg_xy_provider_layers) X(gba::g_ws_affine_filter_enabled) \
     X(gba::g_ws_affine_filter_provider) X(gba::g_ws_authored_margin_layers) \
+    X(gba::g_ws_native_view_left) \
     X(gba::g_ws_pillarbox) X(gba::g_ws_pillarbox_left) X(gba::g_ws_pillarbox_right) \
     X(gba::g_ws_obj_x_provider) X(gba::g_ws_obj_attr_x_provider) \
     X(gba::g_ws_obj_native_clip) X(gba::g_ws_obj_margin_provider) \
@@ -98,6 +99,7 @@ struct GbaNetplayPresentation::Impl {
     explicit Impl(GbaNetplayViewPolicy p, bool filter) : policy(p) {
         GlobalScope scope(globals);
         gba::g_ws_bg_x_provider_layers = gba::g_ws_bg_xy_provider_layers = 0xF;
+        gba::g_ws_native_view_left = -1;
         gba::g_ws_affine_filter_enabled = filter;
     }
 };
