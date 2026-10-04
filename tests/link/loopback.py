@@ -30,6 +30,9 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
                 env["GBA_TEST_CHECKPOINT_CORRUPT"] = "1"
             if mode == "restart":
                 env["GBA_TEST_RESTART"] = "1"
+            if mode == "checkpoint_skew":
+                env["GBA_TEST_CHECKPOINT_SKEW"] = "1"
+                env["GBA_TEST_RESTART"] = "1"
             if mode in ("request_checkpoint", "request_outage"):
                 env["GBA_TEST_REQUEST_CHECKPOINT"] = "1"
             if mode in ("outage", "request_outage"):
@@ -63,7 +66,7 @@ with tempfile.TemporaryDirectory(prefix="gba-link-net-") as tmp:
         assert len(common) >= 60, f"insufficient confirmed history: {len(common)}"
         assert all(timelines[0][t] == timelines[1][t] for t in common), "confirmed simulation timelines diverged"
         assert (root / "peer0.txt.paired").read_bytes() == (root / "peer1.txt.paired").read_bytes(), "agreed paired archives differ"
-        if mode == "restart":
+        if mode in ("restart", "checkpoint_skew"):
             assert (root / "peer0.txt.restart").read_bytes() == (root / "peer1.txt.restart").read_bytes(), "warm restart timelines differ"
             print("restored the agreed archive on a fresh connection and matched 30 further input ticks")
         if rollback:

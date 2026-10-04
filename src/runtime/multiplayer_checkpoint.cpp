@@ -20,6 +20,8 @@ std::uint32_t boundary(std::span<const std::uint8_t> data,const std::string& ide
     if (a.remaining()) throw std::invalid_argument("trailing checkpoint proposal data");
     return tick;
 }
+// Zero-size probes leave input admission running while the slower peer catches up.
+std::uint32_t arrival_token(std::uint32_t tick) { return (tick*2654435761u)^0x41525256u; }
 std::uint32_t ready_hash(const std::vector<std::uint8_t>& bytes) {
     const auto h=gba::sha1(bytes.data(),bytes.size()).bytes;
     return std::uint32_t(h[0]) | (std::uint32_t(h[1])<<8) |
@@ -29,7 +31,7 @@ std::uint32_t ready_hash(const std::vector<std::uint8_t>& bytes) {
 GbaNetplayCheckpointAgreement::GbaNetplayCheckpointAgreement(const GbaNetplayHost& host,
     RNetSession* network,unsigned seat,std::string identity,std::uint32_t through,std::uint32_t tick,bool wait)
     : host_(host),network_(network),seat_(seat),identity_(std::move(identity)),through_(through),
-      proposed_tick_(tick),wait_for_confirmation_(wait),phase_(seat ? Phase::ReceiveProposal : Phase::SendProposal) {
+      proposed_tick_(tick),wait_for_confirmation_(wait),phase_(seat ? Phase::ReceiveProposal : Phase::SendArrival) {
     if (!network || seat>1 || rnet_session_local_slot(network)!=static_cast<int>(seat) ||
         identity_.empty() || identity_.size()>1024 || (wait && !tick))
         throw std::invalid_argument("invalid checkpoint agreement configuration");
@@ -64,6 +66,21 @@ GbaNetplayCheckpointAgreement::Status GbaNetplayCheckpointAgreement::poll(std::u
         if (phase_==Phase::SendProposal && sending_ && ready && op==RNET_STATE_OP_MEMCARD && slot==1)
             phase_=Phase::ReceiveReceipt;
         switch (phase_) {
+        case Phase::SendArrival:
+            // Do not send STATE until the guest holds its candidate too. STATE
+            // would otherwise stop a delay-sync guest one tick short forever.
+            if (!sending_) {
+                if (rnet_session_state_probe(network_,RNET_STATE_OP_SAVE,0,0,arrival_token(checkpoint_.next_tick))==0)
+                    sending_=true;
+            } else {
+                int match=0;
+                if (rnet_session_state_probe_take_reply(network_,&match)) {
+                    if (!match) throw std::runtime_error("peer chose a different checkpoint boundary");
+                    rnet_session_state_probe_finish(network_);
+                    phase_=Phase::SendProposal; sending_=false;
+                }
+            }
+            break;
         case Phase::SendProposal:
         case Phase::SendReceipt: {
             const bool receipt=phase_==Phase::SendReceipt;
@@ -81,6 +98,15 @@ GbaNetplayCheckpointAgreement::Status GbaNetplayCheckpointAgreement::poll(std::u
             break;
         }
         case Phase::ReceiveProposal:
+            if (!arrived_) {
+                rnet_u8 probe_op=0,probe_slot=0; rnet_u32 probe_bytes=0,probe_hash=0;
+                if (!rnet_session_state_probe_pending(network_,&probe_op,&probe_slot,&probe_bytes,&probe_hash)) break;
+                const bool here=probe_op==RNET_STATE_OP_SAVE && probe_slot==0 && probe_bytes==0 &&
+                    probe_hash==arrival_token(proposed_tick_);
+                if (rnet_session_state_probe_reply(network_,here)!=0 || !here)
+                    throw std::runtime_error("peer chose a different checkpoint boundary");
+                arrived_=true;
+            }
             if (ready) {
                 if (op!=RNET_STATE_OP_SAVE || slot!=0 || size>1100)
                     throw std::runtime_error("unexpected checkpoint proposal");

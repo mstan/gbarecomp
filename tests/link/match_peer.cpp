@@ -35,6 +35,8 @@ int run(GbaMultiplayerSession& simulation,int slot,unsigned port,unsigned nonce,
     std::map<std::uint32_t,std::uint32_t> timeline;
     bool saw_reconnecting=false,recovered=false;
     const auto start=rbe_mono_ms();
+    const bool checkpoint_skew=std::getenv("GBA_TEST_CHECKPOINT_SKEW");
+    std::uint64_t lag_started=0;
     GbaNetplayOutput frame;
     while (match.phase()!=GbaNetplayMatch::Phase::CheckpointReady && rbe_mono_ms()-start<95000) {
         if (match.phase()==GbaNetplayMatch::Phase::Running) {
@@ -42,7 +44,22 @@ int run(GbaMultiplayerSession& simulation,int slot,unsigned port,unsigned nonce,
             if (requested && slot==1 && tick>=20) match.request_checkpoint();
             if (match.poll(false)!=GbaNetplayMatch::Step::Idle || match.next_tick()!=tick) return 23;
         }
-        const auto step=match.poll();
+        // A slower guest keeps servicing UDP while its final simulation tick
+        // is delayed. A checkpoint proposal must not block that last tick.
+        if (checkpoint_skew && slot==1 && match.next_tick()==target-1 && !lag_started) {
+            lag_started=rbe_mono_ms();
+            std::fprintf(stderr,"checkpoint skew: guest held at tick=%u\n",match.next_tick());
+        }
+        const bool lagging=lag_started && rbe_mono_ms()-lag_started<500;
+        const auto step=match.poll(!lagging);
+        if (checkpoint_skew && rbe_mono_ms()-start>10000) {
+            RNetSessionStats stats{};
+            rnet_session_get_stats(match.transport(),&stats);
+            std::fprintf(stderr,"checkpoint skew stuck: seat=%d tick=%u phase=%d stall=%s state_bytes=%u\n",
+                         slot,match.next_tick(),static_cast<int>(match.phase()),
+                         rnet_admit_stall_name(stats.last_stall),stats.state_bytes_total);
+            return 25;
+        }
         if (match.phase()==GbaNetplayMatch::Phase::Failed) {
             std::fprintf(stderr,"match: %s\n",match.error().c_str());
             return match.next_tick() ? 6 : 11;
@@ -86,6 +103,7 @@ int run(GbaMultiplayerSession& simulation,int slot,unsigned port,unsigned nonce,
 }
 }
 int main(int argc,char** argv) {
+    std::setvbuf(stderr,nullptr,_IONBF,0);
     if (argc!=6) return 2;
     try {
         const int slot=std::atoi(argv[1]);

@@ -5,7 +5,8 @@
 namespace gbarecomp {
 // An application barrier. Each peer must independently hold the same exact confirmed
 // snapshot; no host snapshot is accepted to paper over a desync. Only metadata
-// and receipts travel over recomp-net. Seat zero proposes the boundary.
+// and receipts travel over recomp-net. Seat zero first waits for both peers
+// to reach the boundary: receiving a STATE transfer stalls input admission.
 class GbaNetplayCheckpointAgreement {
 public:
     enum class Status { Waiting, Ready, Failed };
@@ -25,7 +26,7 @@ public:
     // exports. The app must write it atomically and recover it as a pair.
     std::vector<std::uint8_t> archive() const;
 private:
-    enum class Phase { SendProposal, ReceiveProposal, SendReceipt, ReceiveReceipt,
+    enum class Phase { SendArrival, SendProposal, ReceiveProposal, SendReceipt, ReceiveReceipt,
                        SendReady, ReceiveReady, Done, Failed };
     const GbaNetplayHost& host_;
     RNetSession* network_;
@@ -35,7 +36,7 @@ private:
     std::uint32_t proposed_tick_=0;
     bool wait_for_confirmation_=false;
     Phase phase_;
-    bool sending_=false,started_=false;
+    bool sending_=false,started_=false,arrived_=false;
     std::uint64_t started_ms_=0;
     GbaConfirmedCheckpoint checkpoint_;
     std::vector<std::uint8_t> proposal_;
