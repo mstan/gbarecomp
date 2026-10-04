@@ -449,6 +449,69 @@ void test_flash1m_beats_flash() {
                static_cast<int>(gba::SaveType::Flash1M));
 }
 
+void flash_command(gba::GbaSave& save, uint8_t command) {
+    save.flash_write(0x5555, 0xAA);
+    save.flash_write(0x2AAA, 0x55);
+    save.flash_write(0x5555, command);
+}
+
+void test_flash_chip(std::size_t size, uint8_t device) {
+    const char* test = size == 0x10000 ? "flash512" : "flash1m";
+    gba::GbaSave save;
+    save.configure_flash(size);
+    check_eq(test, "size", save.flash_size(), size);
+    flash_command(save, 0x90);
+    check_eq(test, "maker", save.flash_read(0), 0xC2u);
+    check_eq(test, "device", save.flash_read(1), device);
+    check_bool(test, "identify_clean", save.dirty(), false);
+
+    // Preserve identification even when a snapshot is taken in ID mode.
+    gbarecomp::debug::SnapshotWriter writer;
+    save.serialize(writer);
+    gba::GbaSave restored;
+    gbarecomp::debug::SnapshotReader reader(writer.buffer().data(), writer.buffer().size());
+    restored.deserialize(reader);
+    check_bool(test, "snapshot_ok", reader.ok(), true);
+    check_eq(test, "snapshot_device", restored.flash_read(1), device);
+    flash_command(save, 0xF0);
+    check_eq(test, "leave_id", save.flash_read(0), 0xFFu);
+
+    flash_command(save, 0xA0);
+    save.flash_write(0x1234, 0x5A);
+    check_eq(test, "program", save.flash_read(0x1234), 0x5Au);
+    check_bool(test, "program_dirty", save.dirty(), true);
+
+    // A 512-Kbit part must stay in its only bank; a 1-Mbit part has two.
+    flash_command(save, 0xB0);
+    save.flash_write(0, 1);
+    check_eq(test, "bank1", save.flash_read(0x1234),
+             size == 0x10000 ? 0x5Au : 0xFFu);
+    flash_command(save, 0xA0);
+    save.flash_write(0x1234, 0xA5);
+
+    const auto bytes = save.flash_bytes();
+    gba::GbaSave reloaded;
+    reloaded.configure_flash(size);
+    check_bool(test, "reload", reloaded.load_flash_bytes(bytes.data(), bytes.size()), true);
+    check_bool(test, "reload_clean", reloaded.dirty(), false);
+    check_eq(test, "reload_bank0", reloaded.flash_read(0x1234),
+             size == 0x10000 ? 0xA5u : 0x5Au);
+    flash_command(reloaded, 0xB0);
+    reloaded.flash_write(0, 1);
+    check_eq(test, "reload_bank1", reloaded.flash_read(0x1234), 0xA5u);
+
+    flash_command(reloaded, 0x80);
+    reloaded.flash_write(0x5555, 0xAA);
+    reloaded.flash_write(0x2AAA, 0x55);
+    reloaded.flash_write(0x1000, 0x30);
+    check_eq(test, "sector_erase", reloaded.flash_read(0x1234), 0xFFu);
+    check_bool(test, "erase_dirty", reloaded.dirty(), true);
+    flash_command(reloaded, 0xB0);
+    reloaded.flash_write(0, 0);
+    check_eq(test, "erase_other_bank", reloaded.flash_read(0x1234),
+             size == 0x10000 ? 0xFFu : 0x5Au);
+}
+
 void eeprom_send_bits(gba::GbaSave& save, uint32_t value, int count) {
     for (int bit = count - 1; bit >= 0; --bit) {
         save.eeprom_write_bit(static_cast<uint16_t>((value >> bit) & 1u));
@@ -631,6 +694,8 @@ int main() {
     test_bios_window_writes_are_ignored();
     test_matrix_memory_mapper();
     test_flash1m_beats_flash();
+    test_flash_chip(0x10000, 0x1C);
+    test_flash_chip(0x20000, 0x09);
     test_eeprom_8k_read_write();
     test_eeprom_persistence_bytes_and_dirty();
     test_waitstates();
