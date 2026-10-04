@@ -272,7 +272,9 @@ void GbaSave::configure_flash(std::size_t bytes) {
     flash_banks_ = static_cast<uint32_t>(bytes / kFlashBankBytes);
     if (flash_banks_ == 0) flash_banks_ = 1;
     flash_maker_ = 0xC2;   // Macronix
-    flash_device_ = 0x09;  // MX29L010 (1 Mbit); accepted by FLASH1M & 512K drivers
+    // The guest selects its flash driver by ID. 512-Kbit drivers (including
+    // Mario Kart: Super Circuit's) reject the 1-Mbit MX29L010 identity.
+    flash_device_ = bytes == 0x10000 ? 0x1C : 0x09;  // MX29L512 / MX29L010
     flash_state_ = FlashState::Idle;
     flash_id_mode_ = false;
     flash_bank_ = 0;
