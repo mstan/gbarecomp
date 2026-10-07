@@ -1571,6 +1571,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     if (!args.quiet)
         std::printf("bios_backend=%s\n",
                     gba::bios_hle_mode_name(gba::bios_hle_mode()));
+    if (!args.quiet) std::printf("dma_ram_backend=%s\n", gba::dma_ram_implementation());
 
     // GBARECOMP_WS_WIP is an explicit development override for exercising the
     // generic expanded renderer in games that have not advertised capability.

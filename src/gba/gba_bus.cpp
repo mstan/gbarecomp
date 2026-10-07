@@ -7,6 +7,7 @@
 // to serve bytes before the hash is verified.
 
 #include "gba_bus.h"
+#include <utility>
 
 #include <cstdlib>
 #include <cstdio>
@@ -541,6 +542,27 @@ void GbaBus::write16(uint32_t addr, uint16_t v) {
             log_unmapped(addr, v, true, 2);
             return;
     }
+}
+
+bool GbaBus::dma_copy_ram(uint32_t src, uint32_t dst, uint32_t bytes) {
+    if (write_observer_ || !bytes) return false;
+    auto span = [&](uint32_t addr) -> std::pair<uint8_t*, std::size_t> {
+        if ((addr >> 24) == 2u) {
+            const uint32_t off = addr & 0x3FFFFu;
+            if (bytes <= ewram_.size() - off) return {ewram_.data() + off, bytes};
+        } else if ((addr >> 24) == 3u) {
+            const uint32_t off = addr & 0x7FFFu;
+            if (bytes <= iwram_.size() - off) return {iwram_.data() + off, bytes};
+        }
+        return {nullptr, 0};
+    };
+    const auto source = span(src), destination = span(dst);
+    if (!source.first || !destination.first) return false;
+    const uintptr_t s = reinterpret_cast<uintptr_t>(source.first);
+    const uintptr_t d = reinterpret_cast<uintptr_t>(destination.first);
+    if (s < d + bytes && d < s + bytes) return false;
+    std::memcpy(destination.first, source.first, bytes);
+    return true;
 }
 
 void GbaBus::write32(uint32_t addr, uint32_t v) {

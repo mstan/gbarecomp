@@ -6,6 +6,13 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+set(GBARECOMP_DMA_RAM_IMPLEMENTATION "LLE" CACHE STRING
+    "Developer build choice for contiguous ordinary-RAM DMA: LLE or HLE")
+set_property(CACHE GBARECOMP_DMA_RAM_IMPLEMENTATION PROPERTY STRINGS LLE HLE)
+if(NOT GBARECOMP_DMA_RAM_IMPLEMENTATION MATCHES "^(LLE|HLE)$")
+    message(FATAL_ERROR "GBARECOMP_DMA_RAM_IMPLEMENTATION must be LLE or HLE")
+endif()
+
 # Large generated corpora are expensive to rebuild in fresh build trees.
 # Reuse identical objects automatically when ccache/sccache is available, while
 # preserving an explicit launcher selected by the parent project or user.
@@ -282,6 +289,9 @@ add_library(gbarecomp_gba STATIC
     src/gba/crc32.cpp
 )
 target_include_directories(gbarecomp_gba PUBLIC src/gba)
+if(GBARECOMP_DMA_RAM_IMPLEMENTATION STREQUAL "HLE")
+    target_compile_definitions(gbarecomp_gba PUBLIC GBARECOMP_DMA_RAM_HLE=1)
+endif()
 # src/debug for snapshot.h — the save-state SnapshotWriter/Reader are
 # header-only, so this is an include-path dependency only (gbarecomp_gba
 # does NOT link gbarecomp_debug; that would invert the layering).
@@ -845,6 +855,7 @@ add_test(NAME thumb_tests COMMAND thumb_tests)
 
 add_gbarecomp_runtime_stack_test(bus_tests tests/bus/test_main.cpp)
 add_gbarecomp_runtime_stack_test(dma_tests tests/dma/test_main.cpp)
+add_gbarecomp_runtime_stack_test(dma_bulk_tests tests/dma/bulk_test_main.cpp)
 add_gbarecomp_runtime_stack_test(timer_tests tests/timers/test_main.cpp)
 
 add_executable(gpio_tests tests/gpio/test_main.cpp)

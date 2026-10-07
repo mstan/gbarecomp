@@ -204,6 +204,10 @@ public:
     void write16(uint32_t addr, uint16_t v) override;
     void write32(uint32_t addr, uint32_t v) override;
 
+    // Whole contiguous DMA copy between physical EWRAM/IWRAM spans. Declines
+    // overlap, mirror wrapping and active write observers without changing RAM.
+    bool dma_copy_ram(uint32_t src, uint32_t dst, uint32_t bytes);
+
     // Per-region S/N-cycle table per GBATEK § "GBA Memory Map" and
     // "GBA Cycle Times". Drives interpreter cycle accounting so our
     // PPU/animation timing matches mGBA's after every CPU step.
