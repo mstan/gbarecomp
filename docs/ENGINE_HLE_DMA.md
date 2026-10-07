@@ -107,3 +107,42 @@ Raw stdout/stderr was retained in the workspace artifact directory as
 `gba-probe-0-LLE.log`, `gba-probe-1-HLE.log`,
 `gba-probe-2-HLE.log` and `gba-probe-3-LLE.log`.
 The source test emits all rows and verdicts needed to reproduce the screen.
+
+## Representative workload discovery (2026-10-06)
+
+The bounded discovery pool contains three distinct GBA workloads. It is a
+selection pool, not an automatic title/configuration matrix. The shared pass
+allows at most six fresh captures across all six systems, one configuration
+per selected workload; reuse suitable existing evidence first.
+
+| Workload | Reusable evidence and artifact age | Attribution and next decision |
+|---|---|---|
+| Mega Man Zero, 2D action | `MegaManZeroRecomp/build-pin-final/playtest/smoke-result.json`; Sept26 Release GCC/SDL2 binary, framework `7c9a1eba611b4eef7668937707d5f9abb0d94d9b`. Fresh bounded capture below. | Shared scanline rendering and event/tick batching deserve investigation before assuming RAM DMA is the largest engine boundary. |
+| Mario Kart Super Circuit, racing | `gbarecomp/_ab_results/mksc.log`, Aug20 actual-title smoke with real recompiled BIOS. | Boot/idle evidence has no elapsed cost attribution. A coherent production artifact and active race route would be needed before ranking renderer versus CPU/device costs. |
+| Emerald, RPG | `gbarecomp/_ab_results/emerald.log`, Aug21 actual-title smoke; retained production executable is older. | Idle elision counts are not host time. Useful genre diversity if the remaining capture budget warrants it; artifact identity and active route remain unqualified. |
+
+Parent executed one fresh MMZ production capture using the Sept26 binary:
+SHA-256 `fdcfb8df524a404c35203333a4774055e6e695d4d01a8108a047c2c086e39d78`.
+It loaded the corresponding `ready.state` at actual frame 119727 and advanced
+1,200 frames to 120927 with input replay. The final gameplay image shows
+movement/shots with Ciel. Startup/exit telemetry reports static recompiled
+execution, zero dispatch misses/interpreted instructions, and zero unmapped
+memory/IO accesses. This establishes an exercised gameplay window, not campaign
+completion or qualification of the new DMA HLE build.
+
+Private workspace artifacts are `mmz-profile/samples-ready.csv`,
+`mmz-profile/attribution.json`, `mmz-profile/samples-ready.csv.child.log`,
+`mmz-profile/inputs.csv` and `mmz-profile/final.png`. The initial `samples.csv`
+attempt rejected unsupported `--screenshot` and exited 1 before gameplay;
+retain it as failed setup evidence and exclude it from attribution. The
+corrected run used `--dump-png`, returned zero sample errors and child exit 0.
+
+Of 172 main-thread self samples, 23 (13.372%) were outside the executable.
+Two scanline-renderer symbols account for 25 + 8 = 33 (19.186%) samples;
+`runtime_tick` contributes 16 (9.302%) and `runtime_should_yield` 10 (5.814%).
+Thus approximately 19% renderer and 15% tick/yield are directional shared-engine
+signals. The small coarse sample is not a benchmark or speedup ceiling.
+Headless execution excludes presentation and the sampler does not cover worker
+threads. Eligible RAM-DMA share remains unknown. Renderer/event batching are
+credible next theories; the DMA pilot remains draft/default LLE pending its
+own workload benefit and gameplay gates.
