@@ -6,6 +6,13 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+set(GBARECOMP_SCANLINE_IMPLEMENTATION "LLE" CACHE STRING
+    "Shared native scanline renderer implementation (LLE or HLE)")
+set_property(CACHE GBARECOMP_SCANLINE_IMPLEMENTATION PROPERTY STRINGS LLE HLE)
+if(NOT GBARECOMP_SCANLINE_IMPLEMENTATION MATCHES "^(LLE|HLE)$")
+    message(FATAL_ERROR "GBARECOMP_SCANLINE_IMPLEMENTATION must be LLE or HLE")
+endif()
+
 # Large generated corpora are expensive to rebuild in fresh build trees.
 # Reuse identical objects automatically when ccache/sccache is available, while
 # preserving an explicit launcher selected by the parent project or user.
@@ -280,6 +287,9 @@ add_library(gbarecomp_gba STATIC
     src/gba/sha1.cpp
     src/gba/crc32.cpp
 )
+if(GBARECOMP_SCANLINE_IMPLEMENTATION STREQUAL "HLE")
+    set_property(SOURCE src/gba/gba_ppu.cpp APPEND PROPERTY COMPILE_DEFINITIONS GBARECOMP_SCANLINE_HLE=1)
+endif()
 target_include_directories(gbarecomp_gba PUBLIC src/gba)
 # src/debug for snapshot.h — the save-state SnapshotWriter/Reader are
 # header-only, so this is an include-path dependency only (gbarecomp_gba
@@ -416,6 +426,9 @@ else()
     message(STATUS "gbarecomp: BIOS recompiled output absent — placeholder dispatch only. "
                    "Run `build/gba_recompile.exe --bios bios/gba_bios.bin` "
                    "to populate.")
+endif()
+if(GBARECOMP_SCANLINE_IMPLEMENTATION STREQUAL "HLE")
+    set_property(SOURCE src/runtime/runtime.cpp APPEND PROPERTY COMPILE_DEFINITIONS GBARECOMP_SCANLINE_HLE=1)
 endif()
 target_include_directories(gbarecomp_runtime PUBLIC src/runtime)
 if(GBARECOMP_RUNTIME_UI_ROOT AND
