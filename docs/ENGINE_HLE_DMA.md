@@ -149,157 +149,80 @@ own workload benefit and gameplay gates.
 
 ## Production candidate milestones and owner handoff
 
-This strategy completes one winning shared-engine candidate end to end. The
-three-title pool supplies comparisons, not a requirement to build or time every
-possible route/setting. Use one declared production configuration per title and
-reuse valid route evidence before spending the bounded capture budget.
+Windows is the first qualification platform. Complete one shared-engine
+candidate using focused correctness checks, a measured FPS/percentage gain,
+one basic visual sanity look, then the owner's playtest of all three selected
+games. Ports follow after the Windows result; this is not a configuration matrix.
 
-| Title and concrete useful-work route | Production floor gap / next milestone | Candidate boundary and observable checks |
+### Selected games and production readiness
+
+| Game | Useful-work route | Build readiness |
 |---|---|---|
-| Mega Man Zero (primary): restore Sept26 `ready.state`, replay the already exercised movement/shooting window with Ciel for 1,200 guest frames, recording start/end frames and scene. | Existing production binary/source identity and successful active capture are available. Select a coherent maintained framework/title pin for a matched LLE/HLE production build; the old binary is discovery evidence, not the new candidate baseline. | Scanline output/publication and scheduler tick/yield work: completed frames, gameplay movement/shots, IRQ/event delivery, input response, audio progression and continued combat/script progression. |
-| Mario Kart Super Circuit (companion): active race start/countdown through a short driving segment with opponents, advancing a fixed guest-frame interval rather than menus/attract mode. | Aug20 boot smoke is not a ready measured race floor. Identify a functioning production runner, title pin, isolated save and reproducible race checkpoint/input before timing. | Test shared renderer/event service during racing: countdown/order, motion/opponents, track/sprite output, steering/input, audio and frame/event completion. |
-| Emerald (companion): restored overworld walking followed by entering and advancing one battle/menu transition. | Existing older executable/boot log does not establish active-route readiness. Qualify a coherent production pin and isolated checkpoint before measurement. | Tile/sprite rendering and event delivery across overworld/battle: movement, transition completion, menu input, audio, save persistence and continued progression. |
+| Mega Man Zero | Active movement/shooting with Ciel, using the already exercised 1,200-frame window as a starting point; normal continued play for the owner. | Sept26 binary/profile is discovery evidence. Build a coherent maintained title/framework LLE/HLE pair before candidate timing or owner handoff. |
+| Mario Kart Super Circuit | Race countdown and active driving with opponents. | Aug20 boot smoke is insufficient for a new implementation handoff. Establish the maintained production title pin and functioning race route. |
+| Emerald | Active overworld movement and a battle/menu transition. | Older executable/boot evidence is discovery only. Establish the maintained production title pin and functioning active route. |
 
-First implementation theory: batch or replace a coarse shared scanline-render
-service, or reduce repeated scheduler tick/yield service across a declared
-caller boundary. The active MMZ sample points to approximately 19% scanline
-renderer and 15% tick/yield self samples; it does not identify the winning
-algorithm or an additive speedup ceiling. Measure eligible work on the production
-routes, including worker CPU, before deciding. Choose the boundary that has a
-clear maintained LLE floor, substantial repeated eligible cost, and a caller
-contract permitting materially less total work. This must be shared engine
-service code, not a hardcoded MMZ address/routine intercept. The existing RAM-DMA
-pilot is selected only if actual-game eligible coverage and end-to-end cost make
-it competitive; its large synthetic service ratio alone is insufficient.
+These are three selected games, not three launchable candidate packages yet.
+Old unrelated binaries must not be presented as the new implementation.
+Use one declared Windows production configuration per game. Reuse valid
+profiles and existing focused tests; do not require checkpoint, screenshot,
+audio or internal-state sweeps before the owner can play.
 
-Before code, declare the candidate's supported service family, intended material
-gain and acceptable tiny output/timing approximations. A provisional planning
-target is roughly 10% reduction in total useful-work cost on the primary route,
-not universal acceptance: the measured gain must exceed observed noise and retain
-useful guest-frame/event progress. Profile diagnostics separately from matched
-uninstrumented LLE/HLE measurements. The primary comparison is ABBA (two balanced
-pairs); each ready companion gets one A/B pair. Do not automatically repeat runs
-or expand configurations when evidence is inconclusive; document the next
-specific question and retain an unsuccessful experiment as draft.
+### First shared-engine boundary
 
-Caller contracts cover frame publication/buffer ownership and memory visibility,
-pending-event/IRQ delivery and completion order for the replaced operation.
-Compare exact pixels or event/output counters only where exactness is claimed;
-permitted minute visual/timing differences do not require full internal-state
-identity. Automated production checks must cover boot, active play/progression,
-pause/resume, reset, isolated save/load/persistence, audio and input at affected
-boundaries. Test both build selections, and preserve a functioning LLE build.
+Investigate coarse shared scanline rendering or scheduler tick/yield service.
+The active MMZ discovery sample indicates approximately 19% scanline renderer
+and 15% tick/yield self samples, with a small sample and incomplete thread
+coverage. These are directional signals, not additive speedup ceilings.
+Select the boundary whose actual game workload shows substantial eligible cost
+and whose caller ABI permits materially less work. Implement shared service
+code, not hardcoded MMZ addresses or title routine interception.
 
-Final playable handoff: a production **Mega Man Zero** HLE package from the
-winning coherent title/framework pins, with its LLE build alternative, isolated
-save/checkpoint and instructions for the same Ciel movement/shooting segment plus
-normal continued play. Hand it to the owner only after automated checks and a
-material useful-work gain pass; report measured scope, known approximations and
-companion results. The owner performs the final feel/progression playtest.
-Merge, enable by default only on the demonstrated platform/workload scope with
-build-time LLE opt-out, and close the issue only after that feedback passes.
+The existing RAM-DMA pilot is a possible winner only when actual game coverage
+and FPS/percentage benefit make it meaningful. Its synthetic service ratio
+does not by itself outrank rendering/event work.
 
-## Measurement, decision and delivery protocol
+### Focused correctness and gain
 
-Owner completion rule: establish a material game-workload gain and automated
-compatibility, then deliver the final playable build for the owner's feel check.
-After that check passes, integrate the prepared default change and close the
-scoped work. Exhaustive game coverage and completed campaigns are not additional
-completion requirements.
+Before code, declare the operation scope, caller ABI, maintained LLE alternative
+and intended material gain. Keep caller-visible outputs and completion behavior
+compatible; permitted tiny visual/timing approximation does not require matching
+all internal state or old pixels. For rendering/event work, identify buffer
+publication/ownership and affected event/IRQ completion as the concrete contract.
 
-1. **Pin the workload and floor.** Use the three games and concrete routes above.
-   Build LLE and HLE from the same title/framework revisions, compiler/options,
-   ROM/firmware identities, presentation/audio settings and initial game state;
-   only the selected implementation differs. Keep the replaced LLE service
-   runnable. An old executable is discovery evidence, not a mismatched control.
-   Use native game saves or replayed inputs when private savestates cannot cross
-   builds. First resolve the named route/build gaps; do not perfect unrelated
-   hardware before replacing a functioning operation.
-   Verify that companion routes actually exercise the replacement; an unaffected
-   title is a regression control, not evidence for that HLE service. If the
-   chosen service changes, replace an unsuitable companion in the three-title
-   set instead of accumulating extra games or claiming unexercised coverage.
-2. **Attribute only what is missing.** Reuse suitable profiles and collect at
-   most one new active-workload attribution capture per selected game in this
-   implementation round. Identify the intended service's eligible dynamic work.
-   Include worker threads and external modules or report them unresolved; a
-   main-thread symbol histogram cannot supply a whole-process cost percentage.
-   Capture diagnostics separately from performance. End discovery when there
-   is enough evidence to select a useful service, not when every subsystem has
-   a profile. The earlier six-launch discovery cap applied to that completed
-   pass, not to the whole implementation/qualification program.
-3. **Choose one replacement.** Record its caller ABI, inputs, outputs, observable
-   side effects, supported operation scope, permitted tiny differences, expected
-   cost removed, and candidate-specific useful gain before coding. Implement a
-   shared service with build-time LLE/HLE selection and explicit build identity.
-   Do not stack several speculative replacements into the same comparison.
-4. **Measure equivalent active play.** Delimit a fixed gameplay window by guest
-   frames and meaningful game events, excluding boot, warmup and teardown.
-   Choose enough active work to dominate measurement granularity once, then keep
-   it fixed. Report total process CPU milliseconds per guest frame (all threads),
-   critical-path frame work, median/p95 frame time and missed presentation/audio
-   deadlines where available. Record peak memory and code size, since constrained
-   targets matter. Preserve normal renderer and audio production; a benchmark
-   that omits presentation/audio is a core-only diagnostic, not end-to-end proof.
-   The owner selected Windows first and authorized uncapping for useful
-   measurements. Prefer a finite uncapped comparison where it preserves the
-   same game, render and audio-synthesis work. Remove host frame-delay/VSync
-   waits only in isolated benchmark configuration; do not change the guest
-   timing model, resolution, effects, audio workload or HLE coverage between
-   builds. Report uncapped FPS and milliseconds/frame alongside total CPU/frame,
-   and verify completed render/audio work and game progress rather than trusting
-   a frame counter alone. A legacy benchmark that skips rendering/presentation
-   or audio remains core-only evidence; use a complete paced CPU/frame comparison
-   until that benchmark path can exercise equivalent work. Normal capped play
-   can show reduced CPU/frame even when FPS stays unchanged. Measure GPU
-   completion/queue cost when work moves there; a shorter submission call alone
-   is not a win. Keep the final owner-playtest package normally paced.
-5. **Use a fixed comparison budget.** The primary game gets LLE/HLE/HLE/LLE:
-   two order-balanced pairs, four measured executions. Each of the two companion
-   games gets one LLE/HLE pair, two executions each. That is eight measured runs
-   per candidate on one declared host/configuration, not a Cartesian matrix.
-   Reuse their progression telemetry and final outputs; take expensive milestone
-   captures outside timing, and use isolated LLE/HLE fixtures for detailed
-   contracts. Do not automatically add separate full campaigns or trace runs.
-   Keep team builds/profiling out of the timed window, record host load/power/
-   thermal conditions, and preserve every result. A noisy or contradictory result
-   stops that screen; fix an identified condition before a bounded replacement
-   measurement. Never repeat until a passing subset appears.
-6. **Decide from useful gain and compatibility.** Report both paired percentage
-   and absolute savings, with the observed pair spread. About 10% lower whole
-   active-workload CPU time is a planning aim, not a universal acceptance rule.
-   A candidate may instead solve a declared frame-budget or stutter problem.
-   Both primary pairs must show a clear consistent useful improvement beyond
-   observed noise; two pairs are not a formal confidence interval. Companion
-   single pairs screen for large regressions, not proof of zero performance
-   change. Explain any apparent regression before broadening defaults. Exact
-   promises require exact outputs; permitted approximations use a declared
-   practical image/audio/result comparison. Check input, audio, progression,
-   affected completion/IRQ consumers, transitions and relevant pause/reset/save
-   behavior. No crash, softlock, stale buffer, lost completion or save corruption
-   passes. A huge isolated kernel ratio cannot substitute for this decision.
-7. **Hand off the actual finished candidate.** Provide the named primary game as
-   a ready-to-launch normal-paced HLE package, an LLE comparison build, isolated
-   save/checkpoint setup, launch instructions and checksums/build identity. Include
-   a short before/after report, companion results and any tiny known differences.
-   Prepare the intended default-selection/integration change in the draft PR so
-   the owner tests the package intended to ship. Ask the owner to play normally
-   and assess response, motion/collision, camera/scrolling, stereo where relevant,
-   audio rhythm and continued progression. There is no prescribed full-campaign
-   completion or multi-game human test matrix. Owner rejection reopens the
-   affected behavior; fix and recheck that change before another handoff.
-8. **Finish the scoped delivery.** After owner acceptance, integrate the reviewed
-   candidate, make HLE the default for the supported titles/platform/service,
-   retain a documented build-time LLE opt-out, and record the measured and manual
-   evidence before closing the issue. Do not add unrelated qualification gates
-   after the agreed playtest. If the replacement cannot deliver material gain,
-   preserve its branch and draft PR with results, explain why, and choose a new
-   boundary deliberately; an unsuccessful experiment is not a completed system.
+Reuse focused correctness tests for that boundary. Add a test only for a
+concrete uncovered risk introduced by the candidate. General boot/lifecycle,
+campaign, save, audio and image automation is not a mandatory acceptance sweep.
+A detected defect can justify its own targeted check.
 
-The owner selected **Windows first; port measurements later**. Windows x64 is
-therefore the initial implementation, measurement, final-playtest and default
-scope. After automated checks, material gain and the owner's normal-paced feel
-approval, finish that Windows delivery; a mobile/Xbox port is not a new gate
-before closure. Later port work carries the winning candidate and relevant
-routes to the chosen target and measures there before claiming target savings.
-Do not multiply all hosts into the Windows discovery/comparison matrix.
+Start with one matched LLE/HLE timing pair per selected game. Use the same
+production configuration and comparable active gameplay work; uncapping is
+authorized for measurement. Report FPS and percentage gain with enough context
+to distinguish useful-work improvement from faster guest-clock advancement.
+Keep diagnostic profiling separate from timing. Add a reverse-order pair only
+when observed noise or ambiguity would change the decision; do not allocate
+an automatic eight-run quota or expand into a matrix.
+
+Declare materiality before implementation. Roughly 10% remains a provisional
+planning target, not a universal acceptance threshold. A convincing gain must
+outweigh observed noise. If benefit or correctness is unresolved, keep the
+experiment draft and identify the specific remaining question.
+
+### Visual sanity and owner playtest
+
+Make one representative visual sanity look at the new implementation: frames
+must not be visibly garbled. No corresponding old frame or pixel-perfect
+comparison is required. Deeper visual investigation is triggered only by a
+noticed or reported defect. Rely heavily on the owner for gameplay feel.
+
+Once the candidate's focused checks and material gain pass and all selected
+production packages are ready, launch the new HLE **Mega Man Zero, Mario Kart
+Super Circuit and Emerald** builds for the owner. Use normal pacing for human
+play, isolated test saves where needed, and clearly identify the candidate.
+Launch is already authorized; do not ask permission again. Ask whether each
+game looks and plays right, and address specific feedback before promotion.
+
+Positive owner feedback plus demonstrated material gain supports Windows
+default-on promotion, retaining build-time LLE opt-out, followed by merge and
+issue closure. Report actual title/platform scope and any known approximation.
+Other ports are subsequent work, not prerequisites for this Windows handoff.
