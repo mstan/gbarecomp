@@ -342,3 +342,45 @@ is not relabeled as current. One current adaptive-320 active pair is prepared,
 with a declared roughly 10% total-loop reduction goal above noise, ordinary
 audio/presents, and one HLE image/actual-width confirmation. Owner play and
 promotion remain pending; title integration will be a separate draft PR.
+## Current real-adaptive result (2026-10-07)
+
+One corrected current-pin pair used real SDL borderless desktop 3440x1440 and
+actual logical width 382x160, not a forced drawable. Both arms completed the
+same active frames 10016 to 11215, 1200 presents, 321101 steps and 2116299579
+cycles, final PC `0x0806134a`, with zero dispatch misses/interpreted/healed,
+unmapped or unhandled-I/O counts. LLE loop time was 3.782089 s (317.285 FPS);
+HLE was 3.538319 s (339.144 FPS): 6.889% more FPS and 6.445% less loop time.
+This is a modest gain below the roughly 10% planning goal, not a target-met or
+automatic-default claim. No repeat was made. Ordinary render/audio/present work
+was retained, observer OFF, uncapped pacing only. Previously active foreign
+PSX build contention is disclosed; no isolated-host inference is made.
+
+One HLE extended race image is clear: kart, road/scenery and HUD render normally.
+Normal-paced real-adaptive HLE and the LLE alternative are staged with exact
+binary hashes/arguments in the private review manifest. Owner value/feel decision
+is pending, and title PR 10 remains draft/default LLE as requested. No game is
+launched while the owner is away. The historical native 14.09% FPS result stays
+separate; the earlier wrong-width arms are setup evidence only.
+## MMZ corrected active adaptive result (2026-10-07)
+
+The maintained BIOS configuration repairs the previously rejected floor without
+stubbing dispatch or adding guessed seeds. Exact title `84449cf`, framework
+`a263ff2`, core `763b922` and matching freshly generated ROM/BIOS corpus cold
+boot completed 12000 presents with zero static misses/interpreted/healed and
+unmapped/unhandled-I/O counts. An exact existing `campaign_clear_key` extension
+then progressed beyond dialogue and saved a fresh active checkpoint at 16016.
+One new scene image shows Zero/buster/healthbar/Ciel in the actual industrial
+level. Emerald's planned third sample is deferred by the owner's lightweight
+scope; it is not a missing promotion gate.
+
+One real adaptive borderless pair completed frames 16016 to 17215, 1200 presents,
+actual 382x160 on real 3440x1440. Both report 131310 steps, cycles 62191750, final PC
+`0x080c88ee`, VCOUNT 25 and identical idle-elision counts with zero misses or
+interpreter/heal/unhandled-I/O activity. LLE loop was 3.158846 s (379.886 FPS),
+HLE 2.971153 s (403.884 FPS): +6.317% FPS/-5.942% loop time. This is modest and below
+the planning target, with no automatic repeat/default/merge. A single HLE image
+is clear; the existing provider intentionally pillarboxes unsupported margins,
+so this does not claim expanded authored world content. Normal SDL/audio/present
+work is retained, observer OFF, uncapped pacing only, no forced drawable. Exact
+normal-paced adaptive HLE/LLE review hashes and launch arguments are staged
+privately; owner value/feel decision remains pending. No more GBA runs/builds.
