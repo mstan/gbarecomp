@@ -226,3 +226,119 @@ Positive owner feedback plus demonstrated material gain supports Windows
 default-on promotion, retaining build-time LLE opt-out, followed by merge and
 issue closure. Report actual title/platform scope and any known approximation.
 Other ports are subsequent work, not prerequisites for this Windows handoff.
+
+## Active scanline pilot (implementation preparation)
+
+`GBARECOMP_SCANLINE_IMPLEMENTATION=LLE|HLE` selects the shared native-width
+scanline service at build time; the default remains LLE. DMA remains LLE in
+matched scanline builds. HLE decodes regular-background tile spans (up to eight
+pixels) rather than repeating map/flip/address work per pixel, resolves row
+window controls once, and keeps composition candidates in native 555 color until
+final RGB publication. It retains no cross-row cache, changes no device schedule
+and preserves the same scanline entry point, memory snapshot and RGB destination.
+Affine/bitmap/sprite operations still participate in native-color composition;
+the extended-view renderer is unchanged. This is a shared engine replacement,
+not a title address hook.
+
+The structural opportunity is up to seven of eight repeated tile-map decodes
+plus RGB expansion of occluded candidates. MMZ's 25 regular-background and eight
+other renderer self samples motivate the boundary; they do not predict a speedup.
+The declared planning goal is a useful roughly 10% primary-route total-work gain,
+with acceptance based on actual FPS/percentage improvement above noise and the
+owner's judgment. No performance or gameplay result exists for this implementation
+yet. Existing PPU tests pass in both selections, including color effects,
+windows/OBJ, foreign composition and non-tile-aligned scroll; no speculative
+additional suite was introduced.
+
+Matched Windows production MMZ preparation uses isolated title commit `84449cf`,
+the maintained experimental framework, identical local guest-generated sources
+and real BIOS-generated sources, GCC Release/SDL2 and DMA LLE. Root source edits
+and player saves are preserved. Timed/gameplay/visual runs await the shared serial
+window. Production companion readiness and owner handoff remain pending.
+
+### Production floor qualification (2026-10-06)
+
+The first SDL LLE route accepted the September gameplay state but stopped on
+an undefined interpreter bridge; no completed timing row existed. HLE was not
+run. That attempt mixed current framework sources with an unproven copied guest
+corpus and is excluded from qualification. Its logs remain in the local evidence.
+
+A separate repair uses the title's exact framework `a263ff2` and ARM core
+`763b922`, with fresh ROM and real BIOS generation by that pinned tool. Both
+SDL selections build and existing PPU smoke tests pass. The repaired LLE state
+route nevertheless stops at RAM dispatch `0x0202407C`/undefined `0x020251CC`.
+One subsequent cold-boot LLE setup, without any old state and with the existing
+campaign-safe input sequence replayed through SDL, stops at ROM dispatch
+`0x08294740`/undefined `0x08295174` before active gameplay. This disproves a
+stale-state-only explanation. The ROM target is adjacent to the documented
+stage descriptor `0x08294744`; it must not be admitted as code without tracing
+the actual caller/control-flow contract.
+
+Neither failed route completed its bounded window or produced a qualifying
+visual result. Exit success alone is insufficient. No HLE gameplay, whole-game
+FPS gain, owner handoff or default promotion is claimed. Remaining work is a
+functioning coherent cold-boot production floor, then the bounded native LLE/HLE
+comparison; the renderer candidate itself remains draft and default LLE.
+The subsequent MKSC fallback exposed a concrete preparation error: the fresh
+BIOS generation command omitted the maintained `bios/gba_bios.toml`. Bare BIOS
+vector discovery omitted ARM entry `0x00000300` and exception resume coverage;
+the first strict-static cold-boot setup correctly rejected that dispatch. The
+config supplies verified BIOS roots and `static_resume_all=true`. Regeneration
+with that exact pinned config emits 770 functions and 4,373 interior resume
+aliases, then both SDL arms relink successfully. No BIOS stub or speculative
+code seed was added. This omission also invalidates treating the prior MMZ
+failures as proven underlying title defects; those attempts retain their raw
+findings, but their BIOS floor was incomplete.
+
+MKSC's isolated title `79dffea` uses exact framework `e3c834d` and ARM core
+`c626f4e`, retaining desktop networking and its imported symbol overlay. The
+existing gameplay fixture selects GP, 50cc, a driver and Mushroom Cup, then
+accelerates/steers from frame 8,600. One repaired SDL cold-boot setup is prepared
+to save a fresh race state after frame 10,000 via the existing observer API and
+inspect the final image at frame 18,000. Any matched 1,200-frame active-race pair
+uses that same state with observer disabled, ordinary render/audio/presentation
+work and uncapped pacing. Setup captures are not timing evidence; a valid race
+and completed window are required before HLE runs. Results remain pending.
+### First functioning full-game result: MKSC native race
+
+The BIOS-fixed cold boot completed 18,000 presents, guest frames 0 to 18,002,
+with zero static dispatch misses/interpreted instructions and a clear actual
+Luigi/Mushroom Cup race image. A fresh state was saved at frame 10,016. One
+observer-OFF LLE/HLE pair then completed the identical active window: frames
+10,016 to 11,215, 1,200 presents, 321,101 steps, 2,116,299,579 cycles, final PC
+`0x0806134a` and VCOUNT 7. Both report zero dispatch misses, interpreted/healed
+instructions, unmapped accesses and unhandled I/O.
+
+Loop-only LLE time was 2.503480 s (479.333 present FPS); HLE was 2.194235 s
+(546.888 FPS): 14.09% more FPS and 12.35% less loop time. Ordinary SDL rendering,
+audio drain/mix/push and every presentation remain enabled; only pacing is
+uncapped. Audio counts were not separately instrumented. Startup/state load and
+cleanup/save/PNG are outside the loop timer. One HLE image was inspected and is
+clear actual racing, with no paired pixel comparison. A foreign PSX parallel
+build was active and recorded; this is one route/pair, not an isolated-host,
+all-title or port result. No repeat was necessary to resolve a defect or
+ambiguity. Owner play is pending; adaptive wide rendering is unchanged and the
+candidate remains draft/default LLE.
+
+Local reproducibility evidence is `mksc-titlepin-render-run-manifest.json`,
+`mksc-titlepin-active-pair-result.json`, per-arm stdout/stderr and final PNG,
+`mksc-titlepin-coldboot-biosfixed/setup-result.json`, and the host contention
+census. Raw private ROM/state/generated assets are excluded from commits.
+Adaptive extension now applies the same deferred native-color composition to
+the shared wide renderer, preserving every margin/remap/provider lookup. Wide
+window controls were already row-resolved; arbitrary remapped background samples
+do not use native tile spans. Existing relevant wide-center, bitmap-margin,
+affine-filter and foreign-overlay PPU checks pass in both selections. Selection
+is scoped to the PPU source and runtime banner, so unchanged guest objects can
+be compiled once and reused for the second arm.
+
+Upstream MKSC main advanced to `b89fbb4` (v0.1.4), incorporating save, checkpoint
+and speedometer PRs; no open origin PRs were present at inspection. Current
+integration therefore retains its framework `29efc028` and core `c626f4e` in a
+new isolated worktree rather than downgrading the title's dependency. Fresh
+current guest generation preserves its additional Time Trial roots. Both
+current SDL selections build and PPU checks pass. The historical native pair
+is not relabeled as current. One current adaptive-320 active pair is prepared,
+with a declared roughly 10% total-loop reduction goal above noise, ordinary
+audio/presents, and one HLE image/actual-width confirmation. Owner play and
+promotion remain pending; title integration will be a separate draft PR.
