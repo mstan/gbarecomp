@@ -1,5 +1,30 @@
 # Shared-engine HLE opportunities and ordinary-RAM DMA pilot
 
+## Current scanline default (2026-10-09)
+
+Fresh builds now use `GBARECOMP_SCANLINE_IMPLEMENTATION=HLE`. Select the maintained
+LLE renderer with `-DGBARECOMP_SCANLINE_IMPLEMENTATION=LLE`. This remains a build
+choice, with no runtime handoff. CMake preserves existing cached selections;
+pass `-DGBARECOMP_SCANLINE_IMPLEMENTATION=HLE` to switch an existing build.
+
+The renderer comparison produced byte-identical output for 128 deterministic
+native/adaptive frames covering display modes 0–5, tile formats, scrolling,
+windows, sprites, affine transforms, bitmap pages and blending. The existing
+PPU contract tests pass in both implementations. Separate 120-frame MKSC and
+MMZ checks also matched final images and guest execution statistics. These
+checks support output equivalence for the tested cases; they do not establish
+equivalence for every game or display state.
+
+The Windows adaptive-route measurements below show 6.889% higher overall FPS
+for MKSC and 6.317% for MMZ, with rendering, audio and presentation retained.
+That is a moderate whole-loop improvement on those routes, rather than a
+universal performance guarantee. The native MKSC result used different pins
+and is not a measurement of the current default.
+
+`GBARECOMP_DMA_RAM_IMPLEMENTATION` remains `LLE` by default: its component probe
+does not establish a whole-game gain. The dated investigation and disposition
+sections below retain the earlier evidence and promotion decisions.
+
 Investigation: 2026-10-06, central issue `beads-bce3`. The bounded pilot is
 shared across titles; it does not intercept a title routine. It remains opt-in
 and does not establish a whole-game speedup or authorize a release default.
