@@ -34,6 +34,7 @@
 namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
 namespace gba {
+const char* dma_ram_implementation();
 class GbaSerialDevice;
 
 class GbaPpu;

@@ -734,7 +734,9 @@ void render_scanline_internal(uint8_t* rgb,
     }
 
     struct PixelCandidate {
+#if !defined(GBARECOMP_SCANLINE_HLE)
         uint8_t rgb[3] = {0, 0, 0};
+#endif
         uint16_t color = 0;
         int key = 0x7FFFFFFF;
         uint8_t layer = 5;
@@ -788,11 +790,30 @@ void render_scanline_internal(uint8_t* rgb,
             return static_cast<uint16_t>((winout >> 8) & 0x3Fu);
         return static_cast<uint16_t>(winout & 0x3Fu);
     };
+#if defined(GBARECOMP_SCANLINE_HLE)
+    // The caller gives an immutable row snapshot. Resolve windows once, not
+    // once per candidate/layer. No cross-row state or VRAM cache is retained.
+    uint8_t row_control[GbaPpu::kScreenWidth];
+    for (uint32_t x = 0; x < kScreenWidth; ++x)
+        row_control[x] = static_cast<uint8_t>(window_control(x));
+#endif
     auto layer_enabled = [&](uint32_t x, uint32_t layer_bit) -> bool {
-        return (window_control(x) & (1u << layer_bit)) != 0;
+        return (
+#if defined(GBARECOMP_SCANLINE_HLE)
+                row_control[x]
+#else
+                window_control(x)
+#endif
+                & (1u << layer_bit)) != 0;
     };
     auto blend_enabled = [&](uint32_t x) -> bool {
-        return (window_control(x) & (1u << 5)) != 0;
+        return (
+#if defined(GBARECOMP_SCANLINE_HLE)
+                row_control[x]
+#else
+                window_control(x)
+#endif
+                & (1u << 5)) != 0;
     };
 
     uint16_t bldcnt = static_cast<uint16_t>(io[0x50] | (io[0x51] << 8));
@@ -811,12 +832,16 @@ void render_scanline_internal(uint8_t* rgb,
     const GbaForeignObjFocusTransform* foreign_focus =
         foreign_presentation_internal::obj_focus();
     const uint16_t backdrop_color = load_u16_le(&pal[0]);
+#if !defined(GBARECOMP_SCANLINE_HLE)
     uint8_t backdrop_rgb[3];
     to_rgb888(backdrop_color, backdrop_rgb);
+#endif
     for (uint32_t x = 0; x < kScreenWidth; ++x) {
+#if !defined(GBARECOMP_SCANLINE_HLE)
         top[x].rgb[0] = backdrop_rgb[0];
         top[x].rgb[1] = backdrop_rgb[1];
         top[x].rgb[2] = backdrop_rgb[2];
+#endif
         top[x].color = backdrop_color;
         top[x].key = 0x70000000;
         top[x].layer = 5;
@@ -832,7 +857,9 @@ void render_scanline_internal(uint8_t* rgb,
                       bool target2) {
         PixelCandidate cand;
         cand.color = color;
+#if !defined(GBARECOMP_SCANLINE_HLE)
         to_rgb888(color, cand.rgb);
+#endif
         cand.key = key;
         cand.layer = layer;
         cand.target1 = target1;
@@ -870,6 +897,51 @@ void render_scanline_internal(uint8_t* rgb,
         uint32_t height_px = height_tiles * 8u;
         uint32_t block_cols = width_tiles / 32u;
 
+#if defined(GBARECOMP_SCANLINE_HLE)
+        const uint32_t tex_y = (y + vofs) & (height_px - 1u);
+        const uint32_t tile_y = tex_y >> 3;
+        const uint32_t map_row = screen_base + (tile_y >> 5) * block_cols * 0x800u +
+                                 (tile_y & 31u) * 64u;
+        const int key = static_cast<int>(bg_priority * 256u + 128u + layer);
+        const bool target1 = (first_targets & (1u << layer)) != 0;
+        const bool target2 = (second_targets & (1u << layer)) != 0;
+        for (uint32_t x = 0; x < kScreenWidth;) {
+            const uint32_t tex_x = (x + hofs) & (width_px - 1u);
+            const uint32_t tile_x = tex_x >> 3;
+            const uint32_t begin = tex_x & 7u;
+            const uint32_t count = std::min(8u - begin, kScreenWidth - x);
+            const uint32_t map_off = map_row + (tile_x >> 5) * 0x800u +
+                                     (tile_x & 31u) * 2u;
+            if (map_off + 1u >= 96u * 1024u) { x += count; continue; }
+            const uint16_t entry = load_u16_le(&vram[map_off]);
+            const uint32_t py = (entry & 0x0800u) ? 7u - (tex_y & 7u) : tex_y & 7u;
+            const uint32_t tile_row = char_base + (entry & 0x03FFu) *
+                (color256 ? 64u : 32u) + py * (color256 ? 8u : 4u);
+            const uint32_t palette_bank = (entry >> 12) & 15u;
+            for (uint32_t j = 0; j < count; ++j) {
+                const uint32_t screen_x = x + j;
+                if (!layer_enabled(screen_x, layer)) continue;
+                const uint32_t px = (entry & 0x0400u) ? 7u - (begin + j) : begin + j;
+                const uint32_t addr = tile_row + (color256 ? px : px >> 1);
+                if (addr >= 96u * 1024u) continue;
+                const uint8_t packed = vram[addr];
+                uint32_t index = color256 ? packed : ((px & 1u) ? packed >> 4 : packed & 15u);
+                if (!index) continue;
+                if (!color256) index |= palette_bank << 4;
+                const uint16_t color = load_u16_le(&pal[index * 2]);
+                const bool t1 = blend_enabled(screen_x) && target1;
+                if (foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
+                                                tile_y, screen_x, y)) {
+                    PixelCandidate& hud = foreign_hud_bg[screen_x];
+                    hud.color = color; hud.key = key;
+                    hud.layer = static_cast<uint8_t>(layer);
+                    hud.target1 = t1; hud.target2 = target2; hud.valid = true;
+                }
+                submit(screen_x, color, key, static_cast<uint8_t>(layer), t1, target2);
+            }
+            x += count;
+        }
+#else
         for (uint32_t x = 0; x < kScreenWidth; ++x) {
             if (!layer_enabled(x, layer)) continue;
             uint32_t tex_x = (x + hofs) & (width_px - 1u);
@@ -912,7 +984,9 @@ void render_scanline_internal(uint8_t* rgb,
                                             tile_y, x, y)) {
                 PixelCandidate& hud = foreign_hud_bg[x];
                 hud.color = color;
+#if !defined(GBARECOMP_SCANLINE_HLE)
                 to_rgb888(color, hud.rgb);
+#endif
                 hud.key = static_cast<int>(bg_priority * 256u + 128u + layer);
                 hud.layer = static_cast<uint8_t>(layer);
                 hud.target1 = blend_enabled(x) &&
@@ -926,6 +1000,7 @@ void render_scanline_internal(uint8_t* rgb,
                    blend_enabled(x) && ((first_targets & (1u << layer)) != 0),
                    (second_targets & (1u << layer)) != 0);
         }
+#endif
     };
 
     auto render_affine_bg = [&](uint32_t layer,
@@ -1098,7 +1173,9 @@ void render_scanline_internal(uint8_t* rgb,
                     cand.color = blend_alpha_gba555(overlay->pixels[source],
                                                      old_top.color, alpha,
                                                      16u - alpha);
+#if !defined(GBARECOMP_SCANLINE_HLE)
                     to_rgb888(cand.color, cand.rgb);
+#endif
                     // Same synthetic BG2 identity as a full foreign frame;
                     // regular guest OBJ keys are always in front of 0x10000.
                     cand.key = 0x10000;
@@ -1133,7 +1210,9 @@ void render_scanline_internal(uint8_t* rgb,
             }
             PixelCandidate cand;
             cand.color = foreign[y * GbaPpu::kScreenWidth + x];
+#if !defined(GBARECOMP_SCANLINE_HLE)
             to_rgb888(cand.color, cand.rgb);
+#endif
             cand.key = 0x10000;
             cand.layer = 2;
             cand.target1 = blend_enabled(x) &&
@@ -1302,9 +1381,13 @@ void render_scanline_internal(uint8_t* rgb,
                 : darken_gba555(top[x].color, bldy);
             to_rgb888(adjusted, dst);
         } else {
+#if defined(GBARECOMP_SCANLINE_HLE)
+            to_rgb888(top[x].color, dst);
+#else
             dst[0] = top[x].rgb[0];
             dst[1] = top[x].rgb[1];
             dst[2] = top[x].rgb[2];
+#endif
         }
     }
     return;
@@ -1340,7 +1423,9 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
     if (dispcnt & 0x0080u) { std::memset(row, 0xFF, out_w * 3); return; }
 
     struct PixelCandidate {
+#if !defined(GBARECOMP_SCANLINE_HLE)
         uint8_t rgb[3] = {0, 0, 0};
+#endif
         uint16_t color = 0;
         int key = 0x7FFFFFFF;
         uint8_t layer = 5;
@@ -1449,12 +1534,16 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
     PixelCandidate top[GbaPpu::kMaxRenderWidth];
     PixelCandidate second[GbaPpu::kMaxRenderWidth];
     const uint16_t backdrop_color = load_u16_le(&pal[0]);
+#if !defined(GBARECOMP_SCANLINE_HLE)
     uint8_t backdrop_rgb[3];
     to_rgb888(backdrop_color, backdrop_rgb);
+#endif
     for (uint32_t x = 0; x < out_w; ++x) {
+#if !defined(GBARECOMP_SCANLINE_HLE)
         top[x].rgb[0] = backdrop_rgb[0];
         top[x].rgb[1] = backdrop_rgb[1];
         top[x].rgb[2] = backdrop_rgb[2];
+#endif
         top[x].color = backdrop_color;
         top[x].key = 0x70000000;
         top[x].layer = 5;
@@ -1466,7 +1555,9 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
                       bool target1, bool target2) {
         PixelCandidate cand;
         cand.color = color;
+#if !defined(GBARECOMP_SCANLINE_HLE)
         to_rgb888(color, cand.rgb);
+#endif
         cand.key = key;
         cand.layer = layer;
         cand.target1 = target1;
@@ -1803,7 +1894,9 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
                     cand.color = blend_alpha_gba555(overlay->pixels[source],
                                                      old_top.color, alpha,
                                                      16u - alpha);
+#if !defined(GBARECOMP_SCANLINE_HLE)
                     to_rgb888(cand.color, cand.rgb);
+#endif
                     cand.key = 0x10000;
                     cand.layer = 2;
                     cand.target1 = blend_enabled(x) &&
@@ -2046,9 +2139,13 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
                 : darken_gba555(top[x].color, bldy);
             to_rgb888(adjusted, dst);
         } else {
+#if defined(GBARECOMP_SCANLINE_HLE)
+            to_rgb888(top[x].color, dst);
+#else
             dst[0] = top[x].rgb[0];
             dst[1] = top[x].rgb[1];
             dst[2] = top[x].rgb[2];
+#endif
         }
     }
 }

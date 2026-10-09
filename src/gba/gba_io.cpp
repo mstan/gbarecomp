@@ -10,6 +10,7 @@
 
 #include "gba_audio.h"
 #include "gba_ppu.h"
+#include "gba_bus.h"
 #include "snapshot.h"
 
 // Opt-in MMIO write-trace ring (Axis 4). File-local statics mirroring the
@@ -20,6 +21,13 @@ extern "C" unsigned long long g_runtime_cycles;
 extern "C" uint32_t runtime_current_pc(void);
 
 namespace gba {
+const char* dma_ram_implementation() {
+#if defined(GBARECOMP_DMA_RAM_HLE)
+    return "HLE (contiguous ordinary-RAM DMA)";
+#else
+    return "LLE (per-unit DMA bus service)";
+#endif
+}
 namespace {
 MmioCapEntry* g_mmio_ring  = nullptr;
 uint64_t      g_mmio_write = 0;      // total committed writes (monotonic)
@@ -293,6 +301,14 @@ void GbaIo::run_immediate_dma(int channel) {
 
     uint32_t s = sad;
     uint32_t d = dad;
+#if defined(GBARECOMP_DMA_RAM_HLE)
+    const bool copied = dma_watch < 0 && src_ctrl == 0 &&
+        (dest_ctrl == 0 || dest_ctrl == 3) && word_count >= 4u &&
+        dynamic_cast<GbaBus*>(bus_) &&
+        static_cast<GbaBus*>(bus_)->dma_copy_ram(s, d, word_count * step);
+    if (copied) { s += word_count * step; d += word_count * step; }
+    else
+#endif
     for (uint32_t k = 0; k < word_count; ++k) {
         if (transfer_32) {
             bus_->write32(d, bus_->read32(s));
@@ -356,6 +372,14 @@ void GbaIo::run_timed_dma(int start_mode) {
         uint32_t s = dma_next_source_[channel] & align_mask;
         uint32_t d = dma_next_dest_[channel] & align_mask;
         dma_steal_cycles_ += dma_transfer_cost(s, d, transfer_32, word_count);
+#if defined(GBARECOMP_DMA_RAM_HLE)
+        const bool copied = dma_watch < 0 && src_ctrl == 0 &&
+            (dest_ctrl == 0 || dest_ctrl == 3) && word_count >= 4u &&
+            dynamic_cast<GbaBus*>(bus_) &&
+            static_cast<GbaBus*>(bus_)->dma_copy_ram(s, d, word_count * step);
+        if (copied) { s += word_count * step; d += word_count * step; }
+        else
+#endif
         for (uint32_t k = 0; k < word_count; ++k) {
             if (transfer_32) bus_->write32(d, bus_->read32(s));
             else             bus_->write16(d, bus_->read16(s));

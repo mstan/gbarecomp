@@ -165,6 +165,7 @@ struct Args {
     bool window_set = false;
     bool quiet = false;
     bool window = false;
+    bool uncapped = false;  // benchmark pacing only; retain normal render/audio work
     std::string dump_bmp;
     std::string dump_png;    // --dump-png: final framebuffer as PNG (preferred)
     std::string load_state;  // --load-state <path>: headless savestate load
@@ -1120,6 +1121,10 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             args->bios_skip_intro = 0;
             continue;
         }
+        if (s == "--uncapped") {
+            args->uncapped = true;
+            continue;
+        }
         if (s == "--window") {
             args->window = true;
             args->window_set = true;
@@ -1581,6 +1586,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     if (!args.quiet)
         std::printf("bios_backend=%s\n",
                     gba::bios_hle_mode_name(gba::bios_hle_mode()));
+#if defined(GBARECOMP_SCANLINE_HLE)
+    std::printf("scanline_backend=HLE (tile-span native-color composition)\n");
+#else
+    std::printf("scanline_backend=LLE (per-pixel composition)\n");
+#endif
+    if (!args.quiet) std::printf("dma_ram_backend=%s\n", gba::dma_ram_implementation());
 
     // GBARECOMP_WS_WIP is an explicit development override for exercising the
     // generic expanded renderer in games that have not advertised capability.
@@ -3113,7 +3124,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 #endif
         sync_resize_driven_view();
         if (live_fb.empty()) live_fb.assign(ppu.render_bytes(), 0);
-        pacer.emplace();  // paces to the GBA's 59.7275 Hz
+        pacer.emplace();  // paces to the GBA's 59.7275 Hz by default
+        pacer->set_uncapped(args.uncapped); // no frame skipping/audio suppression
     }
 
     // Host-window save-state slots: the ROM path with a .stateN extension.
@@ -4111,6 +4123,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     if (input_replay_requested) apply_input_replay();
     if (args.window) pump_host_input();
 
+    // Two timestamps only: normal render/audio/present work stays inside,
+    // startup/state restore and exit saves/dumps stay outside the interval.
+    const auto gameplay_begin = std::chrono::steady_clock::now();
     for (uint64_t i = 0; i < step_budget && !host_quit; ++i) {
         // Paused: hold the guest still, keep the window alive (input pump,
         // re-present, ~100 Hz idle). Applies to windowed play only.
@@ -4249,6 +4264,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             break;
         }
     }
+    const double gameplay_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - gameplay_begin).count();
+    const uint64_t gameplay_end_frame = ppu.frame_count();
     // Drop the present-in-place hook before the captured runner locals (win,
     // pacer, live_fb, …) go out of scope at function return.
     runtime_set_frame_present_hook(nullptr);
@@ -4302,6 +4320,17 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // running after win.close() is fine.
     bool save_ok = flush_save_notify();
     if (!suspend_on_exit) clear_suspend_marker();
+    if (args.window && args.frames >= 0) {
+        std::printf("bounded_window start_frame=%llu end_frame=%llu presented=%llu "
+                    "view_width=%u uncapped=%u seconds=%.6f guest_fps=%.3f present_fps=%.3f\n",
+                    static_cast<unsigned long long>(headless_base_frame),
+                    static_cast<unsigned long long>(ppu.frame_count()),
+                    static_cast<unsigned long long>(frames_presented),
+                    ppu.render_width(), args.uncapped ? 1u : 0u,
+                    gameplay_seconds,
+                    gameplay_seconds > 0 ? (gameplay_end_frame - headless_base_frame) / gameplay_seconds : 0,
+                    gameplay_seconds > 0 ? frames_presented / gameplay_seconds : 0);
+    }
     write_session_diagnostics(opts, "exit", ppu.frame_count());
 
     if (!args.dump_bmp.empty() || !args.dump_png.empty()) {
