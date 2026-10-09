@@ -264,6 +264,18 @@ cmake --build build
 ctest --test-dir build
 ```
 
+Fresh builds use the shared scanline HLE renderer. To select the LLE renderer,
+configure a separate build directory:
+
+```sh
+cmake -S . -B build-lle -DGBARECOMP_SCANLINE_IMPLEMENTATION=LLE
+```
+
+CMake preserves an existing build's cached choice. To switch an existing build
+to HLE, configure it with `-DGBARECOMP_SCANLINE_IMPLEMENTATION=HLE`. Ordinary-RAM
+DMA remains LLE by default. See [`docs/ENGINE_HLE_DMA.md`](docs/ENGINE_HLE_DMA.md)
+for the renderer comparison and performance evidence.
+
 To build the self-contained Windows CLI ZIP, install Python 3.12 and
 PyInstaller, then run:
 
