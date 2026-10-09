@@ -204,7 +204,8 @@ class Host {
       gl.bindFramebuffer(gl.FRAMEBUFFER,this.fbo);gl.viewport(0,0,sw,sh);gl.bindTexture(gl.TEXTURE_2D,this.texture);this.filter(false);gl.uniform1f(this.flip,1);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
       gl.bindTexture(gl.TEXTURE_2D,this.sharpTexture);this.filter(true);gl.uniform1f(this.flip,0);
     }else {gl.bindTexture(gl.TEXTURE_2D,this.texture);this.filter(filter===1);gl.uniform1f(this.flip,1);}
-    gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,w,h);gl.clear(gl.COLOR_BUFFER_BIT);gl.viewport(l.x,l.y,l.w,l.h);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    // Shared presentation/touch coordinates start at the top; WebGL starts at the bottom.
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,w,h);gl.clear(gl.COLOR_BUFFER_BIT);gl.viewport(l.x,h-l.y-l.h,l.w,l.h);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
     this.renderOverlay(w,h);
     this.stats.uploadMs=performance.now()-t;this.stats.width=m.w;this.stats.height=m.h;this.redraw=false;this.lastFilter=filter;
   }

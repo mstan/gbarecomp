@@ -3467,7 +3467,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             // The OS may kill a backgrounded app without further notice:
             // persist the cartridge save, a suspend state and the session's
             // diagnostic rings now.
-            const bool saved = flush_save();
+            const bool saved = flush_save_notify();
             write_session_diagnostics(opts, ev.terminating ? "terminating" : "background",
                                       ppu.frame_count());
             std::string e;

@@ -913,8 +913,9 @@ add_test(NAME interpreter_smoke COMMAND interpreter_smoke)
 
 add_executable(tail_dispatch_tests
     tests/armv4t/tail_dispatch_test.cpp
-    tests/codegen/stubs.cpp)
-target_include_directories(tail_dispatch_tests PRIVATE tests/codegen)
+    tests/codegen/stubs.cpp
+    src/gba/gba_waitstates.cpp)
+target_include_directories(tail_dispatch_tests PRIVATE tests/codegen src/gba)
 target_link_libraries(tail_dispatch_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME tail_dispatch_tests COMMAND tail_dispatch_tests)
 

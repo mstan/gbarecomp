@@ -18,6 +18,8 @@ void reset(bool thumb) {
     std::memset(&g_cpu, 0, sizeof(g_cpu));
     g_cpu.cpsr = CPSR_C_BIT | 0x1fu | (thumb ? CPSR_T_BIT : 0u);
     g_cpu.R[15] = 0x08000102;
+    g_runtime_waits.s16[8] = 2;
+    g_runtime_waits.s32[8] = 4;
     g_bios_hle_hook = nullptr;
     g_runtime_ram_dispatch_hook = nullptr;
 }
@@ -78,9 +80,10 @@ void test_swi() {
               "SWI preserves return address in supervisor LR");
         check(g_cpu.banked_spsr[ARM_BANK_SUPERVISOR] == saved_cpsr,
               "SWI saves pre-exception CPSR");
-        check(codegen_test::g_ticked_cycles == 3 &&
+        const uint32_t fetch_wait = thumb ? 2u : 4u;
+        check(codegen_test::g_ticked_cycles == 3u + fetch_wait &&
                   (codegen_test::g_cpsr_at_first_tick & CPSR_I_BIT),
-              "SWI charges three cycles after masking interrupts");
+              "SWI charges exception and opcode fetch cycles after masking interrupts");
 
         reset(thumb);
         g_bios_hle_hook = hle_hook;
@@ -88,8 +91,8 @@ void test_swi() {
         g_runtime_tail_arg = imm;
         runtime_swi_tail();
         check(hook_swi == 6, "HLE decodes ARM and THUMB SWI immediates");
-        check(!codegen_test::g_dispatch_called && codegen_test::g_ticked_cycles == 0,
-              "handled HLE does not enter BIOS or charge exception cycles");
+        check(!codegen_test::g_dispatch_called && codegen_test::g_ticked_cycles == 1u + fetch_wait,
+              "handled HLE charges opcode fetch without entering BIOS");
         check(std::memcmp(&g_cpu, &before_hle, sizeof(g_cpu)) == 0,
               "handled HLE avoids supervisor mode transition");
     }

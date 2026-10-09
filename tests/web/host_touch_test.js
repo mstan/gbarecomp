@@ -24,7 +24,7 @@ function context(extra = {}) {
 function attached(exports) {
   const fields = {};
   ['keys', 'turbo', 'inputUpdates', 'touchWrite', 'touchRead', 'touchOverflow', 'touchControls', 'padVisible',
-   'anchorTop', 'drawable', 'dprMilli', 'insetsLT', 'insetsRB', 'viewXY', 'viewWH'].forEach((k, i) => { fields[k] = i; });
+   'anchorTop', 'drawable', 'dprMilli', 'insetsLT', 'insetsRB', 'viewXY', 'viewWH', 'filter'].forEach((k, i) => { fields[k] = i; });
   const canvas = {width: 480, height: 320, style: {}, focus() {}, setPointerCapture() {},
     getBoundingClientRect: () => ({left: 10, top: 20, width: 240, height: 160, right: 250, bottom: 180})};
   const h = new exports.Host(canvas, () => {});
@@ -204,10 +204,36 @@ function test_presentation_and_services() {
   assert.equal(reports.filter(r => /Haptics unavailable/.test(r)).length, 1, 'reported once');
 }
 
+function test_rendered_viewport() {
+  const {exports} = context({devicePixelRatio: 1});
+  const h = attached(exports), viewports = [];
+  let size = [480, 900];
+  h.canvas.getBoundingClientRect = () => ({left: 0, top: 0, width: size[0], height: size[1]});
+  h.gl = new Proxy({}, {get: (_, key) => key === 'viewport' ? (...args) => viewports.push(args) : () => {}});
+  h.limit = 8192;
+  h.staging = new Uint8Array(240 * 160 * 3);
+  h.meta = {w: 240, h: 160, seq: 1};
+  h.acquire = () => false;
+  h.measureInsets = () => [0, 30, 0, 0];
+  for (const [width, height, anchor, expectedTop] of [[480, 900, 1, 30], [480, 900, 0, 290], [900, 480, 1, 0]]) {
+    size = [width, height];
+    h.store('anchorTop', anchor);
+    h.redraw = true;
+    h.tickVideo();
+    const [x, glY, w, renderedHeight] = viewports.at(-1);
+    const announcedTop = field(h, 'viewXY') >>> 16;
+    assert.equal(announcedTop, expectedTop);
+    assert.equal(height - glY - renderedHeight, announcedTop, 'rendered image must align with touch and overlay coordinates');
+    assert.equal(x, field(h, 'viewXY') & 65535);
+    assert.equal(w, field(h, 'viewWH') & 65535);
+  }
+}
+
 test_ring_and_ownership();
 test_mouse_emulation();
 test_pad();
 test_overlay_replay();
 test_overlay_acquire();
 test_presentation_and_services();
+test_rendered_viewport();
 console.log('web host touch PASS (touch ring, ownership, emulation, pad, overlay replay/copy, anchoring, haptics, settings)');
