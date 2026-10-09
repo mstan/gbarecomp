@@ -113,7 +113,7 @@ int main() {
           "far-branch BL kept call fallthrough");
     check(contains(body, "g_cpu.R[14] = 0x08000005u;"),
           "far-branch BL must still write LR");
-    check(contains(body, "runtime_dispatch(0x08000100u);"),
+    check(contains(body, "GBARECOMP_TAIL_DISPATCH(0x08000100u);"),
           "far-branch BL must transfer to its target");
     check(contains(body, "runtime_call_push_return(0x08000008u)"),
           "real call lost its call-return frame");

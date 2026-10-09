@@ -1782,6 +1782,7 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
             b->window, -1, SDL_RENDERER_ACCELERATED);
     }
     if (!b->renderer) {
+        std::fprintf(stderr, "host_window: accelerated renderer failed: %s\n", SDL_GetError());
         // Fall back to software renderer if accelerated path is
         // unavailable (headless Windows, RDP, etc.).
         b->renderer = SDL_CreateRenderer(b->window, -1, SDL_RENDERER_SOFTWARE);
