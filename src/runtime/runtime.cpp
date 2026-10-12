@@ -3931,10 +3931,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             }
         }
 #else
-        const auto n = bus.audio().drain_samples(audio_buf, 2048);
+        uint32_t rate = 0;
+        const auto n = bus.audio().drain_sample_block(audio_buf, 2048, rate);
         if (n && !fast_forward_active) {
             gba_mod_audio_mix(audio_buf, n);
-            win.push_audio_samples(audio_buf, n);
+            win.push_audio_block(audio_buf, n, rate);
         }
 #endif
     };
