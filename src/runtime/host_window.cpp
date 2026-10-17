@@ -3242,6 +3242,8 @@ int HostWindow::fast_forward_multiplier() const { return 4; }
 
 void HostWindow::push_audio_samples(const int16_t* /*samples*/,
                                     std::size_t /*count*/) {}
+void HostWindow::push_audio_block(const int16_t* /*samples*/,
+                                  std::size_t /*count*/, uint32_t /*rate*/) {}
 
 void HostWindow::service_events() {}
 
