@@ -468,7 +468,7 @@ bool FunctionFinder::is_thumb_ram_leaf(uint32_t addr, uint32_t* ram_global) cons
     // entry shape than merely decoding arbitrary Thumb bytes. Require a store
     // and BX LR, with no calls, other branches, SP, or callee-saved registers.
     bool stored = false;
-    for (uint32_t pc = addr + 2u; pc < addr + 32u; pc += 2u) {
+    for (uint32_t pc = addr + 2u; uint64_t(pc) < uint64_t(addr) + 64u; pc += 2u) {
         if (pc >= aot_scan_end_ || !can_read_at(pc, 2) || addr_in_data_range(pc))
             return false;
         const auto ins = armv4t::ThumbDecoder::decode(read_u16(pc), pc);
@@ -518,6 +518,21 @@ std::vector<FunctionSeed> FunctionFinder::collect_referenced_callback_seeds() {
     std::unordered_set<uint32_t> callback_globals;
     std::unordered_set<uint64_t> emitted;
     for (const auto& seed : seeds_) emitted.insert(visit_key(seed.addr, seed.mode));
+    std::unordered_map<uint32_t, uint32_t> leaf_globals;
+    auto leaf_global = [&](uint32_t pc) {
+        const auto found = leaf_globals.find(pc);
+        if (found != leaf_globals.end()) return found->second;
+        uint32_t ram = 0;
+        is_thumb_ram_leaf(pc, &ram);
+        leaf_globals.emplace(pc, ram);
+        return ram;
+    };
+    auto emit_callback = [&](uint32_t pc) {
+        if (!emitted.insert(visit_key(pc, CpuMode::Thumb)).second) return;
+        out.push_back({pc, CpuMode::Thumb, "", 0, /*speculative=*/true});
+        aot_seen_seed_keys_.insert(visit_key(pc, CpuMode::Thumb));
+        ++stats_.aot_callback_seeds;
+    };
 
     // Referenced data objects need two tagged Thumb entries, including a
     // PUSH-LR entry corroborating another prologue or a RAM-global leaf.
@@ -536,6 +551,43 @@ std::vector<FunctionSeed> FunctionFinder::collect_referenced_callback_seeds() {
         const auto* data = find_data_range(object);
         const bool declared_data = data && uint64_t(object) + 8u <= data->end;
         const bool executable = object >= aot_scan_start_ && object < aot_scan_end_;
+        // Some referenced descriptor arrays begin with an optional NULL pair
+        // and use long frameless setters. A fixed four-record witness can
+        // corroborate these without inferring an array's extent: every record
+        // must be NULL/NULL or a return-proved RAM setter plus a frame or RAM
+        // leaf callback,
+        // with two distinct setters and two distinct frame entries overall.
+        // An arbitrary executable-span pair still cannot qualify on its own.
+        if (executable && !declared_data && can_read_at(object, 32u)) {
+            std::set<uint32_t> leaves, frames, leaf_updates, globals;
+            bool valid = true;
+            for (unsigned record = 0; record < 4u; ++record) {
+                const uint32_t raw_leaf = read_u32(object + record*8u);
+                const uint32_t raw_frame = read_u32(object + record*8u + 4u);
+                if (!raw_leaf && !raw_frame) continue;
+                const uint32_t leaf = raw_leaf & ~1u, frame = raw_frame & ~1u;
+                if (!(raw_leaf & 1u) || !(raw_frame & 1u) ||
+                    leaf < aot_scan_start_ || leaf >= aot_scan_end_ ||
+                    frame < aot_scan_start_ || uint64_t(frame)+12u > aot_scan_end_) {
+                    valid = false; break;
+                }
+                const uint32_t ram = leaf_global(leaf);
+                if (!ram) { valid = false; break; }
+                leaves.insert(leaf); globals.insert(ram);
+                if (is_thumb_func_prologue(frame) && looks_like_code(frame, CpuMode::Thumb, true))
+                    frames.insert(frame);
+                else if (const uint32_t update_ram = leaf_global(frame)) {
+                    leaf_updates.insert(frame); globals.insert(update_ram);
+                } else { valid = false; break; }
+            }
+            if (valid && leaves.size() >= 2u && frames.size() >= 2u) {
+                ++stats_.aot_callback_objects;
+                callback_globals.insert(globals.begin(), globals.end());
+                for (uint32_t pc : leaves) emit_callback(pc);
+                for (uint32_t pc : frames) emit_callback(pc);
+                for (uint32_t pc : leaf_updates) emit_callback(pc);
+            }
+        }
         const unsigned fields = executable && !declared_data ? 4u : 2u;
         if (!can_read_at(object, fields * 4u)) continue;
         uint32_t target[4] = {};
@@ -573,6 +625,22 @@ std::vector<FunctionSeed> FunctionFinder::collect_referenced_callback_seeds() {
             aot_seen_seed_keys_.insert(visit_key(pc, CpuMode::Thumb));
             ++stats_.aot_callback_seeds;
         }
+    }
+    // Independent records may share the descriptor's already corroborated
+    // RAM-global setter contract. Validate each exact pair separately; do not
+    // scan from a base to a guessed terminator or classify intervening data.
+    if (!callback_globals.empty()) for (std::size_t off=0;off+8u<=rom_size_;off+=4u) {
+        const uint32_t slot=rom_base_+static_cast<uint32_t>(off);
+        const uint32_t raw_leaf=read_u32(slot), raw_frame=read_u32(slot+4u);
+        const uint32_t leaf=raw_leaf & ~1u, frame=raw_frame & ~1u;
+        if (!(raw_leaf & 1u) || !(raw_frame & 1u) || leaf==frame ||
+            leaf<aot_scan_start_ || leaf>=aot_scan_end_ ||
+            frame<aot_scan_start_ || uint64_t(frame)+12u>aot_scan_end_ ||
+            !is_thumb_func_prologue(frame) ||
+            !looks_like_code(frame,CpuMode::Thumb,true)) continue;
+        const uint32_t ram=leaf_global(leaf);
+        if (!ram || !callback_globals.count(ram)) continue;
+        emit_callback(leaf); emit_callback(frame);
     }
     // A script may also take setters individually rather than through the
     // descriptor. Require the same bounded leaf shape and the exact RAM-global

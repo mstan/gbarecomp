@@ -103,6 +103,62 @@ static bool referenced_leaf_pair(unsigned fault) {
                     finder.stats().aot_callback_objects == 1 && finder.collisions().empty());
 }
 
+static bool referenced_callback_prefix(unsigned fault) {
+    std::vector<std::uint8_t> rom(0x500, 0);
+    put16(rom,0,0x4770);
+    put32(rom,0x20,kBase+0x300); // referenced object, within executable span
+    auto leaf = [&](unsigned addr, uint32_t ram) {
+        put16(rom,addr,0x480C); // first literal at +52
+        put16(rom,addr+2,0x6001); // store without a frame
+        for (unsigned n=4;n<50;n+=2) put16(rom,addr+n,0x2100);
+        put16(rom,addr+50,0x4770); // 52-byte leaf, not a guessed end
+        put32(rom,addr+52,ram);
+    };
+    leaf(0x100,0x03004000);leaf(0x140,0x03004010);leaf(0x240,0x03004000);
+    for (unsigned addr : {0x180u,0x1C0u,0x200u,0x280u}) {
+        put16(rom,addr,0xB500);
+        for (unsigned n=2;n<10;n+=2) put16(rom,addr+n,0x2100);
+        put16(rom,addr+10,0xBD00);
+    }
+    // Fixed four-record witness; NULL/NULL is a complete optional record.
+    // No claimed array extent and no direct reference to any interior pair.
+    put32(rom,0x308,kBase+0x101);put32(rom,0x30C,kBase+0x181);
+    put32(rom,0x310,kBase+0x141);put32(rom,0x314,kBase+0x1C1);
+    put32(rom,0x318,kBase+0x101);put32(rom,0x31C,kBase+0x201);
+    // Independently located record: only the corroborated RAM global links it.
+    put32(rom,0x380,kBase+0x241);put32(rom,0x384,kBase+0x281);
+    if (fault==1) put32(rom,0x20,0); // unreferenced prefix
+    if (fault==2) put32(rom,0x310,kBase+0x101); // one distinct leaf
+    if (fault==3) { put32(rom,0x314,kBase+0x181);put32(rom,0x31C,kBase+0x181); }
+    if (fault==4) put32(rom,0x300,kBase+0x101); // incomplete optional record
+    if (fault==5) put16(rom,0x110,0xE000); // branch inside leaf
+    if (fault==6) put16(rom,0x110,0x2400); // callee-saved register clobber
+    if (fault==7) put32(rom,0x174,kBase+0x400); // asset, not RAM literal
+    if (fault==8) put16(rom,0x1C0,0xB400); // partner did not save LR
+    if (fault==9) put32(rom,0x310,kBase+0x140); // wrong mode tag
+    if (fault==10) put16(rom,0x172,0x4700); // does not return through LR
+    if (fault==11) put32(rom,0x274,0x03004020); // uncorroborated late record
+    if (fault==12) put16(rom,0x280,0xB400); // late record lacks frame partner
+    if (fault==14 || fault==15) {
+        leaf(0x2C0,0x03004000);put32(rom,0x30C,kBase+0x2C1); // optional frameless updater
+        if (fault==15) put16(rom,0x2F2,0x4700); // updater must also return through LR
+    }
+    gbarecomp::FunctionFinder finder(rom.data(),rom.size(),kBase);
+    finder.set_speculative_literal_harvest(false);
+    finder.set_aot_scan_range(kBase+0x100,kBase+0x500);
+    if (fault==13) finder.add_data_range(kBase+0x100,kBase+0x134,"asset");
+    finder.add_seed({kBase,gbarecomp::CpuMode::Thumb,"entry"});finder.run(64);
+    const bool prefix = fault==0 || fault==11 || fault==12 || fault==14;
+    for (unsigned addr : {0x100u,0x140u,0x180u,0x1C0u,0x200u})
+        if (has_function(finder,kBase+addr,gbarecomp::CpuMode::Thumb)!=(prefix && !(addr==0x180 && fault==14))) return false;
+    // The existing independent-setter rule still accepts an odd referenced
+    // leaf sharing the corroborated RAM global, even when its partner is bad.
+    if (has_function(finder,kBase+0x240,gbarecomp::CpuMode::Thumb)!=(fault==0 || fault==12 || fault==14)) return false;
+    if (has_function(finder,kBase+0x280,gbarecomp::CpuMode::Thumb)!=(fault==0 || fault==14)) return false;
+    if (has_function(finder,kBase+0x2C0,gbarecomp::CpuMode::Thumb)!=(fault==14)) return false;
+    return finder.collisions().empty();
+}
+
 static bool bios_irq_callback(unsigned fault) {
     std::vector<std::uint8_t> rom(0x100, 0);
     put32(rom, 0, 0xE59F1018); // ldr r1,[pc,#24] -> IRQ slot literal
@@ -906,6 +962,10 @@ int main() {
             std::fprintf(stderr, "Referenced leaf callback pair failed: fault=%u\n", fault);
             return 1;
         }
+    }
+    for (unsigned fault=0;fault<=15;++fault) if (!referenced_callback_prefix(fault)) {
+        std::fprintf(stderr,"Referenced callback prefix failed: fault=%u\n",fault);
+        return 1;
     }
     for (unsigned fault=0; fault<8; ++fault) {
         std::vector<uint8_t> image(0x400,0);
