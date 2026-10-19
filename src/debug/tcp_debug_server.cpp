@@ -1038,7 +1038,8 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
             const auto* hd = ctx.ppu->high_resolution();
             out += ",\"scale\":" + std::to_string(ctx.ppu->internal_resolution()) +
                 ",\"affine_lines\":" + std::to_string(hd ? hd->affine_lines() : 0) +
-                ",\"samples\":" + std::to_string(hd ? hd->samples() : 0);
+                ",\"samples\":" + std::to_string(hd ? hd->samples() : 0) +
+                ",\"reused_lines\":" + std::to_string(hd ? hd->reused_lines() : 0);
         }
         out += ",\"data\":";
         json_emit_hex(out, rgb, size_t(width) * height * 3);

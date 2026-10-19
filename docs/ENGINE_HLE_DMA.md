@@ -13,6 +13,40 @@ MKSC main. It remains short of full speed. This does not qualify a DMA,
 guest CPU, other-game or non-Windows gain. See `INTERNAL_RESOLUTION.md` and the
 title's `docs/HD-PERFORMANCE-2026-10-19.md` for scope, inputs and evidence.
 
+## Older-host validation and next candidate (2026-10-19)
+
+The cached-HD default pin `ec778f1` is published on the default branches of all
+24 maintained game repositories found in the local workspace. Each update
+changes only its engine pin; HD itself is not forced on. Existing explicit
+CMake cache selections remain explicit. This is a default rollout, not a claim
+that 24 games have been built or gameplay-qualified. The combined Legacy of
+Goku I/II directory is an incomplete non-Git archive and was excluded.
+
+The owner's NAS provides a useful second Windows host: i5-4670, four cores,
+GTX 760, Windows 10 build 19044. The same private MKSC 300-present route at 8x
+and 382x160 logical width measured direct LLE **11.048 FPS**, cached HLE
+**14.509 FPS** (+31.3%). It used SDL's accelerated OpenGL backend in the SSH
+session, muted audio output with audio emulation retained, uncapped pacing and
+fixed RTC. This does not establish interactive desktop/fullscreen performance.
+Final images and complete guest snapshots match the desktop observations.
+
+A further cached-HLE candidate reuses a completed enhanced row only when all
+semantic inputs are identical: affine history, source-surface versions,
+palette, window/black masks, top/second layers, blending and filter settings.
+Keys belong to the completed raster; partial/repeated rows, ordinary-row
+replacement, restore and resize cannot relabel stale pixels. No guest state or
+GPU timing enters the decision. Direct LLE remains available at build time.
+
+Row reuse measured **31.905 FPS vs 29.104** in its matched desktop continuation
+(+9.6%), and **15.581 vs 14.509** on the NAS (+7.4%). It skipped 4,436 of 25,628
+affine rows on this route. This additional candidate awaits owner playtesting;
+the published title pins still select the already approved cached sampler.
+An experimental partial-upload history added little beyond row reuse and extra
+memory/complexity, so that host-window change was removed. GPU affine sampling
+and filtering remains the larger next opportunity; it has not been implemented
+or measured here. See the title performance note for hashes and private evidence
+locations. Broader MMZ/Emerald work remains separate.
+
 ## Current scanline default (2026-10-09)
 
 Fresh builds now use `GBARECOMP_SCANLINE_IMPLEMENTATION=HLE`. Select the maintained

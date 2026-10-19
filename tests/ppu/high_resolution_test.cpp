@@ -11,6 +11,38 @@
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "line %d: %s\n", __LINE__, #x); std::exit(1); } } while (0)
 namespace {
 bool authorize(int bg, int) { return bg == 2; }
+void repeated_rows() {
+    gba::GbaHighResolutionFrame hd(2);
+    hd.configure(240,160);
+    std::array<uint8_t,0x60> io{};
+    std::array<uint8_t,98304> vram{};
+    std::array<uint8_t,1024> pal{};
+    std::array<uint8_t,720> black{};
+    io[0x0c]=4; std::memset(vram.data()+0x4000,1,64); pal[2]=31;
+    const auto row=[&](unsigned y) {
+        CHECK(hd.begin_line(y,0,0,0x0401,io.data(),vram.data(),pal.data(),authorize,false));
+        hd.resolve();
+    };
+    const auto frame=[&] {
+        hd.begin_frame(); for(unsigned y=0;y<160;++y) row(y); hd.latch(); CHECK(hd.pixels());
+    };
+    frame(); const std::vector<uint8_t> red(hd.pixels(),hd.pixels()+size_t(hd.width())*hd.height()*3);
+    frame(); CHECK(std::memcmp(hd.pixels(),red.data(),red.size())==0);
+    if(std::strncmp(gba::GbaHighResolutionFrame::sampler_implementation(),"HLE",3)==0)
+        CHECK(hd.reused_lines()==160);
+    // An enhanced row can be replaced by ordinary content before the latch.
+    // Its cached inputs must not label those black pixels as the red raster.
+    hd.begin_frame(); for(unsigned y=0;y<160;++y) row(y);
+    hd.upscale_line(0,black.data()); hd.latch(); CHECK(hd.pixels()[0]==0);
+    frame(); CHECK(std::memcmp(hd.pixels(),red.data(),red.size())==0);
+    // Rendering the same changed row twice before a latch must not reuse the
+    // previous published red row under newly written blue input metadata.
+    hd.begin_frame(); pal[2]=0; pal[3]=0x7c;
+    row(0); row(0); for(unsigned y=1;y<160;++y) row(y); hd.latch();
+    CHECK(hd.pixels()[0]==0 && hd.pixels()[1]==0 && hd.pixels()[2]==255);
+    hd.invalidate(); row(0); hd.latch(); CHECK(!hd.pixels());
+    frame(); CHECK(hd.pixels()[2]==255);
+}
 void filter_precision() {
     gba::GbaHighResolutionFrame hd(2);
     hd.configure(240,160);
@@ -119,6 +151,7 @@ void run(unsigned scale, bool wide, bool effects) {
 }
 }
 int main() {
+    repeated_rows();
     filter_precision();
     for (unsigned scale : {2u,3u,4u,8u,16u}) { run(scale,false,false); run(scale,true,true); }
     std::puts("high resolution: real fractional samples, HUD/blend parity, native state isolation, reset/partial-raster/resize passed");

@@ -4853,11 +4853,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     }
 
     if (const auto* hd = ppu.high_resolution())
-        std::printf("presentation scale=%u effective=%ux%u complete_frames=%llu affine_lines=%llu samples=%llu hd_presented=%llu\n",
+        std::printf("presentation scale=%u effective=%ux%u complete_frames=%llu affine_lines=%llu samples=%llu hd_presented=%llu reused_lines=%llu\n",
             hd->scale(), ppu.high_resolution_framebuffer() ? hd->width() : ppu.render_width(),
             ppu.high_resolution_framebuffer() ? hd->height() : ppu.render_height(),
             (unsigned long long)hd->frames(), (unsigned long long)hd->affine_lines(), (unsigned long long)hd->samples(),
-            (unsigned long long)high_resolution_presented);
+            (unsigned long long)high_resolution_presented, (unsigned long long)hd->reused_lines());
     std::printf("\nfinal_pc=0x%08x unmapped=%zu io_unhandled=%zu "
                 "steps=%llu cycles=%llu ppu_vcount=%u ppu_frames=%llu "
                 "frames_presented=%d\n",

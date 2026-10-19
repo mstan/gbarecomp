@@ -21,6 +21,15 @@ const char* GbaHighResolutionFrame::sampler_implementation() {
     return "LLE (direct tiled affine sampling)";
 #endif
 }
+bool GbaHighResolutionFrame::Pixel::operator==(const Pixel& p) const {
+    return color == p.color && key == p.key && layer == p.layer &&
+        target1 == p.target1 && target2 == p.target2 && valid == p.valid;
+}
+bool GbaHighResolutionFrame::Affine::operator==(const Affine& a) const {
+    return active == a.active && cnt == a.cnt && cache == a.cache && y == a.y &&
+        x == a.x && v == a.v && pa == a.pa && pc == a.pc && dx == a.dx && dv == a.dv &&
+        dpa == a.dpa && dpc == a.dpc;
+}
 void GbaHighResolutionFrame::Surface::update(uint16_t cnt, const uint8_t* vram) {
     const unsigned next_layout = cnt & 0xdf0c; // size, map and character bases
     const bool reset = layout != next_layout;
@@ -45,6 +54,7 @@ void GbaHighResolutionFrame::Surface::update(uint16_t cnt, const uint8_t* vram) 
     std::memcpy(chars.data(), source_chars, chars.size());
     std::memcpy(map.data(), source_map, entries);
     layout = next_layout;
+    ++version;
 }
 GbaHighResolutionFrame::GbaHighResolutionFrame(unsigned scale) : scale_(scale) {
     if (scale < 2 || scale > kMaxScale)
@@ -57,6 +67,7 @@ void GbaHighResolutionFrame::configure(unsigned width, unsigned height) {
     width_ = width; height_ = height;
     top_.resize(width); second_.resize(width); windows_.resize(width); black_.resize(width);
     written_.resize(height);
+    cached_rows_.clear(); cached_rows_.resize(height);
     work_.resize(size_t(width) * height * scale_ * scale_ * 3);
     latched_.resize(work_.size());
     scratch_.resize(size_t(width) * height * 3);
@@ -228,6 +239,30 @@ void GbaHighResolutionFrame::resolve() {
         const uint16_t c = palette_[i] = u16(pal_ + i * 2);
         filter_palette_[i] = (c & 31) | (uint64_t((c >> 5) & 31) << 21) | (uint64_t((c >> 10) & 31) << 42);
     }
+    auto& cached = cached_rows_[row_];
+    const std::array<uint64_t, 2> versions{
+        affine_[0].active ? surfaces_[0].version : 0,
+        affine_[1].active ? surfaces_[1].version : 0};
+    const bool reuse = complete_ && cached.frame == frames_ && cached.versions == versions &&
+        cached.affine == affine_ && cached.palette == palette_ && cached.ox == ox_ &&
+        cached.bldcnt == bldcnt_ && cached.alpha == alpha_ && cached.brightness == brightness_ &&
+        cached.filter == filter_ && cached.top == top_ && cached.second == second_ &&
+        cached.windows == windows_ && cached.black == black_;
+    // Stamp work for the next completed latch, never for the currently
+    // published pixels. Repeated/partial rows cannot use freshly changed
+    // metadata to copy an older published raster. Equality is field-wise;
+    // no hashes, padding bytes, host timing or stale guest pointers decide a hit.
+    cached.frame = frames_ + 1;
+    if (reuse) {
+        const size_t offset = size_t(row_) * scale_ * width() * 3;
+        std::memcpy(work_.data() + offset, latched_.data() + offset, size_t(scale_) * width() * 3);
+        ++reused_lines_; wrote_line(row_); return;
+    }
+    cached.versions = versions; cached.affine = affine_; cached.palette = palette_;
+    cached.ox = ox_; cached.bldcnt = bldcnt_; cached.alpha = alpha_;
+    cached.brightness = brightness_; cached.filter = filter_;
+    cached.top = top_; cached.second = second_;
+    cached.windows = windows_; cached.black = black_;
 #endif
     for (unsigned sy = 0; sy < scale_; ++sy) {
         struct Row {
@@ -275,6 +310,9 @@ void GbaHighResolutionFrame::resolve() {
     wrote_line(row_);
 }
 void GbaHighResolutionFrame::upscale_line(unsigned y, const uint8_t* native_row) {
+#if defined(GBARECOMP_HD_SAMPLER_HLE)
+    cached_rows_[y].frame = ~uint64_t(0);
+#endif
     for (unsigned sy = 0; sy < scale_; ++sy) {
         auto* dst = work_.data() + size_t(y * scale_ + sy) * width() * 3;
 #if defined(GBARECOMP_HD_SAMPLER_HLE)

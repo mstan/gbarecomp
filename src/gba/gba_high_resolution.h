@@ -39,6 +39,7 @@ public:
     uint64_t frames() const { return frames_; }
     uint64_t affine_lines() const { return affine_lines_; }
     uint64_t samples() const { return samples_; }
+    uint64_t reused_lines() const { return reused_lines_; }
 
 private:
     struct Pixel {
@@ -46,6 +47,7 @@ private:
         int key = 0x7fffffff;
         uint8_t layer = 5;
         bool target1 = false, target2 = false, valid = false;
+        bool operator==(const Pixel&) const;
     };
     struct Affine {
         bool active = false;
@@ -54,14 +56,27 @@ private:
         int y = -2;
         int64_t x = 0, v = 0, pa = 0, pc = 0;
         int64_t dx = 0, dv = 0, dpa = 0, dpc = 0;
+        bool operator==(const Affine&) const;
     };
     // Presentation-owned indexed surfaces. Palette colors are refreshed at each
     // published row, so HBlank palette writes never require a surface rebuild.
     struct Surface {
         unsigned layout = ~0u, size = 0;
+        uint64_t version = 0;
         std::array<uint8_t, 16384> chars{};
         std::vector<uint8_t> map, texels;
         void update(uint16_t cnt, const uint8_t* vram);
+    };
+    struct CachedRow {
+        uint64_t frame = ~uint64_t(0);
+        std::array<uint64_t, 2> versions{};
+        std::array<Affine, 2> affine{};
+        std::array<uint16_t, 256> palette{};
+        std::vector<Pixel> top, second;
+        std::vector<uint8_t> windows, black;
+        unsigned ox = 0, brightness = 0;
+        uint16_t bldcnt = 0, alpha = 0;
+        bool filter = false;
     };
     static void insert(Pixel& top, Pixel& second, const Pixel& candidate);
     bool sample(const Affine& bg, int64_t u, int64_t v, uint16_t& color) const;
@@ -77,10 +92,12 @@ private:
     std::array<Surface, 2> surfaces_;
     std::array<uint16_t, 256> palette_{};
     std::array<uint64_t, 256> filter_palette_{};
+    std::vector<CachedRow> cached_rows_;
     std::vector<Pixel> top_, second_;
     std::vector<uint8_t> windows_, black_, written_, work_, latched_, scratch_;
     unsigned written_lines_ = 0;
     uint64_t frames_ = 0, affine_lines_ = 0, samples_ = 0;
+    uint64_t reused_lines_ = 0;
 };
 
 } // namespace gba
