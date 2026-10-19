@@ -359,7 +359,15 @@ private:
     bool is_thumb_callback_leaf(uint32_t addr) const;
     void harvest_stored_callback(uint32_t raw);
     void harvest_contextual_callbacks(uint32_t callee, uint8_t known_mask,
-                                      const std::array<uint32_t, 4>& arguments);
+                                      const std::array<uint32_t, 4>& arguments,
+                                      unsigned depth = 0);
+    struct ThumbCallEffects {
+        bool valid = false;
+        uint16_t preserved = 0;
+        bool writes_caller_stack = false;
+    };
+    ThumbCallEffects thumb_call_effects(uint32_t entry, CpuMode mode = CpuMode::Thumb,
+                                       unsigned depth = 0);
     std::vector<FunctionSeed> collect_referenced_callback_seeds();
     void discover_one(uint32_t addr, CpuMode mode,
                       const std::string& name,
@@ -374,6 +382,8 @@ private:
     bool current_walk_dropped_ = false;
     std::set<std::array<uint32_t, 6>> callback_contexts_;
     bool callback_context_budget_reported_ = false;
+    std::unordered_map<uint64_t, ThumbCallEffects> thumb_call_effects_;
+    std::unordered_set<uint64_t> thumb_call_effects_active_;
 };
 
 }  // namespace gbarecomp

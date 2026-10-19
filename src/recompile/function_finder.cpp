@@ -1095,15 +1095,20 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         bool     count_known = false;
         uint32_t count       = 0;
         bool record_slots = false;
+        bool finite_sparse = false, signed_index = false;
     };
     PendingJt pend;
 
     // Finite byte indexes can select callback fields in record arrays. Keep
     // their actual multiply (e.g. (i*2+i)*8), not a guessed word-table stride.
-    struct ByteIndex { bool known=false; uint32_t origin=0, scale=0; };
-    struct RecordAddress { bool known=false; uint32_t base=0, stride=0; };
+    struct ByteIndex { bool known=false; uint32_t origin=0, scale=0; bool signed_index=false; };
+    struct RecordAddress { bool known=false; uint32_t base=0, stride=0; bool signed_index=false; };
     ByteIndex byte_index[16];
     RecordAddress record_address[16];
+    // Exact domains of byte-valued arguments. They qualify all 256 possible
+    // inputs to a callback selector, not a guessed length of its ROM table.
+    struct ByteDomain { bool known=false, signed_value=false; };
+    ByteDomain byte_domain[16];
 
     // A narrow, adjacent load/scale/ADD-pc chain. Unlike abs32 tables these
     // entries are unsigned halfword offsets from the *unaligned* Thumb PC.
@@ -1721,6 +1726,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 reg_sym[r] = {};
                 byte_index[r] = {};
                 record_address[r] = {};
+                byte_domain[r] = {};
             }
             clear_mem_const();
             last_cmp = {};
@@ -1775,6 +1781,15 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 }
                 harvest_contextual_callbacks((ins.branch_target+low.swi_imm)&~1u,
                                               known, arguments);
+                for(unsigned r=0;r<4;++r) if(!(known & (1u<<r)) && byte_domain[r].known) {
+                    auto finite_arguments=arguments;
+                    for(unsigned byte=0;byte<256u;++byte) {
+                        finite_arguments[r]=byte_domain[r].signed_value && byte>=128u
+                            ? byte|0xFFFFFF00u : byte;
+                        harvest_contextual_callbacks((ins.branch_target+low.swi_imm)&~1u,
+                            uint8_t(known | (1u<<r)),finite_arguments);
+                    }
+                }
             }
         }
 
@@ -2155,14 +2170,15 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             }
             if (confirmed) {
                 ++stats_.jt_confirmations;
-                if (pend.record_slots) {
-                    // LDRB proves all 256 possible indexes. Null/payload slots
+                if (pend.record_slots || pend.finite_sparse) {
+                    // Byte loads prove all 256 possible indexes. Null/payload slots
                     // are skipped, never used as a heuristic table terminator.
                     // Require an interworking consumer and strong code entries;
                     // other record fields and their extents remain unclassified.
                     if (interworking) for (uint32_t n=0;n<256u;++n) {
-                        const uint64_t slot=uint64_t(pend.base)+uint64_t(n)*pend.stride;
-                        if (slot>UINT32_MAX || !can_read_at(uint32_t(slot),4)) continue;
+                        const int64_t index=pend.signed_index && n>=128u ? int64_t(n)-256 : int64_t(n);
+                        const int64_t slot=int64_t(pend.base)+index*pend.stride;
+                        if (slot<0 || slot>UINT32_MAX || !can_read_at(uint32_t(slot),4)) continue;
                         const uint32_t raw=read_u32(uint32_t(slot)),target=raw & ~1u;
                         const CpuMode mode=(raw & 1u) ? CpuMode::Thumb : CpuMode::Arm;
                         const bool prologue=mode==CpuMode::Thumb
@@ -2173,7 +2189,10 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                             ++stats_.aot_callback_seeds;
                         }
                     }
-                } else {
+                }
+                if (!pend.record_slots) {
+                    // Preserve the existing word-switch discovery and sizing;
+                    // finite sparse callback harvesting is additional evidence.
                     emit_jump_table(pend.base, pend.stride, ins.pc, interworking,
                                     pend.count_known ? pend.count : 0u);
                 }
@@ -2239,6 +2258,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 pend.count_known = count_known;
                 pend.count       = count;
                 pend.record_slots = false;
+                pend.finite_sparse = false;pend.signed_index=false;
             }
         }
 
@@ -2251,14 +2271,29 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             if ((base & 3u)==0 && address.stride>4u && (address.stride & 3u)==0) {
                 pend.active=true; pend.base=base; pend.stride=address.stride;
                 pend.dest=ins.rd; pend.record_slots=true;
+                pend.finite_sparse=false;pend.signed_index=address.signed_index;
+            } else if((base & 3u)==0 && address.stride==4u && pend.active && pend.base==base && !pend.count_known) {
+                pend.finite_sparse=true;pend.signed_index=address.signed_index;
             }
         }
 
         ByteIndex next_byte{};
         RecordAddress next_record{};
+        ByteDomain next_domain{};
         const auto& record_op=ins.op2;
-        if (ins.op==armv4t::IrOp::LDRB && ins.rd<15) {
-            next_byte={true,pc,1u};
+        if(ins.op==armv4t::IrOp::LDRB || ins.op==armv4t::IrOp::LDRSB)
+            next_domain={true,ins.op==armv4t::IrOp::LDRSB};
+        else if(ins.op==armv4t::IrOp::MOV && record_op.kind==armv4t::Op2::Kind::Shifted &&
+                !record_op.shifted.by_register && record_op.shifted.rm<16) {
+            const auto& shift=record_op.shifted;
+            if(shift.type==armv4t::ShiftType::LSL && shift.imm_or_rs==0)
+                next_domain=byte_domain[shift.rm];
+            else if(shift.imm_or_rs==24 &&
+                (shift.type==armv4t::ShiftType::LSR || shift.type==armv4t::ShiftType::ASR))
+                next_domain={true,shift.type==armv4t::ShiftType::ASR};
+        }
+        if ((ins.op==armv4t::IrOp::LDRB || ins.op==armv4t::IrOp::LDRSB) && ins.rd<15) {
+            next_byte={true,pc,1u,ins.op==armv4t::IrOp::LDRSB};
         } else if (record_op.kind==armv4t::Op2::Kind::Shifted &&
                    !record_op.shifted.by_register &&
                    record_op.shifted.type==armv4t::ShiftType::LSL &&
@@ -2268,27 +2303,31 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             const uint64_t scale=uint64_t(byte_index[rm].scale)<<shift;
             if (ins.op==armv4t::IrOp::MOV && byte_index[rm].known &&
                 scale*255u<=UINT32_MAX) {
-                next_byte={true,byte_index[rm].origin,uint32_t(scale)};
+                next_byte={true,byte_index[rm].origin,uint32_t(scale),byte_index[rm].signed_index};
             } else if (ins.op==armv4t::IrOp::ADD && ins.rn<15) {
                 const auto& lhs=byte_index[ins.rn];
                 if (lhs.known && byte_index[rm].known &&
-                    lhs.origin==byte_index[rm].origin &&
+                    lhs.origin==byte_index[rm].origin && lhs.signed_index==byte_index[rm].signed_index &&
                     (scale+lhs.scale)*255u<=UINT32_MAX)
-                    next_byte={true,lhs.origin,uint32_t(scale+lhs.scale)};
+                    next_byte={true,lhs.origin,uint32_t(scale+lhs.scale),lhs.signed_index};
                 else if (reg_const[ins.rn].known && byte_index[rm].known &&
                          addr_in_rom(reg_const[ins.rn].value) && scale*255u<=UINT32_MAX)
-                    next_record={true,reg_const[ins.rn].value,uint32_t(scale)};
+                    next_record={true,reg_const[ins.rn].value,uint32_t(scale),byte_index[rm].signed_index};
                 else if (shift==0 && reg_const[rm].known && lhs.known &&
                          addr_in_rom(reg_const[rm].value))
-                    next_record={true,reg_const[rm].value,lhs.scale};
+                    next_record={true,reg_const[rm].value,lhs.scale,lhs.signed_index};
             }
         }
         for (uint8_t reg=0;reg<16;++reg) if (may_clobber_register(ins,reg)) {
             byte_index[reg]={}; record_address[reg]={};
+            byte_domain[reg]={};
         }
+        if(ins.is_call || ins.op==armv4t::IrOp::BL_prefix || ins.op==armv4t::IrOp::BL_suffix)
+            for(auto& domain:byte_domain) domain={};
         if (ins.rd<15 && ins.cond==armv4t::Cond::AL) {
             if (next_byte.known) byte_index[ins.rd]=next_byte;
             if (next_record.known) record_address[ins.rd]=next_record;
+            if (next_domain.known) byte_domain[ins.rd]=next_domain;
         }
 
         // CMP-bound capture for exact jump-table sizing (MC-HP-000). The

@@ -159,6 +159,112 @@ static bool referenced_callback_prefix(unsigned fault) {
     return finder.collisions().empty();
 }
 
+static bool callbacks_across_proved_calls(unsigned fault) {
+    std::vector<std::uint8_t> image(0x2400,0);
+    auto bl = [&](unsigned pc,unsigned target) {
+        const int32_t delta=int32_t(target)-int32_t(pc+4u);
+        put16(image,pc,uint16_t(0xF000u|((uint32_t(delta)>>12u)&0x7FFu)));
+        put16(image,pc+2u,uint16_t(0xF800u|((uint32_t(delta)>>1u)&0x7FFu)));
+    };
+    put16(image,0,0x2103);bl(2,0x100);put16(image,6,0x4770);
+    if(fault>=7) put16(image,0,fault==8 ? 0x8811 : fault==9 ? 0x5611 : 0x7811);
+    if(fault==10) {put16(image,2,0x6819);bl(4,0x100);put16(image,8,0x4770);}
+    put16(image,0x100,0xB510);put16(image,0x102,0x1C0C); // PUSH r4,lr; MOV r4,r1
+    bl(0x104,0x500);
+    put16(image,0x108,0xE0FA); // branch to +300, beyond old128-byte lookahead
+    put16(image,0x300,0x1C21); // MOV r1,r4
+    if(fault==4) put16(image,0x300,0x6811); // unknown load destroys the argument
+    bl(0x302,0x600);
+    put16(image,0x306,0xBC10);put16(image,0x308,0xBC01);put16(image,0x30A,0x4700);
+    // The helper actually clobbers r4, then restores its saved incoming value.
+    put16(image,0x500,0xB510);put16(image,0x502,0x2400);
+    put16(image,0x504,0xBC10);put16(image,0x506,0xBC01);put16(image,0x508,0x4700);
+    if(fault==1) { // does not preserve r4
+        put16(image,0x500,0x2400);put16(image,0x502,0x4770);
+    }
+    if(fault==2) put16(image,0x500,0x4708); // unproved indirect transfer
+    if(fault==3) { // explicitly overwrites the saved stack value
+        put16(image,0x502,0x9000);
+    }
+    if(fault==5) { // frameless callee preserves the argument too
+        put16(image,0x500,0x4770);
+    }
+    if(fault==6) { // recursive effect proof must not assume convergence/preservation
+        bl(0x500,0x500);put16(image,0x504,0x4770);
+    }
+    if(fault==11) {put16(image,0x508,0xB001);put16(image,0x50A,0x4700);} // unbalanced SP
+    if(fault==12 || fault==13) {
+        put16(image,0x500,fault==12 ? 0xB510 : 0xB500);bl(0x502,0x5A0);
+        put16(image,0x506,fault==12 ? 0xBC10 : 0xBC01);
+        put16(image,0x508,fault==12 ? 0xBC01 : 0x4700);put16(image,0x50A,0x4700);
+        put16(image,0x5A0,0x2400);put16(image,0x5A2,0x4770);
+    }
+    if(fault==14) put16(image,0x500,0xDF00); // never assume SWI effects
+    if(fault==15) { // SP alias overwrites the saved r4 value
+        put16(image,0x502,0x466A);put16(image,0x504,0x6010);
+        put16(image,0x506,0xBC10);put16(image,0x508,0xBC01);put16(image,0x50A,0x4700);
+    }
+    if(fault>=16 && fault<=20) { // Thumb entry into an ARM library helper
+        put16(image,0x500,0x4778);put16(image,0x502,0x46C0);
+        put32(image,0x504,0xE92D4010); // PUSH r4,lr
+        put32(image,0x508,fault==19 ? 0xE58D0000 : fault==20 ? 0xE8B10010 : 0xE3A04000);
+        put32(image,0x50C,0xE8BD4010);put32(image,0x510,0xE12FFF1E);
+        if(fault==17 || fault==18) {
+            put32(image,0x504,fault==18 ? 0x03A04000 : 0xE3A04000);
+            put32(image,0x508,0xE12FFF1E);
+        }
+    }
+    if(fault==21) { // recursive calls with changing arguments need a depth bound
+        put16(image,0x500,0x3101);bl(0x502,0x500);put16(image,0x506,0x4770);
+    }
+    put16(image,0x600,0x0088);put16(image,0x602,0x1840); // index*5
+    put16(image,0x604,0x0080);put16(image,0x606,0x4A02); // index*20; LDR table
+    put16(image,0x608,0x1880);put16(image,0x60A,0x6800);
+    put16(image,0x60C,0x6018);put16(image,0x60E,0x4770); // callback store; BX LR
+    put32(image,0x610,kBase+0x900);
+    put32(image,0x93C,kBase+0x801);
+    if(fault==9) {put32(image,0x93C,0);put32(image,0x8EC,kBase+0x801);} // signed -1 only
+    put32(image,0x1D00,kBase+0x881); // index256 is outside either byte domain
+    put16(image,0x800,0xB500);
+    for(unsigned n=2;n<10;n+=2)put16(image,0x800+n,0x2000);
+    put16(image,0x80A,0xBD00);
+    put16(image,0x880,0xB500);
+    for(unsigned n=2;n<10;n+=2)put16(image,0x880+n,0x2000);
+    put16(image,0x88A,0xBD00);
+    gbarecomp::FunctionFinder finder(image.data(),image.size(),kBase);
+    finder.set_speculative_literal_harvest(false);finder.set_aot_scan_range(kBase,kBase+0x2400);
+    finder.add_seed({kBase,gbarecomp::CpuMode::Thumb,"caller"});finder.run(128);
+    return has_function(finder,kBase+0x800,gbarecomp::CpuMode::Thumb)==
+        (fault==0 || fault==5 || fault==7 || fault==9 || fault==12 || fault==16 || fault==20) &&
+        !has_function(finder,kBase+0x880,gbarecomp::CpuMode::Thumb);
+}
+
+static bool sparse_byte_word_callbacks(unsigned fault) {
+    std::vector<uint8_t> image(0x1200,0);
+    put16(image,0,0xB500);put16(image,2,0x4D0F);
+    put16(image,4,fault==2 ? 0x56A1 : fault==3 ? 0x8821 : 0x7821);
+    put16(image,6,fault==5 ? 0x0090 : 0x0088);put16(image,8,0x1940);
+    put16(image,10,0x6800);put16(image,12,fault==1 ? 0xBC01 : 0x2800);
+    put16(image,14,0xD001);put16(image,16,0xF000);put16(image,18,0xF826);
+    put16(image,20,0xBD00);put16(image,0x60,fault==4 ? 0x4708 : 0x4700);
+    put32(image,0x40,kBase+0x900);
+    if(fault==6)put32(image,0x40,kBase+0x901); // no unaligned word-pointer proof
+    put32(image,0x904,kBase+0x801);put32(image,0x91C,kBase+0x841);
+    put32(image,0x8FC,kBase+0x881); // selected only by a signed byte index
+    for(unsigned pc:{0x800u,0x840u,0x880u}) {
+        put16(image,pc,0xB500);
+        for(unsigned n=2;n<10;n+=2)put16(image,pc+n,0x2000);
+        put16(image,pc+10,0xBD00);
+    }
+    gbarecomp::FunctionFinder finder(image.data(),image.size(),kBase);
+    finder.set_speculative_literal_harvest(false);finder.set_aot_scan_range(kBase,kBase+0x1200);
+    finder.add_seed({kBase,gbarecomp::CpuMode::Thumb,"byte-word-array"});finder.run(128);
+    const bool valid=fault==0 || fault==2;
+    return has_function(finder,kBase+0x800,gbarecomp::CpuMode::Thumb)==valid &&
+        has_function(finder,kBase+0x840,gbarecomp::CpuMode::Thumb)==valid &&
+        has_function(finder,kBase+0x880,gbarecomp::CpuMode::Thumb)==(fault==2);
+}
+
 static bool bios_irq_callback(unsigned fault) {
     std::vector<std::uint8_t> rom(0x100, 0);
     put32(rom, 0, 0xE59F1018); // ldr r1,[pc,#24] -> IRQ slot literal
@@ -965,6 +1071,14 @@ int main() {
     }
     for (unsigned fault=0;fault<=15;++fault) if (!referenced_callback_prefix(fault)) {
         std::fprintf(stderr,"Referenced callback prefix failed: fault=%u\n",fault);
+        return 1;
+    }
+    for(unsigned fault=0;fault<=21;++fault) if(!callbacks_across_proved_calls(fault)) {
+        std::fprintf(stderr,"Callbacks across proved calls failed: fault=%u\n",fault);
+        return 1;
+    }
+    for(unsigned fault=0;fault<=6;++fault) if(!sparse_byte_word_callbacks(fault)) {
+        std::fprintf(stderr,"Finite sparse word callbacks failed: fault=%u\n",fault);
         return 1;
     }
     for (unsigned fault=0; fault<8; ++fault) {

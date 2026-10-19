@@ -2,12 +2,178 @@
 #include "arm_decode.h"
 #include "thumb_decode.h"
 #include <cstdio>
+#include <map>
 
 namespace gbarecomp {
 namespace {
 uint64_t callback_key(uint32_t pc, CpuMode mode) {
     return (uint64_t(pc) << 1) | (mode == CpuMode::Thumb ? 1u : 0u);
 }
+}
+
+FunctionFinder::ThumbCallEffects FunctionFinder::thumb_call_effects(uint32_t entry, CpuMode mode, unsigned depth) {
+    const uint64_t effect_key=callback_key(entry,mode);
+    if (const auto found = thumb_call_effects_.find(effect_key); found != thumb_call_effects_.end())
+        return found->second;
+    if (depth >= 12u || (entry & (mode==CpuMode::Arm ? 3u : 1u)) || !addr_in_rom(entry) ||
+        !can_read_at(entry, 2) || addr_in_data_range(entry) ||
+        !thumb_call_effects_active_.insert(effect_key).second) return {};
+    // Origins represent incoming registers, not their runtime values. Stack
+    // cells retain those origins across PUSH/POP. No ABI preservation is
+    // assumed for direct callees: every reachable return must prove it.
+    constexpr int32_t unknown = -1, stack_base = 65536;
+    auto stack_value = [](int32_t value) { return value >= 61440 && value <= 69632; };
+    struct State {
+        uint32_t pc;
+        CpuMode mode=CpuMode::Thumb;
+        std::array<int32_t,16> regs{};
+        std::map<int32_t,int32_t> stack;
+    };
+    State initial{};initial.pc=entry;initial.mode=mode;
+    for (unsigned r=0;r<16;++r) initial.regs[r]=int32_t(r);
+    initial.regs[13]=stack_base;
+    std::vector<State> pending{initial};
+    std::set<std::vector<int32_t>> seen;
+    ThumbCallEffects result{true,0xFFFFu,false};
+    bool returned=false;
+    unsigned budget=2048;
+    auto finish = [&](const State& state, int32_t target) {
+        if (target!=14 || state.regs[13]!=stack_base) return false;
+        uint16_t preserved=0;
+        for (unsigned r=0;r<15;++r)
+            if (state.regs[r]==(r==13 ? stack_base : int32_t(r))) preserved|=uint16_t(1u<<r);
+        result.preserved &= preserved;returned=true;return true;
+    };
+    while (!pending.empty() && result.valid && budget) {
+        State state=std::move(pending.back());pending.pop_back();
+        while (result.valid && budget) {
+            --budget;
+            const uint32_t pc=state.pc;
+            const uint32_t step=state.mode==CpuMode::Thumb ? 2u : 4u;
+            if (pc<entry || uint64_t(pc)+step>uint64_t(entry)+4096u ||
+                !can_read_at(pc,step) || addr_in_data_range(pc) || state.stack.size()>128u) {
+                result.valid=false;break;
+            }
+            std::vector<int32_t> key{int32_t(pc),int32_t(step)};
+            key.insert(key.end(),state.regs.begin(),state.regs.end());
+            for (const auto& cell:state.stack) { key.push_back(cell.first);key.push_back(cell.second); }
+            if (!seen.insert(std::move(key)).second) break;
+            const auto op=state.mode==CpuMode::Thumb
+                ? armv4t::ThumbDecoder::decode(read_u16(pc),pc)
+                : armv4t::ArmDecoder::decode(read_u32(pc),pc);
+            if (op.is_undefined || op.op==armv4t::IrOp::SWI) {result.valid=false;break;}
+            if (op.op==armv4t::IrOp::B) {
+                State branch=state;branch.pc=op.branch_target;pending.push_back(std::move(branch));
+                if (op.cond==armv4t::Cond::AL) break;
+                state.pc+=step;continue;
+            }
+            if (state.mode==CpuMode::Arm && op.cond!=armv4t::Cond::AL) {
+                State skipped=state;skipped.pc+=step;pending.push_back(std::move(skipped));
+            }
+            if (op.op==armv4t::IrOp::BL || op.op==armv4t::IrOp::BL_prefix) {
+                uint32_t callee=op.branch_target,call_size=step;
+                if(op.op==armv4t::IrOp::BL_prefix) {
+                    if(!can_read_at(pc+2u,2)) {result.valid=false;break;}
+                    const auto low=armv4t::ThumbDecoder::decode(read_u16(pc+2u),pc+2u);
+                    if (low.op!=armv4t::IrOp::BL_suffix) {result.valid=false;break;}
+                    callee=(op.branch_target+low.swi_imm)&~1u;call_size=4;
+                }
+                const auto effects=thumb_call_effects(callee,state.mode,depth+1u);
+                if (!effects.valid) {result.valid=false;break;}
+                for (unsigned r=0;r<15;++r)
+                    if (!(effects.preserved & (1u<<r))) state.regs[r]=unknown;
+                state.regs[14]=unknown; // BL itself replaces LR even for a leaf
+                if (effects.writes_caller_stack) {
+                    for (auto& cell:state.stack) if (cell.first>=state.regs[13]-stack_base)
+                        cell.second=unknown;
+                }
+                result.writes_caller_stack |= effects.writes_caller_stack;
+                state.pc+=call_size;continue;
+            }
+            if (op.op==armv4t::IrOp::BX) {
+                // GCC's memcpy helpers enter ARM with Thumb BX PC. Follow the
+                // actual instruction-state change rather than assuming ABI
+                // effects for a library name or treating ARM words as Thumb.
+                if(state.mode==CpuMode::Thumb && op.rm==15) {
+                    state.pc=(pc+4u)&~3u;state.mode=CpuMode::Arm;continue;
+                }
+                result.valid=op.rm<16 && finish(state,state.regs[op.rm]);break;
+            }
+            const auto& operand=op.op2;
+            if (op.op==armv4t::IrOp::STM || op.op==armv4t::IrOp::LDM) {
+                if(op.block.rn>=15 || !op.block.reg_list ||
+                    (op.block.writeback && (op.block.reg_list & (1u<<op.block.rn)))) {result.valid=false;break;}
+                if(!stack_value(state.regs[op.block.rn])) {
+                    if(op.block.load && (op.block.reg_list & 0x8000u)) {result.valid=false;break;}
+                    if(op.block.load) for(unsigned r=0;r<16;++r)
+                        if(op.block.reg_list & (1u<<r)) state.regs[r]=unknown;
+                    if(op.block.writeback) state.regs[op.block.rn]=unknown;
+                    state.pc+=step;continue;
+                }
+                unsigned n=0;for(unsigned r=0;r<16;++r) n+=(op.block.reg_list>>r)&1u;
+                const int32_t sp=state.regs[op.block.rn]-stack_base;
+                int32_t at=sp+(op.block.add ? (op.block.pre_indexed ? 4 : 0)
+                    : (op.block.pre_indexed ? -4*int32_t(n) : -4*int32_t(n-1u)));
+                for (unsigned r=0;r<16;++r) if (op.block.reg_list & (1u<<r)) {
+                    if (op.block.load) {
+                        const auto cell=state.stack.find(at);
+                        state.regs[r]=cell==state.stack.end() ? unknown : cell->second;
+                    } else {state.stack[at]=state.regs[r];if(at>=0) result.writes_caller_stack=true;}
+                    at+=4;
+                }
+                if(op.block.writeback) state.regs[op.block.rn]+=op.block.add ? 4*int32_t(n) : -4*int32_t(n);
+                if (op.block.load && (op.block.reg_list & 0x8000u)) {
+                    result.valid=finish(state,state.regs[15]);break;
+                }
+            } else if (op.op==armv4t::IrOp::MOV || op.op==armv4t::IrOp::ADD || op.op==armv4t::IrOp::SUB) {
+                int32_t value=unknown;
+                if (op.op==armv4t::IrOp::MOV && operand.kind==armv4t::Op2::Kind::Shifted &&
+                    !operand.shifted.by_register && operand.shifted.type==armv4t::ShiftType::LSL &&
+                    operand.shifted.imm_or_rs==0 && operand.shifted.rm<16)
+                    value=state.regs[operand.shifted.rm];
+                if (op.op!=armv4t::IrOp::MOV && op.rn<16 && stack_value(state.regs[op.rn]) &&
+                    operand.kind==armv4t::Op2::Kind::Imm) {
+                    const int64_t adjusted=int64_t(state.regs[op.rn])+
+                        (op.op==armv4t::IrOp::ADD ? int64_t(operand.imm_value) : -int64_t(operand.imm_value));
+                    if (adjusted>=61440 && adjusted<=69632) value=int32_t(adjusted);
+                }
+                if (op.rd==15) {result.valid=finish(state,value);break;}
+                if (op.rd<16) state.regs[op.rd]=value;
+            } else if (op.op==armv4t::IrOp::LDR || op.op==armv4t::IrOp::LDRB ||
+                       op.op==armv4t::IrOp::LDRH || op.op==armv4t::IrOp::LDRSB ||
+                       op.op==armv4t::IrOp::LDRSH || op.op==armv4t::IrOp::STR ||
+                       op.op==armv4t::IrOp::STRB || op.op==armv4t::IrOp::STRH) {
+                const bool store=op.op==armv4t::IrOp::STR || op.op==armv4t::IrOp::STRB || op.op==armv4t::IrOp::STRH;
+                const unsigned width=(op.op==armv4t::IrOp::LDR || op.op==armv4t::IrOp::STR) ? 4u :
+                    (op.op==armv4t::IrOp::LDRH || op.op==armv4t::IrOp::LDRSH || op.op==armv4t::IrOp::STRH) ? 2u : 1u;
+                int32_t value=unknown;
+                if (op.mem.rn<16 && stack_value(state.regs[op.mem.rn])) {
+                    if (op.mem.by_register || op.mem.writeback || !op.mem.pre_indexed) {result.valid=false;break;}
+                    const int32_t at=state.regs[op.mem.rn]-stack_base+
+                        (op.mem.add ? int32_t(op.mem.imm_offset) : -int32_t(op.mem.imm_offset));
+                    if (store) {
+                        for(auto& cell:state.stack) if(cell.first<at+int32_t(width) && cell.first+4>at) cell.second=unknown;
+                        if(width==4 && !(at&3)) state.stack[at]=op.rd<16 ? state.regs[op.rd] : unknown;
+                        if(at>=0) result.writes_caller_stack=true;
+                    } else if(width==4 && !(at&3)) {
+                        const auto cell=state.stack.find(at);if(cell!=state.stack.end()) value=cell->second;
+                    }
+                }
+                if(!store && op.rd<16) state.regs[op.rd]=value;
+                if(op.mem.writeback && op.mem.rn<16) state.regs[op.mem.rn]=unknown;
+            } else if (op.op!=armv4t::IrOp::CMP && op.op!=armv4t::IrOp::CMN &&
+                       op.op!=armv4t::IrOp::TST && op.op!=armv4t::IrOp::TEQ) {
+                if(op.is_branch || op.is_call) {result.valid=false;break;}
+                if(op.rd<16) state.regs[op.rd]=unknown;
+            }
+            state.pc+=step;
+        }
+    }
+    result.valid=result.valid && returned && pending.empty() && budget>0;
+    if(!result.valid) result={};
+    thumb_call_effects_active_.erase(effect_key);
+    thumb_call_effects_[effect_key]=result;
+    return result;
 }
 
 bool FunctionFinder::is_thumb_callback_leaf(uint32_t entry) const {
@@ -88,8 +254,8 @@ void FunctionFinder::harvest_stored_callback(uint32_t raw) {
 
 void FunctionFinder::harvest_contextual_callbacks(
         uint32_t entry, uint8_t known_mask,
-        const std::array<uint32_t, 4>& arguments) {
-    if (aot_scan_start_ >= aot_scan_end_ || !known_mask || (entry & 1u) ||
+        const std::array<uint32_t, 4>& arguments, unsigned depth) {
+    if (depth >= 16u || aot_scan_start_ >= aot_scan_end_ || !known_mask || (entry & 1u) ||
         !addr_in_rom(entry) || !can_read_at(entry, 2) || addr_in_data_range(entry)) return;
     std::array<uint32_t, 6> key{entry, known_mask, 0, 0, 0, 0};
     for (unsigned r = 0; r < 4; ++r)
@@ -112,13 +278,13 @@ void FunctionFinder::harvest_contextual_callbacks(
     for (unsigned r = 0; r < 4; ++r)
         if (known_mask & (1u << r)) initial.regs[r] = {true, arguments[r], 0};
     std::vector<State> pending{initial};
-    unsigned budget = 256;
+    unsigned budget = 8192;
     while (!pending.empty() && budget) {
         State state = pending.back(); pending.pop_back();
         while (budget) {
             --budget;
             const uint32_t pc = state.pc;
-            if (pc < entry || uint64_t(pc)+2u > uint64_t(entry)+128u ||
+            if (pc < entry || uint64_t(pc)+2u > uint64_t(entry)+2048u ||
                 !can_read_at(pc, 2) || addr_in_data_range(pc)) break;
             const auto op = armv4t::ThumbDecoder::decode(read_u16(pc), pc);
             if (op.is_undefined || op.op == armv4t::IrOp::SWI) break;
@@ -167,7 +333,7 @@ void FunctionFinder::harvest_contextual_callbacks(
             };
             if (op.op == armv4t::IrOp::B) {
                 const int taken = branch_taken();
-                if (taken != 0 && op.branch_target > pc && pending.size() < 16) {
+                if (taken != 0 && pending.size() < 16) {
                     State next = state; next.pc = op.branch_target;
                     pending.push_back(next);
                 }
@@ -197,10 +363,20 @@ void FunctionFinder::harvest_contextual_callbacks(
                         if (pointer.origin >= rom_base_+4u && can_read_at(pointer.origin-4u, 4))
                             harvest_stored_callback(read_u32(pointer.origin-4u));
                     }
+                    break; // the indirect callee's effects remain unknown
                 }
-                // Never assume a callee preserves a register or execute a SWI.
-                // This pass only finds pointers before the first opaque call.
-                break;
+                uint8_t nested_mask=0;
+                std::array<uint32_t,4> nested_arguments{};
+                for(unsigned r=0;r<4;++r) if(state.regs[r].known) {
+                    nested_mask|=uint8_t(1u<<r);nested_arguments[r]=state.regs[r].value;
+                }
+                harvest_contextual_callbacks(callee,nested_mask,nested_arguments,depth+1u);
+                const auto effects=thumb_call_effects(callee);
+                if(!effects.valid) break;
+                for(unsigned r=0;r<15;++r)
+                    if(!(effects.preserved & (1u<<r))) state.regs[r]={};
+                state.regs[14]={};state.flags=false;
+                state.pc+=4u;continue;
             }
             if (op.is_branch || op.is_call || op.cond != armv4t::Cond::AL) break;
             if (op.set_flags) state.flags = false;
