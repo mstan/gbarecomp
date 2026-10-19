@@ -519,10 +519,12 @@ std::vector<FunctionSeed> FunctionFinder::collect_referenced_callback_seeds() {
     std::unordered_set<uint64_t> emitted;
     for (const auto& seed : seeds_) emitted.insert(visit_key(seed.addr, seed.mode));
 
-    // Inspect only the first two words of an explicitly referenced ROM object
-    // outside the reviewed executable span. Both words must be odd Thumb code
-    // pointers: at least one PUSH-LR entry corroborates its neighbor, which
-    // must be another PUSH-LR entry or a RAM-global leaf.
+    // Referenced data objects need two tagged Thumb entries, including a
+    // PUSH-LR entry corroborating another prologue or a RAM-global leaf.
+    // Executable scan spans can also contain callback records (including a
+    // conservative whole-ROM span). Without an authoritative data range,
+    // require four distinct PUSH-LR entries there instead of treating an
+    // arbitrary adjacent pair of instruction words as a descriptor.
     // No table-end guess or unrestricted harvesting of pointer-shaped words.
     for (std::size_t off = 0; off + 4 <= rom_size_; off += 4) {
         const uint32_t object = read_u32(rom_base_ + static_cast<uint32_t>(off));
@@ -530,16 +532,20 @@ std::vector<FunctionSeed> FunctionFinder::collect_referenced_callback_seeds() {
         if ((object & 1u) && code >= aot_scan_start_ && code < aot_scan_end_)
             referenced_code.insert(code);
         if ((object & 3u) || !addr_in_rom(object) ||
-            (object >= aot_scan_start_ && object < aot_scan_end_) ||
-            !can_read_at(object, 8) || !objects.insert(object).second) continue;
-        const uint32_t raw[2] = {read_u32(object), read_u32(object + 4u)};
-        uint32_t target[2] = {};
-        uint32_t ram_global[2] = {};
-        bool push[2] = {}, leaf[2] = {};
+            !objects.insert(object).second) continue;
+        const auto* data = find_data_range(object);
+        const bool declared_data = data && uint64_t(object) + 8u <= data->end;
+        const bool executable = object >= aot_scan_start_ && object < aot_scan_end_;
+        const unsigned fields = executable && !declared_data ? 4u : 2u;
+        if (!can_read_at(object, fields * 4u)) continue;
+        uint32_t target[4] = {};
+        uint32_t ram_global[4] = {};
+        bool push[4] = {}, leaf[4] = {}, all_push = true;
         bool valid = true;
-        for (unsigned i = 0; i < 2; ++i) {
-            target[i] = raw[i] & ~1u;
-            if (!(raw[i] & 1u) || target[i] < aot_scan_start_ ||
+        for (unsigned i = 0; i < fields; ++i) {
+            const uint32_t raw = read_u32(object + 4u * i);
+            target[i] = raw & ~1u;
+            if (!(raw & 1u) || target[i] < aot_scan_start_ ||
                 target[i] >= aot_scan_end_ ||
                 static_cast<uint64_t>(target[i]) + 12u > aot_scan_end_ ||
                 !looks_like_code(target[i], CpuMode::Thumb, true)) {
@@ -548,14 +554,20 @@ std::vector<FunctionSeed> FunctionFinder::collect_referenced_callback_seeds() {
             }
             push[i] = is_thumb_func_prologue(target[i]);
             leaf[i] = !push[i] && is_thumb_ram_leaf(target[i], &ram_global[i]);
+            all_push = all_push && push[i];
         }
         if (!valid || target[0] == target[1] || !(push[0] || push[1]) ||
             !(push[0] || leaf[0]) || !(push[1] || leaf[1])) continue;
+        if (fields == 4 && (!all_push ||
+            std::unordered_set<uint32_t>(target, target + fields).size() != fields))
+            continue;
         ++stats_.aot_callback_objects;
-        for (uint32_t ram : ram_global) {
+        for (unsigned i = 0; i < fields; ++i) {
+            const uint32_t ram = ram_global[i];
             if (ram != 0) callback_globals.insert(ram);
         }
-        for (uint32_t pc : target) {
+        for (unsigned i = 0; i < fields; ++i) {
+            const uint32_t pc = target[i];
             if (!emitted.insert(visit_key(pc, CpuMode::Thumb)).second) continue;
             out.push_back({pc, CpuMode::Thumb, "", 0, /*speculative=*/true});
             aot_seen_seed_keys_.insert(visit_key(pc, CpuMode::Thumb));

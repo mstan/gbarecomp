@@ -194,6 +194,44 @@ static bool bounded_callback_copy(unsigned fault) {
            !has_function(finder, kBase+0x1E0, gbarecomp::CpuMode::Thumb);
 }
 
+static bool executable_span_callback_record(unsigned fault) {
+    std::vector<std::uint8_t> rom(0x240, 0);
+    put16(rom, 0, 0x480F); // referenced pointer array, not the record directly
+    put16(rom, 2, 0x6801); // load record pointer; no branch consuming it here
+    put16(rom, 4, 0x4770);
+    put32(rom, 0x40, kBase + 0x80);
+    put32(rom, 0x80, fault == 5 ? 0 : kBase + 0x100);
+    for (unsigned i = 0; i < 4; ++i) {
+        const unsigned off = 0x180 + 0x20*i;
+        put32(rom, 0x100+4*i, kBase+off+1);
+        put16(rom, off, 0xB500);
+        for (unsigned n = 2; n < 10; n += 2) put16(rom, off+n, 0x46C0);
+        put16(rom, off+10, 0xBD00);
+    }
+    if (fault == 1) put32(rom, 0x10C, 0x03000001); // non-ROM field
+    if (fault == 2) put32(rom, 0x10C, kBase+0x181); // repeated prologue is not independent evidence
+    if (fault == 3) put16(rom, 0x1C0, 0x46C0); // only three prologues
+    if (fault == 6) put32(rom, 0x80, kBase+0x101); // unaligned object
+    if (fault == 7 || fault == 8) {
+        put32(rom, 0x108, 0); // ordinary two-entry data record
+        put32(rom, 0x10C, 0);
+    }
+    gbarecomp::FunctionFinder finder(rom.data(), rom.size(), kBase);
+    finder.set_speculative_literal_harvest(false);
+    finder.set_aot_scan_range(kBase, kBase+(fault == 9 ? 0x1E0 : 0x240));
+    if (fault == 4) finder.add_data_range(kBase+0x1C0, kBase+0x1CC, "not code");
+    if (fault == 7 || fault == 8)
+        finder.add_data_range(kBase+0x100, kBase+(fault == 7 ? 0x108 : 0x104), "record data");
+    finder.add_seed({kBase, gbarecomp::CpuMode::Thumb, "nested_record"});
+    finder.run(64);
+    for (unsigned i = 0; i < 4; ++i) {
+        const bool expected = fault == 0 || (fault == 7 && i < 2);
+        if (has_function(finder, kBase+0x180+0x20*i, gbarecomp::CpuMode::Thumb) != expected)
+            return false;
+    }
+    return finder.collisions().empty();
+}
+
 static bool literal_callback(unsigned fault) {
     std::vector<std::uint8_t> rom(0x100, 0);
     put16(rom, 0, 0x4800); // callback passed as an argument, no local BX consumer
@@ -488,6 +526,12 @@ bool callback_table_transfer(bool thumb, unsigned fault = 0) {
 }
 
 int main() {
+    for (unsigned fault = 0; fault < 10; ++fault) {
+        if (!executable_span_callback_record(fault)) {
+            std::fprintf(stderr, "Executable-span callback record failed: fault=%u\n", fault);
+            return 1;
+        }
+    }
     for (unsigned fault = 0; fault < 19; ++fault) {
         if (!bounded_callback_copy(fault)) {
             std::fprintf(stderr, "Bounded callback copy discovery failed: fault=%u\n", fault);
