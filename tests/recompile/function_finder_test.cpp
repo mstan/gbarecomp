@@ -232,6 +232,105 @@ static bool executable_span_callback_record(unsigned fault) {
     return finder.collisions().empty();
 }
 
+static void put_thumb_call(std::vector<uint8_t>& rom, unsigned at, unsigned target) {
+    const uint32_t delta = uint32_t(int32_t(target)-int32_t(at+4));
+    put16(rom, at, uint16_t(0xF000u | ((delta >> 12) & 0x7FFu)));
+    put16(rom, at+2, uint16_t(0xF800u | ((delta >> 1) & 0x7FFu)));
+}
+
+static bool constant_argument_callbacks(unsigned fault) {
+    std::vector<uint8_t> rom(0x500, 0);
+    put16(rom, 0, 0xB500);
+    put16(rom, 2, 0x2101); put_thumb_call(rom, 4, 0x80);
+    put16(rom, 8, 0x2102); put_thumb_call(rom, 0xA, 0x80);
+    put16(rom, 0xE, 0x2100); put_thumb_call(rom, 0x10, 0xC0);
+    put16(rom, 0x14, 0xBD00);
+    const uint16_t getter[] = {0xB510,0x4A2F,0x1C09,0x0048,0x1840,0x0080,
+        0x3204,0x1880,0x6803,0x2B00,0xD003,0,0,0xE001,0x46C0,0x2001,0xBC10,0xBC02,0x4708};
+    for (unsigned i=0;i<sizeof(getter)/sizeof(getter[0]);++i) put16(rom,0x80+2*i,getter[i]);
+    put_thumb_call(rom, 0x96, 0x1E0);
+    const uint16_t setter[] = {0xB510,0x1C04,0x4B1F,0x004A,0x1852,0x0092,
+        0x18D2,0x6811,0x6021,0xBC10,0xBC01,0x4700};
+    for (unsigned i=0;i<sizeof(setter)/sizeof(setter[0]);++i) put16(rom,0xC0+2*i,setter[i]);
+    put32(rom,0x140,kBase+0x200); put32(rom,0x144,kBase+0x200);
+    put16(rom,0x1E0,0x4718); // BX r3 veneer
+    put16(rom,0x1E8,0xB500); put16(rom,0x1EA,0xBD00);
+    const unsigned callbacks[] = {0x300,0,0,0x320,0x340,1,0x360,0x380,2};
+    for (unsigned i=0;i<9;++i) put32(rom,0x200+4*i,
+        callbacks[i]>=0x300 ? kBase+callbacks[i]+1 : callbacks[i]);
+    const uint16_t leaf[] = {0x2204,0x1881,0x7809,0x0049,0x3010,0x1840,0x8800,0x4770};
+    for (unsigned i=0;i<sizeof(leaf)/sizeof(leaf[0]);++i) put16(rom,0x300+2*i,leaf[i]);
+    for (unsigned off : {0x320u,0x340u,0x360u,0x380u}) {
+        put16(rom,off,0xB500);
+        for (unsigned n=2;n<10;n+=2) put16(rom,off+n,0x2000);
+        put16(rom,off+10,0xBD00);
+    }
+    if (fault==1) for (unsigned off : {2u,8u,0xEu}) put16(rom,off,0x1C39);
+    if (fault==2) put16(rom,0x92,0x2300); // clobber loaded callback
+    if (fault==3) put16(rom,0x92,0xBC08); // POP replaces callback
+    if (fault==4) put16(rom,0x1E0,0x4770); // called helper is not a BX veneer
+    if (fault==5) {put32(rom,0x210,0);put32(rom,0x21C,0);}
+    if (fault==6) put16(rom,0x84,0x3101); // callee changes index, select actual new value
+    if (fault==7) put32(rom,0x140,0x02001000); // mutable RAM reads stay unknown
+    if (fault==8) put32(rom,0x210,0x09000001); // non-ROM callback
+    if (fault==10) put16(rom,0xD0,0x7021); // partial pointer store
+    if (fault==11) put16(rom,0x300,0x3401); // leaf clobbers callee-saved r4
+    if (fault==12) put16(rom,0x30E,0xE7FE); // no return witness
+    if (fault==13) put_thumb_call(rom,0x96,0x1E8); // opaque callee stops proof
+    if (fault==14) {
+        put32(rom,0x21C,kBase+0x400);
+        put32(rom,0x400,0xE92D4000);
+        for (unsigned n=4;n<20;n+=4) put32(rom,0x400+n,0xE1A00000);
+        put32(rom,0x414,0xE8BD8000);
+    }
+    if (fault==16) {put16(rom,2,0x2100);put16(rom,8,0x2100);put16(rom,0xE,0x1C39);}
+    if (fault==17) put16(rom,0x94,0xD103); // non-null path returns instead of calling
+    if (fault==18) put16(rom,0xD0,0x2100); // loaded value never escapes
+    if (fault==19) put32(rom,0x140,kBase+0x201); // no aligned static word read
+    gbarecomp::FunctionFinder finder(rom.data(),rom.size(),kBase);
+    finder.set_speculative_literal_harvest(false);
+    if (fault!=15) finder.set_aot_scan_range(kBase,kBase+rom.size());
+    if (fault==9) finder.add_data_range(kBase+0x340,kBase+0x34C,"not code");
+    finder.add_seed({kBase,gbarecomp::CpuMode::Thumb,"constant_calls"});
+    finder.run(128);
+    const bool none = fault==1 || fault==15 || fault==16;
+    const bool default_leaf = !none && fault!=10 && fault!=11 && fault!=12 && fault!=18;
+    const bool pair_one = !none && !(fault>=2 && fault<=9) && fault!=13 && fault!=17 && fault!=19;
+    const bool pair_two = !none && fault!=2 && fault!=3 && fault!=4 && fault!=5 &&
+        fault!=7 && fault!=13 && fault!=17 && fault!=19;
+    return has_function(finder,kBase+0x300,gbarecomp::CpuMode::Thumb)==default_leaf &&
+        has_function(finder,kBase+0x320,gbarecomp::CpuMode::Thumb)==pair_one &&
+        has_function(finder,kBase+0x340,gbarecomp::CpuMode::Thumb)==pair_one &&
+        has_function(finder,kBase+0x360,gbarecomp::CpuMode::Thumb)==pair_two &&
+        has_function(finder,kBase+0x380,gbarecomp::CpuMode::Thumb)==(pair_two && fault!=14) &&
+        has_function(finder,kBase+0x400,gbarecomp::CpuMode::Arm)==(fault==14);
+}
+
+static bool stored_leaf_callback(unsigned fault) {
+    std::vector<uint8_t> rom(0x100,0);
+    put16(rom,0,0x4807); put16(rom,2,0x6020); put16(rom,4,0x4770);
+    put32(rom,0x20,kBase+0x41);
+    const uint16_t leaf[] = {0x2204,0x1881,0x7809,0x0049,0x3010,0x1840,0x8800,0x4770};
+    for (unsigned i=0;i<sizeof(leaf)/sizeof(leaf[0]);++i) put16(rom,0x40+2*i,leaf[i]);
+    if (fault==1) put16(rom,2,0x7020);
+    if (fault==2) put16(rom,2,0x2000);
+    if (fault==3) put16(rom,0x40,0x3401);
+    if (fault==4) put16(rom,2,0x46C0);
+    if (fault==5) {
+        put16(rom,0x40,0x2002); put16(rom,0x42,0x2103); put16(rom,0x44,0x4348);
+        for (unsigned off=0x46;off<0x64;off+=2) put16(rom,off,0x0000);
+        put16(rom,0x64,0x4770);
+    }
+    if (fault==7) put32(rom,0x20,kBase+0x40);
+    gbarecomp::FunctionFinder finder(rom.data(),rom.size(),kBase);
+    finder.set_speculative_literal_harvest(false);
+    finder.set_aot_scan_range(kBase,kBase+rom.size());
+    if (fault==6) finder.add_data_range(kBase+0x40,kBase+0x50,"data");
+    finder.add_seed({kBase,gbarecomp::CpuMode::Thumb,"publish_leaf"});
+    finder.run(32);
+    return has_function(finder,kBase+0x40,gbarecomp::CpuMode::Thumb)==(fault==0 || fault==5);
+}
+
 static bool literal_callback(unsigned fault) {
     std::vector<std::uint8_t> rom(0x100, 0);
     put16(rom, 0, 0x4800); // callback passed as an argument, no local BX consumer
@@ -526,6 +625,12 @@ bool callback_table_transfer(bool thumb, unsigned fault = 0) {
 }
 
 int main() {
+    for (unsigned fault=0;fault<20;++fault) if (!constant_argument_callbacks(fault)) {
+        std::fprintf(stderr,"Constant-argument callbacks failed: fault=%u\n",fault); return 1;
+    }
+    for (unsigned fault=0;fault<8;++fault) if (!stored_leaf_callback(fault)) {
+        std::fprintf(stderr,"Stored leaf callback failed: fault=%u\n",fault); return 1;
+    }
     for (unsigned fault = 0; fault < 10; ++fault) {
         if (!executable_span_callback_record(fault)) {
             std::fprintf(stderr, "Executable-span callback record failed: fault=%u\n", fault);

@@ -1695,6 +1695,21 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             break;
         }
 
+        if (entry_mode == CpuMode::Thumb && ins.op == armv4t::IrOp::BL_prefix &&
+            can_read_walk_at(pc+2u, 2)) {
+            const auto low = armv4t::ThumbDecoder::decode(read_walk_u16(pc+2u), pc+2u);
+            if (low.op == armv4t::IrOp::BL_suffix) {
+                std::array<uint32_t, 4> arguments{};
+                uint8_t known = 0;
+                for (unsigned r = 0; r < 4; ++r) if (reg_const[r].known) {
+                    known |= uint8_t(1u << r);
+                    arguments[r] = reg_const[r].value;
+                }
+                harvest_contextual_callbacks((ins.branch_target+low.swi_imm)&~1u,
+                                              known, arguments);
+            }
+        }
+
         if (entry_mode == CpuMode::Thumb && entry_addr == entry_source &&
             addr_in_rom(pc)) {
             if (ins.op == armv4t::IrOp::B && ins.cond != armv4t::Cond::AL &&
@@ -2268,6 +2283,10 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 stored = reg_const[ins.rd].value;
                 known_value = true;
             }
+
+            if (entry_mode == CpuMode::Thumb && known_value &&
+                ins.cond == armv4t::Cond::AL && !ins.mem.writeback)
+                harvest_stored_callback(stored);
 
             // The real GBA BIOS branches through this word with BX on IRQ.
             // A proved word store therefore supplies a typed code reference,

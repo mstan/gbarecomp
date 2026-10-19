@@ -262,6 +262,7 @@ set_property(TARGET gbarecomp_armv4t PROPERTY POSITION_INDEPENDENT_CODE ON)
 # ─────────────────────────────────────────────────────────────────────────────
 add_library(gbarecomp_recompile_core STATIC
     src/recompile/function_finder.cpp
+    src/recompile/callback_discovery.cpp
     src/recompile/emit_function.cpp
     src/recompile/ram_templates.cpp
     src/recompile/codegen_shards.cpp

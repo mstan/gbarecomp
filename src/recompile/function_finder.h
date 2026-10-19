@@ -22,6 +22,8 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -354,6 +356,10 @@ private:
     void harvest_relative_callbacks();
     std::vector<FunctionSeed> collect_code_copy_seeds() const;
     bool is_thumb_ram_leaf(uint32_t addr, uint32_t* ram_global = nullptr) const;
+    bool is_thumb_callback_leaf(uint32_t addr) const;
+    void harvest_stored_callback(uint32_t raw);
+    void harvest_contextual_callbacks(uint32_t callee, uint8_t known_mask,
+                                      const std::array<uint32_t, 4>& arguments);
     std::vector<FunctionSeed> collect_referenced_callback_seeds();
     void discover_one(uint32_t addr, CpuMode mode,
                       const std::string& name,
@@ -366,6 +372,8 @@ private:
     // discover_one drops the function instead of hard-erroring.
     bool current_walk_speculative_ = false;
     bool current_walk_dropped_ = false;
+    std::set<std::array<uint32_t, 6>> callback_contexts_;
+    bool callback_context_budget_reported_ = false;
 };
 
 }  // namespace gbarecomp
