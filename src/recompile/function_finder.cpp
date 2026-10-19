@@ -2064,6 +2064,25 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 known_value = true;
             }
 
+            // The real GBA BIOS branches through this word with BX on IRQ.
+            // A proved word store therefore supplies a typed code reference,
+            // including leaf ARM dispatchers without a PUSH-LR prologue.
+            // Discover its ROM body so the existing byte-guarded RAM catalog
+            // can also serve it when the game later copies it into IWRAM.
+            uint32_t vector_slot = 0;
+            if (known_value && ins.cond == armv4t::Cond::AL &&
+                !ins.mem.writeback && eval_mem_imm_addr(ins, &vector_slot) &&
+                vector_slot == 0x03007FFCu) {
+                const uint32_t target = stored & ~uint32_t{1};
+                const CpuMode mode = (stored & 1u) ? CpuMode::Thumb : CpuMode::Arm;
+                if (target >= 0x08000000u && addr_in_rom(target) &&
+                    looks_like_code(target, mode, /*strict=*/true) &&
+                    aot_seen_seed_keys_.insert(visit_key(target, mode)).second) {
+                    aot_pointer_seeds_.push_back({target, mode, "", 0, false});
+                    ++stats_.aot_callback_seeds;
+                }
+            }
+
             if (!ins.mem.writeback &&
                 eval_symbolic_mem_addr(ins, &rn, &offset) &&
                 known_value) {

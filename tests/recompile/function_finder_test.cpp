@@ -103,6 +103,43 @@ static bool referenced_leaf_pair(unsigned fault) {
                     finder.stats().aot_callback_objects == 1 && finder.collisions().empty());
 }
 
+static bool bios_irq_callback(unsigned fault) {
+    std::vector<std::uint8_t> rom(0x100, 0);
+    put32(rom, 0, 0xE59F1018); // ldr r1,[pc,#24] -> IRQ slot literal
+    put32(rom, 4, 0xE28F0034); // adr r0,08000040; no frame prologue
+    put32(rom, 8, 0xE5810000); // str r0,[r1]
+    put32(rom, 12, 0xE12FFF1E); // bx lr
+    put32(rom, 0x20, fault == 1 ? 0x03007FF8 : 0x03007FFC);
+    for (unsigned off = 0x40; off < 0x5C; off += 4)
+        put32(rom, off, 0xE1A00000); // mov r0,r0
+    put32(rom, 0x40, 0xE3A03301); // mov r3,#04000000, like the retail IRQ
+    put32(rom, 0x5C, 0xE12FFF1E);
+    if (fault == 2) {
+        put32(rom, 8, 0xE5920000); // unknown load clobbers the callback
+        put32(rom, 12, 0xE5810000);
+        put32(rom, 16, 0xE12FFF1E);
+    }
+    if (fault == 4) put32(rom, 4, 0xE28F0036); // misaligned ARM pointer
+    if (fault == 5) put32(rom, 4, 0xE28F00F4); // beyond the image
+    if (fault == 6) {
+        put32(rom, 4, 0xE59F0010); // tagged Thumb callback from literal1C
+        put32(rom, 0x1C, kBase + 0x41);
+        for (unsigned off = 0x40; off < 0x4A; off += 2)
+            put16(rom, off, 0x46C0); // nop, still no PUSH-LR
+        put16(rom, 0x4A, 0x4770); // bx lr
+    }
+    if (fault == 7) put32(rom, 8, 0xE1A00000); // address-taking alone
+    if (fault == 8) put32(rom, 8, 0xE5C10000); // byte store is not a vector
+    if (fault == 9) put32(rom, 8, 0xE4810004); // unsupported writeback
+    gbarecomp::FunctionFinder finder(rom.data(), rom.size(), kBase);
+    finder.set_speculative_literal_harvest(false);
+    if (fault == 3) finder.add_data_range(kBase + 0x40, kBase + 0x60, "data");
+    finder.add_seed({kBase, gbarecomp::CpuMode::Arm, "entry"});
+    finder.run(64);
+    const auto mode = fault == 6 ? gbarecomp::CpuMode::Thumb : gbarecomp::CpuMode::Arm;
+    return has_function(finder, kBase + 0x40, mode) == (fault == 0 || fault == 6);
+}
+
 static bool literal_callback(unsigned fault) {
     std::vector<std::uint8_t> rom(0x100, 0);
     put16(rom, 0, 0x4800); // callback passed as an argument, no local BX consumer
@@ -397,6 +434,12 @@ bool callback_table_transfer(bool thumb, unsigned fault = 0) {
 }
 
 int main() {
+    for (unsigned fault = 0; fault < 10; ++fault) {
+        if (!bios_irq_callback(fault)) {
+            std::fprintf(stderr, "BIOS IRQ callback discovery failed: fault=%u\n", fault);
+            return 1;
+        }
+    }
     {
         std::vector<std::uint8_t> rom(4);
         put16(rom,0,0x2000);
