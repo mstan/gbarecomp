@@ -203,6 +203,53 @@ static bool shared_ram_store_callbacks(unsigned fault) {
         finder.collisions().empty();
 }
 
+static bool branch_callbacks_preserve_existing_budget() {
+    // A bounded extension must not evict a real callback near the end of the
+    // existing call-site budget. A full byte-domain workload and 256 extra
+    // branch paths must not starve the final directly known selector argument.
+    auto run=[](bool branches) {
+        std::vector<uint8_t> image(0x6000,0);
+        auto bl=[&](unsigned pc,unsigned target) {
+            const uint32_t delta=target-(pc+4u);
+            put16(image,pc,uint16_t(0xF000u|((delta>>12)&0x7FFu)));
+            put16(image,pc+2,uint16_t(0xF800u|((delta>>1)&0x7FFu)));
+        };
+        if (branches) {
+            for (unsigned i=0;i<256;++i) {
+                const unsigned pc=0x100+6*i;
+                put16(image,pc,0xB500);put16(image,pc+2,uint16_t(0x2700|i));
+                put16(image,pc+4,uint16_t(0xE000|((0x800-(pc+8))/2)));
+            }
+            put16(image,0x800,0x1C38);bl(0x802,0x3000);
+            put16(image,0x806,0xBC01);put16(image,0x808,0x4700);
+            put16(image,0x3000,0x4770);
+        }
+        unsigned at=0x1000;
+        for (unsigned i=0;i<256;++i) {
+            for (unsigned r=0;r<4;++r) {
+                put16(image,at,uint16_t(0x7820|(r<<6)|r));at+=2;
+            }
+            bl(at,0x4000+2*i);at+=4;put16(image,0x4000+2*i,0x4770);
+        }
+        put16(image,at,0x2001);at+=2;bl(at,0x5000);at+=4;put16(image,at,0x4770);
+        put16(image,0x5000,0x0080);put16(image,0x5002,0x4903);
+        put16(image,0x5004,0x5808);put16(image,0x5006,0x4903);
+        put16(image,0x5008,0x6008);put16(image,0x500A,0x4770);
+        put32(image,0x5010,kBase+0x5200);put32(image,0x5014,0x03001000);
+        put32(image,0x5204,kBase+0x5101);
+        put16(image,0x5100,0xB500);
+        for (unsigned pc=0x5102;pc<0x510A;pc+=2)put16(image,pc,0x2000);
+        put16(image,0x510A,0xBD00);
+        gbarecomp::FunctionFinder finder(image.data(),image.size(),kBase);
+        finder.set_speculative_literal_harvest(false);finder.set_aot_scan_range(kBase,kBase+image.size());
+        if (branches) for(unsigned i=0;i<256;++i)
+            finder.add_seed({kBase+0x100+6*i,gbarecomp::CpuMode::Thumb,"branch-predecessor"});
+        finder.add_seed({kBase+0x1000,gbarecomp::CpuMode::Thumb,"legacy-calls"});finder.run(2048);
+        return has_function(finder,kBase+0x5100,gbarecomp::CpuMode::Thumb) && finder.collisions().empty();
+    };
+    return run(false) && run(true);
+}
+
 static bool callback_constants_at_branch_joins(unsigned fault) {
     std::vector<uint8_t> image(0x1200,0);
     auto bl=[&](unsigned pc,unsigned target) {
@@ -1209,6 +1256,10 @@ int main() {
     }
     for(unsigned fault=0;fault<=13;++fault) if(!shared_ram_store_callbacks(fault)) {
         std::fprintf(stderr,"Shared RAM-store callbacks failed: fault=%u\n",fault);
+        return 1;
+    }
+    if (!branch_callbacks_preserve_existing_budget()) {
+        std::fprintf(stderr,"Branch callback extension displaced existing call-site coverage\n");
         return 1;
     }
     for(unsigned fault=0;fault<=7;++fault) if(!callback_constants_at_branch_joins(fault)) {

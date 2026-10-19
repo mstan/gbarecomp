@@ -1155,6 +1155,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
     bool in_switch_block = false;
     uint32_t callback_branch_start=pc;
     bool callback_branch_constant=false;
+    std::set<uint32_t> function_callback_branches;
 
     struct RegSym {
         bool    known = false;
@@ -1811,7 +1812,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 // Re-evaluate this predecessor's own instructions with every
                 // incoming register unknown. Constants may survive the join in
                 // this path only; none are assumed for other predecessors.
-                harvest_contextual_callbacks(callback_branch_start,0,{},0,true);
+                function_callback_branches.insert(callback_branch_start);
             }
         }
 
@@ -1833,7 +1834,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                         finite_arguments[r]=byte_domain[r].signed_value && byte>=128u
                             ? byte|0xFFFFFF00u : byte;
                         harvest_contextual_callbacks((ins.branch_target+low.swi_imm)&~1u,
-                            uint8_t(known | (1u<<r)),finite_arguments);
+                            uint8_t(known | (1u<<r)),finite_arguments,0,false,CallbackFlow::ByteDomain);
                     }
                 }
             }
@@ -2903,6 +2904,7 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
     // Preserve the true (un-clamped) body-walk extent before run()'s
     // "next function start" clamp truncates end_addr (see Function::walk_end_addr).
     fn.walk_end_addr = fn.end_addr;
+    deferred_callback_branches_.insert(function_callback_branches.begin(), function_callback_branches.end());
     functions_.push_back(std::move(fn));
 }
 
@@ -2974,9 +2976,25 @@ void FunctionFinder::run(std::size_t max_functions) {
     }
 
     std::size_t pos = 0;
-    while ((pos < worklist.size() || !deferred_store_callbacks_.empty()) &&
+    while ((pos < worklist.size() || !deferred_store_callbacks_.empty() || !deferred_callback_branches_.empty()) &&
            (functions_.size() < max_functions || required_remaining > 0)) {
         if(pos==worklist.size()) {
+            if (deferred_store_callbacks_.empty()) {
+                // The branch extension must not spend the bounded call-site
+                // budget, or change traversal provenance, before the existing
+                // discovery closure completes. Recursive branch calls use a
+                // separate budget too; only completed code walks add roots.
+                const auto branches=std::move(deferred_callback_branches_);
+                deferred_callback_branches_.clear();
+                for (const auto pc:branches) harvest_contextual_callbacks(pc,0,{},0,true);
+                for (const auto& seed:aot_pointer_seeds_) {
+                    const auto k=visit_key(seed.addr,seed.mode);
+                    origin_mask[k]|=2u;
+                    if (enqueued.insert(k).second) worklist.push_back({seed,false});
+                }
+                aot_pointer_seeds_.clear();
+                if (pos==worklist.size()) continue;
+            }
             // Establish the existing reachable closure before adding these
             // conservative metadata roots. Preseeding an already reachable
             // callback would otherwise change its walk's required/speculative

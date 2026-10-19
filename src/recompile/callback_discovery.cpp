@@ -319,7 +319,8 @@ void FunctionFinder::harvest_stored_callback(uint32_t raw) {
 
 void FunctionFinder::harvest_contextual_callbacks(
         uint32_t entry, uint8_t known_mask,
-        const std::array<uint32_t, 4>& arguments, unsigned depth, bool local_branch) {
+        const std::array<uint32_t, 4>& arguments, unsigned depth, bool local_branch,
+        CallbackFlow flow) {
     if (depth >= 16u || aot_scan_start_ >= aot_scan_end_ || (!known_mask && !local_branch) || (entry & 1u) ||
         !addr_in_rom(entry) || !can_read_at(entry, 2) || addr_in_data_range(entry)) return;
     std::array<uint32_t, 6> key{entry, known_mask, 0, 0, 0, 0};
@@ -334,14 +335,25 @@ void FunctionFinder::harvest_contextual_callbacks(
             return;
         }
         if(!callback_branch_contexts_.insert(entry).second) return;
-    } else if (callback_contexts_.size() >= 262144u) {
-        if (!callback_context_budget_reported_) {
-            std::fprintf(stderr, "[finder] callback call-site analysis budget exhausted; additional contexts remain unexamined\n");
-            callback_context_budget_reported_ = true;
+    }
+    if (local_branch) flow = CallbackFlow::Branch;
+    // Enumerating many byte values for one helper must not starve a later
+    // directly known callback argument. Recursive calls retain their original
+    // producer's quota; branch-derived work cannot spend either older quota.
+    const bool branch_flow = flow == CallbackFlow::Branch;
+    const bool byte_flow = flow == CallbackFlow::ByteDomain;
+    auto& contexts = branch_flow ? callback_branch_call_contexts_ : byte_flow ? callback_byte_contexts_ : callback_contexts_;
+    auto& reported = branch_flow ? callback_branch_call_budget_reported_ : byte_flow ? callback_byte_budget_reported_ : callback_context_budget_reported_;
+    const std::size_t context_limit = branch_flow ? 65536u : 262144u;
+    if (!local_branch && contexts.size() >= context_limit) {
+        if (!reported) {
+            std::fprintf(stderr, "[finder] callback %s analysis budget exhausted; additional contexts remain unexamined\n",
+                         branch_flow ? "branch call-site" : byte_flow ? "byte-domain call-site" : "call-site");
+            reported = true;
         }
         return;
     }
-    if (!local_branch && !callback_contexts_.insert(key).second) return;
+    if (!local_branch && !contexts.insert(key).second) return;
     struct Value { bool known = false; uint32_t value = 0, origin = 0; };
     struct State {
         uint32_t pc;
@@ -444,7 +456,7 @@ void FunctionFinder::harvest_contextual_callbacks(
                 for(unsigned r=0;r<4;++r) if(state.regs[r].known) {
                     nested_mask|=uint8_t(1u<<r);nested_arguments[r]=state.regs[r].value;
                 }
-                harvest_contextual_callbacks(callee,nested_mask,nested_arguments,depth+1u);
+                harvest_contextual_callbacks(callee,nested_mask,nested_arguments,depth+1u,false,flow);
                 const auto effects=thumb_call_effects(callee);
                 if(!effects.valid) break;
                 for(unsigned r=0;r<15;++r)
