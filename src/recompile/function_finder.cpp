@@ -516,6 +516,7 @@ std::vector<FunctionSeed> FunctionFinder::collect_referenced_callback_seeds() {
     std::unordered_set<uint32_t> objects;
     std::unordered_set<uint32_t> referenced_code;
     std::unordered_set<uint32_t> callback_globals;
+    std::unordered_set<uint32_t> store_globals;
     std::unordered_set<uint64_t> emitted;
     for (const auto& seed : seeds_) emitted.insert(visit_key(seed.addr, seed.mode));
     std::unordered_map<uint32_t, uint32_t> leaf_globals;
@@ -532,6 +533,11 @@ std::vector<FunctionSeed> FunctionFinder::collect_referenced_callback_seeds() {
         out.push_back({pc, CpuMode::Thumb, "", 0, /*speculative=*/true});
         aot_seen_seed_keys_.insert(visit_key(pc, CpuMode::Thumb));
         ++stats_.aot_callback_seeds;
+    };
+    auto anchor_callback = [&](uint32_t pc) {
+        const auto roots=thumb_ram_store_roots(pc);
+        store_globals.insert(roots.begin(),roots.end());
+        emit_callback(pc);
     };
 
     // Referenced data objects need two tagged Thumb entries, including a
@@ -583,9 +589,9 @@ std::vector<FunctionSeed> FunctionFinder::collect_referenced_callback_seeds() {
             if (valid && leaves.size() >= 2u && frames.size() >= 2u) {
                 ++stats_.aot_callback_objects;
                 callback_globals.insert(globals.begin(), globals.end());
-                for (uint32_t pc : leaves) emit_callback(pc);
-                for (uint32_t pc : frames) emit_callback(pc);
-                for (uint32_t pc : leaf_updates) emit_callback(pc);
+                for (uint32_t pc : leaves) anchor_callback(pc);
+                for (uint32_t pc : frames) anchor_callback(pc);
+                for (uint32_t pc : leaf_updates) anchor_callback(pc);
             }
         }
         const unsigned fields = executable && !declared_data ? 4u : 2u;
@@ -620,10 +626,7 @@ std::vector<FunctionSeed> FunctionFinder::collect_referenced_callback_seeds() {
         }
         for (unsigned i = 0; i < fields; ++i) {
             const uint32_t pc = target[i];
-            if (!emitted.insert(visit_key(pc, CpuMode::Thumb)).second) continue;
-            out.push_back({pc, CpuMode::Thumb, "", 0, /*speculative=*/true});
-            aot_seen_seed_keys_.insert(visit_key(pc, CpuMode::Thumb));
-            ++stats_.aot_callback_seeds;
+            anchor_callback(pc);
         }
     }
     // Independent records may share the descriptor's already corroborated
@@ -647,14 +650,40 @@ std::vector<FunctionSeed> FunctionFinder::collect_referenced_callback_seeds() {
     // literal already corroborated by a descriptor, plus an odd ROM reference.
     std::vector<uint32_t> ordered_code(referenced_code.begin(), referenced_code.end());
     std::sort(ordered_code.begin(), ordered_code.end());
+    std::unordered_set<uint32_t> store_callbacks;
+    auto return_proved = [&](uint32_t pc) {
+        if(is_thumb_callback_leaf(pc)) return true;
+        if(!is_thumb_func_prologue(pc) || !looks_like_code(pc,CpuMode::Thumb,true)) return false;
+        const auto effects=thumb_call_effects(pc);
+        return effects.valid && !effects.writes_caller_stack && (effects.preserved & 0x2FF0u)==0x2FF0u;
+    };
+    std::unordered_set<uint32_t> deferred;
+    auto defer_callback = [&](uint32_t pc) {
+        if(emitted.count(visit_key(pc,CpuMode::Thumb)) || !deferred.insert(pc).second) return;
+        deferred_store_callbacks_.push_back({pc,CpuMode::Thumb,"",0,true});
+    };
     for (uint32_t pc : ordered_code) {
-        if (emitted.count(visit_key(pc, CpuMode::Thumb)) != 0) continue;
-        uint32_t ram = 0;
-        if (!is_thumb_ram_leaf(pc, &ram) || callback_globals.count(ram) == 0) continue;
-        emitted.insert(visit_key(pc, CpuMode::Thumb));
-        out.push_back({pc, CpuMode::Thumb, "", 0, /*speculative=*/true});
-        aot_seen_seed_keys_.insert(visit_key(pc, CpuMode::Thumb));
-        ++stats_.aot_callback_seeds;
+        const uint32_t ram=leaf_global(pc);
+        if(ram && callback_globals.count(ram)) emit_callback(pc); // existing contract
+        const auto roots=thumb_ram_store_roots(pc);
+        const bool shared=std::any_of(roots.begin(),roots.end(),[&](uint32_t root) {
+            return store_globals.count(root)!=0;
+        });
+        if(shared && return_proved(pc)) {
+            store_callbacks.insert(pc);
+            defer_callback(pc);
+        }
+    }
+    // An exact tagged record may pair a proved shared-global callback with a
+    // return-proved update, including BX LR. This does not propagate globals
+    // from new callbacks or recursively qualify adjacent pointer-shaped words.
+    if(!store_callbacks.empty()) for(std::size_t off=0;off+8u<=rom_size_;off+=4u) {
+        const uint32_t slot=rom_base_+static_cast<uint32_t>(off);
+        const uint32_t first=read_u32(slot),second=read_u32(slot+4u),target=second & ~1u;
+        if(!(first & 1u) || !(second & 1u) || first==second ||
+           !store_callbacks.count(first & ~1u) || target<aot_scan_start_ ||
+           uint64_t(target)+2u>aot_scan_end_ || addr_in_data_range(target)) continue;
+        if(return_proved(target)) defer_callback(target);
     }
     return out;
 }
@@ -2924,8 +2953,24 @@ void FunctionFinder::run(std::size_t max_functions) {
     }
 
     std::size_t pos = 0;
-    while (pos < worklist.size() &&
+    while ((pos < worklist.size() || !deferred_store_callbacks_.empty()) &&
            (functions_.size() < max_functions || required_remaining > 0)) {
+        if(pos==worklist.size()) {
+            // Establish the existing reachable closure before adding these
+            // conservative metadata roots. Preseeding an already reachable
+            // callback would otherwise change its walk's required/speculative
+            // provenance and could suppress discovery from that real caller.
+            for(const auto& seed:deferred_store_callbacks_) {
+                const uint64_t key=visit_key(seed.addr,seed.mode);
+                if(!enqueued.insert(key).second) continue;
+                aot_seen_seed_keys_.insert(key);
+                origin_mask[key]|=2u;
+                worklist.push_back({seed,false});
+                ++stats_.aot_callback_seeds;
+            }
+            deferred_store_callbacks_.clear();
+            continue;
+        }
         // Safety net: discovery must converge (worklist drains toward
         // empty). A runaway past this bound means a detector or decoder
         // change is seeding garbage — halt loudly rather than exhaust

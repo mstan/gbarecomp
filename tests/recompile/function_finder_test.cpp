@@ -159,6 +159,50 @@ static bool referenced_callback_prefix(unsigned fault) {
     return finder.collisions().empty();
 }
 
+static bool shared_ram_store_callbacks(unsigned fault) {
+    std::vector<uint8_t> image(0x1200,0);
+    put16(image,0,0x4770);
+    put32(image,0x20,fault==6 ? 0 : kBase+0xA00);
+    put32(image,0xA00,kBase+0x101);put32(image,0xA04,kBase+0x181);
+    // An authoritative referenced descriptor anchors both actual store roots.
+    put16(image,0x100,0x4803);put16(image,0x102,0x6001);
+    put16(image,0x104,0x4A03);put16(image,0x106,fault==5 ? 0x6811 : 0x6011);
+    put16(image,0x108,0x4770);
+    put32(image,0x110,0x03004000);put32(image,0x114,0x03005000);
+    put16(image,0x180,0xB500);
+    for(unsigned at=0x182;at<0x18A;at+=2)put16(image,at,0x2100);
+    put16(image,0x18A,0xBD00);
+    // The framed callback reads another global, but stores the anchored root.
+    put32(image,0x24,kBase+(fault==4 ? 0x400 : 0x401));
+    put16(image,0x400,0xB510);put16(image,0x402,0x4B07);
+    put16(image,0x404,fault==7 ? 0x2500 : 0x4806);
+    put16(image,0x406,0x6800);
+    put16(image,0x408,fault==3 ? 0x681B : fault==12 ? 0x3304 : 0x2100);
+    put16(image,0x40A,fault==2 ? 0x8818 : 0x8058);
+    put16(image,0x40C,fault==8 ? 0xB081 : 0x2100);
+    put16(image,0x40E,0xBC10);put16(image,0x410,0xBC01);put16(image,0x412,0x4700);
+    put32(image,0x420,fault==1 ? 0x03007000 : fault==10 ? kBase+0xB00 : 0x03005000);
+    // A leaf reads a camera global first, then writes a different shared root.
+    put16(image,0x500,0x4A07);put16(image,0x502,0x6810);
+    put16(image,0x504,0x4907);put16(image,0x506,0x8188);
+    put16(image,0x508,fault==9 ? 0x4700 : 0x4770);
+    put32(image,0x520,0x03006000);put32(image,0x524,0x03005000);
+    // Only the accepted first field can give this exact paired no-op its type.
+    put32(image,0xB00,kBase+0x501);put32(image,0xB04,kBase+(fault==13 ? 0x600 : 0x601));
+    put16(image,0x600,0x4770);
+    gbarecomp::FunctionFinder finder(image.data(),image.size(),kBase);
+    finder.set_speculative_literal_harvest(false);
+    finder.set_aot_scan_range(kBase+0x100,kBase+(fault==11 ? 0x400 : 0x900));
+    finder.add_seed({kBase,gbarecomp::CpuMode::Thumb,"entry"});finder.run(128);
+    const bool anchored=fault!=5 && fault!=6 && fault!=11;
+    const bool frame=anchored && (fault==0 || fault==9 || fault==12 || fault==13);
+    const bool leaf=anchored && fault!=9;
+    return has_function(finder,kBase+0x400,gbarecomp::CpuMode::Thumb)==frame &&
+        has_function(finder,kBase+0x500,gbarecomp::CpuMode::Thumb)==leaf &&
+        has_function(finder,kBase+0x600,gbarecomp::CpuMode::Thumb)==(leaf && fault!=13) &&
+        finder.collisions().empty();
+}
+
 static bool callbacks_across_proved_calls(unsigned fault) {
     std::vector<std::uint8_t> image(0x2400,0);
     auto bl = [&](unsigned pc,unsigned target) {
@@ -1080,6 +1124,10 @@ int main() {
     }
     for(unsigned fault=0;fault<=8;++fault) if(!sparse_byte_word_callbacks(fault)) {
         std::fprintf(stderr,"Finite sparse word callbacks failed: fault=%u\n",fault);
+        return 1;
+    }
+    for(unsigned fault=0;fault<=13;++fault) if(!shared_ram_store_callbacks(fault)) {
+        std::fprintf(stderr,"Shared RAM-store callbacks failed: fault=%u\n",fault);
         return 1;
     }
     for (unsigned fault=0; fault<8; ++fault) {

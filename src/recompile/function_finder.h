@@ -357,6 +357,7 @@ private:
     std::vector<FunctionSeed> collect_code_copy_seeds() const;
     bool is_thumb_ram_leaf(uint32_t addr, uint32_t* ram_global = nullptr) const;
     bool is_thumb_callback_leaf(uint32_t addr) const;
+    std::vector<uint32_t> thumb_ram_store_roots(uint32_t addr) const;
     void harvest_stored_callback(uint32_t raw);
     void harvest_contextual_callbacks(uint32_t callee, uint8_t known_mask,
                                       const std::array<uint32_t, 4>& arguments,
@@ -384,6 +385,7 @@ private:
     bool callback_context_budget_reported_ = false;
     std::unordered_map<uint64_t, ThumbCallEffects> thumb_call_effects_;
     std::unordered_set<uint64_t> thumb_call_effects_active_;
+    std::vector<FunctionSeed> deferred_store_callbacks_;
 };
 
 }  // namespace gbarecomp

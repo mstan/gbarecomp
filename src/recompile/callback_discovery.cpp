@@ -176,6 +176,70 @@ FunctionFinder::ThumbCallEffects FunctionFinder::thumb_call_effects(uint32_t ent
     return result;
 }
 
+std::vector<uint32_t> FunctionFinder::thumb_ram_store_roots(uint32_t entry) const {
+    struct Value { bool known=false; uint32_t value=0, root=0; };
+    std::array<Value,16> regs{};
+    std::set<uint32_t> roots;
+    if ((entry & 1u) || entry<aot_scan_start_ || entry>=aot_scan_end_) return {};
+    // Only exact destinations in the initial basic block contribute. A literal
+    // used for a read, or a pointer loaded from mutable RAM, is not a store root.
+    // This fixed rejection budget never declares a function or table extent.
+    for(uint32_t pc=entry;uint64_t(pc)+2u<=uint64_t(entry)+64u;pc+=2u) {
+        if(uint64_t(pc)+2u>aot_scan_end_ || !can_read_at(pc,2) || addr_in_data_range(pc)) break;
+        const auto op=armv4t::ThumbDecoder::decode(read_u16(pc),pc);
+        if(op.is_undefined || op.is_branch || op.is_call || op.op==armv4t::IrOp::SWI) break;
+        auto operand = [&]() -> Value {
+            if(op.op2.kind==armv4t::Op2::Kind::Imm) return {true,op.op2.imm_value,0};
+            if(op.op2.kind==armv4t::Op2::Kind::Shifted && !op.op2.shifted.by_register &&
+               op.op2.shifted.type==armv4t::ShiftType::LSL && op.op2.shifted.imm_or_rs==0 &&
+               op.op2.shifted.rm<15) return regs[op.op2.shifted.rm];
+            return {};
+        };
+        if(op.op==armv4t::IrOp::STM && op.block.rn==13 && op.block.pre_indexed &&
+           !op.block.add && op.block.writeback) { regs[13]={};continue; }
+        if(op.op==armv4t::IrOp::LDM || op.op==armv4t::IrOp::STM) break;
+        if(op.op==armv4t::IrOp::STR || op.op==armv4t::IrOp::STRB || op.op==armv4t::IrOp::STRH) {
+            if(op.mem.writeback || !op.mem.pre_indexed || op.mem.rn>=15) break;
+            const auto base=regs[op.mem.rn];
+            bool known=base.known;
+            uint32_t offset=op.mem.imm_offset;
+            if(op.mem.by_register) {
+                const auto rm=op.mem.reg_offset.rm;
+                known=known && rm<15 && regs[rm].known &&
+                    !op.mem.reg_offset.by_register && op.mem.reg_offset.type==armv4t::ShiftType::LSL &&
+                    op.mem.reg_offset.imm_or_rs==0;
+                if(known) offset=regs[rm].value;
+            }
+            const int64_t address=int64_t(base.value)+(op.mem.add ? int64_t(offset) : -int64_t(offset));
+            const uint32_t width=op.op==armv4t::IrOp::STR ? 4u : op.op==armv4t::IrOp::STRH ? 2u : 1u;
+            if(known && base.root && address>=0x02000000 && address+width<=0x04000000 &&
+               (address & (width-1u))==0) roots.insert(base.root);
+            continue;
+        }
+        if(op.op==armv4t::IrOp::CMP || op.op==armv4t::IrOp::CMN ||
+           op.op==armv4t::IrOp::TST || op.op==armv4t::IrOp::TEQ) continue;
+        Value value{};
+        if(op.op==armv4t::IrOp::LDR && op.mem.rn==15 && !op.mem.by_register && !op.mem.writeback) {
+            const uint32_t base=(pc+4u)&~3u;
+            const uint32_t literal=op.mem.add ? base+op.mem.imm_offset : base-op.mem.imm_offset;
+            if(can_read_at(literal,4)) {
+                value={true,read_u32(literal),0};
+                if(value.value>=0x02000000u && value.value<0x04000000u) value.root=value.value;
+            }
+        } else if(op.op==armv4t::IrOp::MOV) value=operand();
+        else if((op.op==armv4t::IrOp::ADD || op.op==armv4t::IrOp::SUB) && op.rn<15) {
+            const auto left=regs[op.rn],right=operand();
+            if(left.known && right.known && !right.root) {
+                value={true,op.op==armv4t::IrOp::ADD ? left.value+right.value : left.value-right.value,left.root};
+                if(value.value<0x02000000u || value.value>=0x04000000u) value.root=0;
+            }
+        }
+        if(op.rd>=15) break;
+        regs[op.rd]=value; // other loads/arithmetic retire the old destination
+    }
+    return {roots.begin(),roots.end()};
+}
+
 bool FunctionFinder::is_thumb_callback_leaf(uint32_t entry) const {
     if ((entry & 1u) || entry < aot_scan_start_ ||
         uint64_t(entry)+2u > aot_scan_end_) return false;
