@@ -2180,6 +2180,8 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                         const int64_t slot=int64_t(pend.base)+index*pend.stride;
                         if (slot<0 || slot>UINT32_MAX || !can_read_at(uint32_t(slot),4)) continue;
                         const uint32_t raw=read_u32(uint32_t(slot)),target=raw & ~1u;
+                        if(pend.finite_sparse && (target<aot_scan_start_ ||
+                            uint64_t(target)+12u>aot_scan_end_)) continue;
                         const CpuMode mode=(raw & 1u) ? CpuMode::Thumb : CpuMode::Arm;
                         const bool prologue=mode==CpuMode::Thumb
                             ? is_thumb_func_prologue(target) : is_arm_func_prologue(target);
@@ -2272,7 +2274,10 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 pend.active=true; pend.base=base; pend.stride=address.stride;
                 pend.dest=ins.rd; pend.record_slots=true;
                 pend.finite_sparse=false;pend.signed_index=address.signed_index;
-            } else if((base & 3u)==0 && address.stride==4u && pend.active && pend.base==base && !pend.count_known) {
+            } else if(aot_scan_start_<aot_scan_end_ && (base & 3u)==0 && address.stride==4u &&
+                      pend.active && pend.base==base && !pend.count_known) {
+                // Additional sparse callback admission requires an explicit
+                // executable span; every candidate target stays inside it.
                 pend.finite_sparse=true;pend.signed_index=address.signed_index;
             }
         }
@@ -2292,7 +2297,8 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
                 (shift.type==armv4t::ShiftType::LSR || shift.type==armv4t::ShiftType::ASR))
                 next_domain={true,shift.type==armv4t::ShiftType::ASR};
         }
-        if ((ins.op==armv4t::IrOp::LDRB || ins.op==armv4t::IrOp::LDRSB) && ins.rd<15) {
+        if ((ins.op==armv4t::IrOp::LDRB ||
+             (ins.op==armv4t::IrOp::LDRSB && aot_scan_start_<aot_scan_end_)) && ins.rd<15) {
             next_byte={true,pc,1u,ins.op==armv4t::IrOp::LDRSB};
         } else if (record_op.kind==armv4t::Op2::Kind::Shifted &&
                    !record_op.shifted.by_register &&

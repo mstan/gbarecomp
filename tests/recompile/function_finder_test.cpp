@@ -257,7 +257,8 @@ static bool sparse_byte_word_callbacks(unsigned fault) {
         put16(image,pc+10,0xBD00);
     }
     gbarecomp::FunctionFinder finder(image.data(),image.size(),kBase);
-    finder.set_speculative_literal_harvest(false);finder.set_aot_scan_range(kBase,kBase+0x1200);
+    finder.set_speculative_literal_harvest(false);
+    if(fault!=7)finder.set_aot_scan_range(kBase,kBase+(fault==8 ? 0x800u : 0x1200u));
     finder.add_seed({kBase,gbarecomp::CpuMode::Thumb,"byte-word-array"});finder.run(128);
     const bool valid=fault==0 || fault==2;
     return has_function(finder,kBase+0x800,gbarecomp::CpuMode::Thumb)==valid &&
@@ -1077,7 +1078,7 @@ int main() {
         std::fprintf(stderr,"Callbacks across proved calls failed: fault=%u\n",fault);
         return 1;
     }
-    for(unsigned fault=0;fault<=6;++fault) if(!sparse_byte_word_callbacks(fault)) {
+    for(unsigned fault=0;fault<=8;++fault) if(!sparse_byte_word_callbacks(fault)) {
         std::fprintf(stderr,"Finite sparse word callbacks failed: fault=%u\n",fault);
         return 1;
     }
