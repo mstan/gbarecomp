@@ -203,6 +203,45 @@ static bool shared_ram_store_callbacks(unsigned fault) {
         finder.collisions().empty();
 }
 
+static bool paired_ram_initializers(unsigned fault) {
+    std::vector<uint8_t> image(0x1000,0);
+    put16(image,0,0x4770);
+    // An independently referenced descriptor corroborates two RAM stores.
+    put32(image,0x20,fault==10 ? 0 : kBase+0xE00);
+    put32(image,0xE00,kBase+0x101);put32(image,0xE04,kBase+0x181);
+    put16(image,0x100,0x4803);put16(image,0x102,0x8001);
+    put16(image,0x104,0x4A03);put16(image,0x106,0x8011);put16(image,0x108,0x4770);
+    put32(image,0x110,0x03004000);put32(image,0x114,0x03005000);
+    put16(image,0x180,0xB500);
+    for(unsigned at=0x182;at<0x18A;at+=2)put16(image,at,0x2100);
+    put16(image,0x18A,0xBD00);
+    // This exact record pairs a framed initializer with a RAM-global leaf.
+    // Its direct callee uses SWI: it has no valid call-effect summary. Entry
+    // discovery must not assume that summary or propagate register constants.
+    put32(image,0xE40,kBase+(fault==4 ? 0x400 : 0x401));
+    put32(image,0xE44,kBase+(fault==5 ? 0x500 : 0x501));
+    put16(image,0x400,fault==6 ? 0x2000 : 0xB510);
+    put16(image,0x402,0x4807);put16(image,0x404,0x2100);put16(image,0x406,0x8001);
+    put16(image,0x408,0x4A06);put16(image,0x40A,fault==1 ? 0x8811 : 0x8011);
+    const uint32_t delta=0x700u-(0x40Cu+4u);
+    put16(image,0x40C,uint16_t(0xF000u|((delta>>12)&0x7FFu)));
+    put16(image,0x40E,uint16_t(0xF800u|((delta>>1)&0x7FFu)));
+    put16(image,0x410,0xBC10);put16(image,0x412,0xBC01);put16(image,0x414,0x4700);
+    put32(image,0x420,0x03004000);put32(image,0x424,fault==2 ? 0x03006000 : 0x03005000);
+    put16(image,0x500,0x4803);put16(image,0x502,0x2100);
+    put16(image,0x504,fault==3 ? 0x8801 : 0x8001);put16(image,0x506,0x4770);
+    put32(image,0x510,fault==9 ? 0x03006000 : 0x03004000);
+    put16(image,0x700,0xDF06);put16(image,0x702,0x4770);
+    gbarecomp::FunctionFinder finder(image.data(),image.size(),kBase);
+    finder.set_speculative_literal_harvest(false);
+    if(fault!=7)finder.set_aot_scan_range(kBase+0x100,kBase+(fault==8 ? 0x400 : 0x900));
+    if(fault!=10)finder.add_data_range(kBase+0xE00,kBase+0xE08,"descriptor");
+    if(fault==11)finder.add_data_range(kBase+0x400,kBase+0x440,"payload");
+    finder.add_seed({kBase,gbarecomp::CpuMode::Thumb,"entry"});finder.run(128);
+    return has_function(finder,kBase+0x400,gbarecomp::CpuMode::Thumb)==(fault==0) &&
+        finder.collisions().empty();
+}
+
 static bool branch_callbacks_preserve_existing_budget() {
     // A bounded extension must not evict a real callback near the end of the
     // existing call-site budget. A full byte-domain workload and 256 extra
@@ -1256,6 +1295,10 @@ int main() {
     }
     for(unsigned fault=0;fault<=13;++fault) if(!shared_ram_store_callbacks(fault)) {
         std::fprintf(stderr,"Shared RAM-store callbacks failed: fault=%u\n",fault);
+        return 1;
+    }
+    for(unsigned fault=0;fault<=11;++fault) if(!paired_ram_initializers(fault)) {
+        std::fprintf(stderr,"Paired RAM initializer callbacks failed: fault=%u\n",fault);
         return 1;
     }
     if (!branch_callbacks_preserve_existing_budget()) {

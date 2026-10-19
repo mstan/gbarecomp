@@ -685,6 +685,32 @@ std::vector<FunctionSeed> FunctionFinder::collect_referenced_callback_seeds() {
            uint64_t(target)+2u>aot_scan_end_ || addr_in_data_range(target)) continue;
         if(return_proved(target)) defer_callback(target);
     }
+    // A framed initializer can call a complex helper for which the register
+    // effect analysis has no summary. Its exact paired RAM-global leaf still
+    // corroborates an entry when the initializer stores that same root AND
+    // another independently anchored RAM root. This supplies code provenance,
+    // not a call-effect summary: unknown callees remain unknown, and these
+    // pairs cannot introduce globals or recursively qualify adjacent records.
+    if(!callback_globals.empty() && store_globals.size()>=2u)
+        for(std::size_t off=0;off+8u<=rom_size_;off+=4u) {
+            const uint32_t slot=rom_base_+static_cast<uint32_t>(off);
+            const uint32_t first=read_u32(slot),second=read_u32(slot+4u);
+            const uint32_t target=first & ~1u,update=second & ~1u;
+            if(!(first & 1u) || !(second & 1u) || first==second ||
+               target<aot_scan_start_ || uint64_t(target)+12u>aot_scan_end_ ||
+               update<aot_scan_start_ || uint64_t(update)+2u>aot_scan_end_ ||
+               addr_in_data_range(target) || !is_thumb_func_prologue(target) ||
+               !looks_like_code(target,CpuMode::Thumb,true)) continue;
+            const uint32_t ram=leaf_global(update);
+            if(!ram || !callback_globals.count(ram)) continue;
+            const auto roots=thumb_ram_store_roots(target);
+            if(std::find(roots.begin(),roots.end(),ram)==roots.end()) continue;
+            const auto shared=std::count_if(roots.begin(),roots.end(),[&](uint32_t root) {
+                return store_globals.count(root)!=0;
+            });
+            if(shared<2) continue;
+            defer_callback(target);emit_callback(update);
+        }
     return out;
 }
 
