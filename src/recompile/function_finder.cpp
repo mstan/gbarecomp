@@ -19,9 +19,11 @@
 #include "function_finder.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 
 #include "arm_decode.h"
 #include "thumb_decode.h"
@@ -750,6 +752,177 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         uint32_t value = 0;
     };
     RegConst reg_const[16];
+
+    struct CopyLoopEntry {
+        uint32_t pc;
+        std::array<RegConst, 16> regs;
+    };
+    std::deque<CopyLoopEntry> copy_loop_entries;
+    auto harvest_callback_copy = [&](uint32_t start, uint32_t backedge,
+                                     const std::array<RegConst, 16>& initial) {
+        // Simulate only a short, straight-line ROM-to-RAM word-copy loop.
+        // Every operand must be known, and the actual CMP/backedge must
+        // terminate within the analysis budget. The budget is a rejection
+        // limit, never a guessed table length. No RAM is read or written.
+        if (aot_scan_start_ >= aot_scan_end_ || start >= backedge ||
+            backedge - start > 64u) return;
+        std::vector<armv4t::Instr> body;
+        for (uint32_t pos = start; pos <= backedge; pos += 2u) {
+            if (!can_read_walk_at(pos, 2) || addr_in_data_range(pos)) return;
+            auto decoded = armv4t::ThumbDecoder::decode(read_walk_u16(pos), pos);
+            if (decoded.is_undefined) return;
+            if (pos != backedge && (decoded.is_branch || decoded.is_call ||
+                                    decoded.cond != armv4t::Cond::AL)) return;
+            body.push_back(decoded);
+        }
+        const auto& branch = body.back();
+        if (branch.op != armv4t::IrOp::B || branch.branch_target != start ||
+            body.size() < 3 || body[body.size()-2].op != armv4t::IrOp::CMP)
+            return;
+        switch (branch.cond) {
+            case armv4t::Cond::CC: case armv4t::Cond::LS:
+            case armv4t::Cond::LT: case armv4t::Cond::LE:
+            case armv4t::Cond::NE: break;
+            default: return;
+        }
+        auto regs = initial;
+        std::array<uint32_t, 16> origin{};
+        struct CopyWord { uint32_t source, destination, value; };
+        std::vector<CopyWord> words;
+        bool terminated = false;
+        for (unsigned iteration = 0; iteration < 256; ++iteration) {
+            unsigned loads = 0, stores = 0;
+            uint32_t lhs = 0, rhs = 0;
+            auto get_reg = [&](uint8_t reg, uint32_t pc_value, uint32_t& value) {
+                if (reg == 15) { value = (pc_value + 4u) & ~3u; return true; }
+                if (reg >= 16 || !regs[reg].known) return false;
+                value = regs[reg].value;
+                return true;
+            };
+            auto operand = [&](const armv4t::Instr& op, uint32_t& value) {
+                if (op.op2.kind == armv4t::Op2::Kind::Imm) {
+                    value = op.op2.imm_value;
+                    return true;
+                }
+                if (op.op2.kind != armv4t::Op2::Kind::Shifted ||
+                    op.op2.shifted.by_register ||
+                    !get_reg(op.op2.shifted.rm, op.pc, value)) return false;
+                const unsigned shift = op.op2.shifted.imm_or_rs;
+                if (shift >= 32u) return false;
+                switch (op.op2.shifted.type) {
+                    case armv4t::ShiftType::LSL: value <<= shift; return true;
+                    case armv4t::ShiftType::LSR:
+                        if (!shift) return false;
+                        value >>= shift; return true;
+                    case armv4t::ShiftType::ASR:
+                        if (!shift) return false;
+                        value = (value >> shift) | ((value & 0x80000000u)
+                            ? (~uint32_t{0} << (32u-shift)) : 0u);
+                        return true;
+                    default: return false;
+                }
+            };
+            auto address = [&](const armv4t::Instr& op, uint32_t& value) {
+                if (!op.mem.pre_indexed || op.mem.writeback ||
+                    !get_reg(op.mem.rn, op.pc, value))
+                    return false;
+                uint32_t offset = op.mem.imm_offset;
+                if (op.mem.by_register) {
+                    const auto& shift = op.mem.reg_offset;
+                    if (shift.by_register || shift.type != armv4t::ShiftType::LSL ||
+                        shift.imm_or_rs >= 32u || !get_reg(shift.rm, op.pc, offset))
+                        return false;
+                    offset <<= shift.imm_or_rs;
+                }
+                value = op.mem.add ? value + offset : value - offset;
+                return (value & 3u) == 0;
+            };
+            for (std::size_t index = 0; index + 1 < body.size(); ++index) {
+                const auto& op = body[index];
+                uint32_t value = 0, left = 0;
+                if (op.op == armv4t::IrOp::CMP) {
+                    if (index + 2 != body.size() ||
+                        !get_reg(op.rn, op.pc, lhs) || !operand(op, rhs)) return;
+                } else if (op.op == armv4t::IrOp::STR) {
+                    uint32_t destination = 0;
+                    if (op.rd >= 15 || !regs[op.rd].known || !origin[op.rd] ||
+                        !address(op, destination) || ++stores != 1) return;
+                    const bool ram = (destination >= 0x02000000u && destination <= 0x0203FFFCu) ||
+                                     (destination >= 0x03000000u && destination <= 0x03007FF8u);
+                    if (!ram) return; // IRQ-vector/MMIO writes are not array copies.
+                    words.push_back({origin[op.rd], destination, regs[op.rd].value});
+                } else if (op.op == armv4t::IrOp::LDR) {
+                    uint32_t source = 0;
+                    if (op.rd >= 13 || !address(op, source) ||
+                        !addr_in_rom(source) || !can_read_at(source, 4)) return;
+                    regs[op.rd] = {true, read_u32(source)};
+                    origin[op.rd] = op.mem.rn == 15 ? 0u : source;
+                    if (origin[op.rd] && ++loads != 1) return;
+                } else if (op.op == armv4t::IrOp::MOV) {
+                    if (op.rd >= 13 || !operand(op, value)) return;
+                    const bool copy = op.op2.kind == armv4t::Op2::Kind::Shifted &&
+                        op.op2.shifted.type == armv4t::ShiftType::LSL &&
+                        op.op2.shifted.imm_or_rs == 0;
+                    const uint32_t source = copy ? origin[op.op2.shifted.rm] : 0u;
+                    regs[op.rd] = {true, value};
+                    origin[op.rd] = source;
+                } else if (op.op == armv4t::IrOp::ADD || op.op == armv4t::IrOp::SUB) {
+                    if (op.rd >= 13 || !get_reg(op.rn, op.pc, left) ||
+                        !operand(op, value)) return;
+                    regs[op.rd] = {true, op.op == armv4t::IrOp::ADD ? left + value : left - value};
+                    origin[op.rd] = 0;
+                } else {
+                    return;
+                }
+            }
+            if (loads != 1 || stores != 1) return;
+            if (words.size() > 1) {
+                const auto& prev = words[words.size()-2];
+                const auto& next = words.back();
+                if (uint64_t(prev.source)+4u != next.source ||
+                    uint64_t(prev.destination)+4u != next.destination) return;
+            }
+            const uint32_t result = lhs - rhs;
+            const bool n = (result >> 31) != 0, z = result == 0, c = lhs >= rhs;
+            const bool v = (((lhs ^ rhs) & (lhs ^ result)) >> 31) != 0;
+            bool taken = false;
+            switch (branch.cond) {
+                case armv4t::Cond::CC: taken = !c; break;
+                case armv4t::Cond::LS: taken = !c || z; break;
+                case armv4t::Cond::LT: taken = n != v; break;
+                case armv4t::Cond::LE: taken = z || n != v; break;
+                case armv4t::Cond::NE: taken = !z; break;
+                default: return;
+            }
+            if (!taken) { terminated = true; break; }
+        }
+        if (!terminated || words.size() < 2) return;
+        // Two independent PUSH-LR entries corroborate a callback array.
+        // RAM/null/payload words neither seed code nor truncate its proven
+        // copy extent. Leaf Thumb callbacks retain their actual pointer tag.
+        std::unordered_set<uint32_t> prologues;
+        for (const auto& word : words) {
+            const uint32_t target = word.value & ~1u;
+            if ((word.value & 1u) && target >= aot_scan_start_ &&
+                uint64_t(target)+12u <= aot_scan_end_ && addr_in_rom(target) &&
+                is_thumb_func_prologue(target) && looks_like_code(target, CpuMode::Thumb, true))
+                prologues.insert(target);
+        }
+        if (prologues.size() < 2) return;
+        std::size_t emitted = 0;
+        for (const auto& word : words) {
+            const uint32_t target = word.value & ~1u;
+            if (!(word.value & 1u) || target < aot_scan_start_ ||
+                uint64_t(target)+12u > aot_scan_end_ || !addr_in_rom(target) ||
+                !looks_like_code(target, CpuMode::Thumb, true) ||
+                !aot_seen_seed_keys_.insert(visit_key(target, CpuMode::Thumb)).second)
+                continue;
+            aot_pointer_seeds_.push_back({target, CpuMode::Thumb, "", 0, true});
+            ++stats_.aot_callback_seeds;
+            ++emitted;
+        }
+        if (emitted) ++stats_.aot_callback_objects;
+    };
 
     // Jump-table address tracking (MC-HP-000). The compiler builds a
     // dispatch like:  LDR Rb,=table ; LSL Ri,Ri,#k ; ADD Ra,Ri,Rb ;
@@ -1508,6 +1681,26 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             ++stats_.undefined_instr_count;
             if (next_switch_block()) continue;
             break;
+        }
+
+        if (entry_mode == CpuMode::Thumb && entry_addr == entry_source &&
+            addr_in_rom(pc)) {
+            if (ins.op == armv4t::IrOp::B && ins.cond != armv4t::Cond::AL &&
+                ins.branch_target < pc) {
+                for (const auto& saved : copy_loop_entries) {
+                    if (saved.pc == ins.branch_target) {
+                        harvest_callback_copy(saved.pc, pc, saved.regs);
+                        break;
+                    }
+                }
+            }
+            if (ins.is_branch || ins.is_call) copy_loop_entries.clear();
+            else {
+                CopyLoopEntry saved{pc, {}};
+                std::copy(std::begin(reg_const), std::end(reg_const), saved.regs.begin());
+                copy_loop_entries.push_back(saved);
+                if (copy_loop_entries.size() > 32) copy_loop_entries.pop_front();
+            }
         }
 
         if (entry_mode == CpuMode::Thumb) {

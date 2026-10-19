@@ -140,6 +140,60 @@ static bool bios_irq_callback(unsigned fault) {
     return has_function(finder, kBase + 0x40, mode) == (fault == 0 || fault == 6);
 }
 
+static bool bounded_callback_copy(unsigned fault) {
+    std::vector<std::uint8_t> rom(0x240, 0);
+    const uint16_t code[] = {
+        0x2200, 0x4C0F, 0x4B0F, // zero counter, RAM destination, ROM source
+        0x0411, 0x1409, 0x0088, // signed16 counter, word offset
+        0x1902, 0x18C0, 0x6800, // form both element addresses; load word
+        0x6010, 0x3101, 0x0409, // store it; increment counter
+        0x0C0A, 0x1409, 0x2904, // narrow16; signed bound4
+        0xDDF2, 0x4770,         // BLE loop; BX LR
+    };
+    for (unsigned i = 0; i < sizeof(code)/sizeof(code[0]); ++i)
+        put16(rom, 2*i, code[i]);
+    put32(rom, 0x40, 0x03001000);
+    put32(rom, 0x44, kBase + 0x100);
+    put32(rom, 0x100, 0x03000441); // RAM callback must not truncate the table
+    put32(rom, 0x104, kBase + 0x181);
+    put32(rom, 0x108, kBase + 0x1A1);
+    put32(rom, 0x10C, 0);          // null inside the proved copy extent
+    put32(rom, 0x110, kBase + 0x1C1);
+    put32(rom, 0x114, kBase + 0x1E1); // adjacent pointer is NOT copied
+    for (unsigned off : {0x180u, 0x1A0u, 0x1C0u, 0x1E0u}) {
+        put16(rom, off, off == 0x1C0 ? 0x2007 : 0xB500);
+        for (unsigned i = 2; i < 10; i += 2) put16(rom, off+i, 0x46C0);
+        put16(rom, off+10, off == 0x1C0 ? 0x4770 : 0xBD00);
+    }
+    if (fault == 1) put16(rom, 0, 0x1C3A); // unknown incoming counter
+    if (fault == 2) put16(rom, 0x12, 0x2000); // loaded value clobbered, no copy
+    if (fault == 3) put16(rom, 0x12, 0x6011); // store counter, not loaded word
+    if (fault == 4) put16(rom, 0x12, 0x7010); // byte store
+    if (fault == 5) put32(rom, 0x44, 0x02001000); // unknown RAM source
+    if (fault == 6) put32(rom, 0x40, kBase + 0x140); // non-RAM destination
+    if (fault == 7) put16(rom, 0x14, 0x3100); // loop does not terminate
+    if (fault == 9) put16(rom, 0x1A0, 0x46C0); // no second prologue witness
+    if (fault == 11) put16(rom, 0x10, 0x8800); // halfword load
+    if (fault == 12) put16(rom, 0x1C, 0x2903); // leaf lies beyond exact copy count
+    if (fault == 14) put16(rom, 0x14, 0x3102); // non-contiguous transfer
+    if (fault == 15) put16(rom, 0x16, 0xE000); // branch inside body
+    if (fault == 16) put32(rom, 0x44, kBase + 0x230); // copy exceeds image
+    if (fault == 17) put32(rom, 0x44, kBase + 0x101); // unaligned source
+    if (fault == 18) put32(rom, 0x40, 0x03007FF8); // destination crosses IRQ vector
+    gbarecomp::FunctionFinder finder(rom.data(), rom.size(), kBase);
+    finder.set_speculative_literal_harvest(false);
+    if (fault != 13) finder.set_aot_scan_range(kBase+0x180,
+        kBase+(fault == 10 ? 0x1C0 : 0x240));
+    if (fault == 8) finder.add_data_range(kBase+0x180, kBase+0x1B0, "data");
+    finder.add_seed({kBase, gbarecomp::CpuMode::Thumb, "copy_callbacks"});
+    finder.run(64);
+    const bool valid = fault == 0 || fault == 10 || fault == 12;
+    return has_function(finder, kBase+0x180, gbarecomp::CpuMode::Thumb) == valid &&
+           has_function(finder, kBase+0x1A0, gbarecomp::CpuMode::Thumb) == valid &&
+           has_function(finder, kBase+0x1C0, gbarecomp::CpuMode::Thumb) == (fault == 0) &&
+           !has_function(finder, kBase+0x1E0, gbarecomp::CpuMode::Thumb);
+}
+
 static bool literal_callback(unsigned fault) {
     std::vector<std::uint8_t> rom(0x100, 0);
     put16(rom, 0, 0x4800); // callback passed as an argument, no local BX consumer
@@ -434,6 +488,12 @@ bool callback_table_transfer(bool thumb, unsigned fault = 0) {
 }
 
 int main() {
+    for (unsigned fault = 0; fault < 19; ++fault) {
+        if (!bounded_callback_copy(fault)) {
+            std::fprintf(stderr, "Bounded callback copy discovery failed: fault=%u\n", fault);
+            return 1;
+        }
+    }
     for (unsigned fault = 0; fault < 10; ++fault) {
         if (!bios_irq_callback(fault)) {
             std::fprintf(stderr, "BIOS IRQ callback discovery failed: fault=%u\n", fault);
