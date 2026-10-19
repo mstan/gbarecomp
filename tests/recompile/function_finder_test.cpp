@@ -203,6 +203,87 @@ static bool shared_ram_store_callbacks(unsigned fault) {
         finder.collisions().empty();
 }
 
+static bool callback_constants_at_branch_joins(unsigned fault) {
+    std::vector<uint8_t> image(0x1200,0);
+    auto bl=[&](unsigned pc,unsigned target) {
+        const uint32_t delta=target-(pc+4u);
+        put16(image,pc,uint16_t(0xF000u|((delta>>12)&0x7FFu)));
+        put16(image,pc+2,uint16_t(0xF800u|((delta>>1)&0x7FFu)));
+    };
+    put16(image,0,0xB590);put16(image,2,0x2800);put16(image,4,0xD00C);
+    put16(image,6,fault==2 ? 0x1C07 : 0x270C);put16(image,8,0xE01A);
+    put16(image,0x20,fault==2 ? 0x1C07 : 0x270E);put16(image,0x22,0xE00D);
+    // Two distinct path-local R7 constants join before a bounded four-step loop.
+    put16(image,0x40,fault==1 ? 0x1C07 : fault==5 ? 0xDF00 : 0x2400);
+    put16(image,0x42,0x3401);put16(image,0x44,0x2C03);put16(image,0x46,0xD9FC);
+    put16(image,0x48,0x1C39);bl(0x4A,0x400);
+    put16(image,0x4E,0xBC90);put16(image,0x50,0xBC01);put16(image,0x52,0x4700);
+    put16(image,0x400,0x0089);put16(image,0x402,0x4A04);
+    put16(image,0x404,0x1851);put16(image,0x406,0x6808);
+    put16(image,0x408,0x4A03);put16(image,0x40A,0x6010);put16(image,0x40C,0x4770);
+    put32(image,0x414,kBase+0x800);put32(image,0x418,0x03001000);
+    put32(image,0x830,kBase+(fault==3 ? 0xA00 : 0xA01));
+    put32(image,0x838,kBase+(fault==3 ? 0xB00 : 0xB01));
+    for(unsigned pc:{0xA00u,0xB00u}) {
+        put16(image,pc,0xB500);
+        for(unsigned at=pc+2;at<pc+10;at+=2)put16(image,at,0x2000);
+        put16(image,pc+10,0xBD00);
+    }
+    gbarecomp::FunctionFinder finder(image.data(),image.size(),kBase);
+    finder.set_speculative_literal_harvest(false);
+    if(fault!=4)finder.set_aot_scan_range(kBase,kBase+(fault==6 ? 0xB00 : 0x1200));
+    if(fault==7)finder.add_data_range(kBase+0x830,kBase+0x83C,"callback-data");
+    finder.add_seed({kBase,gbarecomp::CpuMode::Thumb,"branch-join"});finder.run(128);
+    const bool valid=fault==0 || fault==6 || fault==7;
+    return has_function(finder,kBase+0xA00,gbarecomp::CpuMode::Thumb)==valid &&
+        has_function(finder,kBase+0xB00,gbarecomp::CpuMode::Thumb)==(valid && fault!=6) &&
+        finder.collisions().empty();
+}
+
+static bool masked_selector_at_branch_joins(unsigned fault) {
+    std::vector<uint8_t> image(0x1400,0);
+    put16(image,0,0xB510);put16(image,2,fault==10 ? 0x6819 : 0x6818);
+    const unsigned mask=fault==1 ? 3u : fault==2 ? 255u : fault==3 ? 0u : 10u;
+    put16(image,4,fault==4 ? 0x6819 : uint16_t((fault==10 ? 0x2000 : 0x2100)|mask));
+    put16(image,6,0x4A06);put16(image,8,0xE01A);put32(image,0x20,fault==5 ? 0x02001000 : kBase+0x800);
+    if(fault==11 || fault==12) {
+        // Inline LCG: MUL operands are IR Rm/Rs, not data-processing Op2.
+        put16(image,2,fault==12 ? 0x490A : 0x6819);
+        put16(image,4,0x4807);put16(image,6,0x4348);put16(image,8,0x4907);
+        put16(image,10,0x1840);put16(image,12,0x0C00);put16(image,14,0x210A);
+        put16(image,16,0x4A03);put16(image,18,0xE015);
+        put32(image,0x24,0x00196225);put32(image,0x28,0x3C6EF35F);put32(image,0x2C,1);
+    }
+    put16(image,0x40,0x4008);put16(image,0x42,0x0080);put16(image,0x44,0x1880);
+    put16(image,0x46,0x6801);put16(image,0x48,0xE01A);
+    put16(image,0x80,fault==6 ? 0x6819 : 0x1C20);
+    put16(image,0x82,0xF000);put16(image,0x84,0xF9BD);
+    put16(image,0x86,0xBC10);put16(image,0x88,0xBC01);put16(image,0x8A,0x4700);
+    put16(image,0x400,0x0089);put16(image,0x402,0x4A04);put16(image,0x404,0x1851);
+    put16(image,0x406,0x6808);put16(image,0x408,0x4A03);put16(image,0x40A,0x6010);put16(image,0x40C,0x4770);
+    put32(image,0x414,kBase+0x900);put32(image,0x418,0x03001000);
+    for(unsigned i=0;i<=10;++i)put32(image,0x800+i*4,48); // impossible mask values point at the fifth callback
+    const unsigned indices[4]={0,fault==1 ? 1u : 2u,fault==1 ? 2u : 8u,fault==1 ? 3u : 10u};
+    const unsigned states[5]={6,14,20,32,48};
+    for(unsigned i=0;i<4;++i)put32(image,0x800+indices[i]*4,states[i]);
+    for(unsigned i=0;i<5;++i) {
+        const unsigned pc=0xA00+i*0x40;
+        put32(image,0x900+states[i]*4,kBase+pc+(fault==8 ? 0u : 1u));
+        put16(image,pc,0xB500);for(unsigned at=pc+2;at<pc+10;at+=2)put16(image,at,0x2100);
+        put16(image,pc+10,0xBD00);
+    }
+    gbarecomp::FunctionFinder finder(image.data(),image.size(),kBase);
+    finder.set_speculative_literal_harvest(false);
+    if(fault!=7)finder.set_aot_scan_range(kBase,kBase+(fault==9 ? 0xAC0 : 0x1400));
+    finder.add_seed({kBase,gbarecomp::CpuMode::Thumb,"masked-state-selector"});finder.run(128);
+    const bool valid=fault==0 || fault==1 || fault==3 || fault==9 || fault==10 || fault==11 || fault==12;
+    for(unsigned i=0;i<4;++i) {
+        const bool expected=valid && (fault!=3 || i==0) && (fault!=9 || i<3) && (fault!=12 || i==2);
+        if(has_function(finder,kBase+0xA00+i*0x40,gbarecomp::CpuMode::Thumb)!=expected)return false;
+    }
+    return !has_function(finder,kBase+0xB00,gbarecomp::CpuMode::Thumb) && finder.collisions().empty();
+}
+
 static bool callbacks_across_proved_calls(unsigned fault) {
     std::vector<std::uint8_t> image(0x2400,0);
     auto bl = [&](unsigned pc,unsigned target) {
@@ -1128,6 +1209,14 @@ int main() {
     }
     for(unsigned fault=0;fault<=13;++fault) if(!shared_ram_store_callbacks(fault)) {
         std::fprintf(stderr,"Shared RAM-store callbacks failed: fault=%u\n",fault);
+        return 1;
+    }
+    for(unsigned fault=0;fault<=7;++fault) if(!callback_constants_at_branch_joins(fault)) {
+        std::fprintf(stderr,"Callback branch-join constants failed: fault=%u\n",fault);
+        return 1;
+    }
+    for(unsigned fault=0;fault<=12;++fault) if(!masked_selector_at_branch_joins(fault)) {
+        std::fprintf(stderr,"Masked selector branch joins failed: fault=%u\n",fault);
         return 1;
     }
     for (unsigned fault=0; fault<8; ++fault) {

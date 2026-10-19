@@ -1153,6 +1153,8 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
     std::size_t next_switch_target = 0;
     uint32_t block_start = pc;
     bool in_switch_block = false;
+    uint32_t callback_branch_start=pc;
+    bool callback_branch_constant=false;
 
     struct RegSym {
         bool    known = false;
@@ -1744,6 +1746,8 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             if (covered) continue;
             pc = block_start = target;
             in_switch_block = true;
+            callback_branch_start=pc;
+            callback_branch_constant=false;
             count = 0;  // retain the normal instruction limit per linear walk
             // Each case is a separate CFG entry. No constants, bounds, or
             // pending loads from the dispatcher dominate an arbitrary case.
@@ -1796,6 +1800,19 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
             ++stats_.undefined_instr_count;
             if (next_switch_block()) continue;
             break;
+        }
+
+        if(entry_mode==CpuMode::Thumb && entry_addr==entry_source && addr_in_rom(pc)) {
+            if(ins.op==armv4t::IrOp::MOV && ins.rd<13 &&
+               ins.op2.kind==armv4t::Op2::Kind::Imm) callback_branch_constant=true;
+            if(ins.op==armv4t::IrOp::B && ins.cond==armv4t::Cond::AL &&
+               ins.branch_target>pc && callback_branch_constant &&
+               pc>=callback_branch_start && pc-callback_branch_start<=64u) {
+                // Re-evaluate this predecessor's own instructions with every
+                // incoming register unknown. Constants may survive the join in
+                // this path only; none are assumed for other predecessors.
+                harvest_contextual_callbacks(callback_branch_start,0,{},0,true);
+            }
         }
 
         if (entry_mode == CpuMode::Thumb && ins.op == armv4t::IrOp::BL_prefix &&
@@ -2824,6 +2841,10 @@ void FunctionFinder::discover_one(uint32_t entry_addr, CpuMode entry_mode,
         }
 
         pc += step;
+        if(ins.is_branch || ins.is_call || ins.op==armv4t::IrOp::SWI) {
+            callback_branch_start=pc;
+            callback_branch_constant=false;
+        }
         if (ins.is_call || ins.op == armv4t::IrOp::SWI) {
             ++relative_epoch;
             relative.active = false;

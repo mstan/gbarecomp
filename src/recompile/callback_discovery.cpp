@@ -3,6 +3,7 @@
 #include "thumb_decode.h"
 #include <cstdio>
 #include <map>
+#include <bit>
 
 namespace gbarecomp {
 namespace {
@@ -318,20 +319,29 @@ void FunctionFinder::harvest_stored_callback(uint32_t raw) {
 
 void FunctionFinder::harvest_contextual_callbacks(
         uint32_t entry, uint8_t known_mask,
-        const std::array<uint32_t, 4>& arguments, unsigned depth) {
-    if (depth >= 16u || aot_scan_start_ >= aot_scan_end_ || !known_mask || (entry & 1u) ||
+        const std::array<uint32_t, 4>& arguments, unsigned depth, bool local_branch) {
+    if (depth >= 16u || aot_scan_start_ >= aot_scan_end_ || (!known_mask && !local_branch) || (entry & 1u) ||
         !addr_in_rom(entry) || !can_read_at(entry, 2) || addr_in_data_range(entry)) return;
     std::array<uint32_t, 6> key{entry, known_mask, 0, 0, 0, 0};
     for (unsigned r = 0; r < 4; ++r)
         if (known_mask & (1u << r)) key[2+r] = arguments[r];
-    if (callback_contexts_.size() >= 262144u) {
+    if(local_branch) {
+        if(callback_branch_contexts_.size()>=4096u) {
+            if(!callback_branch_budget_reported_) {
+                std::fprintf(stderr,"[finder] callback branch analysis budget exhausted; additional branch contexts remain unexamined\n");
+                callback_branch_budget_reported_=true;
+            }
+            return;
+        }
+        if(!callback_branch_contexts_.insert(entry).second) return;
+    } else if (callback_contexts_.size() >= 262144u) {
         if (!callback_context_budget_reported_) {
             std::fprintf(stderr, "[finder] callback call-site analysis budget exhausted; additional contexts remain unexamined\n");
             callback_context_budget_reported_ = true;
         }
         return;
     }
-    if (!callback_contexts_.insert(key).second) return;
+    if (!local_branch && !callback_contexts_.insert(key).second) return;
     struct Value { bool known = false; uint32_t value = 0, origin = 0; };
     struct State {
         uint32_t pc;
@@ -458,13 +468,32 @@ void FunctionFinder::harvest_contextual_callbacks(
                     op.op2.shifted.type == armv4t::ShiftType::LSL && op.op2.shifted.imm_or_rs == 0;
                 const uint32_t origin = copy ? state.regs[op.op2.shifted.rm].origin : 0u;
                 if (op.rd < 15) state.regs[op.rd] = {known, right, origin};
+            } else if(op.op==armv4t::IrOp::MUL) {
+                // MUL has dedicated Rm/Rs operands. Its unused Op2 defaults
+                // cannot prove a zero product when the runtime input is unknown.
+                const bool known=reg(op.rm,left) && reg(op.rs,right);
+                if(op.rd<15)state.regs[op.rd]={known,known ? left*right : 0u,0};
             } else if (op.op == armv4t::IrOp::ADD || op.op == armv4t::IrOp::SUB ||
                        op.op == armv4t::IrOp::AND || op.op == armv4t::IrOp::ORR ||
-                       op.op == armv4t::IrOp::EOR || op.op == armv4t::IrOp::BIC ||
-                       op.op == armv4t::IrOp::MUL) {
+                       op.op == armv4t::IrOp::EOR || op.op == armv4t::IrOp::BIC) {
                 const bool pc_base = op.rn == 15 && op.op2.kind == armv4t::Op2::Kind::Imm;
                 const bool have_left = pc_base ? (left = (pc+4u)&~3u, true) : reg(op.rn, left);
-                const bool known = have_left && operand(right);
+                const bool have_right=operand(right);
+                if(op.op==armv4t::IrOp::AND && op.rd<15 && have_left!=have_right) {
+                    const uint32_t mask=have_left ? left : right;
+                    if(mask<=255u && std::popcount(mask)<=4) {
+                        // Enumerate the exact finite image of x & mask. Values
+                        // with bits outside mask are impossible, even when
+                        // they sit between zero and mask in the ROM table.
+                        for(uint32_t value=mask;value;value=(value-1u)&mask) {
+                            State choice=state;choice.pc+=2u;choice.flags=false;
+                            choice.regs[op.rd]={true,value,0};pending.push_back(choice);
+                        }
+                        state.regs[op.rd]={true,0,0};state.flags=false;state.pc+=2u;
+                        continue;
+                    }
+                }
+                const bool known = have_left && have_right;
                 uint32_t value = 0;
                 if (known) switch (op.op) {
                     case armv4t::IrOp::ADD: value = left+right; break;
@@ -473,7 +502,6 @@ void FunctionFinder::harvest_contextual_callbacks(
                     case armv4t::IrOp::ORR: value = left|right; break;
                     case armv4t::IrOp::EOR: value = left^right; break;
                     case armv4t::IrOp::BIC: value = left&~right; break;
-                    case armv4t::IrOp::MUL: value = left*right; break;
                     default: break;
                 }
                 if (op.rd < 15) state.regs[op.rd] = {known, value, 0};

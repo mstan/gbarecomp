@@ -361,7 +361,7 @@ private:
     void harvest_stored_callback(uint32_t raw);
     void harvest_contextual_callbacks(uint32_t callee, uint8_t known_mask,
                                       const std::array<uint32_t, 4>& arguments,
-                                      unsigned depth = 0);
+                                      unsigned depth = 0, bool local_branch = false);
     struct ThumbCallEffects {
         bool valid = false;
         uint16_t preserved = 0;
@@ -383,6 +383,8 @@ private:
     bool current_walk_dropped_ = false;
     std::set<std::array<uint32_t, 6>> callback_contexts_;
     bool callback_context_budget_reported_ = false;
+    std::unordered_set<uint32_t> callback_branch_contexts_;
+    bool callback_branch_budget_reported_ = false;
     std::unordered_map<uint64_t, ThumbCallEffects> thumb_call_effects_;
     std::unordered_set<uint64_t> thumb_call_effects_active_;
     std::vector<FunctionSeed> deferred_store_callbacks_;
