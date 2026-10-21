@@ -1,4 +1,4 @@
-# GBARecomp — Beta
+# GBARecomp
 
 **A beta static-recompilation framework for the Game Boy Advance.** GBARecomp
 translates ARM7TDMI ARM and Thumb machine code into C++, compiles it into a
