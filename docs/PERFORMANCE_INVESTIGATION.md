@@ -18,15 +18,15 @@ saves are read-only inputs; speculative saves stay inside isolated test sessions
 | Establish storage and benchmark isolation | Passed; timing gate active | Initial F: queue 4 / 11.8 MB/s; G: queue 0 / 0.3 MB/s. Scratch, builds, profiles and caches on G:. Named benchmark mutex, actual game CPU observations and automated-job classification. Owner clarified ordinary open playtests may remain. |
 | Select proving title and freeze coherent original | Passed | Mario Kart: Super Circuit USA AMKE0, SHA-1 `9d327c030c3e2d9007990518594f70c3340ac56f`; original native binaries/libraries preserved in `baseline/`. Existing generated retail BIOS explicitly included in both configurations. |
 | Attribute CPU execution / interpreter / AOT dispatch | Passed, bounded instrumentation | Actual MKSC session phases and dispatch resolver timers; zero dispatch misses/interpreted instructions. Timer overhead and nested phases are explicit limitations below. |
-| Attribute copies / allocations / capture / rollback | Passed; retention timing pending | Ordinary allocation counts and exact snapshot sizes. Temporary per-device vector copies identified; staging restore deliberately retained. Large diagnostic capture-ring initialization also identified; prototype deferred after observer-thread review. |
+| Attribute copies / allocations / capture / rollback | Passed | Direct archive capture reduces synthetic 2p CPU time 41.0%, hash parts 14.2%; allocation and requested-byte reductions below. Staging restore retained and CPU-neutral. Diagnostic capture-ring initialization identified; chunk prototype deferred after observer-thread review. |
 | Attribute scanlines / audio / synchronization | Passed, bounded instrumentation | Scanline, APU, timers/FIFO DMA, serial, PPU, HBlank DMA, VBlank latch/DMA, binding, scheduling, and real transport correction evidence. |
-| Audit tile/OBJ, bitmap, affine, blend, windows, mosaic candidates | Passed with baseline gap | Existing tile spans/indexed HD surfaces retained; all six bitmap/tile modes exercised. No mosaic-register consumption found in the compositor: baseline accuracy gap remains unverified, never labeled a pass. Raster cost fixture awaits the same quiet timing window. |
+| Audit tile/OBJ, bitmap, affine, blend, windows, mosaic candidates | Passed with baseline gap | Existing tile spans/indexed HD surfaces retained; all six bitmap/tile modes exercised. No mosaic-register consumption found in the compositor: baseline accuracy gap remains unverified, never labeled a pass. Four serialized original raster attribution repetitions complete. |
 | Implement and qualify candidates separately | One eligible; one deferred | Direct bounded archive sections pass original/candidate 2p and 4p state/pixel/audio comparisons. Diagnostic audio capture chunks are excluded from the branch's production changes; see the disposition below. |
-| Balanced A/A and A/B CPU measurements | Running on NAS | Same frozen Windows binaries transferred and SHA-256 verified on SERVER. Full independent ABBA title runs on logical CPU 3; snapshot microbenchmarks follow serially. Local partial A/A data retained separately, never pooled across hosts. Profiling excluded. Retention requires a repeatable called-path CPU reduction beyond A/A noise and no material regression in unchanged simulation/restore paths. |
-| Bundle compatible wins and secondary-title validation | Correctness passed; performance retention pending | One candidate, so no multi-change performance bundle. Emerald USA secondary title passed exact state/image/audio and real delay/rollback comparisons. No title pins or Sonic renderer/UI files changed. |
+| Balanced A/A and A/B CPU measurements | Passed; retain archive candidate | SERVER logical CPU 3: all 24 synthetic and 64 retail launches plus four raster repetitions complete. Fixed balanced blocks, exact-binary A/A controls, thread/process CPU time and cycles; profiling off. No final block overlapped a detected workload. Capture/hash gains exceed controls; unchanged execution/restore has no material observed regression. |
+| Bundle compatible wins and secondary-title validation | Passed | Bounded archive optimization bundled with required local snapshot correctness companion and checkpoint fixture correction. Emerald secondary title passed exact state/image/audio, real delay/rollback and balanced CPU comparisons. No title pins or Sonic renderer/UI files changed. |
 | Real delay/rollback transport and current-build save/rewind | Passed after fixture correction | Title real UDP peers, latency/loss and actual replay passed with identical confirmed bytes. Synthetic mid-frame replay/rewind and malformed-load atomicity passed. Generic checkpoint failure reproduced in original: test stopped correction before all peers confirmed. Corrected fixture's six original/candidate ordinary rollback and 2p/4p outage cases and all 31 affected loopback checks pass. |
 | Real local title save/load and complete PSG capture | Passed | Local snapshot v3 preserves pending device timing and PSG wave/noise state. Full GCC 122/122, Clang 4/4, refreshed actual-title continuations and exact canonical streams pass. Original audio negative control fails the new continuation check as intended. |
-| Owner review and one playtest per affected title | Builds/profiles ready; CPU acceptance pending | Isolated G: recomp-ui/mods/netplay title builds and owner profiles, normal windows/audio, separate states/saves. Emerald native save copied and verified; MKSC uses a fresh QA save. No owner launch before automated evidence and CPU retention. Final integration awaits explicit owner approval. |
+| Owner review and one playtest per affected title | Ready for human validation | Isolated G: recomp-ui/mods/netplay builds, normal windows/audio, separate states/saves. Emerald native save copied and verified; MKSC uses a fresh QA save. All automated evidence and CPU retention complete. One owner playtest per title and final integration approval remain. |
 
 ## Initial source findings (hypotheses, not performance claims)
 
@@ -276,6 +276,60 @@ benchmark slot, with no active measured child. The owner and other jobs remain
 untouched. NAS timing is an independent full plan, not a retry selected for a
 favorable result.
 
+## Final CPU decision
+
+Retain the bounded direct archive sections. The complete fixed plan accepted
+24 synthetic launches (eight A/A, sixteen A/B), 64 retail launches (four A/A
+and twelve A/B per workload) and four original-only raster repetitions on
+SERVER. The guard waited for reference jobs between blocks; no final block
+needed overlap rejection. All 64 retail final frame/cycle/PC/digest endpoints
+match across original, A/A control and candidate, with zero interpreted
+instructions or dispatch misses. These endpoint checks supplement the earlier
+full state/pixel/PCM comparisons; they do not replace them.
+
+Synthetic two-player medians, measured CPU time per call:
+
+| Path | Original ms | Candidate ms | CPU reduction | A/A CPU reduction | Ordinary allocations / requested bytes, original → candidate |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Capture | 1.694 | 0.999 | 41.0% | -1.0% | 30 / 5,331,656 → 26 / 3,003,347 |
+| Hash parts | 2.197 | 1.884 | 14.2% | -1.0% | 47 / 4,663,118 → 45 / 3,328,456 |
+| Restore | 6.287 | 6.287 | 0.0% | -3.0% | 48 / 19,229,393 → unchanged |
+| Execute frame | 4.761 | 4.761 | 0.0% | 1.3% | Zero → zero |
+
+Capture thread cycles decrease 41.0%, bootstrap 95% interval 34.9–43.9%; its
+A/A cycle change is -0.2%, interval -5.2–1.7%. Hash-part cycles decrease 14.2%,
+interval 12.2–16.9%; its A/A change is -0.5%, interval -5.9–0.8%. Both targeted
+paths improve in CPU time and cycles beyond their controls. Allocation counts
+exclude aligned allocation APIs and direct C malloc. Snapshot bytes remain
+exactly 1,337,218 for the synthetic two-player fixture. Digest and unchanged
+execution paths receive no speedup claim; restore's staging and allocations
+remain intact. The large diagnostic capture-ring prototype stays deferred.
+
+Retail CPU-time medians include startup, simulation and enabled audio. Execution
+uses 600 paired frames; capture/restore uses 300 with both operations each frame:
+
+| Workload | A/A CPU reduction | A/B CPU reduction | A/B cycle reduction | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| MKSC execution | -1.0% | -0.4% | 1.1% | Within control noise; no gameplay speedup claim |
+| MKSC capture/restore | 0.2% | 2.1% | 2.6% | Reduced whole-workload CPU cost |
+| Emerald execution | 2.8% | 2.8% | 2.4% | Within control noise; no gameplay speedup claim |
+| Emerald capture/restore | 0.1% | 2.2% | 2.3% | Reduced whole-workload CPU cost |
+
+The A/B cycle intervals for the capture/restore workloads are 1.2–3.8% and
+1.8–2.9%, respectively. A/A retail intervals are wider, especially initial
+launches, and all those samples remain included. Retention rests on the clear
+called-path CPU/cycle reductions, consistent allocation reductions, complete
+correctness evidence and absence of a material observed execution/restore
+regression. No FPS or general gameplay throughput improvement is claimed.
+Fixed ABBA blocks were never repeated because of an unfavorable result or noisy
+control. The earlier local partial/overlapped runs remain excluded and preserved.
+
+Raw ledgers, all sample files, scripts, host provenance, resource snapshots and
+the combined analysis are copied to `nas-results/`; see `nas-results/analysis.json`,
+`measurements/summary.json` and `title-measurements-v3/summary.json`. The independent
+bootstrap summaries use 10,000 fixed-seed median resamples; they are descriptive
+intervals for these fixtures on this host, not cross-title performance guarantees.
+
 ## Host cost attribution
 
 ETW sampling was unavailable: Windows refused its performance-profile policy
@@ -313,6 +367,28 @@ synthetic 2p probe, a 1,337,218-byte snapshot made 30 ordinary allocations reque
 bytes. This explains both the capture-copy candidate and why transactional
 restore remains a larger follow-up opportunity. Allocation counts exclude
 aligned allocation APIs and direct C malloc calls.
+
+The original-only raster attribution renders one static 240×160 image per
+operation; it does not execute a guest frame. Four serialized repetitions of
+128 images each give these median CPU costs, with zero ordinary allocations:
+
+| Fixture | CPU ms / render |
+| --- | ---: |
+| Text backgrounds and objects | 1.587 |
+| Affine background and objects | 0.793 |
+| Bitmap mode 3 and objects | 0.610 |
+| Bitmap mode 4 and objects | 0.610 |
+| Bitmap mode 5 and objects | 0.610 |
+| Text/objects with blending | 1.770 |
+| Text/objects with windows | 1.587 |
+| Text/objects with mosaic registers set | 1.526 |
+
+These are fixture costs, not candidate speedups. Mosaic register setup does not
+establish correct mosaic behavior; the baseline gap remains explicit. The
+separate audio tick loop takes about 224 thread cycles per 1,024 guest-cycle
+tick; its short total duration makes CPU-time quantization too coarse for a
+precise per-call CPU-time claim. Detailed live-title audio attribution above
+also includes its actual timers/FIFO ordering.
 
 ## Remaining boundaries
 
