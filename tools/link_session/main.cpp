@@ -3,6 +3,7 @@
 #include "multiplayer_session.h"
 #include "gba_bios.h"
 #include "sha1.h"
+#include "self_heal.h"
 #include <charconv>
 #include <cstdio>
 #include <fstream>
@@ -148,6 +149,11 @@ int main(int argc, char** argv) {
         Buttons buttons{};
         const auto keys=[&] { return std::span<const std::uint16_t>(buttons.data(),players); };
         const bool costs=std::getenv("GBA_LINK_PROBE_COSTS")!=nullptr;
+        std::ofstream audio_out;
+        if (const auto* path=std::getenv("GBA_LINK_PROBE_AUDIO_OUT")) {
+            audio_out.open(path,std::ios::binary);
+            if (!audio_out) throw std::runtime_error("cannot open probe audio output");
+        }
         std::vector<double> save_ms, digest_ms, load_ms;
         std::size_t snapshot_bytes=0;
         std::vector<double> frame_ms;
@@ -178,6 +184,19 @@ int main(int argc, char** argv) {
             };
             const auto frame_start=Clock::now();
             session->run_frame(keys());
+            if (audio_out.is_open()) for (unsigned port=0;port<players;++port) {
+                auto& apu=session->machine(port).bus.audio();
+                std::array<std::int16_t,8192> samples{};
+                const auto count=apu.drain_samples(samples.data(),samples.size());
+                const auto rate=apu.sample_rate();
+                for (unsigned i=0;i<4;++i) audio_out.put(char(rate>>(8*i)));
+                for (unsigned i=0;i<4;++i) audio_out.put(char(count>>(8*i)));
+                for (std::size_t i=0;i<count;++i) {
+                    audio_out.put(char(std::uint16_t(samples[i])));
+                    audio_out.put(char(std::uint16_t(samples[i])>>8));
+                }
+                if (!audio_out) throw std::runtime_error("cannot write probe audio output");
+            }
             session->discard_audio_output();
             frame_ms.push_back(elapsed(frame_start));
             if (costs) {
@@ -256,6 +275,9 @@ int main(int argc, char** argv) {
             if (!out.write(reinterpret_cast<const char*>(session->machine(port).ppu.latched_framebuffer()),
                 gba::GbaPpu::kFramebufferBytes)) throw std::runtime_error("cannot write probe frame");
         }
+        std::printf("coverage dispatch_misses=%u interpreted_insns=%llu\n",
+            gbarecomp::self_heal_distinct_misses(),
+            static_cast<unsigned long long>(gbarecomp::self_heal_interpreted_insns()));
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr,"link probe: %s\n",e.what());

@@ -29,6 +29,7 @@
 #include <cstdlib>
 #include <functional>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -64,6 +65,9 @@ extern "C" unsigned long long g_runtime_vblank_starts = 0;
 // the env var is set. Dumped to stderr at exit.
 extern "C" unsigned long long g_prof_scanline_ns = 0;
 extern "C" unsigned long long g_prof_scanline_count = 0;
+#if defined(GBARECOMP_DETAILED_PHASE_PROFILE)
+static unsigned long long g_prof_device_ns[6]{}, g_prof_device_count[6]{};
+#endif
 // Native event service is deliberately separate from frame presentation and
 // guest input. It keeps a window responsive while one emulated frame spends a
 // long time in translated software-rendering or decode code.
@@ -89,10 +93,32 @@ static const bool g_phase_prof = [] {
                     ? static_cast<double>(g_prof_scanline_ns) /
                           static_cast<double>(g_prof_scanline_count)
                     : 0.0);
+#if defined(GBARECOMP_DETAILED_PHASE_PROFILE)
+            constexpr const char* names[]{"audio", "timers-and-fifo-dma", "serial", "ppu-tick", "hblank-dma", "vblank-latch-dma"};
+            for (unsigned i=0;i<6;++i)
+                std::fprintf(stderr,"[phase] %s: %llu ns over %llu calls\n",
+                    names[i],g_prof_device_ns[i],g_prof_device_count[i]);
+#endif
         });
     }
     return on;
 }();
+#if defined(GBARECOMP_DETAILED_PHASE_PROFILE)
+template<class Work> static auto profile_device(unsigned phase, Work work) {
+    if (!g_phase_prof) return work();
+    const auto start=std::chrono::steady_clock::now();
+    const auto record=[&] {
+        g_prof_device_ns[phase]+=std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now()-start).count();
+        ++g_prof_device_count[phase];
+    };
+    if constexpr (std::is_void_v<decltype(work())>) { work(); record(); }
+    else { auto result=work(); record(); return result; }
+}
+#define GBA_DEVICE_PHASE(index, expression) profile_device(index,[&] { return (expression); })
+#else
+#define GBA_DEVICE_PHASE(index, expression) (expression)
+#endif
 static unsigned long long g_runtime_yielded_vblank_start = 0;
 static bool g_session_execution = false;
 static bool g_session_instruction_started = false;
@@ -567,13 +593,13 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
         if (until_ppu < chunk) chunk = until_ppu;
         if (chunk == 0) chunk = 1;
 
-        bus->audio().tick(chunk);
-        bus->io().tick_timers(chunk);
-        bus->io().tick_sio(chunk);
+        GBA_DEVICE_PHASE(0,bus->audio().tick(chunk));
+        GBA_DEVICE_PHASE(1,bus->io().tick_timers(chunk));
+        GBA_DEVICE_PHASE(2,bus->io().tick_sio(chunk));
 
         uint16_t vc_compare = static_cast<uint16_t>(
             (bus->io().dispstat() >> 8) & 0xFFu);
-        auto events = ppu->tick(chunk, vc_compare);
+        auto events = GBA_DEVICE_PHASE(3,ppu->tick(chunk, vc_compare));
         uint16_t ds = bus->io().dispstat();
         if (events.hblank_started &&
             ppu->vcount() < gba::GbaPpu::kLinesVisible) {
@@ -597,12 +623,12 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
             // the DMA at HBlank N loads the register used by line N+1). This is
             // what walks the per-scanline WIN0H circle table for the transition
             // iris (MC-HP-003).
-            bus->io().run_timed_dma(2);
+            GBA_DEVICE_PHASE(4,bus->io().run_timed_dma(2));
         }
         if (events.vblank_started) {
-            ppu->mark_framebuffer_latched();
+            GBA_DEVICE_PHASE(5,ppu->mark_framebuffer_latched());
             ++g_runtime_vblank_starts;
-            bus->io().run_timed_dma(1);   // VBlank-timed DMA
+            GBA_DEVICE_PHASE(5,bus->io().run_timed_dma(1));   // VBlank-timed DMA
             if (!g_session_execution && g_vblank_input_hook) g_vblank_input_hook();
         }
         if (!g_session_execution && events.frame_completed && g_frame_start_hook) {

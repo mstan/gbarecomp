@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 project(gbarecomp C CXX)
 
+option(GBARECOMP_DETAILED_PHASE_PROFILE "Build additional opt-in device phase timers" OFF)
+if(GBARECOMP_DETAILED_PHASE_PROFILE)
+    set_property(SOURCE src/runtime/runtime_bus_bridge.cpp src/armv4t/runtime_arm.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS GBARECOMP_DETAILED_PHASE_PROFILE=1)
+endif()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -1050,6 +1056,13 @@ add_gbarecomp_runtime_stack_test(wireless_tests tests/link/wireless_test.cpp)
 add_subdirectory(tests/link)
 add_subdirectory(tests/timing)
 include(cmake/GbaNetplay.cmake)
+
+option(GBARECOMP_BUILD_PERFORMANCE_TOOLS "Build explicit host-cost qualification tools" OFF)
+if(GBARECOMP_BUILD_PERFORMANCE_TOOLS)
+    add_executable(gba_session_benchmark tools/performance/session_benchmark.cpp
+        tools/bios_smoke/dispatch_stub.cpp)
+    target_link_gbarecomp_runtime_stack(gba_session_benchmark)
+endif()
 
 # P6 differential-gate primitives (offline; full-RAM snapshot/restore/diff).
 add_executable(heal_gate_tests

@@ -15,6 +15,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#if defined(GBARECOMP_DETAILED_PHASE_PROFILE)
+#include <chrono>
+#endif
 
 // runtime_dispatch_miss / runtime_unimplemented_op default-abort
 // implementations live in src/runtime/runtime_arm_default_aborts.cpp
@@ -1027,8 +1030,38 @@ void exchange_instruction_set(uint32_t target_pc) {
 
 }  // namespace
 
+#if defined(GBARECOMP_DETAILED_PHASE_PROFILE)
+namespace {
+unsigned long long dispatch_resolve_ns=0, dispatch_resolve_calls=0;
+const DispatchEntry* profiled_dispatch_resolve(uint32_t pc) {
+    static const bool enabled=[] {
+        const char* value=std::getenv("GBARECOMP_PHASE_PROF");
+        const bool on=value && !(value[0]=='0' && value[1]=='\0');
+        if(on) std::atexit([] {
+            std::fprintf(stderr,"[phase] dispatch-resolve-including-callbacks: %llu ns over %llu calls\n",
+                dispatch_resolve_ns,dispatch_resolve_calls);
+        });
+        return on;
+    }();
+    if(!enabled) return dispatch_resolve(pc);
+    struct Sample {
+        std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
+        ~Sample() {
+            dispatch_resolve_ns+=std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now()-start).count();
+            ++dispatch_resolve_calls;
+        }
+    } sample;
+    return dispatch_resolve(pc);
+}
+}
+#define GBA_DISPATCH_RESOLVE(pc) profiled_dispatch_resolve(pc)
+#else
+#define GBA_DISPATCH_RESOLVE(pc) dispatch_resolve(pc)
+#endif
+
 extern "C" void runtime_dispatch(uint32_t target_pc) {
-    const DispatchEntry* entry = dispatch_resolve(target_pc);
+    const DispatchEntry* entry = GBA_DISPATCH_RESOLVE(target_pc);
     if (entry) entry->fn();
 }
 
@@ -1037,7 +1070,7 @@ extern "C" void runtime_dispatch(uint32_t target_pc) {
 // guaranteed return_call, so a guest loop that crosses functions never grows
 // the host stack; natively it is the same sibling call runtime_dispatch makes.
 extern "C" void runtime_dispatch_tail(void) {
-    const DispatchEntry* entry = dispatch_resolve(g_runtime_tail_arg);
+    const DispatchEntry* entry = GBA_DISPATCH_RESOLVE(g_runtime_tail_arg);
     if (!entry) return;
     GBARECOMP_TAIL_CALL(entry->fn);
 }
