@@ -463,10 +463,11 @@ Original title/UI/Sonic pins and native save files remain untouched.
 
 The scoped audit, before/after hashes, working diffs and merge log are retained
 under `integration-20261023/` in the evidence root, including `result.json`.
-Central Beads issue `beads-vm0x` records the approval and intended bundle.
-Its final completion update and closure remain pending: the central client
-encountered database-connection and schema migration-lock deadlines on three
-write attempts. A subsequent read succeeded; no shared server restart, forced
-unlock or integrity bypass was attempted. The pending completion record is
-retained in `integration-20261023/beads-completion-pending.txt` for the next
-healthy central write. The qualified isolated owner builds remain available on G:.
+Central Beads issue `beads-vm0x` records the approved integration and is closed.
+The successful closure followed three database/schema-lock write timeouts.
+The central push then aborted when its own retained-history integrity check
+reached the five-minute deadline; remote tracker synchronization remains
+pending. No shared server restart, forced unlock or integrity bypass was
+attempted. `integration-20261023/final-status.json` records the closure and
+sync result. Engineering, automated qualification and owner playtests are
+complete. The qualified isolated owner builds remain available on G:.
