@@ -66,6 +66,26 @@ public:
         }
         blob(bytes, count);
     }
+    // Emit the same bounded length-prefixed payload as vector(), directly into
+    // the containing archive. Keep indices rather than pointers across growth.
+    template<class Append> void write_section(std::uint32_t maximum, Append append) {
+        static_assert(!Reading, "write_section is a serialization operation");
+        const auto prefix = output_.size();
+        try {
+            std::uint32_t count = 0;
+            value(count);
+            const auto begin = output_.size();
+            append(*this);
+            const auto size = output_.size() - begin;
+            if (size > maximum) throw std::invalid_argument("state section exceeds bound");
+            count = static_cast<std::uint32_t>(size);
+            for (unsigned i = 0; i < sizeof(count); ++i)
+                output_[prefix + i] = static_cast<std::uint8_t>(count >> (8 * i));
+        } catch (...) {
+            output_.resize(prefix);
+            throw;
+        }
+    }
     template<class T> void identity(const T& expected) {
         auto actual = expected;
         value(actual);

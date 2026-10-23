@@ -101,8 +101,11 @@ public:
 };
 std::vector<std::uint8_t> save_device_state(const GbaBus& bus, const GbaPpu& ppu) {
     SimulationArchive<false> archive;
-    SimulationStateCodec::visit(archive,bus,ppu);
+    append_device_state(archive,bus,ppu);
     return archive.take();
+}
+void append_device_state(SimulationArchive<false>& archive, const GbaBus& bus, const GbaPpu& ppu) {
+    SimulationStateCodec::visit(archive,bus,ppu);
 }
 bool load_device_state(GbaBus& bus, GbaPpu& ppu, std::span<const std::uint8_t> bytes) {
     try {

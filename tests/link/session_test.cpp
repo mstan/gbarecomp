@@ -1,11 +1,48 @@
 #include "multiplayer_session.h"
 #include "multiplayer_slice.h"
+#include "simulation_archive.h"
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 
 #define CHECK(expr) do { if (!(expr)) { std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr); std::exit(1); } } while (0)
 namespace {
+void bounded_sections() {
+    using gba::SimulationArchive;
+    const std::uint16_t marker=0x7351;
+    std::vector<std::uint8_t> payload(8193);
+    for (unsigned i=0;i<payload.size();++i) payload[i]=i*37;
+    SimulationArchive<false> framed, direct;
+    framed(marker); framed.vector(payload,9000);
+    direct(marker);
+    direct.write_section(9000,[&](auto& section) { section.blob(payload,payload.size()); });
+    CHECK(direct.bytes()==framed.bytes());
+    const auto stable=direct.bytes();
+    try {
+        direct.write_section(8192,[&](auto& section) { section.blob(payload,payload.size()); });
+        CHECK(false);
+    } catch (const std::invalid_argument&) {}
+    CHECK(direct.bytes()==stable);
+    try {
+        direct.write_section(9000,[&](auto& section) {
+            section(marker); throw std::runtime_error("failed device capture");
+        });
+        CHECK(false);
+    } catch (const std::runtime_error&) {}
+    CHECK(direct.bytes()==stable);
+    SimulationArchive<false> nested;
+    nested.write_section(9004,[&](auto& outer) {
+        outer.write_section(9000,[&](auto& inner) { inner.blob(payload,payload.size()); });
+    });
+    SimulationArchive<true> reader(nested.bytes());
+    std::vector<std::uint8_t> outer, inner;
+    reader.vector(outer,9004); CHECK(reader.remaining()==0);
+    SimulationArchive<true> inner_reader(outer);
+    inner_reader.vector(inner,9000);
+    CHECK(inner==payload && inner_reader.remaining()==0);
+    direct.write_section(0,[](auto&) {});
+    CHECK(direct.bytes().size()==stable.size()+4);
+}
 void slice_classification_cache() {
     auto bus=std::make_unique<gba::GbaBus>();
     ArmCpuState cpu{}; cpu.cpsr=CPSR_T_BIT; cpu.R[15]=0x02000000;
@@ -360,6 +397,7 @@ void exception_continuations(bool return_yield) {
 }
 }
 int main() {
+    bounded_sections();
     slice_classification_cache();
     return_yield_continuation();
     exception_continuations(false); exception_continuations(true);

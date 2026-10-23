@@ -257,8 +257,9 @@ std::vector<std::uint8_t> GbaMultiplayerSession::save_state() const {
         const auto& m = *ptr;
         execution_state(a,m.execution);
         a(m.timing.cycles,m.timing.vblank_starts);
-        auto bytes = gba::save_device_state(m.bus,m.ppu);
-        a.vector(bytes,4*1024*1024);
+        a.write_section(4*1024*1024,[&](auto& section) {
+            gba::append_device_state(section,m.bus,m.ppu);
+        });
     }
     auto link = link_state();
     a.vector(link,1024*1024);
@@ -336,8 +337,9 @@ std::array<std::uint32_t,3> GbaMultiplayerSession::state_hash_parts() const {
         const auto& m = *machines_[i];
         execution_state(a,m.execution);
         a(m.timing.cycles,m.timing.vblank_starts);
-        auto bytes = gba::save_device_state(m.bus,m.ppu);
-        a.vector(bytes,4*1024*1024);
+        a.write_section(4*1024*1024,[&](auto& section) {
+            gba::append_device_state(section,m.bus,m.ppu);
+        });
     }
     manifest(link,config_); link(cycle_);
     auto bytes = link_state(); link.vector(bytes,1024*1024);
