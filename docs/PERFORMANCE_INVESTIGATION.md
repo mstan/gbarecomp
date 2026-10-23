@@ -26,7 +26,7 @@ saves are read-only inputs; speculative saves stay inside isolated test sessions
 | Bundle compatible wins and secondary-title validation | Passed | Bounded archive optimization bundled with required local snapshot correctness companion and checkpoint fixture correction. Emerald secondary title passed exact state/image/audio, real delay/rollback and balanced CPU comparisons. No title pins or Sonic renderer/UI files changed. |
 | Real delay/rollback transport and current-build save/rewind | Passed after fixture correction | Title real UDP peers, latency/loss and actual replay passed with identical confirmed bytes. Synthetic mid-frame replay/rewind and malformed-load atomicity passed. Generic checkpoint failure reproduced in original: test stopped correction before all peers confirmed. Corrected fixture's six original/candidate ordinary rollback and 2p/4p outage cases and all 31 affected loopback checks pass. |
 | Real local title save/load and complete PSG capture | Passed | Local snapshot v3 preserves pending device timing and PSG wave/noise state. Full GCC 122/122, Clang 4/4, refreshed actual-title continuations and exact canonical streams pass. Original audio negative control fails the new continuation check as intended. |
-| Owner review and one playtest per affected title | MKSC passed; Emerald open for validation | Owner reports "mksc looks fine". Emerald's private UI dependency update passes launcher bridge and current-build state/image continuation checks, including exact prior-build guest sections and PNG. Its normal-window/audio launcher is open. Emerald owner validation and final integration approval remain. |
+| Owner review and one playtest per affected title | Both passed; final integration approval pending | Owner reports "mksc looks fine" and confirms Emerald looked fine. Emerald's private UI dependency update passes launcher bridge and current-build state/image continuation checks, including exact prior-build guest sections and PNG. The one owner playtest per title is complete. Only explicit final integration approval remains. |
 
 ## Initial source findings (hypotheses, not performance claims)
 
@@ -436,8 +436,12 @@ build exactly. The original native save hash is unchanged. See
 `review/emerald/wireless-ui-seam-test.log`, `review/smoke-wireless-ui-report.json`
 and `review/emerald/wireless-ui-provenance.json`.
 
-The corrected owner launcher is open and responding, normal window/audio,
-with the protected native-save copy. `review/owner-profiles.json` records the
-new executable hash and UI revision. The engine performance source and frozen
-timing binaries are unchanged. No repeat Mario Kart playtest is needed;
-Emerald's owner result and explicit integration approval remain pending.
+The corrected owner launcher opened and responded, normal window/audio,
+with the protected native-save copy. The playtest subsequently shut down with
+normal final diagnostics and zero dispatch misses or interpreted instructions.
+The owner answered "yes" when asked whether Emerald looked fine. Both owner
+playtests are now recorded as overall passes; no granular manual checks are
+inferred from those responses. `review/owner-profiles.json` records the new
+executable hash, UI revision and owner results. The engine performance source
+and frozen timing binaries are unchanged. No repeat playtest is needed.
+Explicit final integration approval remains pending, as originally requested.
