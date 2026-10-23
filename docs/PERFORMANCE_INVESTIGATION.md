@@ -24,8 +24,8 @@ saves are read-only inputs; speculative saves stay inside isolated test sessions
 | Implement and qualify candidates separately | One eligible; one deferred | Direct bounded archive sections pass original/candidate 2p and 4p state/pixel/audio comparisons. Diagnostic audio capture chunks are excluded from the branch's production changes; see the disposition below. |
 | Balanced A/A and A/B CPU measurements | Waiting on other windows | ABBA process launches, thread cycles and thread CPU time, identical features/inputs, exact-binary A/A control. Both ordinary title execution and repeated capture/restore workloads are prepared. Profiling excluded. Retention requires a repeatable called-path CPU reduction beyond A/A noise and no material regression in unchanged simulation/restore paths. |
 | Bundle compatible wins and secondary-title validation | Correctness passed; performance retention pending | One candidate, so no multi-change performance bundle. Emerald USA secondary title passed exact state/image/audio and real delay/rollback comparisons. No title pins or Sonic renderer/UI files changed. |
-| Real delay/rollback transport and current-build save/rewind | Title comparisons passed; final quiet transport checks pending | Both titles' original/candidate real UDP peers, latency/loss and actual replay; confirmed bytes identical. Synthetic mid-frame replay/rewind and malformed-load atomicity passed. A later retained-candidate generic rollback check failed checkpoint agreement; the initial pass and later failure are both retained. Quiet original/candidate ordinary rollback and 2p/4p outage checks precede timing. |
-| Owner review and one playtest per affected title | Pending | Automated evidence first; normal windows/audio for approved handoff; final integration awaits explicit owner approval. |
+| Real delay/rollback transport and current-build save/rewind | Passed after fixture correction | Title real UDP peers, latency/loss and actual replay passed with identical confirmed bytes. Synthetic mid-frame replay/rewind and malformed-load atomicity passed. Generic checkpoint failure reproduced in original: test stopped correction before all peers confirmed. Corrected fixture's six original/candidate ordinary rollback and 2p/4p outage cases and all 31 affected loopback checks pass. |
+| Owner review and one playtest per affected title | Builds preparing; acceptance pending | Isolated G: recomp-ui/netplay title builds, two compiler jobs, preserved title sources/pins. No owner launch before automated evidence and CPU retention. Normal windows/audio for handoff; final integration awaits explicit owner approval. |
 
 ## Initial source findings (hypotheses, not performance claims)
 
@@ -137,20 +137,40 @@ deferred before performance acceptance. Its source and patch are retained in
 production audio files were restored; they are absent from the integration
 candidate. The new optional capture-contract probe is retained for future work.
 
-Only the archive-copy candidate remains eligible for measurement. A quiet-window
-paired transport recheck precedes its CPU runs. After restoring the original
+Only the archive-copy candidate remains eligible for measurement. After restoring the original
 audio implementation, a focused run passed six component checks but failed
 `multiplayer_rollback_loopback` with "proposed checkpoint is unavailable or
-unconfirmed". This check had passed earlier. The cause remains unresolved;
-contention is not established as the cause. Both results are retained in
+unconfirmed". This check had passed earlier. Both results are retained in
 `qualification/archive-final-focused.log` and the earlier qualification logs.
-Quiet checks cover ordinary rollback and 2p/4p outages on the coherent original
-and retained candidate; no repeated retry-until-pass qualification is planned.
+A six-case control run reproduced checkpoint failures in both original and
+candidate (`qualification/network-background-20261022-204034/`). Correctness
+checks run with background work allowed; CPU timing remains serialized.
+
+A bounded diagnostic reproducer stopped at its first trial, a failure in the
+original. Seat 0 had simulated through boundary 87 but confirmed only tick 7;
+it still held snapshot 60 and was outside replay. Seat 1 had confirmed tick 83.
+The first seat correctly refused to export an unconfirmed boundary. The harness
+had quiesced on one peer's watermark, preventing the other from opening needed
+corrections. This is not evidence of a snapshot-copy regression or missing ring
+entry. See `qualification/checkpoint-reproduce-20261022-204725/report.json`.
+
+The production `GbaNetplayMatch` already agrees the full checkpoint while both
+drivers can correct, then drains. The lower-level test now uses that ordering,
+pins its planned boundary, and verifies that agreement stays unchanged during
+drain. It keeps the existing confirmation, exact archive, restart, corruption,
+and replay checks. The same corrected fixture is linked separately against the
+frozen original and candidate libraries. Ordinary 2p rollback and 2p/4p outages
+all pass, with 80, 80 and 88 common confirmed ticks and identical final archives.
+See `qualification/checkpoint-fixed-20261022-204938/` and
+`checkpoint-fixed/provenance.json`. All 31 affected CTest loopbacks pass
+(`qualification/checkpoint-fixture-ctest.log`, 294.79 seconds): delay/rollback,
+loss, outages, startup, restart, rejection and checkpoint corruption, with
+2/3/4 seats and both network topologies. Earlier failures remain preserved; this is a source-based
+fixture correction rather than retry-until-pass qualification.
 
 The restored implementation's GCC capture and 2p/4p simulation streams still
 match the original exactly. Clang capture and 2p streams also match, with its
-session and playback checks passing. The six component checks passed separately;
-these do not substitute for the pending transport checks. See
+session and playback checks passing. The six component checks passed separately. See
 `qualification/archive-final-correctness.json` and `archive-final-*.log`.
 Every restored static-library member matches the frozen archive candidate except
 the diagnostic replay object. That object is identical after normalizing its
@@ -158,10 +178,18 @@ the diagnostic replay object. That object is identical after normalizing its
 `qualification/archive-revision-identity.json` records this comparison. This is
 binary provenance evidence, not a claim of cross-build netplay compatibility.
 
-The benchmark guard waits without
-a time limit, releases the shared benchmark slot while waiting, checks fresh
-F:/G: readiness/space/queues, and rejects samples overlapping other builds,
-games, tests or known heavy tools. It never interrupts competing workloads.
+The owner subsequently clarified that low-use open playtests provide enough
+headroom to continue. A fresh three-second check found the MMX launcher and
+gameplay process used about 1% combined machine CPU on the 16-thread host;
+Yoshi used about 0.07%, and no RKA process remained in that snapshot. Subsequent
+RKA automated jobs have restarted; actual activity is observed afresh. The earlier presence-only game
+gate was overbroad. The revised guard records actual game CPU in G: logs,
+permits at most 0.5 logical CPU of aggregate observed game work, and still
+serializes builds, tests and benchmarks. A/A noise remains a condition of
+accepting CPU evidence. It releases the shared benchmark slot while waiting,
+checks fresh F:/G: readiness/space/queues (heavy output stays on G: and its
+queue gates timing), rejects substantial game CPU overlap,
+and never interrupts competing workloads.
 
 ## Host cost attribution
 
