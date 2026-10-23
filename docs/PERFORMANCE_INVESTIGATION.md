@@ -5,9 +5,9 @@ Original reference: engine `7a05e7610f32ce0587c7f2a97f80b695c8c9e8c3`.
 Investigation branch: `perf/accuracy-host-20261022`. Work is solo.
 Evidence root: `G:/Temp/Codex/gbarecomp/accuracy-perf-20261022/`.
 
-This is an investigation and qualification record, not integration approval.
-The owner explicitly requires approval after automated qualification and before
-final integration. No old save-state compatibility is required. Native cartridge
+This records the investigation, qualification, owner approval and local
+integration. The owner approved integration after automated qualification and
+both required playtests passed. No old save-state compatibility is required. Native cartridge
 saves are read-only inputs; speculative saves stay inside isolated test sessions.
 
 ## Task burndown
@@ -21,12 +21,13 @@ saves are read-only inputs; speculative saves stay inside isolated test sessions
 | Attribute copies / allocations / capture / rollback | Passed | Direct archive capture reduces synthetic 2p CPU time 41.0%, hash parts 14.2%; allocation and requested-byte reductions below. Staging restore retained and CPU-neutral. Diagnostic capture-ring initialization identified; chunk prototype deferred after observer-thread review. |
 | Attribute scanlines / audio / synchronization | Passed, bounded instrumentation | Scanline, APU, timers/FIFO DMA, serial, PPU, HBlank DMA, VBlank latch/DMA, binding, scheduling, and real transport correction evidence. |
 | Audit tile/OBJ, bitmap, affine, blend, windows, mosaic candidates | Passed with baseline gap | Existing tile spans/indexed HD surfaces retained; all six bitmap/tile modes exercised. No mosaic-register consumption found in the compositor: baseline accuracy gap remains unverified, never labeled a pass. Four serialized original raster attribution repetitions complete. |
-| Implement and qualify candidates separately | One eligible; one deferred | Direct bounded archive sections pass original/candidate 2p and 4p state/pixel/audio comparisons. Diagnostic audio capture chunks are excluded from the branch's production changes; see the disposition below. |
+| Implement and qualify candidates separately | One retained; one deferred | Direct bounded archive sections pass original/candidate 2p and 4p state/pixel/audio comparisons and reduce capture CPU cost. Diagnostic audio capture chunks are excluded from the integrated production changes; see the disposition below. |
 | Balanced A/A and A/B CPU measurements | Passed; retain archive candidate | SERVER logical CPU 3: all 24 synthetic and 64 retail launches plus four raster repetitions complete. Fixed balanced blocks, exact-binary A/A controls, thread/process CPU time and cycles; profiling off. No final block overlapped a detected workload. Capture/hash gains exceed controls; unchanged execution/restore has no material observed regression. |
 | Bundle compatible wins and secondary-title validation | Passed | Bounded archive optimization bundled with required local snapshot correctness companion and checkpoint fixture correction. Emerald secondary title passed exact state/image/audio, real delay/rollback and balanced CPU comparisons. No title pins or Sonic renderer/UI files changed. |
 | Real delay/rollback transport and current-build save/rewind | Passed after fixture correction | Title real UDP peers, latency/loss and actual replay passed with identical confirmed bytes. Synthetic mid-frame replay/rewind and malformed-load atomicity passed. Generic checkpoint failure reproduced in original: test stopped correction before all peers confirmed. Corrected fixture's six original/candidate ordinary rollback and 2p/4p outage cases and all 31 affected loopback checks pass. |
 | Real local title save/load and complete PSG capture | Passed | Local snapshot v3 preserves pending device timing and PSG wave/noise state. Full GCC 122/122, Clang 4/4, refreshed actual-title continuations and exact canonical streams pass. Original audio negative control fails the new continuation check as intended. |
-| Owner review and one playtest per affected title | Both passed; final integration approval pending | Owner reports "mksc looks fine" and confirms Emerald looked fine. Emerald's private UI dependency update passes launcher bridge and current-build state/image continuation checks, including exact prior-build guest sections and PNG. The one owner playtest per title is complete. Only explicit final integration approval remains. |
+| Owner review and one playtest per affected title | Both passed; integration approved | Owner reports "mksc looks fine" and confirms Emerald looked fine. Emerald's private UI dependency update passes launcher bridge and current-build state/image continuation checks, including exact prior-build guest sections and PNG. The owner explicitly approved final engine integration after both playtests. |
+| Final integration | Passed | Main fast-forwarded from original `7a05e761` to approved bundle `dfd0215`. Qualified implementation unchanged from `4cfd762`; all 11 unrelated files and the existing working diff preserved exactly. Title pins and native saves untouched. |
 
 ## Initial source findings (hypotheses, not performance claims)
 
@@ -396,14 +397,12 @@ No Sonic title, launcher, mod, renderer, revision profile or engine pin was
 changed. Their working recomp-ui/adaptive Fit implementations remain in their
 own repositories. This investigation does not newly qualify a Sonic release;
 any future Sonic pin/update affecting presentation still requires the owner's
-per-revision resize, margin content, entity and HUD checks. No owner-facing game
-was launched. A single approved playtest per affected title remains a human
-step, using normal windows and normal audio. Their launch scripts and manifests
+per-revision resize, margin content, entity and HUD checks. One owner playtest
+per affected title passed, using normal windows and normal audio. Their launch scripts and manifests
 are staged in `review/{mksc,emerald}/owner/` and `review/owner-profiles.json`.
 The original Emerald native save was copied and SHA-256 verified, never changed;
 MKSC has a fresh isolated QA save because its configured original path was absent.
-Final integration is prohibited
-until the owner approves the concrete qualified result.
+The owner then approved final integration of the qualified engine bundle.
 
 ## Owner validation progress
 
@@ -444,4 +443,25 @@ playtests are now recorded as overall passes; no granular manual checks are
 inferred from those responses. `review/owner-profiles.json` records the new
 executable hash, UI revision and owner results. The engine performance source
 and frozen timing binaries are unchanged. No repeat playtest is needed.
-Explicit final integration approval remains pending, as originally requested.
+The owner subsequently answered "yes" to the explicit request to integrate the
+qualified engine changes into `main`, satisfying the requested final approval.
+
+## Approved integration
+
+Engine `main` was fast-forwarded from the coherent original `7a05e761` to
+`dfd02153a62b073327e15a503ec5eb9f27671bf3`. The implementation under `src/`,
+`tests/`, `tools/` and `CMakeLists.txt` is exactly the code qualified at `4cfd762`;
+later investigation-branch commits update only this report. No repeat build or
+playtest is needed for the same implementation. This completion record is a
+documentation-only follow-up.
+
+Before and after integration, SHA-256 checks matched all 11 unrelated files:
+the owner's modified `oracle/gba_tcp.py`, untracked Gen3 presentation/CMake
+work, and the untracked mGBA DLL ZIP. The existing tracked working diff is
+also byte-identical. Integration used no stash, reset, cleanup or source push.
+Original title/UI/Sonic pins and native save files remain untouched.
+
+The scoped audit, before/after hashes, working diffs and merge log are retained
+under `integration-20261023/` in the evidence root, including `result.json`.
+Central Beads issue `beads-vm0x` records the approval, integrated bundle and
+completion head. The qualified isolated owner builds remain available on G:.
