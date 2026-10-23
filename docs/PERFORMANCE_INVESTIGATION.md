@@ -15,17 +15,18 @@ saves are read-only inputs; speculative saves stay inside isolated test sessions
 | Task | Status | Evidence / completion condition |
 | --- | --- | --- |
 | Establish repository, instructions and dirty-file boundaries | Passed | Parent is a repository collection; engine main is dirty only in `oracle/gba_tcp.py` plus an untracked mGBA archive. No on-disk AGENTS.md found at the applicable ancestors or scoped engine paths. Owner-supplied instructions apply. Isolated worktree on G:; no edits in other worktrees. |
-| Establish storage and benchmark isolation | Waiting on other windows | Initial F: queue 4 / 11.8 MB/s; G: queue 0 / 0.3 MB/s. Scratch, builds, profiles and caches on G:. Owner explicitly chose to wait for current workloads to finish. Named benchmark mutex plus process inventory gate. |
+| Establish storage and benchmark isolation | Passed; timing gate active | Initial F: queue 4 / 11.8 MB/s; G: queue 0 / 0.3 MB/s. Scratch, builds, profiles and caches on G:. Named benchmark mutex, actual game CPU observations and automated-job classification. Owner clarified ordinary open playtests may remain. |
 | Select proving title and freeze coherent original | Passed | Mario Kart: Super Circuit USA AMKE0, SHA-1 `9d327c030c3e2d9007990518594f70c3340ac56f`; original native binaries/libraries preserved in `baseline/`. Existing generated retail BIOS explicitly included in both configurations. |
 | Attribute CPU execution / interpreter / AOT dispatch | Passed, bounded instrumentation | Actual MKSC session phases and dispatch resolver timers; zero dispatch misses/interpreted instructions. Timer overhead and nested phases are explicit limitations below. |
 | Attribute copies / allocations / capture / rollback | Passed; retention timing pending | Ordinary allocation counts and exact snapshot sizes. Temporary per-device vector copies identified; staging restore deliberately retained. Large diagnostic capture-ring initialization also identified; prototype deferred after observer-thread review. |
 | Attribute scanlines / audio / synchronization | Passed, bounded instrumentation | Scanline, APU, timers/FIFO DMA, serial, PPU, HBlank DMA, VBlank latch/DMA, binding, scheduling, and real transport correction evidence. |
 | Audit tile/OBJ, bitmap, affine, blend, windows, mosaic candidates | Passed with baseline gap | Existing tile spans/indexed HD surfaces retained; all six bitmap/tile modes exercised. No mosaic-register consumption found in the compositor: baseline accuracy gap remains unverified, never labeled a pass. Raster cost fixture awaits the same quiet timing window. |
 | Implement and qualify candidates separately | One eligible; one deferred | Direct bounded archive sections pass original/candidate 2p and 4p state/pixel/audio comparisons. Diagnostic audio capture chunks are excluded from the branch's production changes; see the disposition below. |
-| Balanced A/A and A/B CPU measurements | Waiting on other windows | ABBA process launches, thread cycles and thread CPU time, identical features/inputs, exact-binary A/A control. Both ordinary title execution and repeated capture/restore workloads are prepared. Profiling excluded. Retention requires a repeatable called-path CPU reduction beyond A/A noise and no material regression in unchanged simulation/restore paths. |
+| Balanced A/A and A/B CPU measurements | Running on NAS | Same frozen Windows binaries transferred and SHA-256 verified on SERVER. Full independent ABBA title runs on logical CPU 3; snapshot microbenchmarks follow serially. Local partial A/A data retained separately, never pooled across hosts. Profiling excluded. Retention requires a repeatable called-path CPU reduction beyond A/A noise and no material regression in unchanged simulation/restore paths. |
 | Bundle compatible wins and secondary-title validation | Correctness passed; performance retention pending | One candidate, so no multi-change performance bundle. Emerald USA secondary title passed exact state/image/audio and real delay/rollback comparisons. No title pins or Sonic renderer/UI files changed. |
 | Real delay/rollback transport and current-build save/rewind | Passed after fixture correction | Title real UDP peers, latency/loss and actual replay passed with identical confirmed bytes. Synthetic mid-frame replay/rewind and malformed-load atomicity passed. Generic checkpoint failure reproduced in original: test stopped correction before all peers confirmed. Corrected fixture's six original/candidate ordinary rollback and 2p/4p outage cases and all 31 affected loopback checks pass. |
-| Owner review and one playtest per affected title | Builds preparing; acceptance pending | Isolated G: recomp-ui/netplay title builds, two compiler jobs, preserved title sources/pins. No owner launch before automated evidence and CPU retention. Normal windows/audio for handoff; final integration awaits explicit owner approval. |
+| Real local title save/load and complete PSG capture | Passed | Local snapshot v3 preserves pending device timing and PSG wave/noise state. Full GCC 122/122, Clang 4/4, refreshed actual-title continuations and exact canonical streams pass. Original audio negative control fails the new continuation check as intended. |
+| Owner review and one playtest per affected title | Builds/profiles ready; CPU acceptance pending | Isolated G: recomp-ui/mods/netplay title builds and owner profiles, normal windows/audio, separate states/saves. Emerald native save copied and verified; MKSC uses a fresh QA save. No owner launch before automated evidence and CPU retention. Final integration awaits explicit owner approval. |
 
 ## Initial source findings (hypotheses, not performance claims)
 
@@ -184,12 +185,96 @@ gameplay process used about 1% combined machine CPU on the 16-thread host;
 Yoshi used about 0.07%, and no RKA process remained in that snapshot. Subsequent
 RKA automated jobs have restarted; actual activity is observed afresh. The earlier presence-only game
 gate was overbroad. The revised guard records actual game CPU in G: logs,
-permits at most 0.5 logical CPU of aggregate observed game work, and still
-serializes builds, tests and benchmarks. A/A noise remains a condition of
+permits at most two logical CPUs of aggregate observed game work (12.5% of this
+host), and detects explicit automated game test/benchmark command lines. It still
+serializes builds, tests and benchmarks. This threshold was fixed before any
+timing samples were collected; A/A noise remains a condition of
 accepting CPU evidence. It releases the shared benchmark slot while waiting,
 checks fresh F:/G: readiness/space/queues (heavy output stays on G: and its
 queue gates timing), rejects substantial game CPU overlap,
 and never interrupts competing workloads.
+
+## Local snapshot correctness found in review builds
+
+The isolated recomp-ui/mods/netplay title builds also exercise the actual local
+save/load path. MKSC's controller route reaches Peach Circuit at frame 4000.
+With a fixed RTC, its continuous and restored frame-4180 CPU, bus, I/O, audio,
+native-save and PPU sections and image match. The advisory host idle-work counter
+differs by 129; only `pump_idle` increments it, and no guest/device execution
+reads it. The initial uncontrolled RTC timestamp difference is retained too.
+
+Emerald's startup route initially matched pixels but differed by one cycle in
+the PPU, timer and APU phases after local load. An original-session reference,
+relinked with the unchanged title/UI objects, reproduced the exact same
+continuous/restored hashes as the candidate. The local serializer omitted
+`RuntimeTimingContext`: guest-clock debt not yet materialized into devices was
+lost on restore. A prototype timing section removes that mismatch; all guest
+sections and pending scheduling then match. See `review/original/provenance.json`,
+`review/smoke-original-fixed-rtc-report.json` and
+`review/smoke-timing-prototype-report.json`.
+
+The required correctness companion (`4cfd762`) writes local snapshot v3 with a
+required, preflighted timing section. It also preserves PSG3/4 generators, both
+wave RAM banks and their routing. The old audio serializer explicitly omitted
+these solely to avoid invalidating older states, accepting a short sound glitch.
+The new wave/noise PCM continuation check fails against the frozen original and
+passes with the fix, including immediately after restore. Old local v1/v2 states
+are rejected before guest/provider restoration; no migration was added. Native
+cartridge save formats and paths are unchanged. The canonical multiplayer state
+codec already includes these fields and its format is unchanged.
+
+Five focused bus/audio/session/netplay/capture checks pass. The full GCC suite
+passes all 122 checks in 580.30 seconds, including the actual UDP loss/outage,
+restart, rejection and replay cases. Clang passes its four bus, audio playback,
+session and capture checks. The new wave/noise regression fails when linked to
+the frozen original audio implementation. See `qualification/snapshot-v3-ctest-all.log`,
+`snapshot-v3-clang-components.log`, `snapshot-v3-streams.json` and
+`audio-original-regression/run.log`. GCC 2p/4p, Clang 2p and the public capture
+transcript retain the exact original bytes and hashes above.
+
+Both refreshed recomp-ui title executables pass continuous/restored guest
+CPU, bus, I/O, audio, native-save and PPU comparison, including pending timing
+and event scheduling. MKSC frame 4180 is the Peach Circuit race; Emerald frame
+1380 remains startup-only coverage. Their PNG hashes are respectively
+`936a70ee725ee7ec4018b88babe8eaa44e09efc62cc569847ec623c2608caeda` and
+`f3a89b6562ebfcbb9560f3578f11df4018832bfc6457095421e26cb55db81cd7`.
+See `review/smoke-snapshot-v3-report.json`. Local state files are not claimed
+byte-identical across restore: the runner intentionally re-origins its diagnostic
+cycle clock, and host dispatch/idle counters are advisory. Actual guest sections,
+pending device/presentation scheduling and rendered output are compared directly.
+The v3 timing fix also removes the earlier MKSC idle-count difference; Emerald
+retains a one-dispatch advisory difference. Neither is used as a guest timing
+substitute.
+
+The final candidate is frozen in `candidate-v3/manifest.json`, source commit
+`4cfd7625617ff66bf55266e005c0f8bebd74bcf0`. Its 2p/4p streams repeat exactly.
+Both retail 180-frame state/timeline/image/PCM/replay comparisons pass again,
+and all eight original/current, MKSC/Emerald, delay/rollback UDP pairs pass with
+actual corrections and matching confirmed tick-60 archives. The final MKSC
+checkpoint SHA-256 is `5f5d81a94c8e2b814b86fc120534707e48f6a464664bed0ecfca237903c292a1`;
+Emerald is `31c8338f5d1ba8738d673fa60c813eb444ff94a3f90408a5e63fa2a546de1a0f`.
+See `qualification/title-comparison-v3.json` and `network-v3/report.json`.
+
+The first CPU measurement attempt stopped after four A/A launches when video
+encoding overlapped a sample. The entire block is excluded and retained in
+`measurements-rejected-ffmpeg-aa-20261022/`; no A/B data or accepted timing claim
+exists from that attempt. Final CPU runs use the qualified combined candidate.
+
+The owner subsequently authorized NAS SSH work. SERVER is a four-core Intel
+i5-4670 Windows host, with about 4.2 TB free on its G: drive and no observed disk
+queue at placement. An initial reference workload used approximately one core;
+the guard waits for reference/benchmark/build jobs there too. All remote
+fixtures, DLLs, outputs, temporary files, caches and profiles are under
+`G:/Temp/Codex/gbarecomp/accuracy-perf-20261022-nas/` on SERVER. Original, exact-copy
+A/A control and final candidate executable hashes match the local frozen copies.
+The full retail ABBA plan runs there on logical CPU 3, followed by the full
+snapshot microbenchmark plan. Both retain overlap-rejected blocks and check
+resource readiness before fresh blocks. No result is pooled across machines.
+The local attempt retained one four-launch A/A block but no A/B samples before
+migration; only our waiting controllers were stopped while holding the local
+benchmark slot, with no active measured child. The owner and other jobs remain
+untouched. NAS timing is an independent full plan, not a retry selected for a
+favorable result.
 
 ## Host cost attribution
 
@@ -237,5 +322,9 @@ own repositories. This investigation does not newly qualify a Sonic release;
 any future Sonic pin/update affecting presentation still requires the owner's
 per-revision resize, margin content, entity and HUD checks. No owner-facing game
 was launched. A single approved playtest per affected title remains a human
-step, using normal windows and normal audio. Final integration is prohibited
+step, using normal windows and normal audio. Their launch scripts and manifests
+are staged in `review/{mksc,emerald}/owner/` and `review/owner-profiles.json`.
+The original Emerald native save was copied and SHA-256 verified, never changed;
+MKSC has a fresh isolated QA save because its configured original path was absent.
+Final integration is prohibited
 until the owner approves the concrete qualified result.
