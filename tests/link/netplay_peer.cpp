@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <memory>
 #include <thread>
 #include <chrono>
 
@@ -55,6 +56,7 @@ int main(int argc,char** argv) {
     if (!link_fixture::owner_saves_intact(*simulation)) {
         std::fprintf(stderr,"startup did not preserve every player's individual save\n"); return 12;
     }
+    if (rollback) host.pin_checkpoint(60);
     host.begin_match();
     RNetRbDriver* driver=nullptr;
     if (rollback) {
@@ -72,6 +74,8 @@ int main(int argc,char** argv) {
     }
     std::map<std::uint32_t,std::uint32_t> timeline;
     start=rbe_mono_ms(); bool drained=false, saw_reconnecting=false, recovered=false;
+    std::unique_ptr<gbarecomp::GbaNetplayCheckpointAgreement> agreed_checkpoint;
+    bool checkpoint_ready=false;
     // Four concurrent four-seat cases run sixteen peer processes under CTest.
     // Leave enough wall time for the correction-heavy synthetic route.
     const auto drain_timeout_ms = slots == 4 ? 90000u : 55000u;
@@ -89,12 +93,27 @@ int main(int argc,char** argv) {
             }
         }
         if (host.return_to_lobby_requested()) { std::fprintf(stderr,"host error: %s\n",host.error().c_str()); return 6; }
-        // A simulated tick can still be speculative. Drain only after the
-        // agreed watermark covers the target; quiesce deliberately stops new
-        // corrections, and cannot make an unconfirmed tail authoritative.
-        if (driver && host.next_tick()>=80 && rnet_rb_driver_confirmed_through(driver)>=79)
-            rnet_rb_driver_request_quiesce(driver);
-        if (driver && rnet_rb_driver_quiesce_state(driver)==RNET_RB_QUIESCE_DRAINED) { drained=true; break; }
+        // Follow GbaNetplayMatch's production ordering: agree the pinned
+        // boundary while every peer can still correct, then drain. One peer's
+        // watermark does not authorize stopping another peer's corrections.
+        if (driver) {
+            const auto through=rnet_rb_driver_confirmed_through(driver);
+            if (!agreed_checkpoint && host.next_tick()>=80 && through!=UINT32_MAX && through>=79)
+                agreed_checkpoint=std::make_unique<gbarecomp::GbaNetplayCheckpointAgreement>(
+                    host,session,slot,"link-fixture/runtime-v1/bios-none/mods-none",through,60,true);
+            if (agreed_checkpoint) {
+                agreed_checkpoint->update_confirmation(through);
+                if (!host.replaying()) {
+                    const auto status=agreed_checkpoint->poll(rbe_mono_ms());
+                    if (status==gbarecomp::GbaNetplayCheckpointAgreement::Status::Failed) {
+                        std::fprintf(stderr,"checkpoint agreement: %s\n",agreed_checkpoint->error().c_str()); return 14;
+                    }
+                    checkpoint_ready=status==gbarecomp::GbaNetplayCheckpointAgreement::Status::Ready;
+                }
+            }
+            if (checkpoint_ready) rnet_rb_driver_request_quiesce(driver);
+        }
+        if (driver && checkpoint_ready && rnet_rb_driver_quiesce_state(driver)==RNET_RB_QUIESCE_DRAINED) { drained=true; break; }
         if (!driver && host.next_tick()>=80) { drained=true; break; }
         bool ran=false,replay=false;
         if (driver) {
@@ -141,13 +160,17 @@ int main(int argc,char** argv) {
     const auto replay_ticks=driver ? rnet_rb_driver_resim_ticks(driver) : 0;
     const auto episodes=driver ? rnet_rb_driver_episode_count(driver) : 0;
     const auto desyncs=driver ? rnet_rb_driver_desync_count(driver) : 0;
+    if (driver && !host.checkpoint_unchanged(agreed_checkpoint->checkpoint())) {
+        std::fprintf(stderr,"agreed checkpoint changed during rollback drain\n"); return 14;
+    }
     if (driver) { rnet_rb_driver_destroy(driver); driver=nullptr; }
     if (std::getenv("GBA_TEST_CHECKPOINT_CORRUPT")) simulation->machine(1).bus.write8(0x02000100,0x5a);
-    // Stop admission/episodes before freezing the selected common boundary.
-    // Delay-sync ends at exactly 80; rollback's drained tails can differ, so
-    // select the shared earlier snapshot at 60, still in each local ring.
-    gbarecomp::GbaNetplayCheckpointAgreement agreement(host,session,slot,
-        "link-fixture/runtime-v1/bios-none/mods-none",confirmed,rollback ? 60 : 80);
+    // Rollback already agreed the pinned boundary before draining. Delay-sync
+    // stops at exactly 80 and can freeze that shared boundary directly.
+    if (!agreed_checkpoint)
+        agreed_checkpoint=std::make_unique<gbarecomp::GbaNetplayCheckpointAgreement>(host,session,slot,
+            "link-fixture/runtime-v1/bios-none/mods-none",confirmed,80);
+    auto& agreement=*agreed_checkpoint;
     for (;;) {
         const auto status=agreement.poll(rbe_mono_ms());
         if (status==gbarecomp::GbaNetplayCheckpointAgreement::Status::Failed) {
