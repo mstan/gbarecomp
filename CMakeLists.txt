@@ -1062,6 +1062,10 @@ if(GBARECOMP_BUILD_PERFORMANCE_TOOLS)
     add_executable(gba_session_benchmark tools/performance/session_benchmark.cpp
         tools/bios_smoke/dispatch_stub.cpp)
     target_link_gbarecomp_runtime_stack(gba_session_benchmark)
+    add_executable(gba_audio_capture_qualification tools/performance/audio_capture_qualification.cpp)
+    target_include_directories(gba_audio_capture_qualification PRIVATE src/debug)
+    target_link_libraries(gba_audio_capture_qualification PRIVATE gbarecomp_gba)
+    add_test(NAME audio_capture_qualification COMMAND gba_audio_capture_qualification)
 endif()
 
 # P6 differential-gate primitives (offline; full-RAM snapshot/restore/diff).
