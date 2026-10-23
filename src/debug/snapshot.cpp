@@ -27,13 +27,13 @@
 #include "gba_bus.h"
 #include "gba_ppu.h"
 #include "runtime_arm.h"
+#include "runtime_bus_bridge.h"
 
 namespace gbarecomp::debug {
 
 namespace {
 
 constexpr char kMagic[4] = {'G', 'B', 'A', 'S'};
-constexpr uint32_t kLegacySnapshotVersion = 1;
 
 // FourCC section tags.
 constexpr uint32_t fourcc(char a, char b, char c, char d) {
@@ -50,6 +50,7 @@ constexpr uint32_t TAG_SAVE  = fourcc('S', 'A', 'V', '0');
 constexpr uint32_t TAG_PPU   = fourcc('P', 'P', 'U', '0');
 constexpr uint32_t TAG_META  = fourcc('M', 'E', 'T', 'A');
 constexpr uint32_t TAG_MODS  = fourcc('M', 'O', 'D', 'S');
+constexpr uint32_t TAG_TIME  = fourcc('T', 'I', 'M', 'E');
 
 constexpr std::size_t kRomSha1Len = 40;
 
@@ -121,10 +122,7 @@ bool save_state_bytes(std::vector<uint8_t>* out, const SnapshotContext& ctx,
     char sha1[kRomSha1Len];
     fill_rom_sha1(sha1, ctx.rom_sha1);
 
-    // Version 2 deliberately remains the container version.  MODS is a tagged
-    // optional section: v2 files written before mod-state existed still load
-    // for an empty catalog, while any active catalog requires its exact MODS
-    // identity on load.
+    // A non-empty provider catalog requires its exact MODS identity on load.
     SnapshotWriter mods;
     const bool has_mod_state = ctx.mod_state && ctx.mod_state->size() != 0;
     if (has_mod_state && !ctx.mod_state->serialize(mods, err)) return false;
@@ -133,7 +131,7 @@ bool save_state_bytes(std::vector<uint8_t>* out, const SnapshotContext& ctx,
     w.bytes(kMagic, 4);
     w.u32(kSnapshotVersion);
     w.bytes(sha1, kRomSha1Len);
-    w.u32(has_mod_state ? 8 : 7);  // section_count
+    w.u32(has_mod_state ? 9 : 8);  // section_count
 
     add_section(w, TAG_CPU,   [&](SnapshotWriter& s) { serialize_cpu(s); });
     add_section(w, TAG_BUS,   [&](SnapshotWriter& s) { ctx.bus->serialize(s); });
@@ -142,6 +140,12 @@ bool save_state_bytes(std::vector<uint8_t>* out, const SnapshotContext& ctx,
     add_section(w, TAG_SAVE,  [&](SnapshotWriter& s) { ctx.bus->save().serialize(s); });
     add_section(w, TAG_PPU,   [&](SnapshotWriter& s) { ctx.ppu->serialize(s); });
     add_section(w, TAG_META,  [&](SnapshotWriter& s) { serialize_meta(s, ctx); });
+    add_section(w, TAG_TIME, [&](SnapshotWriter& s) {
+        RuntimeTimingContext timing;
+        runtime_capture_timing_context(timing);
+        s.u64(timing.cycles); s.u64(timing.vblank_starts); s.u64(timing.yielded_vblank);
+        s.u64(timing.pending_cycles); s.u64(static_cast<uint64_t>(timing.event_budget));
+    });
     if (has_mod_state) {
         w.u32(TAG_MODS);
         w.u32(static_cast<uint32_t>(mods.size()));
@@ -204,7 +208,7 @@ bool load_state_bytes(const uint8_t* data, std::size_t size,
         return false;
     }
     uint32_t version = head.u32();
-    if (version != kSnapshotVersion && version != kLegacySnapshotVersion) {
+    if (version != kSnapshotVersion) {
         if (err) {
             *err = "snapshot: version mismatch (file v" +
                    std::to_string(version) + ", runtime v" +
@@ -261,7 +265,6 @@ bool load_state_bytes(const uint8_t* data, std::size_t size,
         cursor = payload_off + len;
     }
 
-    const bool legacy_v1 = version == kLegacySnapshotVersion;
     if (cursor != size) {
         if (err) *err = "snapshot: trailing container data";
         return false;
@@ -269,30 +272,11 @@ bool load_state_bytes(const uint8_t* data, std::size_t size,
 
     // All gameplay-relevant sections must be present. META is advisory.
     const uint32_t required[] = {TAG_CPU, TAG_BUS, TAG_IO,
-                                 TAG_AUDIO, TAG_SAVE, TAG_PPU};
+                                 TAG_AUDIO, TAG_SAVE, TAG_PPU, TAG_TIME};
     for (uint32_t tag : required) {
         if (sections.find(tag) == sections.end()) {
             if (err) *err = "snapshot: missing required section";
             return false;
-        }
-    }
-
-    // v1 predates trusted native state.  Its only defined on-disk schema is
-    // the original seven sections written by the v1 serializer.  Do not infer
-    // MODS payloads or section lengths from arbitrary bytes: fully frame the
-    // known container first, then permit it solely for an empty catalog.
-    if (legacy_v1) {
-        const uint32_t legacy_required[] = {TAG_CPU, TAG_BUS, TAG_IO, TAG_AUDIO,
-                                            TAG_SAVE, TAG_PPU, TAG_META};
-        if (section_count != 7 || sections.size() != 7) {
-            if (err) *err = "snapshot: unsupported legacy v1 section catalog";
-            return false;
-        }
-        for (uint32_t tag : legacy_required) {
-            if (sections.find(tag) == sections.end()) {
-                if (err) *err = "snapshot: unsupported legacy v1 section catalog";
-                return false;
-            }
         }
     }
 
@@ -301,10 +285,6 @@ bool load_state_bytes(const uint8_t* data, std::size_t size,
     // catalog/schema mismatch cannot partially mutate guest state.
     const bool active_mod_catalog = ctx.mod_state && ctx.mod_state->size() != 0;
     auto mods_it = sections.find(TAG_MODS);
-    if (legacy_v1 && active_mod_catalog) {
-        if (err) *err = "snapshot: legacy v1 has no MODS migration for active mod catalog";
-        return false;
-    }
     if (active_mod_catalog && mods_it == sections.end()) {
         if (err) *err = "snapshot: missing MODS section for active mod catalog";
         return false;
@@ -327,6 +307,22 @@ bool load_state_bytes(const uint8_t* data, std::size_t size,
         return SnapshotReader(base, len);
     };
 
+    RuntimeTimingContext timing;
+    {
+        if (sections.at(TAG_TIME).len != 40) {
+            if (err) *err = "snapshot: invalid timing section size";
+            return false;
+        }
+        auto r = reader_for(TAG_TIME);
+        timing.cycles=r.u64(); timing.vblank_starts=r.u64(); timing.yielded_vblank=r.u64();
+        timing.pending_cycles=r.u64(); timing.event_budget=static_cast<int64_t>(r.u64());
+        if (timing.pending_cycles > gba::GbaPpu::kCyclesPerFrame ||
+            timing.event_budget < 0 || timing.event_budget > gba::GbaPpu::kCyclesPerFrame) {
+            if (err) *err = "snapshot: invalid pending device timing";
+            return false;
+        }
+    }
+
     { SnapshotReader r = reader_for(TAG_CPU);   deserialize_cpu(r); }
     { SnapshotReader r = reader_for(TAG_BUS);   ctx.bus->deserialize(r); }
     { SnapshotReader r = reader_for(TAG_IO);    ctx.bus->io().deserialize(r); }
@@ -346,6 +342,7 @@ bool load_state_bytes(const uint8_t* data, std::size_t size,
         // live, so continuing after a provider violation would be unsafe.
         if (!ctx.mod_state->restore(mods_reader, err)) std::abort();
     }
+    runtime_restore_timing_context(timing);
 
     return true;
 }

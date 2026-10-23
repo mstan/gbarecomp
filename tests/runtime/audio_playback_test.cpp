@@ -110,12 +110,51 @@ void test_pcm_and_ring_wrap() {
     }
     check(audible, "PCM comparison exercised actual sound rather than only silence");
 }
+
+void test_wave_and_noise_restore_continuation() {
+    auto audio = fresh_audio();
+    audio->write_io16(0x084,0x0080);
+    audio->write_io16(0x080,0xcc77); // Wave and noise, both speakers.
+    for (unsigned bank = 0; bank < 2; ++bank) {
+        audio->write_io16(0x070,0x00a0 | (bank << 6));
+        for (unsigned i = 0; i < 16; ++i)
+            audio->write_io8(0x090+i,static_cast<uint8_t>(0x13u+i*11u+bank*7u));
+    }
+    audio->write_io16(0x070,0x00a0); // Play both banks from bank zero.
+    audio->write_io16(0x072,0x2000);
+    audio->write_io16(0x074,0x87b1);
+    audio->write_io16(0x078,0xf200);
+    audio->write_io16(0x07c,0x802b);
+    audio->tick(31*1024+137); // Nonzero phase in both generators and APU clock.
+    audio->discard_playback();
+    gbarecomp::debug::SnapshotWriter snapshot;
+    audio->serialize(snapshot);
+    auto restored = fresh_audio();
+    gbarecomp::debug::SnapshotReader reader(snapshot.buffer().data(),snapshot.size());
+    restored->deserialize(reader);
+    check(reader.ok() && reader.remaining()==0,"complete wave/noise state restores");
+    bool wave=false,noise=false;
+    for (unsigned event=0; event<128; ++event) {
+        const auto start=audio->samples_generated();
+        audio->tick(1024); restored->tick(1024);
+        std::array<int16_t,32> original{},replayed{};
+        const auto n=audio->drain_samples(original.data(),original.size());
+        const auto m=restored->drain_samples(replayed.data(),replayed.size());
+        check(n==m && original==replayed,"wave/noise PCM matches immediately after restore");
+        std::array<gba::GbaAudio::CapSample,32> taps{};
+        uint64_t first=0;
+        const auto count=audio->query_capture(start,taps.size(),taps.data(),first);
+        for (std::size_t i=0;i<count;++i) { wave|=taps[i].ch[2]!=0; noise|=taps[i].ch[3]!=0; }
+    }
+    check(wave && noise,"restore comparison exercised audible wave and noise channels");
+}
 }  // namespace
 
 int main() {
     test_rate_boundaries_and_partial_drains();
     test_restore_and_discard();
     test_pcm_and_ring_wrap();
+    test_wave_and_noise_restore_continuation();
     if (failures) return 1;
     std::puts("audio playback: rate boundaries, restore and discard passed");
     return 0;

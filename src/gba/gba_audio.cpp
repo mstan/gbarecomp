@@ -48,12 +48,9 @@ void GbaAudio::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     // are stable within a build and the snapshot version gates layout.
     w.bytes(&ch1_, sizeof(ch1_));
     w.bytes(&ch2_, sizeof(ch2_));
-    // NOTE: ch3_/ch4_/wave_ram_ are intentionally NOT serialized — adding them
-    // would change the blob layout and savestates are version-locked
-    // (snapshot.h kSnapshotVersion), invalidating every existing state file.
-    // Their state is transient (the MP2K driver re-triggers the PSG channels
-    // each frame and rewrites wave RAM per note), so a save/load boundary
-    // re-syncs them within ~1 frame. Revisit if/when kSnapshotVersion bumps.
+    w.bytes(&ch3_, sizeof(ch3_));
+    w.bytes(&ch4_, sizeof(ch4_));
+    w.bytes(wave_ram_, sizeof(wave_ram_));
     w.boolean(master_enable_);
     w.u8(volume_l_);
     w.u8(volume_r_);
@@ -61,6 +58,10 @@ void GbaAudio::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     w.boolean(ch1_right_enable_);
     w.boolean(ch2_left_enable_);
     w.boolean(ch2_right_enable_);
+    w.boolean(ch3_left_enable_);
+    w.boolean(ch3_right_enable_);
+    w.boolean(ch4_left_enable_);
+    w.boolean(ch4_right_enable_);
     w.u8(dmg_volume_ratio_);
     w.bytes(&fifo_a_, sizeof(fifo_a_));
     w.bytes(&fifo_b_, sizeof(fifo_b_));
@@ -88,11 +89,9 @@ void GbaAudio::serialize(gbarecomp::debug::SnapshotWriter& w) const {
 void GbaAudio::deserialize(gbarecomp::debug::SnapshotReader& r) {
     r.bytes(&ch1_, sizeof(ch1_));
     r.bytes(&ch2_, sizeof(ch2_));
-    // ch3_/ch4_/wave_ram_ not serialized — see serialize(). Reset them so a
-    // loaded state starts the new channels clean (they re-sync within ~1 frame).
-    ch3_ = Sound3{};
-    ch4_ = Sound4{};
-    std::fill(std::begin(wave_ram_), std::end(wave_ram_), uint8_t{0});
+    r.bytes(&ch3_, sizeof(ch3_));
+    r.bytes(&ch4_, sizeof(ch4_));
+    r.bytes(wave_ram_, sizeof(wave_ram_));
     master_enable_    = r.boolean();
     volume_l_         = r.u8();
     volume_r_         = r.u8();
@@ -100,6 +99,10 @@ void GbaAudio::deserialize(gbarecomp::debug::SnapshotReader& r) {
     ch1_right_enable_ = r.boolean();
     ch2_left_enable_  = r.boolean();
     ch2_right_enable_ = r.boolean();
+    ch3_left_enable_ = r.boolean();
+    ch3_right_enable_ = r.boolean();
+    ch4_left_enable_ = r.boolean();
+    ch4_right_enable_ = r.boolean();
     dmg_volume_ratio_ = r.u8();
     r.bytes(&fifo_a_, sizeof(fifo_a_));
     r.bytes(&fifo_b_, sizeof(fifo_b_));

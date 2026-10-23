@@ -1,6 +1,7 @@
 // bus_tests — current scope: ROM header parser. As more bus
 // subsystems come online (Phase 2/3) this file expands to cover them.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -17,6 +18,7 @@
 #include "gba_simulation_state.h"
 #include "mod_state.h"
 #include "snapshot.h"
+#include "runtime_bus_bridge.h"
 
 namespace {
 
@@ -254,7 +256,7 @@ void patch_snapshot_version(const std::filesystem::path& path, uint32_t version)
     file.write(bytes, sizeof(bytes));
 }
 
-void test_legacy_v1_snapshot_empty_catalog_only() {
+void test_older_snapshots_rejected_before_restore() {
     namespace debug = gbarecomp::debug;
     gba::GbaBus bus;
     gba::GbaPpu ppu;
@@ -274,18 +276,20 @@ void test_legacy_v1_snapshot_empty_catalog_only() {
     context.rom_sha1 = "0123456789012345678901234567890123456789";
     context.mod_state = &empty_catalog;
     bus.write8(0x02000000u, 0x11);
-    check_bool("snapshot_legacy_v1", "write v2 source",
+    check_bool("snapshot_legacy_v1", "write current source",
                debug::save_state(v2_path.string().c_str(), context, &error), true);
     std::filesystem::copy_file(v2_path, v1_path, std::filesystem::copy_options::overwrite_existing, ec);
     patch_snapshot_version(v1_path, 1);
 
-    // v1 has the original seven guest sections and no native MODS identity;
-    // an empty catalog may restore it exactly.
+    // Old layouts are disposable, including for an empty provider catalog.
     bus.write8(0x02000000u, 0xaa);
     error.clear();
-    check_bool("snapshot_legacy_v1", "empty catalog loads",
-               debug::load_state(v1_path.string().c_str(), context, &error), true);
-    check_eq("snapshot_legacy_v1", "guest restored", bus.read8(0x02000000u), 0x11u);
+    for (uint32_t version : {1u,2u}) {
+        patch_snapshot_version(v1_path,version);
+        check_bool("snapshot_old", "old version rejected",
+                   debug::load_state(v1_path.string().c_str(), context, &error), false);
+        check_eq("snapshot_old", "guest unchanged", bus.read8(0x02000000u), 0xaau);
+    }
 
     SnapshotModValue provider_value{0x7777u};
     debug::ModStateRegistry catalog;
@@ -300,13 +304,12 @@ void test_legacy_v1_snapshot_empty_catalog_only() {
     error.clear();
     check_bool("snapshot_legacy_v1", "provider catalog rejected",
                debug::load_state(v1_path.string().c_str(), provider_context, &error), false);
-    check_bool("snapshot_legacy_v1", "rejection names migration",
-               error.find("no MODS migration") != std::string::npos, true);
+    check_bool("snapshot_legacy_v1", "rejection names version",
+               error.find("version mismatch") != std::string::npos, true);
     check_eq("snapshot_legacy_v1", "provider rejection leaves guest", bus.read8(0x02000000u), 0xbbu);
     check_eq("snapshot_legacy_v1", "provider not restored", provider_value.restores, 0);
 
-    // The legacy branch frames every declared section and consumes the entire
-    // container before guest restoration; an unframed tail is never ignored.
+    // A malformed old file is rejected without attempting restoration.
     std::filesystem::copy_file(v1_path, malformed_path, std::filesystem::copy_options::overwrite_existing, ec);
     { std::ofstream malformed(malformed_path, std::ios::binary | std::ios::app); malformed.put('\0'); }
     bus.write8(0x02000000u, 0xcc);
@@ -320,7 +323,52 @@ void test_legacy_v1_snapshot_empty_catalog_only() {
     std::filesystem::remove(malformed_path, ec);
 }
 
-void test_v2_trailing_container_rejects_before_guest_mutation() {
+void test_snapshot_pending_timing() {
+    namespace debug=gbarecomp::debug;
+    const char* t="snapshot_pending_timing";
+    gbarecomp::RuntimeTimingContext previous;
+    gbarecomp::runtime_capture_timing_context(previous);
+    const gbarecomp::RuntimeTimingContext saved{1000,8,7,37,150};
+    gbarecomp::runtime_restore_timing_context(saved);
+    gba::GbaBus bus; gba::GbaPpu ppu;
+    debug::SnapshotContext context;
+    context.bus=&bus; context.ppu=&ppu;
+    bus.write8(0x02000000,0x11);
+    std::string error; std::vector<uint8_t> bytes;
+    check_bool(t,"save",debug::save_state_bytes(&bytes,context,&error),true);
+    gbarecomp::runtime_restore_timing_context({2000,18,17,3,50});
+    bus.write8(0x02000000,0xaa);
+    check_bool(t,"load",debug::load_state_bytes(bytes.data(),bytes.size(),context,&error),true);
+    gbarecomp::RuntimeTimingContext restored;
+    gbarecomp::runtime_capture_timing_context(restored);
+    check_eq(t,"master clock",restored.cycles,saved.cycles);
+    check_eq(t,"vblank count",restored.vblank_starts,saved.vblank_starts);
+    check_eq(t,"presentation boundary",restored.yielded_vblank,saved.yielded_vblank);
+    check_eq(t,"pending cycles",restored.pending_cycles,saved.pending_cycles);
+    check_eq(t,"event horizon",restored.event_budget,saved.event_budget);
+    check_eq(t,"guest restored",bus.read8(0x02000000),0x11u);
+    // Corrupt only the fixed timing payload. Refusal precedes any guest or
+    // clock restoration, rather than silently dropping the clock debt.
+    std::size_t cursor=52;
+    while (cursor+8<=bytes.size()) {
+        const uint32_t size=bytes[cursor+4] | (uint32_t(bytes[cursor+5])<<8) |
+            (uint32_t(bytes[cursor+6])<<16) | (uint32_t(bytes[cursor+7])<<24);
+        if (std::memcmp(bytes.data()+cursor,"TIME",4)==0) {
+            std::fill(bytes.begin()+cursor+8+24,bytes.begin()+cursor+8+32,0xff);
+            break;
+        }
+        cursor+=8+size;
+    }
+    check_bool(t,"timing payload found",cursor+8<=bytes.size(),true);
+    bus.write8(0x02000000,0xa5);
+    check_bool(t,"bad timing refused",debug::load_state_bytes(bytes.data(),bytes.size(),context,&error),false);
+    check_eq(t,"refusal leaves guest",bus.read8(0x02000000),0xa5u);
+    gbarecomp::runtime_capture_timing_context(restored);
+    check_eq(t,"refusal leaves clock",restored.pending_cycles,saved.pending_cycles);
+    gbarecomp::runtime_restore_timing_context(previous);
+}
+
+void test_trailing_container_rejects_before_guest_mutation() {
     namespace debug = gbarecomp::debug;
     gba::GbaBus bus;
     gba::GbaPpu ppu;
@@ -775,8 +823,9 @@ int main() {
     test_sram_signature();
     test_sram_controller_and_snapshot();
     test_snapshot_mods_preflight_before_guest_restore();
-    test_legacy_v1_snapshot_empty_catalog_only();
-    test_v2_trailing_container_rejects_before_guest_mutation();
+    test_older_snapshots_rejected_before_restore();
+    test_snapshot_pending_timing();
+    test_trailing_container_rejects_before_guest_mutation();
     test_sram_bus_width_and_region_mirroring();
     test_bios_undocumented_io_write();
     test_bios_window_writes_are_ignored();

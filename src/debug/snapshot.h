@@ -34,11 +34,10 @@ namespace gbarecomp::debug {
 
 class ModStateRegistry;
 
-// New snapshots use v2.  The loader also recognizes the original v1
-// seven-section container only when no trusted native providers are registered;
-// it has no MODS identity to migrate or validate.  Other old layouts remain
-// rejected rather than guessed.
-constexpr uint32_t kSnapshotVersion = 2;
+// Build-specific snapshots include pending device timing and every PSG channel.
+// Older layouts are rejected before restoration; native cartridge saves have
+// their own independent format and are unaffected.
+constexpr uint32_t kSnapshotVersion = 3;
 
 // ── SnapshotWriter ─────────────────────────────────────────────────
 // Append-only little-endian byte sink. Header-only.
