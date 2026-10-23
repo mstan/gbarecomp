@@ -18,13 +18,13 @@ saves are read-only inputs; speculative saves stay inside isolated test sessions
 | Establish storage and benchmark isolation | Waiting on other windows | Initial F: queue 4 / 11.8 MB/s; G: queue 0 / 0.3 MB/s. Scratch, builds, profiles and caches on G:. Owner explicitly chose to wait for current workloads to finish. Named benchmark mutex plus process inventory gate. |
 | Select proving title and freeze coherent original | Passed | Mario Kart: Super Circuit USA AMKE0, SHA-1 `9d327c030c3e2d9007990518594f70c3340ac56f`; original native binaries/libraries preserved in `baseline/`. Existing generated retail BIOS explicitly included in both configurations. |
 | Attribute CPU execution / interpreter / AOT dispatch | Passed, bounded instrumentation | Actual MKSC session phases and dispatch resolver timers; zero dispatch misses/interpreted instructions. Timer overhead and nested phases are explicit limitations below. |
-| Attribute copies / allocations / capture / rollback | Passed; retention timing pending | Ordinary allocation counts and exact snapshot sizes. Temporary per-device vector copies identified; staging restore deliberately retained. |
+| Attribute copies / allocations / capture / rollback | Passed; retention timing pending | Ordinary allocation counts and exact snapshot sizes. Temporary per-device vector copies identified; staging restore deliberately retained. Large diagnostic capture-ring initialization also identified; prototype deferred after observer-thread review. |
 | Attribute scanlines / audio / synchronization | Passed, bounded instrumentation | Scanline, APU, timers/FIFO DMA, serial, PPU, HBlank DMA, VBlank latch/DMA, binding, scheduling, and real transport correction evidence. |
 | Audit tile/OBJ, bitmap, affine, blend, windows, mosaic candidates | Passed with baseline gap | Existing tile spans/indexed HD surfaces retained; all six bitmap/tile modes exercised. No mosaic-register consumption found in the compositor: baseline accuracy gap remains unverified, never labeled a pass. Raster cost fixture awaits the same quiet timing window. |
-| Implement and qualify measured candidates separately | Passed for one candidate | Direct bounded archive sections; original/candidate 2p and 4p state/pixel/audio streams identical. No persistent cache or hardware shortcut introduced. |
-| Balanced A/A and A/B CPU measurements | Waiting on other windows | ABBA process launches, thread cycles and thread CPU time, identical features/inputs, exact-binary A/A control. Profiling excluded. Retention requires a repeatable called-path CPU reduction beyond A/A noise and no material regression in unchanged simulation/restore paths. |
+| Implement and qualify candidates separately | One eligible; one deferred | Direct bounded archive sections pass original/candidate 2p and 4p state/pixel/audio comparisons. Diagnostic audio capture chunks are excluded from the branch's production changes; see the disposition below. |
+| Balanced A/A and A/B CPU measurements | Waiting on other windows | ABBA process launches, thread cycles and thread CPU time, identical features/inputs, exact-binary A/A control. Both ordinary title execution and repeated capture/restore workloads are prepared. Profiling excluded. Retention requires a repeatable called-path CPU reduction beyond A/A noise and no material regression in unchanged simulation/restore paths. |
 | Bundle compatible wins and secondary-title validation | Correctness passed; performance retention pending | One candidate, so no multi-change performance bundle. Emerald USA secondary title passed exact state/image/audio and real delay/rollback comparisons. No title pins or Sonic renderer/UI files changed. |
-| Real delay/rollback transport and current-build save/rewind | Passed | Both titles' original/candidate real UDP peers, latency/loss and actual replay; confirmed bytes identical. Synthetic mid-frame replay/rewind and malformed-load atomicity passed. |
+| Real delay/rollback transport and current-build save/rewind | Title comparisons passed; final quiet transport checks pending | Both titles' original/candidate real UDP peers, latency/loss and actual replay; confirmed bytes identical. Synthetic mid-frame replay/rewind and malformed-load atomicity passed. A later retained-candidate generic rollback check failed checkpoint agreement; the initial pass and later failure are both retained. Quiet original/candidate ordinary rollback and 2p/4p outage checks precede timing. |
 | Owner review and one playtest per affected title | Pending | Automated evidence first; normal windows/audio for approved handoff; final integration awaits explicit owner approval. |
 
 ## Initial source findings (hypotheses, not performance claims)
@@ -102,6 +102,67 @@ with MSYS2 Bash on PATH. Final focused PPU, HD, session, netplay and real rollba
 checks passed after the profiling build was disabled. See `qualification/` and
 `network/report.json` for retained logs and file hashes.
 
+## Deferred audio capture-storage prototype
+
+Restore constructs new audio devices. Each originally allocates and initializes
+262,144 diagnostic `CapSample` entries, 3.5 MiB on the tested hosts, in addition
+to its playback buffers. This is host observability storage, separate from sound
+generation and FIFO execution. A prototype used 4,096-entry chunks with implicit
+zero values in untouched chunks. Default copies remained independent, and reset
+and legacy deserialize retained existing capture entries as before.
+
+The public capture contract probe matched the original exactly across storage
+boundaries, full-ring wrap, reset, copies, queries and fresh/reused-device
+restore: 4,282,828 bytes, SHA-256
+`ff803b4da215b20c9ff4d3e71f8185856736826bd36c245b738f97d5f2f10cec`.
+GCC and Clang matched both this stream and the canonical simulation stream.
+Both commercial titles also matched state, pixels and PCM, and their actual
+delay/rollback peers matched confirmed checkpoint bytes.
+
+The prototype's full suite passed 120/122 checks. Two outage cases reported
+checkpoint-unavailable or recovery-grace failures. A single predeclared paired
+original/prototype follow-up passed both 2p and 4p cases: 94 and 80 common
+confirmed ticks, respectively, with identical final archives. The initial
+failures remain recorded; their cause was not established. See
+`qualification/bundle-ctest-all.log`, `qualification/outage-control/`, and
+`network-bundle/report.json`. Replay counts and packet totals are not CPU-work
+measurements.
+
+Source review then found the supported windowed TCP observer queries capture
+on a separate thread (`runtime.cpp` observer thread and `cmd_audio_cap`). Lazy
+chunk growth changes metadata publication and lifetime behavior. Sequential
+equivalence does not qualify that concurrent reader. The prototype is therefore
+deferred before performance acceptance. Its source and patch are retained in
+`deferred-audio-chunks/`, with frozen binaries in `candidate-bundle/`. Its two
+production audio files were restored; they are absent from the integration
+candidate. The new optional capture-contract probe is retained for future work.
+
+Only the archive-copy candidate remains eligible for measurement. A quiet-window
+paired transport recheck precedes its CPU runs. After restoring the original
+audio implementation, a focused run passed six component checks but failed
+`multiplayer_rollback_loopback` with "proposed checkpoint is unavailable or
+unconfirmed". This check had passed earlier. The cause remains unresolved;
+contention is not established as the cause. Both results are retained in
+`qualification/archive-final-focused.log` and the earlier qualification logs.
+Quiet checks cover ordinary rollback and 2p/4p outages on the coherent original
+and retained candidate; no repeated retry-until-pass qualification is planned.
+
+The restored implementation's GCC capture and 2p/4p simulation streams still
+match the original exactly. Clang capture and 2p streams also match, with its
+session and playback checks passing. The six component checks passed separately;
+these do not substitute for the pending transport checks. See
+`qualification/archive-final-correctness.json` and `archive-final-*.log`.
+Every restored static-library member matches the frozen archive candidate except
+the diagnostic replay object. That object is identical after normalizing its
+12-character engine revision string (`7a05e7610f32` versus `2258281732b6`);
+`qualification/archive-revision-identity.json` records this comparison. This is
+binary provenance evidence, not a claim of cross-build netplay compatibility.
+
+The benchmark guard waits without
+a time limit, releases the shared benchmark slot while waiting, checks fresh
+F:/G: readiness/space/queues, and rejects samples overlapping other builds,
+games, tests or known heavy tools. It never interrupts competing workloads.
+
 ## Host cost attribution
 
 ETW sampling was unavailable: Windows refused its performance-profile policy
@@ -111,6 +172,8 @@ adds device/dispatch timers, activated by the existing `GBARECOMP_PHASE_PROF`
 environment variable. It defaults off. In the default build the complete
 `runtime_arm.cpp.obj` and `runtime_bus_bridge.cpp.obj` objects are byte-identical
 to the original, verified from both static libraries.
+The deferred prototype also retained byte-identical PPU and HD renderer objects;
+the retained archive candidate does not modify those sources either.
 
 The final detailed MKSC observation covers 300 emulated paired frames after the
 race checkpoint. These are instrumented wall durations, including timer costs,
