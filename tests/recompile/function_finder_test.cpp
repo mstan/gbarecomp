@@ -1368,6 +1368,57 @@ int main() {
         std::fprintf(stderr,"Cross-copy call inherited the caller's source bias\n");
         return 1;
     }
+    // Gap roll-in: a split loop whose linear walk ends at an unconditional
+    // branch before a literal pool, with the back-edge block sitting behind
+    // the pool, is rolled into the host instead of becoming its own
+    // function — the forward branch then lowers to a goto, keeping the loop
+    // in one host frame.
+    std::vector<std::uint8_t> gap_rom(0x20, 0);
+    put16(gap_rom, 0x00, 0xE004u);  // b +0x0C (over the pool)
+    put32(gap_rom, 0x04, 0x12345678u);
+    put32(gap_rom, 0x08, 0x9ABCDEF0u);
+    put16(gap_rom, 0x0Cu, 0x2001u);  // mov r0, #1
+    put16(gap_rom, 0x0Eu, 0x3002u);  // add r0, #2
+    put16(gap_rom, 0x10u, 0xE7F6u);  // b 0x00 (back edge)
+
+    gbarecomp::FunctionFinder gap(gap_rom.data(), gap_rom.size(), kBase);
+    gap.set_speculative_literal_harvest(false);
+    gap.add_seed({kBase, gbarecomp::CpuMode::Thumb, "split_loop"});
+    // The back-edge block is an explicit interior/resume seed (config
+    // `[[extra_func]] resume = true`): beyond every host extent, it is a
+    // candidate for roll-in rather than a standalone function.
+    gbarecomp::FunctionSeed gap_candidate{
+        kBase + 0x0Cu, gbarecomp::CpuMode::Thumb, "back_edge"};
+    gap_candidate.alias_candidate = true;
+    gap.add_seed(gap_candidate);
+    gap.run(32);
+
+    const auto* gap_host = find_function(gap, kBase, gbarecomp::CpuMode::Thumb);
+    if (!gap_host) {
+        std::fprintf(stderr, "gap roll-in: host function missing\n");
+        return 1;
+    }
+    if (has_function(gap, kBase + 0x0Cu, gbarecomp::CpuMode::Thumb)) {
+        std::fprintf(stderr,
+                     "gap roll-in: back-edge block became its own function\n");
+        return 1;
+    }
+    if (gap_host->end_addr < kBase + 0x12u) {
+        std::fprintf(stderr,
+                     "gap roll-in: host extent 0x%08X does not cover 0x%08X\n",
+                     gap_host->end_addr, kBase + 0x0Cu);
+        return 1;
+    }
+    bool gap_aliased = false;
+    for (std::uint32_t pc : gap_host->alias_entries) {
+        if (pc == kBase + 0x0Cu) gap_aliased = true;
+    }
+    if (!gap_aliased) {
+        std::fprintf(stderr, "gap roll-in: host has no alias entry for 0x%08X\n",
+                     kBase + 0x0Cu);
+        return 1;
+    }
+
     std::printf("function_finder_tests: PASS\n");
     return 0;
 }
