@@ -62,6 +62,9 @@ extern "C" RuntimeThumbAluImmediateOverride
 extern "C" RuntimeBusReadOverride g_runtime_bus_read_override = nullptr;
 extern "C" RuntimeRamDispatchHook g_runtime_ram_dispatch_hook = nullptr;
 extern "C" RuntimeRamCodeView g_runtime_ram_code_view = nullptr;
+extern "C" RuntimeDispatchObserver g_runtime_dispatch_observer = nullptr;
+extern "C" uint32_t g_runtime_observed_pcs[RUNTIME_MAX_OBSERVED_PCS] = {};
+extern "C" unsigned g_runtime_observed_pc_count = 0;
 extern "C" RuntimeForceInterpHook g_runtime_force_interp_hook = nullptr;
 extern "C" int g_runtime_force_interp_step_active = 0;
 
@@ -945,6 +948,12 @@ const DispatchEntry* dispatch_resolve(uint32_t target_pc) {
         runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
 
     bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+    for (unsigned i = 0; i < g_runtime_observed_pc_count; ++i) {
+        if (g_runtime_observed_pcs[i] == pc) {
+            g_runtime_dispatch_observer(pc, thumb ? 1 : 0);
+            break;
+        }
+    }
     if (g_resumable_context && g_resumable_context->program_dispatch &&
         g_resumable_context->program_dispatch(pc, thumb ? 1 : 0)) return nullptr;
     // A generated caller may enter mutable code without returning through the

@@ -385,6 +385,9 @@ struct Backend {
     // A game input policy consumes touches (RunOptions::input_frame).
     bool touch_policy = false;
     std::uint32_t touch_claims = 0;
+    // Enhanced (MP2K shadow) audio; saved = the player chose it in the menu.
+    bool audio_enhanced = false;
+    bool audio_enhanced_saved = false;
     bool touch_emulation = false;   // desktop mouse -> touch
     float px_per_mm = 96.0f / 25.4f;
     float logical_px_per_mm = 96.0f / 25.4f;  // SDL-reported (logical) density
@@ -1113,7 +1116,9 @@ void save_touch_config(const Backend* b) {
             while (!line.empty() && line.back() == '\r') line.pop_back();
             const size_t s = line.find_first_not_of(" \t");
             const bool header = s != std::string::npos && line[s] == '[';
-            if (header) in_section = line.compare(s, 7, "[Touch]") == 0;
+            if (header)
+                in_section = line.compare(s, 7, "[Touch]") == 0 ||
+                             line.compare(s, 7, "[Audio]") == 0;
             if (in_section) continue;
             kept.push_back(line);
         }
@@ -1129,6 +1134,10 @@ void save_touch_config(const Backend* b) {
     if (b->toggle_pos_saved) {
         f << "toggle_x = " << b->toggle_fx << "\n";
         f << "toggle_y = " << b->toggle_fy << "\n";
+    }
+    if (b->audio_enhanced_saved) {
+        f << "\n[Audio]\n";
+        f << "enhanced = " << (b->audio_enhanced ? 1 : 0) << "\n";
     }
 }
 
@@ -2640,6 +2649,29 @@ void HostWindow::set_touch_config_dir(const char* dir) {
             b->toggle_pos_saved = true;
         }
     });
+    ini_scan_section((b->touch_config_dir + "/config.ini").c_str(), "Audio",
+                     [b](const char* key, const char* val) {
+        if (SDL_strcasecmp(key, "enhanced") == 0) {
+            b->audio_enhanced = std::atoi(val) != 0;
+            b->audio_enhanced_saved = true;
+        }
+    });
+}
+
+bool HostWindow::saved_audio_enhanced(bool& enabled) const {
+    if (!open_ || !impl_) return false;
+    auto* b = static_cast<const Backend*>(impl_);
+    if (!b->audio_enhanced_saved) return false;
+    enabled = b->audio_enhanced;
+    return true;
+}
+
+void HostWindow::save_audio_enhanced(bool enabled) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    b->audio_enhanced = enabled;
+    b->audio_enhanced_saved = true;
+    save_touch_config(b);
 }
 
 bool HostWindow::touch_pad_visible() const {
@@ -3178,6 +3210,8 @@ int  HostWindow::volume() const { return 100; }
 int  HostWindow::window_scale() const { return 1; }
 void HostWindow::set_linear_filter(bool /*enabled*/) {}
 bool HostWindow::linear_filter() const { return false; }
+bool HostWindow::saved_audio_enhanced(bool& /*enabled*/) const { return false; }
+void HostWindow::save_audio_enhanced(bool /*enabled*/) {}
 void HostWindow::set_audio_enabled(bool /*enabled*/) {}
 bool HostWindow::audio_enabled() const { return false; }
 void HostWindow::set_resize_driven_view(bool /*enabled*/) {}

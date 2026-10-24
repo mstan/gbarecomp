@@ -158,6 +158,21 @@ public:
                           const uint8_t* iwram, std::size_t iwram_len,
                           bool enable_request);
     bool shadow_live() const { return shadow_enabled_ && shadow_.live(); }
+    // The ROM links MP2K, so the shadow can be switched on.
+    bool shadow_available() const { return shadow_.armed(); }
+    bool shadow_enabled() const { return shadow_enabled_; }
+    // Player toggle (in-game menu). Switching on starts from a fresh shadow
+    // that has to prove itself again; switching off returns to the canon
+    // mix at once. No effect when the ROM does not link MP2K.
+    void set_shadow_enabled(bool on);
+    // Entry PCs (Thumb bit clear) of the detected SoundMainRAM copies; the
+    // runtime calls shadow_driver_tick() when guest code dispatches to one.
+    std::size_t shadow_hook_pcs(uint32_t* out, std::size_t max) const;
+    // One MP2K driver tick: SoundMain has updated the channels and is about
+    // to mix. The shadow re-reads the channel state here.
+    void shadow_driver_tick(uint32_t pc, bool thumb);
+    // One log line: how long the shadow substituted, ticks seen, reverts.
+    void log_shadow_summary(const char* when) const;
 
     // Save-state serialization. Captures the full guest mixer state
     // (channels, FIFOs, master, soundbias, sample accumulator) plus the
@@ -309,6 +324,15 @@ private:
     void cap_push(const CapSample& s);
     int16_t current_samples_[kMaxSamplesPerEvent] = {};
     uint8_t current_sample_rates_[kMaxSamplesPerEvent] = {};
+    CapSample current_caps_[kMaxSamplesPerEvent] = {};
+    // 2nd-order Butterworth low-pass (8 kHz) on the PSG part while the MP2K
+    // shadow substitutes; see mix_slot().
+    struct PsgLowPass {
+        uint32_t rate = 0;
+        float b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+        float x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+        bool  primed = false;
+    } psg_lp_;
     uint32_t sample_index_ = 0;
     std::vector<FifoTrace> trace_;
     uint32_t trace_write_ = 0;
@@ -323,6 +347,11 @@ private:
     uint32_t samples_per_event() const;
     uint32_t cycles_until_next_sample_event() const;
     void sample_until_current_time();
+    // Mixes one output slot of the current event: canon, or PSG plus the
+    // MP2K shadow while it substitutes. The single place both the event and
+    // the mid-event catch-up (sample_until_current_time) produce samples.
+    void mix_slot(uint32_t slot);
+    int16_t psg_low_pass(int16_t in);
     void run_sample_event();
     void ch1_trigger();
     void ch2_trigger();
@@ -342,11 +371,12 @@ private:
 
     // ── MP2K HLE shadow (verified-enhancement; default off) ──────
     Mp2kShadow shadow_{};
+    std::vector<Mp2kSig> shadow_sigs_;  // kept to re-arm on a player toggle
     MemView    shadow_mem_{};
     bool       shadow_enabled_ = false;
     uint64_t   shadow_cursor_ = 0;          // running grid-sample count
-    uint32_t   shadow_samples_since_hook_ = 0;
-    uint32_t   shadow_hook_period_ = 1097;  // ≈ output samples per 59.7 Hz tick
+    uint64_t   shadow_enabled_samples_ = 0;  // samples rendered while enabled
+    uint64_t   shadow_live_samples_ = 0;     // ... of which substituted
 };
 
 }  // namespace gba
