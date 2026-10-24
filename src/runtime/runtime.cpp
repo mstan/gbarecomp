@@ -3689,12 +3689,17 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                       ppu.frame_count());
             std::string e;
             const std::string state_path = suspend_state_path();
-            const bool suspended = do_savestate_save(state_path, e);
+            // A session stopped before its first frame has nothing to keep;
+            // its state would overwrite the previous session's suspend state
+            // (and the marker the next launch resumes from).
+            const bool ran = ppu.frame_count() > 0;
+            const bool suspended = ran && do_savestate_save(state_path, e);
+            if (!ran) e = "no frame run, previous state kept";
             if (suspended) {
                 std::ofstream marker(suspend_marker_path(), std::ios::trunc);
                 marker << ppu.frame_count() << "\n";
             }
-            if (ev.terminating) suspend_on_exit = suspended;
+            if (ev.terminating) suspend_on_exit = suspended || !ran;
             std::fprintf(stderr,
                          "[gbarecomp:runtime] %s: save=%s suspend_state=%s%s%s\n",
                          ev.terminating ? "terminating" : "entering background",
@@ -3708,7 +3713,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     clear_suspend_marker();
                     if (pacer) pacer->reset();
                 } else {
+                    // Destroyed while suspended (swiped away, or the Activity
+                    // finished): nothing ran since the state was written, so
+                    // the next launch resumes it.
                     host_quit = true;
+                    suspend_on_exit = suspended || !ran;
                 }
             }
         }

@@ -2124,6 +2124,13 @@ void HostWindow::close() {
     delete b;
     impl_ = nullptr;
     open_ = false;
+#if defined(__ANDROID__)
+    // The process outlives the session and SDL's event queue with it. When
+    // the Activity is destroyed in the background, SDL queues SDL_QUIT then
+    // SDL_APP_TERMINATING; wait_for_foreground() returns on the first, and the
+    // second used to terminate the next session before its first frame.
+    SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
+#endif
 }
 
 bool HostWindow::set_surface_size(int base_w, int base_h) {
