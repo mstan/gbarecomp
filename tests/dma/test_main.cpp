@@ -1,6 +1,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 
 #include "gba_audio.h"
 #include "gba_io.h"
@@ -9,6 +10,7 @@ namespace {
 
 class TestBus final : public armv4t::Bus {
 public:
+    void set_io(gba::GbaIo* io) { io_ = io; }
     uint8_t read8(uint32_t addr) override { return byte(addr); }
     uint16_t read16(uint32_t addr) override {
         return static_cast<uint16_t>(read8(addr) | (read8(addr + 1) << 8));
@@ -21,10 +23,18 @@ public:
     }
     void write8(uint32_t addr, uint8_t value) override { byte(addr) = value; }
     void write16(uint32_t addr, uint16_t value) override {
+        if (io_ && (addr & 0xFF000000u) == 0x04000000u) {
+            io_->write16(addr - 0x04000000u, value);
+            return;
+        }
         write8(addr, static_cast<uint8_t>(value));
         write8(addr + 1, static_cast<uint8_t>(value >> 8));
     }
     void write32(uint32_t addr, uint32_t value) override {
+        if (io_ && (addr & 0xFF000000u) == 0x04000000u) {
+            io_->write32(addr - 0x04000000u, value);
+            return;
+        }
         write8(addr, static_cast<uint8_t>(value));
         write8(addr + 1, static_cast<uint8_t>(value >> 8));
         write8(addr + 2, static_cast<uint8_t>(value >> 16));
@@ -32,6 +42,7 @@ public:
     }
 
 private:
+    gba::GbaIo* io_ = nullptr;
     uint8_t& byte(uint32_t addr) {
         if ((addr & 0xFF000000u) == 0x02000000u) {
             return ewram_[addr & (ewram_.size() - 1)];
@@ -145,9 +156,63 @@ void test_sound_fifo_dma_completion_irq() {
              io.if_reg() & gba::GbaIo::IrqDma2, gba::GbaIo::IrqDma2);
 }
 
+void test_mmio_cap_records_dma_kicked_from_write32() {
+    TestBus bus;
+    gba::GbaIo io;
+    io.set_bus(&bus);
+    bus.set_io(&io);
+    bus.write16(0x02000000u, 0xBEEFu);
+
+    const uint64_t t0 = gba::gba_mmio_cap_total();
+    io.write32(0xB0u, 0x02000000u);  // DMA0 SAD
+    io.write32(0xB4u, 0x04000204u);  // DMA0 DAD = WAITCNT (plain store)
+    // One 32-bit store covering CNT_L+CNT_H: the CNT_H half kicks an
+    // immediate 16-bit transfer whose destination write reenters
+    // GbaIo::write16 while the split is still being decomposed.
+    io.write32(0xB8u, 0x80000001u);  // CNT_L=1, CNT_H=enable+immediate
+    const uint64_t t1 = gba::gba_mmio_cap_total();
+
+    // 3 size-4 stores + the reentrant destination write. The old global
+    // split flag swallowed the last one (delta was 3).
+    check_eq("mmio_cap_dma_reentrancy_delta",
+             static_cast<uint32_t>(t1 - t0), 4u);
+
+    std::array<gba::MmioCapEntry, 4> entries{};
+    uint64_t first = 0;
+    const std::size_t n =
+        gba::gba_mmio_cap_query(t0, entries.size(), entries.data(), first);
+    check_eq("mmio_cap_dma_reentrancy_query", static_cast<uint32_t>(n), 4u);
+    if (n == 4) {
+        check_eq("mmio_cap_dma_reentrancy_sad_addr", entries[0].addr,
+                 0x040000B0u);
+        check_eq("mmio_cap_dma_reentrancy_sad_size", entries[0].size, 4u);
+        check_eq("mmio_cap_dma_reentrancy_dad_addr", entries[1].addr,
+                 0x040000B4u);
+        check_eq("mmio_cap_dma_reentrancy_dad_size", entries[1].size, 4u);
+        check_eq("mmio_cap_dma_reentrancy_cnt_addr", entries[2].addr,
+                 0x040000B8u);
+        check_eq("mmio_cap_dma_reentrancy_cnt_size", entries[2].size, 4u);
+        check_eq("mmio_cap_dma_reentrancy_dest_addr", entries[3].addr,
+                 0x04000204u);
+        check_eq("mmio_cap_dma_reentrancy_dest_size", entries[3].size, 2u);
+        check_eq("mmio_cap_dma_reentrancy_dest_value", entries[3].value,
+                 0xBEEFu);
+    }
+    check_eq("mmio_cap_dma_reentrancy_guest",
+             io.read16(gba::IoReg::WAITCNT), 0xBEEFu);
+    check_eq("mmio_cap_dma_reentrancy_runs",
+             static_cast<uint32_t>(io.dma_runs(0)), 1u);
+}
+
 }  // namespace
 
 int main() {
+#if defined(_WIN32)
+    _putenv_s("GBARECOMP_MMIO_CAP", "1");
+#else
+    setenv("GBARECOMP_MMIO_CAP", "1", 1);
+#endif
+    test_mmio_cap_records_dma_kicked_from_write32();
     test_immediate_word_alignment();
     test_immediate_halfword_alignment();
     test_timed_word_alignment();
