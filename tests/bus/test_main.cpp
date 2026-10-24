@@ -279,13 +279,13 @@ void test_legacy_v1_snapshot_empty_catalog_only() {
     std::filesystem::copy_file(v2_path, v1_path, std::filesystem::copy_options::overwrite_existing, ec);
     patch_snapshot_version(v1_path, 1);
 
-    // v1 has the original seven guest sections and no native MODS identity;
-    // an empty catalog may restore it exactly.
+    // Snapshots are build-specific. Older layouts are rejected even when
+    // no mod provider is active, before changing any live guest state.
     bus.write8(0x02000000u, 0xaa);
     error.clear();
-    check_bool("snapshot_legacy_v1", "empty catalog loads",
-               debug::load_state(v1_path.string().c_str(), context, &error), true);
-    check_eq("snapshot_legacy_v1", "guest restored", bus.read8(0x02000000u), 0x11u);
+    check_bool("snapshot_legacy_v1", "empty catalog rejects old version",
+               debug::load_state(v1_path.string().c_str(), context, &error), false);
+    check_eq("snapshot_legacy_v1", "guest preserved", bus.read8(0x02000000u), 0xaau);
 
     SnapshotModValue provider_value{0x7777u};
     debug::ModStateRegistry catalog;
@@ -300,8 +300,8 @@ void test_legacy_v1_snapshot_empty_catalog_only() {
     error.clear();
     check_bool("snapshot_legacy_v1", "provider catalog rejected",
                debug::load_state(v1_path.string().c_str(), provider_context, &error), false);
-    check_bool("snapshot_legacy_v1", "rejection names migration",
-               error.find("no MODS migration") != std::string::npos, true);
+    check_bool("snapshot_legacy_v1", "rejection names version mismatch",
+               error.find("version mismatch") != std::string::npos, true);
     check_eq("snapshot_legacy_v1", "provider rejection leaves guest", bus.read8(0x02000000u), 0xbbu);
     check_eq("snapshot_legacy_v1", "provider not restored", provider_value.restores, 0);
 

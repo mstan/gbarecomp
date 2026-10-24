@@ -1000,6 +1000,12 @@ target_include_directories(tail_dispatch_tests PRIVATE tests/codegen src/gba)
 target_link_libraries(tail_dispatch_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME tail_dispatch_tests COMMAND tail_dispatch_tests)
 
+add_executable(swi_snapshot_tests tests/armv4t/swi_snapshot_test.cpp
+    tools/bios_smoke/dispatch_stub.cpp)
+target_include_directories(swi_snapshot_tests PRIVATE src/armv4t src/debug src/gba)
+target_link_gbarecomp_runtime_stack(swi_snapshot_tests)
+add_test(NAME swi_snapshot_tests COMMAND swi_snapshot_tests)
+
 add_executable(armv4t_tests tests/armv4t/test_main.cpp)
 target_link_libraries(armv4t_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME armv4t_tests COMMAND armv4t_tests)
