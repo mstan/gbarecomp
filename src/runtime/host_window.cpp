@@ -2112,6 +2112,16 @@ void HostWindow::close() {
     if (b->audio_mtx) SDL_DestroyMutex(b->audio_mtx);
     close_game_controller(b);
     if (b->device_gyro) SDL_SensorClose(b->device_gyro);
+#if defined(__ANDROID__)
+    // The process outlives a game session (a launcher Activity can keep it),
+    // but SDL's Android sensor driver binds every event queue to the ALooper
+    // of the thread that initialised the subsystem: this session's game
+    // thread, which ends with it. Quit the subsystem so the next session's
+    // open() initialises it again on its own thread. Otherwise the next
+    // session's SDL_SensorOpen/SDL_SensorClose went through the dead thread's
+    // looper and crashed in Looper::addFd / Looper::removeFd.
+    SDL_QuitSubSystem(SDL_INIT_SENSOR);
+#endif
     if (b->haptic) SDL_HapticClose(b->haptic);
     if (g_haptic_window == this) g_haptic_window = nullptr;
 #if defined(GBARECOMP_RUNTIME_UI)
