@@ -52,6 +52,42 @@ bool contains(const std::string& s, const char* needle) {
     return s.find(needle) != std::string::npos;
 }
 
+void test_forward_in_body_goto() {
+    // Split loop with the back-edge block behind a literal pool: the finder
+    // rolls the block into the host (see function_finder_tests), and the
+    // forward branch to the labelled block must lower to a goto instead of
+    // a host call — this is what keeps a split loop in one host frame.
+    Rom rom2;
+    rom2.h(kBase + 0x00u, 0xE004u);  // b +0x0C (over the pool)
+    rom2.w(kBase + 0x04u, 0x12345678u);
+    rom2.w(kBase + 0x08u, 0x9ABCDEF0u);
+    rom2.h(kBase + 0x0Cu, 0xE7F8u);  // b back to the head
+    rom2.h(kBase + 0x0Eu, 0x4770u);  // bx lr
+    gbarecomp::Function host{};
+    host.addr = kBase;
+    host.source_addr = kBase;
+    host.mode = gbarecomp::CpuMode::Thumb;
+    host.name = "gap";
+    host.end_addr = kBase + 0x10u;
+    host.alias_entries.push_back(kBase + 0x0Cu);
+    const std::unordered_map<std::uint64_t, std::string> names;
+    const std::string body = gbarecomp::emit_function_body_str(
+        host, rom2.bytes.data(), rom2.bytes.size(), kBase, names);
+    check(contains(body, "L_0800000C:"),
+          "rolled-in block is missing its interior label");
+    // The resume prologue legitimately holds one goto to the alias entry;
+    // the branch lowering below must add the second. Without the forward
+    // goto the branch exits the host frame via a tail dispatch instead.
+    std::size_t gotos = 0;
+    for (std::size_t pos = 0;
+         (pos = body.find("goto L_0800000C;", pos)) != std::string::npos;
+         ++pos, ++gotos) {
+    }
+    check(gotos == 2, "forward in-body branch did not lower to a goto");
+    check(!contains(body, "GBARECOMP_TAIL_DISPATCH(0x0800000Cu)"),
+          "forward in-body branch exits the host frame");
+}
+
 }  // namespace
 
 int main() {
@@ -126,6 +162,8 @@ int main() {
         moved, rom.bytes.data(), rom.bytes.size(), kBase, names);
     check(contains(moved_body, "runtime_call_push_return(0x03000004u)"),
           "relocated BL must stay a call");
+
+    test_forward_in_body_goto();
 
     if (failures) return 1;
     std::printf("link_branch_tests: OK\n");

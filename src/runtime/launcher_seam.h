@@ -28,8 +28,9 @@
 // The launcher is skipped (returns 0 with args untouched) for every headless
 // or explicit-path invocation: --tcp, --steps, --frames, --no-window,
 // --dump-bmp/--dump-png, --load-state, --help, an explicit --rom, or
-// GBARECOMP_NO_LAUNCHER=1. `--launcher` forces it past a persisted
-// skip_launcher=1; `--no-launcher` skips for one run. Both are seam-only
+// GBARECOMP_NO_LAUNCHER=1 — unless `--launcher` is given, which forces the
+// UI past both headless flags and a persisted skip_launcher=1 (netplay
+// still skips); `--no-launcher` skips for one run. Both are seam-only
 // flags, stripped before run_game() parses the args.
 
 #pragma once
@@ -659,7 +660,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     }
     if (const char* env = std::getenv("GBARECOMP_NO_LAUNCHER"))
         if (env[0] && env[0] != '0') skip_once = true;
-    if (headless || (skip_once && !force_launcher) || (opts.netplay && opts.netplay->enabled)) return 0;
+    // An explicit --launcher forces the UI even for scripted-looking runs
+    // (wrappers that always pass --rom read as headless below); without
+    // it, any headless flag skips the launcher silently.
+    if ((headless && !force_launcher) || (skip_once && !force_launcher) || (opts.netplay && opts.netplay->enabled)) return 0;
 
     const std::string dir = exe_dir(args);
     const auto state_path = [&](const char* filename,

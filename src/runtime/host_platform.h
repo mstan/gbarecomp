@@ -41,7 +41,17 @@ public:
 
     // Block until the next frame's deadline. Call once per presented
     // frame. No-op while uncapped.
-    void wait_for_next_frame();
+    //
+    // `frames` is the banked-frame count for this present (normally 1).
+    // A present can cover k>1 guest frames when stale-frame presents were
+    // skipped (the present hook only presents on frame change): without
+    // accounting, those banked frames escape throttling and the guest
+    // wall-clock runs fast (measured +5% in battle, with audio-bridge
+    // flood as the audible symptom). The deadline advances by the banked
+    // count so one wait throttles all of them; frames==1 is exactly the
+    // old behavior. Fast-forward presents one frame per wait already, so
+    // it is unaffected. The behind-resync below still bounds real stalls.
+    void wait_for_next_frame(uint64_t frames = 1);
 
     // Realign the deadline to "now". Call after any non-real-time jump
     // (startup, save-state load) so the pacer doesn't try to catch up.

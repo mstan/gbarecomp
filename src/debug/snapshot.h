@@ -38,7 +38,7 @@ class ModStateRegistry;
 // seven-section container only when no trusted native providers are registered;
 // it has no MODS identity to migrate or validate.  Other old layouts remain
 // rejected rather than guessed.
-constexpr uint32_t kSnapshotVersion = 2;
+constexpr uint32_t kSnapshotVersion = 4;
 
 // ── SnapshotWriter ─────────────────────────────────────────────────
 // Append-only little-endian byte sink. Header-only.

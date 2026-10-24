@@ -139,6 +139,14 @@ struct RunOptions {
     std::uint8_t rewind_history_seconds = 0;
     std::uint8_t rewind_capture_interval_frames = 15;
 
+    // Desktop autosave crash guard: when > 0 (and
+    // resume_suspend_state_on_launch is set) interactive windowed play
+    // snapshots the machine to the suspend-state file every N seconds and on
+    // every battery-save flush, leaving the crash marker; a launch after an
+    // unclean exit resumes it. 0 disables it. Headless, --tcp, --load-state
+    // and replay sessions never touch the suspend files.
+    std::uint8_t autosave_interval_seconds = 0;
+
     // Optional game-owned content initializer. Called exactly once, after the
     // first non-native view has been authorized and applied. For a fixed view
     // that is during startup; for resize-driven view it is deferred until the

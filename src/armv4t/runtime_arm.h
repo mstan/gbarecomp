@@ -69,6 +69,16 @@ extern RuntimeBusReadOverride g_runtime_bus_read_override;
 typedef int (*RuntimeRamDispatchHook)(uint32_t pc, int thumb);
 extern RuntimeRamDispatchHook g_runtime_ram_dispatch_hook;
 
+// Optional read-only observer for a few exact dispatch entries (PCs without
+// the Thumb bit), called before the target runs. It must not change guest
+// state. The runtime uses it for the MP2K mixer's per-tick entry
+// (SoundMainRAM), which the audio shadow has to see at that exact point.
+typedef void (*RuntimeDispatchObserver)(uint32_t pc, int thumb);
+enum { RUNTIME_MAX_OBSERVED_PCS = 4 };
+extern RuntimeDispatchObserver g_runtime_dispatch_observer;
+extern uint32_t g_runtime_observed_pcs[RUNTIME_MAX_OBSERVED_PCS];
+extern unsigned g_runtime_observed_pc_count;
+
 // Optional game/runtime predicate for executable regions whose bytes can change
 // underneath a static dispatch entry (self-modifying RAM, banked cartridge
 // apertures). A non-zero result selects the reference interpreter instead of

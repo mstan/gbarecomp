@@ -8,6 +8,7 @@
 #include "../armv4t/runtime_arm.h"
 #include "../armv4t/runtime_context.h"
 #include "runtime_bus_bridge.h"
+#include "mobile_platform.h"
 #include "multiplayer_slice.h"
 #include "../armv4t/arm_ir.h"
 #include "../armv4t/symbol_lookup.h"
@@ -1039,6 +1040,34 @@ void runtime_set_vblank_input_hook(std::function<void()> h) {
 }
 
 extern "C" bool runtime_should_yield(void) {
+    // Host-stack budget guard: branch/dispatch chains that fail to unwind
+    // (e.g. a busy-wait split across generated functions whose wake flag
+    // never arrives) nest host frames without bound on finite-stack threads
+    // (mobile game thread; desktop TCP game thread — armed via
+    // host_stack_guard_arm_current). Unwind at the same instruction-boundary
+    // protocol as the vblank yield, gated the same way (never inside a live
+    // IRQ handler, whose dispatch must complete), before the stack is
+    // exhausted. Inert while no budget is armed.
+    if constexpr (gbarecomp::host_stack_guard_supported()) {
+        char probe;
+        const bool in_handler = g_irq_nest_depth != 0u;
+        const bool fire =
+            (in_handler ? gbarecomp::host_stack_critically_low(&probe)
+                        : gbarecomp::mobile_stack_over_budget(&probe));
+        if (fire) {
+            static unsigned long long guard_unwinds = 0;
+            ++guard_unwinds;
+            if (guard_unwinds <= 4u ||
+                (guard_unwinds & (guard_unwinds - 1u)) == 0u) {
+                std::fprintf(stderr,
+                    "runtime: host-stack guard unwind count=%llu pc=0x%08X"
+                    "%s\n",
+                    guard_unwinds, g_cpu.R[15],
+                    in_handler ? " (nested)" : "");
+            }
+            return true;
+        }
+    }
     if (g_session_execution) {
         if (gbarecomp::runtime_dispatch_suspended()) return true;
         auto* bus = gbarecomp::g_active_bus;
@@ -1203,6 +1232,18 @@ extern "C" bool runtime_should_yield(void) {
     }
 
     if (g_runtime_break_pc != 0u && g_cpu.R[15] == g_runtime_break_pc) {
+        // Debug breakpoint hit — unwind to the exec loop. Env-gated forensic
+        // hook: dump the instruction ring at the park. The last record is
+        // the instruction that TRANSFERRED to the break pc (with its full
+        // register set), so a breakpoint-caught anomaly is recoverable on
+        // surfaces without an fp_save command (e.g. --tcp-observe).
+        const char* fp = std::getenv("GBARECOMP_BREAK_FP");
+        if (fp != nullptr && *fp != '\0') {
+            const std::uint32_t n = runtime_fp_save_file(fp);
+            std::fprintf(stderr,
+                "runtime_break: pc=0x%08X — instruction ring dumped to %s "
+                "(%u records)\n", g_cpu.R[15], fp, n);
+        }
         return true;  // debug breakpoint hit — unwind to the exec loop
     }
     return halted;

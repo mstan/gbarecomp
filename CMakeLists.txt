@@ -401,6 +401,9 @@ add_library(gbarecomp_runtime STATIC
     # Trusted function-entry hooks are always linked: opted-in generated code
     # must work even when the package catalog itself is disabled.
     src/runtime/mod_function_hooks.cpp
+    # Declarative mod cheats: always linked so the runner's frame hook builds
+    # in mod-disabled games too (it is then simply never armed).
+    src/runtime/codebreaker.cpp
     src/runtime/host_platform.cpp
     src/runtime/touch_input.cpp
     src/runtime/mobile_platform.cpp
@@ -635,23 +638,36 @@ target_link_libraries(gba_scan PRIVATE gbarecomp_armv4t gbarecomp_gba)
 
 # A local toml++ checkout remains useful for offline development, but it is
 # intentionally ignored.  Fresh clones/worktrees must still be able to build
-# gba_recompile, so resolve the pinned upstream dependency into the build tree
+# gba_recompile, so the pinned upstream dependency is cloned into the build tree
 # when the local single-header checkout is absent.
+#
+# The clone is a build step of the three targets that include toml++, not a
+# configure step: only gba_recompile and its config tests parse TOML, and a game
+# project that adds gbarecomp to build its runtime must configure and build
+# without network (Flatpak sandboxes, offline machines). Passing
+# -DGBARECOMP_TOMLPP_INCLUDE_DIR=<dir> also builds the recompiler offline.
 find_path(GBARECOMP_TOMLPP_INCLUDE_DIR
     NAMES toml.hpp
     HINTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tomlpp"
     NO_DEFAULT_PATH)
+set(GBARECOMP_TOMLPP_DEPENDENCY "")
 if(NOT GBARECOMP_TOMLPP_INCLUDE_DIR)
-    include(FetchContent)
-    set(TOMLPLUSPLUS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(TOMLPLUSPLUS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(tomlplusplus
+    include(ExternalProject)
+    set(_gbarecomp_tomlpp_src "${CMAKE_CURRENT_BINARY_DIR}/_deps/tomlplusplus-src")
+    ExternalProject_Add(gbarecomp_tomlplusplus
         GIT_REPOSITORY https://github.com/marzer/tomlplusplus.git
-        GIT_TAG 30172438cee64926dc41fdd9c11fb3ba5b2ba9de)
-    FetchContent_MakeAvailable(tomlplusplus)
-    set(GBARECOMP_TOMLPP_INCLUDE_DIR "${tomlplusplus_SOURCE_DIR}")
+        GIT_TAG 30172438cee64926dc41fdd9c11fb3ba5b2ba9de
+        SOURCE_DIR "${_gbarecomp_tomlpp_src}"
+        UPDATE_DISCONNECTED TRUE
+        CONFIGURE_COMMAND ""
+        BUILD_COMMAND ""
+        INSTALL_COMMAND ""
+        TEST_COMMAND ""
+        EXCLUDE_FROM_ALL TRUE)
+    set(GBARECOMP_TOMLPP_INCLUDE_DIR "${_gbarecomp_tomlpp_src}")
+    set(GBARECOMP_TOMLPP_DEPENDENCY gbarecomp_tomlplusplus)
     message(STATUS
-        "gbarecomp: fetched pinned toml++ v3.4.0 for gba_recompile")
+        "gbarecomp: toml++ v3.4.0 is fetched when gba_recompile is built")
 else()
     message(STATUS
         "gbarecomp: using local toml++ at ${GBARECOMP_TOMLPP_INCLUDE_DIR}")
@@ -664,6 +680,9 @@ target_include_directories(gba_recompile PRIVATE
     tools/gba_recompile
     src/armv4t
     "${GBARECOMP_TOMLPP_INCLUDE_DIR}")
+if(GBARECOMP_TOMLPP_DEPENDENCY)
+    add_dependencies(gba_recompile ${GBARECOMP_TOMLPP_DEPENDENCY})
+endif()
 target_link_libraries(gba_recompile PRIVATE
     gbarecomp_recompile_core gbarecomp_armv4t gbarecomp_gba)
 
@@ -833,6 +852,7 @@ if(GBARECOMP_ENABLE_MODS)
         # PPU by providing its otherwise PPU-owned storage symbol.
         tests/mod_runtime/ppu_provider_stub.cpp
         src/runtime/mod_runtime.cpp
+        src/runtime/codebreaker.cpp
         src/runtime/mod_function_hooks.cpp
         src/runtime/asset_picker.cpp
         src/runtime/host_platform.cpp
@@ -847,11 +867,21 @@ if(GBARECOMP_ENABLE_MODS)
     add_test(NAME mod_runtime_tests COMMAND mod_runtime_tests)
 endif()
 
+add_executable(codebreaker_tests
+    tests/runtime/codebreaker_test.cpp
+    src/runtime/codebreaker.cpp)
+target_include_directories(codebreaker_tests PRIVATE src/runtime)
+add_test(NAME codebreaker_tests COMMAND codebreaker_tests)
+
 add_executable(mod_audio_tests
     tests/mod_audio/test_main.cpp
     src/gba/mod_audio.cpp)
 target_include_directories(mod_audio_tests PRIVATE src/gba)
 add_test(NAME mod_audio_tests COMMAND mod_audio_tests)
+
+add_executable(suspend_guard_tests tests/runtime/suspend_guard_test.cpp src/gba/sha1.cpp)
+target_include_directories(suspend_guard_tests PRIVATE src/runtime)
+add_test(NAME suspend_guard_tests COMMAND suspend_guard_tests)
 
 add_executable(file_replace_tests tests/debug/file_replace_test.cpp)
 target_link_libraries(file_replace_tests PRIVATE gbarecomp_debug)
@@ -891,6 +921,9 @@ target_include_directories(config_overlay_smoke PRIVATE
     "${GBARECOMP_TOMLPP_INCLUDE_DIR}")
 target_link_libraries(config_overlay_smoke PRIVATE
     gbarecomp_recompile_core gbarecomp_armv4t gbarecomp_gba)
+if(GBARECOMP_TOMLPP_DEPENDENCY)
+    add_dependencies(config_overlay_smoke ${GBARECOMP_TOMLPP_DEPENDENCY})
+endif()
 add_test(NAME config_overlay_smoke COMMAND config_overlay_smoke)
 
 # Decomp symbol importer: synthetic readelf + link-map fixtures through
@@ -940,6 +973,9 @@ target_include_directories(recompile_config_tests PRIVATE
     tools/gba_recompile src/recompile src/armv4t
     "${GBARECOMP_TOMLPP_INCLUDE_DIR}")
 target_link_libraries(recompile_config_tests PRIVATE gbarecomp_gba)
+if(GBARECOMP_TOMLPP_DEPENDENCY)
+    add_dependencies(recompile_config_tests ${GBARECOMP_TOMLPP_DEPENDENCY})
+endif()
 add_test(NAME recompile_config_tests COMMAND recompile_config_tests)
 
 add_executable(audio_drc_tests tests/runtime/audio_drc_test.cpp)
@@ -979,6 +1015,26 @@ target_include_directories(diagnostic_replay_tests PRIVATE src/runtime src/debug
 find_package(Threads REQUIRED)
 target_link_libraries(diagnostic_replay_tests PRIVATE Threads::Threads)
 add_test(NAME diagnostic_replay_tests COMMAND diagnostic_replay_tests)
+# Host-stack budget guard — pure pthread/stack logic, links only
+# src/runtime/mobile_platform.cpp.
+add_executable(stack_guard_tests
+    tests/runtime/stack_guard_test.cpp
+    src/runtime/mobile_platform.cpp)
+target_include_directories(stack_guard_tests PRIVATE src/runtime)
+find_package(Threads REQUIRED)
+target_link_libraries(stack_guard_tests PRIVATE Threads::Threads)
+add_test(NAME stack_guard_tests COMMAND stack_guard_tests)
+
+# FramePacer banked-frame throttling — wall-clock pacing, links only
+# src/runtime/host_platform.cpp.
+add_executable(pacer_tests
+    tests/runtime/pacer_test.cpp
+    src/runtime/host_platform.cpp)
+target_include_directories(pacer_tests PRIVATE src/runtime)
+if(WIN32)
+    target_link_libraries(pacer_tests PRIVATE winmm)
+endif()
+add_test(NAME pacer_tests COMMAND pacer_tests)
 
 # Self-heal proposal clustering — pure logic, links only the standalone
 # clustering TU (no runtime/bus/overlay dependencies).
@@ -987,6 +1043,12 @@ add_executable(selfheal_cluster_test
     src/runtime/self_heal_cluster.cpp)
 target_include_directories(selfheal_cluster_test PRIVATE src/runtime)
 add_test(NAME selfheal_cluster_test COMMAND selfheal_cluster_test)
+
+add_executable(selfheal_persistence_test tests/selfheal/persistence_test.cpp
+    tools/bios_smoke/dispatch_stub.cpp)
+target_include_directories(selfheal_persistence_test PRIVATE src/runtime)
+target_link_gbarecomp_runtime_stack(selfheal_persistence_test)
+add_test(NAME selfheal_persistence_test COMMAND selfheal_persistence_test)
 
 add_executable(interpreter_smoke tests/armv4t/interpreter_smoke.cpp)
 target_link_libraries(interpreter_smoke PRIVATE gbarecomp_armv4t)
@@ -1000,6 +1062,12 @@ target_include_directories(tail_dispatch_tests PRIVATE tests/codegen src/gba)
 target_link_libraries(tail_dispatch_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME tail_dispatch_tests COMMAND tail_dispatch_tests)
 
+add_executable(swi_snapshot_tests tests/armv4t/swi_snapshot_test.cpp
+    tools/bios_smoke/dispatch_stub.cpp)
+target_include_directories(swi_snapshot_tests PRIVATE src/armv4t src/debug src/gba)
+target_link_gbarecomp_runtime_stack(swi_snapshot_tests)
+add_test(NAME swi_snapshot_tests COMMAND swi_snapshot_tests)
+
 add_executable(armv4t_tests tests/armv4t/test_main.cpp)
 target_link_libraries(armv4t_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME armv4t_tests COMMAND armv4t_tests)
@@ -1009,6 +1077,7 @@ target_link_libraries(thumb_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME thumb_tests COMMAND thumb_tests)
 
 add_gbarecomp_runtime_stack_test(bus_tests tests/bus/test_main.cpp)
+add_gbarecomp_runtime_stack_test(bridge_iret_tests tests/runtime/bridge_iret_test.cpp)
 add_gbarecomp_runtime_stack_test(high_resolution_tests tests/ppu/high_resolution_test.cpp)
 add_gbarecomp_runtime_stack_test(vertical_obj_tests tests/ppu/vertical_obj_test.cpp)
 add_gbarecomp_runtime_stack_test(dma_tests tests/dma/test_main.cpp)

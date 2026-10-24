@@ -516,6 +516,16 @@ std::string emit_function_body_str(
     ctx.idle_backedge_pcs = runtime_ram_placement ? nullptr : &idle_backedge_pcs;
     ctx.link_branch_targets = &link_branch_targets;
 
+    // Labels the emitted body will actually carry: backward branch targets
+    // (labelled by the scan above) plus mid-function alias/resume entries
+    // (labelled in the emit loop below). Forward in-body branches to a
+    // labelled target lower to `goto` instead of a C call — this is what
+    // keeps a rolled-in split loop inside a single host frame.
+    std::unordered_set<uint32_t> in_body_goto_targets = backward_targets;
+    in_body_goto_targets.insert(fn.alias_entries.begin(),
+                                fn.alias_entries.end());
+    ctx.in_body_goto_targets = &in_body_goto_targets;
+
     uint32_t pc = fn.addr;
 
     // Mid-function alias entries (resume points rolled into this host). When

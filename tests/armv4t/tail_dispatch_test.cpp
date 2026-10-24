@@ -1,5 +1,6 @@
 // Reuse the codegen harness bus/miss recorders, with the real runtime helpers.
 #include "runtime_arm.h"
+#include "runtime_context.h"
 #include "stubs.h"
 
 #include <cstdio>
@@ -14,6 +15,7 @@ void check(bool condition, const char* what) {
     if (!condition) { std::printf("FAIL: %s\n", what); ++failures; }
 }
 void reset(bool thumb) {
+    runtime_init(nullptr);
     codegen_test::bus_reset(0x03000000, 0x8000);
     std::memset(&g_cpu, 0, sizeof(g_cpu));
     g_cpu.cpsr = CPSR_C_BIT | 0x1fu | (thumb ? CPSR_T_BIT : 0u);
@@ -98,11 +100,60 @@ void test_swi() {
     }
     g_bios_hle_hook = nullptr;
 }
+
+void test_swi_return_ledger() {
+    // A corrupted SVC return keeps the recorded SWI continuation.
+    runtime_fp_reset();  // hermetic ledger (also clears the fp ring)
+    reset(true);
+    runtime_swi(0x06u);
+    check((g_cpu.cpsr & 0x1Fu) == 0x13u, "ledger test starts in SVC mode");
+    // The clobbered LR_svc feeds the epilogue a foreign target (the
+    // IRQ-interrupted mainline); the ledger must win.
+    runtime_exception_return(0x080033BAu);
+    check(g_cpu.R[15] == 0x08000102u,
+          "ledger override keeps the recorded SWI continuation");
+    // A legal return lands untouched.
+    runtime_fp_reset();
+    reset(false);
+    runtime_swi(0x060000u);
+    runtime_exception_return(0x08000102u);
+    check(g_cpu.R[15] == 0x08000102u, "ledger passes a legal SVC return");
+    // An empty ledger (e.g. after a machine-reset origin) never overrides.
+    runtime_fp_reset();
+    reset(false);
+    runtime_swi(0x060000u);
+    runtime_init(nullptr);
+    runtime_exception_return(0x080033BAu);
+    check(g_cpu.R[15] == 0x080033BAu,
+          "empty ledger leaves an SVC return alone");
+    runtime_fp_reset();
+}
+void test_swi_context_isolation() {
+    reset(true);
+    g_cpu.R[15] = 0x08001002u;
+    runtime_swi(6);
+    gbarecomp::RuntimeArmContext first;
+    gbarecomp::runtime_capture_arm_context(first);
+    reset(true);
+    g_cpu.R[15] = 0x08002002u;
+    runtime_swi(6);
+    gbarecomp::RuntimeArmContext second;
+    gbarecomp::runtime_capture_arm_context(second);
+    gbarecomp::runtime_restore_arm_context(first);
+    runtime_fp_reset();
+    runtime_exception_return(0x08001002u);
+    check(g_cpu.R[15] == 0x08001002u, "first machine keeps its own SVC continuation");
+    gbarecomp::runtime_restore_arm_context(second);
+    runtime_exception_return(0x08002002u);
+    check(g_cpu.R[15] == 0x08002002u, "second machine keeps its own SVC continuation");
+}
 }  // namespace
 
 int main() {
     test_exchange_and_miss();
     test_swi();
+    test_swi_return_ledger();
+    test_swi_context_isolation();
     if (failures) return 1;
     std::puts("tail dispatch: exchange, misses, RAM hooks and SWI parity passed");
     return 0;

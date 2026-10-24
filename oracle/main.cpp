@@ -253,14 +253,18 @@ struct Oracle {
             }
         }
         if (rom_path && *rom_path) {
-            VFile* vf = VFileOpen(rom_path, O_RDONLY);
-            if (!vf) {
-                std::fprintf(stderr, "oracle: open ROM %s failed\n", rom_path);
+            // mCoreLoadFile derives the directory set from the ROM path
+            // (baseName/dirs.save), then we autoload "<rom>.sav" with the
+            // standard mGBA helper (frontends do this; a raw loadROM call
+            // does neither). Needed for save/load-flow comparisons.
+            if (!mCoreLoadFile(core, rom_path)) {
+                std::fprintf(stderr, "oracle: loadROM %s failed\n", rom_path);
                 return false;
             }
-            if (!core->loadROM(core, vf)) {
-                std::fprintf(stderr, "oracle: loadROM failed\n");
-                return false;
+            if (!mCoreAutoloadSave(core)) {
+                std::fprintf(stderr,
+                    "oracle: no save autoloaded for %s (continuing)\n",
+                    rom_path);
             }
         }
 

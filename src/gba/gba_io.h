@@ -290,6 +290,12 @@ private:
     // quiet by default and bounded when GBARECOMP_VERBOSE_IO_WARNINGS is set.
     void warn_unhandled(uint32_t off, uint32_t value, bool is_write, uint8_t width);
     void run_sound_fifo_dma(int channel);
+    // write16 body with per-call MMIO-ring record control: write32's synthetic
+    // halves pass record=false (one size-4 entry), while REENTRANT writes —
+    // e.g. a DMA transfer kicked from the CNT_H half of a 32-bit CNT store —
+    // keep recording. A global split flag used to swallow reentrant transfers
+    // (the MMIO-cap guest-DMA gap, fixed 2026-10-08).
+    void write16_commit(uint32_t off, uint16_t v, bool record);
 };
 
 }  // namespace gba

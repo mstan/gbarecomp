@@ -10,7 +10,12 @@ slots and 8 voices; full fixed-voice allocation uses deterministic round-robin
 replacement.
 
 The emulation thread mixes sources into the native producer PCM buffer before
-the normal launcher volume and host clock-domain bridge. SDL only consumes that
+the normal launcher volume and host clock-domain bridge. The producer runs at
+the guest's SOUNDBIAS rate (32768, 65536, 131072 or 262144 Hz) and each block
+is tagged with it; `gba_mod_audio_mix_at_rate` keeps sources at 65536 Hz by
+averaging two source frames per 32768-Hz producer frame or holding one source
+frame for 2/4 faster producer frames. At 65536 Hz it is the legacy mixer,
+sample for sample. SDL only consumes that
 already-mixed queue. Fixed-clip controls never allocate, lock, invoke
 callbacks, or touch SDL. The optional pull callback runs only in the producer
 mixer, never on SDL's consumer callback.
