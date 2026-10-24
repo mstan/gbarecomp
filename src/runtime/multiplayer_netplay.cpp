@@ -242,10 +242,15 @@ bool GbaNetplayHost::take_output(std::size_t seat,GbaNetplayOutput& out) {
     auto& machine=simulation_.input_machine(seat);
     out.tick=next_tick_-1; out.machine=machine.descriptor.id;
     std::copy_n(machine.ppu.latched_framebuffer(),out.rgb888.size(),out.rgb888.begin());
-    out.audio.clear();
+    out.audio.clear(); out.audio_blocks.clear();
     std::array<std::int16_t,1024> samples;
-    while (const auto count=machine.bus.audio().drain_samples(samples.data(),samples.size()))
+    std::uint32_t rate=0;
+    while (const auto count=machine.bus.audio().drain_sample_block(samples.data(),samples.size(),rate)) {
         out.audio.insert(out.audio.end(),samples.begin(),samples.begin()+count);
+        if (out.audio_blocks.empty() || out.audio_blocks.back().rate!=rate)
+            out.audio_blocks.push_back({rate,0});
+        out.audio_blocks.back().count+=count;
+    }
     simulation_.discard_audio_output(); // other consoles never feed local speakers
     output_ready_=false;
     return true;

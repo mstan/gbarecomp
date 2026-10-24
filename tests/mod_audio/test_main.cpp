@@ -124,6 +124,68 @@ void test_saturation_and_replacement() {
     gba_mod_audio_stop_all();
 }
 
+void test_producer_rates() {
+    // Mod sources are 65536 Hz; the producer block follows SOUNDBIAS.
+    const int16_t ramp[] = {100, 300, 500, 700, 900, 1100, 1300, 1500};
+    GBAModAudioClip clip = register_enabled(ramp, 8);
+
+    // 32768 Hz: each producer frame averages two overlay frames.
+    check(gba_mod_audio_play(clip, 100, 0) == 1, "32768 play");
+    std::array<int16_t, 5> slow = {10, 20, 0, 0, 0};
+    const int16_t want_slow[] = {210, 620, 1000, 1400, 0};
+    gba_mod_audio_mix_at_rate(slow.data(), slow.size(), 32768);
+    check_samples(slow.data(), want_slow, slow.size(), "32768 averages pairs");
+
+    // 131072 Hz: each overlay frame is held for two producer frames, and the
+    // hold carries across calls.
+    check(gba_mod_audio_play(clip, 100, 0) == 1, "131072 play");
+    std::array<int16_t, 3> fast_a = {};
+    std::array<int16_t, 3> fast_b = {};
+    const int16_t want_fast_a[] = {100, 100, 300};
+    const int16_t want_fast_b[] = {300, 500, 500};
+    gba_mod_audio_mix_at_rate(fast_a.data(), fast_a.size(), 131072);
+    gba_mod_audio_mix_at_rate(fast_b.data(), fast_b.size(), 131072);
+    check_samples(fast_a.data(), want_fast_a, fast_a.size(), "131072 first call");
+    check_samples(fast_b.data(), want_fast_b, fast_b.size(), "131072 carries hold");
+    gba_mod_audio_stop_all();
+    std::array<int16_t, 1> after_stop = {};
+    gba_mod_audio_mix_at_rate(after_stop.data(), after_stop.size(), 131072);
+    check(after_stop[0] == 0, "stop discards held overlay");
+    gba_mod_audio_stop_all();
+
+    // 262144 Hz: four producer frames per overlay frame.
+    check(gba_mod_audio_play(clip, 100, 0) == 1, "262144 play");
+    std::array<int16_t, 5> fastest = {};
+    const int16_t want_fastest[] = {100, 100, 100, 100, 300};
+    gba_mod_audio_mix_at_rate(fastest.data(), fastest.size(), 262144);
+    check_samples(fastest.data(), want_fastest, fastest.size(), "262144 holds 4");
+    gba_mod_audio_stop_all();
+
+    // 65536 Hz (and unsupported rates) are exactly the legacy mixer.
+    check(gba_mod_audio_play(clip, 100, 0) == 1, "65536 play");
+    std::array<int16_t, 3> native = {};
+    const int16_t want_native[] = {100, 300, 500};
+    gba_mod_audio_mix_at_rate(native.data(), native.size(), 65536);
+    check_samples(native.data(), want_native, native.size(), "65536 identity");
+    std::array<int16_t, 2> odd = {};
+    const int16_t want_odd[] = {700, 900};
+    gba_mod_audio_mix_at_rate(odd.data(), odd.size(), 48000);
+    check_samples(odd.data(), want_odd, odd.size(), "unsupported rate is legacy");
+    gba_mod_audio_stop_all();
+
+    // Leaving a holding rate mid-frame returns to the legacy path afterwards.
+    check(gba_mod_audio_play(clip, 100, 0) == 1, "rate change play");
+    std::array<int16_t, 1> held = {};
+    gba_mod_audio_mix_at_rate(held.data(), held.size(), 131072);
+    std::array<int16_t, 2> switched = {};
+    const int16_t want_switched[] = {300, 500};
+    gba_mod_audio_mix_at_rate(switched.data(), switched.size(), 65536);
+    check(held[0] == 100, "held frame before rate change");
+    check_samples(switched.data(), want_switched, switched.size(),
+                  "rate change resumes at the next overlay frame");
+    gba_mod_audio_stop_all();
+}
+
 void test_stream_rejects_untrusted_callers() {
     StreamSource source{1000};
     // Public callers have no authorization setter or plugin-ID escape hatch;
@@ -139,6 +201,7 @@ int main() {
     test_inactive_identity_and_bad_rate();
     test_one_shot_loop_and_stop_reset();
     test_saturation_and_replacement();
+    test_producer_rates();
     test_stream_rejects_untrusted_callers();
     if (failures) return 1;
     std::puts("GBA mod audio: bounded producer PCM mixer passed");

@@ -20,6 +20,7 @@
 // step_once() becomes a real `runtime_dispatch` driver.
 
 #include "runtime.h"
+#include "suspend_guard.h"
 #include "multiplayer_launch.h"
 #include "view_config.h"
 
@@ -38,6 +39,7 @@
 #include "self_heal.h"
 #include "overlay_loader.h"
 #include "../gba/mod_audio.h"
+#include "codebreaker.h"
 #if defined(GBARECOMP_ENABLE_MODS)
 #include "mod_runtime.h"
 #endif
@@ -1608,6 +1610,18 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             args.resize_view = gba_mod_adaptive_view_enabled() != 0;
     }
 #endif
+    // Declarative mod cheats ([[cheat]] records of enabled features). They
+    // mutate guest RAM, so they run only in a single-player session whose
+    // catalog committed them: netplay never loads the catalog (and returned
+    // above in any case), and a diagnostic replay must reproduce the recorded
+    // session, which capture never records with cheats active.
+#if defined(GBARECOMP_ENABLE_MODS)
+    const bool mod_cheats_active = mods_ready && !netplay &&
+        args.replay_diagnostic.empty() &&
+        mod_runtime_committed_cheat_count() > 0;
+#else
+    const bool mod_cheats_active = false;
+#endif
 
     gba::GbaBus bus;
     gba::GbaPpu ppu;
@@ -2489,8 +2503,37 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         std::fprintf(stderr, "[gbarecomp:runtime] cheats=ENABLED count=%zu "
                              "(validation only)\n", cheats.size());
     }
-    if (opts.extended_view_frame || !cheats.empty()) {
+    // Mod cheats go through the bus like the game's own stores; the parser
+    // already confined every address to EWRAM/IWRAM.
+    codebreaker::Memory mod_cheat_memory;
+    mod_cheat_memory.ctx = &bus;
+    mod_cheat_memory.read16 = [](void* c, uint32_t a) {
+        return static_cast<gba::GbaBus*>(c)->read16(a);
+    };
+    mod_cheat_memory.write8 = [](void* c, uint32_t a, uint8_t v) {
+        static_cast<gba::GbaBus*>(c)->write8(a, v);
+    };
+    mod_cheat_memory.write16 = [](void* c, uint32_t a, uint16_t v) {
+        static_cast<gba::GbaBus*>(c)->write16(a, v);
+    };
+    std::atomic<uint64_t> mod_cheat_frames{0};
+#if defined(GBARECOMP_ENABLE_MODS)
+    if (mod_cheats_active) {
+        std::string names;
+        for (const std::string& name : mod_runtime_committed_cheat_names())
+            names += (names.empty() ? "" : ", ") + name;
+        std::fprintf(stderr, "[gbarecomp:runtime] mod cheats ENABLED count=%zu: %s\n",
+                     mod_runtime_committed_cheat_count(), names.c_str());
+    }
+#endif
+    if (opts.extended_view_frame || !cheats.empty() || mod_cheats_active) {
         runtime_set_frame_start_hook([&]() {
+#if defined(GBARECOMP_ENABLE_MODS)
+            if (mod_cheats_active) {
+                mod_runtime_run_cheats(mod_cheat_memory);
+                mod_cheat_frames.fetch_add(1, std::memory_order_relaxed);
+            }
+#endif
             for (const Cheat& c : cheats)
                 for (unsigned i = 0; i < c.bytes; ++i)
                     c.ptr[i] = static_cast<uint8_t>(c.value >> (8 * i));
@@ -2592,6 +2635,27 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // commands first, then the game's own extension.
     auto tcp_extension = [&](const std::string& request, std::string& reply) -> bool {
         if (touch_tcp_command(request, reply)) return true;
+        // Read-only: which committed mod cheats this session runs and how many
+        // frames they have been applied (always-on counter, no arming).
+        if (request.find("\"mod_cheats\"") != std::string::npos) {
+            std::string body = "{\"ok\":true,\"active\":";
+            body += mod_cheats_active ? "true" : "false";
+            body += ",\"frames_applied\":" +
+                    std::to_string(mod_cheat_frames.load(std::memory_order_relaxed));
+            body += ",\"cheats\":[";
+#if defined(GBARECOMP_ENABLE_MODS)
+            if (mod_cheats_active) {
+                bool first = true;
+                for (const std::string& name : mod_runtime_committed_cheat_names()) {
+                    body += (first ? "\"" : ",\"") + name + "\"";
+                    first = false;
+                }
+            }
+#endif
+            body += "]}";
+            reply = std::move(body);
+            return true;
+        }
         if (!opts.tcp_command) return false;
         std::string streamed;
         auto write = [](void* ctx, const char* data, std::size_t len) {
@@ -3691,8 +3755,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             const std::string state_path = suspend_state_path();
             const bool suspended = do_savestate_save(state_path, e);
             if (suspended) {
-                std::ofstream marker(suspend_marker_path(), std::ios::trunc);
-                marker << ppu.frame_count() << "\n";
+                write_suspend_marker(suspend_marker_path(), args.save_path, ppu.frame_count());
             }
             if (ev.terminating) suspend_on_exit = suspended;
             std::fprintf(stderr,
@@ -3906,7 +3969,38 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     uint64_t save_last_change_frame = ppu.frame_count();
     uint64_t save_dirty_since_frame = ppu.frame_count();
     bool save_pending = false;
+    // Desktop autosave crash guard (RunOptions::autosave_interval_seconds).
+    // It feeds the existing suspend state + marker that
+    // resume_suspend_state_on_launch already understands: a clean exit clears
+    // the marker, an unclean exit leaves it, and the next launch resumes from
+    // the last snapshot. Interactive windowed play only: headless, --tcp,
+    // --load-state, input-replay and diagnostic-replay sessions never touch the
+    // suspend files, and a game without resume never pays for snapshots
+    // nobody reads.
+    const bool autosave_on =
+        opts.autosave_interval_seconds > 0 &&
+        opts.resume_suspend_state_on_launch && args.window &&
+        args.tcp_port <= 0 && args.load_state.empty() &&
+        !input_replay_requested && args.replay_diagnostic.empty();
+    const uint64_t autosave_interval_frames = autosave_on
+        ? static_cast<uint64_t>(opts.autosave_interval_seconds) * 60u : 0;
+    uint64_t next_autosave_frame = ppu.frame_count() + autosave_interval_frames;
+    bool autosave_failure_logged = false;
+    auto autosave_now = [&](uint64_t frame) {
+        std::string e;
+        if (do_savestate_save(suspend_state_path(), e)) {
+            if (!write_suspend_marker(suspend_marker_path(), args.save_path, frame))
+                std::fprintf(stderr, "[gbarecomp:runtime] autosave marker FAILED\n");
+            autosave_failure_logged = false;
+        } else if (!autosave_failure_logged) {
+            std::fprintf(stderr, "[gbarecomp:runtime] autosave FAILED: %s\n",
+                         e.c_str());
+            autosave_failure_logged = true;
+        }
+        next_autosave_frame = frame + autosave_interval_frames;
+    };
     auto maybe_flush_battery = [&](uint64_t frame) {
+        if (autosave_on && frame >= next_autosave_frame) autosave_now(frame);
         if (!bus.save().dirty()) {
             save_pending = false;
             return;
@@ -3926,6 +4020,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             flush_save_notify();
             save_last_change_frame = frame;
             save_dirty_since_frame = frame;
+            // A resumed snapshot restores its own save RAM, which the next
+            // flush writes back to disk. Refresh the snapshot with every
+            // battery flush so resuming can never roll back a newer save.
+            if (autosave_on) autosave_now(frame);
         }
     };
 #if defined(GBARECOMP_WEB_HOST)
@@ -3946,15 +4044,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             const auto n = bus.audio().drain_sample_block(audio_buf, 2048, rate);
             if (!n) break;
             if (!fast_forward_active) {
-                gba_mod_audio_mix(audio_buf, n);
+                gba_mod_audio_mix_at_rate(audio_buf, n, rate);
                 win.push_audio_block(audio_buf, n, rate);
             }
         }
 #else
-        const auto n = bus.audio().drain_samples(audio_buf, 2048);
+        uint32_t rate = 0;
+        const auto n = bus.audio().drain_sample_block(audio_buf, 2048, rate);
         if (n && !fast_forward_active) {
-            gba_mod_audio_mix(audio_buf, n);
-            win.push_audio_samples(audio_buf, n);
+            gba_mod_audio_mix_at_rate(audio_buf, n, rate);
+            win.push_audio_block(audio_buf, n, rate);
         }
 #endif
     };
@@ -4209,6 +4308,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                  "while GBARECOMP_CHEATS is active\n");
             want = false;
         }
+        if (want && mod_cheats_active) {
+            std::fprintf(stderr, "[gbarecomp:diagnostics] replay capture disabled "
+                                 "while mod cheats are enabled\n");
+            want = false;
+        }
         if (want && args.window && args.tcp_port <= 0) {
             if (present_in_place)
                 if (diag.start_recording(diag_config, diag_host))
@@ -4324,7 +4428,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         // The previous session was suspended by the OS and never came back
         // (killed in the background, or swiped away): resume it.
         std::error_code ec;
-        if (std::filesystem::exists(suspend_marker_path(), ec) &&
+        if (suspend_marker_matches_battery(suspend_marker_path(), args.save_path) &&
             std::filesystem::exists(suspend_state_path(), ec)) {
             std::string e;
             if (do_savestate_load(suspend_state_path(), e)) {

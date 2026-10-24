@@ -106,6 +106,10 @@ void local_output() {
     const auto state=simulation->save_state();
     CHECK(host.take_output(1,output)); CHECK(output.tick==0 && output.machine==0);
     CHECK(output.audio.size()>=548 && output.audio.size()<=550);
+    // Default SOUNDBIAS resolution mixes at 32768 Hz; the block tags cover
+    // every sample so the host never assumes the 65536 Hz bridge default.
+    CHECK(output.audio_blocks.size()==1 && output.audio_blocks[0].rate==32768u &&
+          output.audio_blocks[0].count==output.audio.size());
     CHECK(!host.take_output(0,output)); // one local view, no duplicate sound
     CHECK(simulation->save_state()==state);
     std::int16_t samples[8];

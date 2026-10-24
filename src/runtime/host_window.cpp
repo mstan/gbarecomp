@@ -1948,7 +1948,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
 // (We are already inside namespace gbarecomp, so declare it unqualified.)
 uint64_t overlay_game_thread_compile_ns();
 
-void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
+void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
+                                  uint32_t rate) {
     if (!open_ || !impl_ || !samples || count == 0) return;
     auto* b = static_cast<Backend*>(impl_);
     if (b->audio_dev == 0) return;
@@ -2054,6 +2055,32 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
     }
     if (!b->bridge_ready) return;
 
+    // Re-tune the bridge to the block's true source rate. The mixer rate
+    // follows SOUNDBIAS (GbaAudio::sample_rate()), so a stream assumed to be
+    // 65.536 kHz while the guest mixes at 32.768 kHz drains the ring twice as
+    // fast as it fills and the stall concealment loops recent audio — heard as
+    // a sustained crackle. Rebuild the filter bank only when the source:host
+    // ratio class changes (downsampling needs a different cutoff); a pure
+    // upsampling change only moves cur_step, so it reuses the coefficients.
+    if (rate != 0 && rate != static_cast<uint32_t>(b->bridge.cfg.source_rate)) {
+        const bool was_down = b->bridge.cfg.source_rate > b->bridge.cfg.host_rate;
+        const bool now_down = static_cast<double>(rate) > b->bridge.cfg.host_rate;
+        SDL_LockMutex(b->audio_mtx);
+        if (was_down || now_down) {
+            rab_config cfg = b->bridge.cfg;
+            cfg.source_rate = static_cast<double>(rate);
+            rab_free(&b->bridge);
+            if (rab_init(&b->bridge, &cfg) != 0) {
+                SDL_UnlockMutex(b->audio_mtx);
+                b->bridge_ready = false;
+                return;
+            }
+        } else {
+            b->bridge.cfg.source_rate = static_cast<double>(rate);
+        }
+        SDL_UnlockMutex(b->audio_mtx);
+    }
+
     // Producer: append mono frames into the bridge ring. The SDL callback
     // (gba_audio_callback) drains it at the device rate with band-limited
     // resampling + a P-only fill servo — no queue underrun, no hard flush.
@@ -2094,6 +2121,11 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
             std::fflush(stderr);
         }
     }
+}
+
+void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
+    // Legacy callers that do not tag a rate: assume the engine default.
+    push_audio_block(samples, count, 65536u);
 }
 
 void HostWindow::set_title(const char* title) {
@@ -3205,6 +3237,8 @@ int HostWindow::fast_forward_multiplier() const { return 4; }
 
 void HostWindow::push_audio_samples(const int16_t* /*samples*/,
                                     std::size_t /*count*/) {}
+void HostWindow::push_audio_block(const int16_t* /*samples*/,
+                                  std::size_t /*count*/, uint32_t /*rate*/) {}
 
 void HostWindow::service_events() {}
 

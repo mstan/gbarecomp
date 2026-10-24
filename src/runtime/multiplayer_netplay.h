@@ -32,6 +32,12 @@ struct GbaNetplayOutput {
     GbaMachineId machine = 0;
     std::array<std::uint8_t,gba::GbaPpu::kFramebufferBytes> rgb888{};
     std::vector<std::int16_t> audio;
+    // Consecutive runs of `audio`, each produced at one SOUNDBIAS mixer rate
+    // (GbaAudio::drain_sample_block). The host re-tunes its resampler per
+    // block instead of assuming 65536 Hz; a mid-tick SOUNDBIAS change yields
+    // two blocks. The counts sum to audio.size().
+    struct AudioBlock { std::uint32_t rate = 0; std::size_t count = 0; };
+    std::vector<AudioBlock> audio_blocks;
 };
 // Engine callbacks for the shared episode driver. The runner owns transport,
 // lobby/startup agreement, and the driver lifetime. No serial data crosses this

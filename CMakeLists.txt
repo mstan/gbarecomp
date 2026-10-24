@@ -401,6 +401,9 @@ add_library(gbarecomp_runtime STATIC
     # Trusted function-entry hooks are always linked: opted-in generated code
     # must work even when the package catalog itself is disabled.
     src/runtime/mod_function_hooks.cpp
+    # Declarative mod cheats: always linked so the runner's frame hook builds
+    # in mod-disabled games too (it is then simply never armed).
+    src/runtime/codebreaker.cpp
     src/runtime/host_platform.cpp
     src/runtime/touch_input.cpp
     src/runtime/mobile_platform.cpp
@@ -833,6 +836,7 @@ if(GBARECOMP_ENABLE_MODS)
         # PPU by providing its otherwise PPU-owned storage symbol.
         tests/mod_runtime/ppu_provider_stub.cpp
         src/runtime/mod_runtime.cpp
+        src/runtime/codebreaker.cpp
         src/runtime/mod_function_hooks.cpp
         src/runtime/asset_picker.cpp
         src/runtime/host_platform.cpp
@@ -847,11 +851,21 @@ if(GBARECOMP_ENABLE_MODS)
     add_test(NAME mod_runtime_tests COMMAND mod_runtime_tests)
 endif()
 
+add_executable(codebreaker_tests
+    tests/runtime/codebreaker_test.cpp
+    src/runtime/codebreaker.cpp)
+target_include_directories(codebreaker_tests PRIVATE src/runtime)
+add_test(NAME codebreaker_tests COMMAND codebreaker_tests)
+
 add_executable(mod_audio_tests
     tests/mod_audio/test_main.cpp
     src/gba/mod_audio.cpp)
 target_include_directories(mod_audio_tests PRIVATE src/gba)
 add_test(NAME mod_audio_tests COMMAND mod_audio_tests)
+
+add_executable(suspend_guard_tests tests/runtime/suspend_guard_test.cpp src/gba/sha1.cpp)
+target_include_directories(suspend_guard_tests PRIVATE src/runtime)
+add_test(NAME suspend_guard_tests COMMAND suspend_guard_tests)
 
 add_executable(file_replace_tests tests/debug/file_replace_test.cpp)
 target_link_libraries(file_replace_tests PRIVATE gbarecomp_debug)

@@ -94,6 +94,13 @@ int gba_mod_audio_stream_set_native_gain_percent(GBAModAudioStream stream,
 // SDL; SDL's consumer callback receives only the completed queue.
 void gba_mod_audio_mix(int16_t* dst, size_t frame_count);
 
+// Same, for a producer buffer at `producer_rate` (the SOUNDBIAS mixer rate of
+// that block: 32768, 65536, 131072 or 262144 Hz). Mod sources stay 65536-Hz:
+// a slower producer averages overlay frames, a faster one holds them. At
+// 65536 Hz (or an unsupported rate) this is exactly gba_mod_audio_mix.
+void gba_mod_audio_mix_at_rate(int16_t* dst, size_t frame_count,
+                               uint32_t producer_rate);
+
 #ifdef __cplusplus
 }
 #endif

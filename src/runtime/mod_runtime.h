@@ -5,8 +5,12 @@
 #include "../gba/foreign_screen_overlay.h"
 
 #ifdef __cplusplus
+#include <cstddef>
 #include <filesystem>
 #include <string>
+#include <vector>
+
+#include "codebreaker.h"
 
 struct RecompLauncherCModProvider;
 
@@ -32,6 +36,16 @@ const RecompLauncherCModProvider* mod_runtime_launcher_provider();
 // mod runtime and remains valid until its next initialize/commit cycle.
 const char* mod_runtime_required_asset_path(const std::string& package_id,
                                             const std::string& asset_id);
+
+// Declarative cheats ([[cheat]] records, docs/MOD_PACKAGES.md). The committed
+// set is the enabled cheat features of the last successful commit; it is
+// empty until a commit, after initialize, and whenever the catalog is not
+// loaded at all (netplay never loads it). The runner calls
+// mod_runtime_run_cheats once per guest frame only while the count is
+// non-zero, so a session without enabled cheats is byte-identical to stock.
+std::size_t mod_runtime_committed_cheat_count();
+std::vector<std::string> mod_runtime_committed_cheat_names();
+void mod_runtime_run_cheats(const codebreaker::Memory& memory);
 
 }  // namespace gbarecomp
 #endif

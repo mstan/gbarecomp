@@ -42,11 +42,22 @@
 #include "../gba/gba_bus.h"
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <string>
 #include <vector>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -68,6 +79,67 @@ struct MissRec {
 std::map<std::uint32_t, MissRec> g_misses;        // keyed by PC & ~1
 std::uint64_t                    g_interp_insns = 0;
 bool                             g_miss_notice_logged = false;
+
+// ── Fatal-abort crash log ──────────────────────────────────────────
+// Every fatal site below prints to stderr, which a GUI-subsystem build (or a
+// desktop-launched AppImage) never shows. fatal_abort() mirrors the same line,
+// plus this session's bridged dispatch misses, into crash.log beside the
+// executable so a player-box crash is diagnosable from the artifact alone.
+// Where the executable directory cannot be resolved or written, only stderr is
+// used, exactly as before.
+std::string crash_log_path() {
+#if defined(_WIN32)
+    char buf[MAX_PATH];
+    const DWORD n = GetModuleFileNameA(nullptr, buf, sizeof(buf));
+    if (n == 0 || n >= sizeof(buf)) return {};
+    const std::string path(buf, n);
+#elif defined(__linux__)
+    char buf[4096];
+    const ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return {};
+    const std::string path(buf, static_cast<std::size_t>(n));
+#else
+    const std::string path;
+#endif
+    const std::size_t slash = path.find_last_of("/\\");
+    if (slash == std::string::npos) return {};
+    return path.substr(0, slash + 1) + "crash.log";
+}
+
+void crash_log_write(const char* message) {
+    const std::string path = crash_log_path();
+    if (path.empty()) return;
+    std::FILE* f = std::fopen(path.c_str(), "a");
+    if (!f) return;
+    std::fputs(message, f);
+    std::fprintf(f, "session dispatch misses: %zu distinct PCs\n", g_misses.size());
+    for (const auto& [pc, rec] : g_misses)
+        std::fprintf(f, "  pc=0x%08X (%s) count=%llu\n", pc,
+                     rec.thumb ? "thumb" : "arm",
+                     static_cast<unsigned long long>(rec.count));
+    std::fputs("\n", f);
+    std::fclose(f);
+}
+
+// Print a fatal diagnostic to stderr, mirror it to crash.log, dump the recent
+// dispatch trace, and abort. Every fatal site in this file goes through here.
+[[noreturn]] void fatal_abort(const char* fmt, ...)
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
+void fatal_abort(const char* fmt, ...) {
+    char message[1024];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+    std::fputs(message, stderr);
+    std::fflush(stderr);
+    crash_log_write(message);
+    runtime_trace_dump_recent(96);
+    std::abort();
+}
 
 bool self_heal_verbose() {
     const char* value = std::getenv("GBARECOMP_SELFHEAL_VERBOSE");
@@ -455,11 +527,8 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
     if (!bus) {
         // No bus bound (e.g. a unit harness that didn't set one up): we
         // cannot bridge. Stay loud — this is not a self-healable state.
-        std::fprintf(stderr,
-                     "runtime_arm: bridge interpret for pc=0x%08X with no active "
+        fatal_abort("runtime_arm: bridge interpret for pc=0x%08X with no active "
                      "bus — cannot bridge.\n", entry_pc);
-        runtime_trace_dump_recent(96);
-        std::abort();
     }
 
     // ── (1) Stop-address contract ──────────────────────────────────
@@ -583,16 +652,13 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
             // interpreter's own NotImplemented gate — PRINCIPLES.md "Genuine
             // interpreter gaps still abort loudly").
             gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
-            std::fprintf(stderr,
-                "runtime_arm: SELF-HEAL bridge hit interpreter %s at "
+            fatal_abort("runtime_arm: SELF-HEAL bridge hit interpreter %s at "
                 "pc=0x%08X while bridging dispatch miss 0x%08X. The reference "
                 "interpreter cannot execute this op; add its lowering in "
                 "src/armv4t/interpreter.cpp.\n",
                 r == armv4t::Interpreter::Result::Undefined ? "Undefined"
                                                             : "NotImplemented",
                 pc, entry_pc);
-            runtime_trace_dump_recent(96);
-            std::abort();
         }
 
         if (r == armv4t::Interpreter::Result::Swi) {
@@ -704,15 +770,12 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
                 return 0;
             }
             gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
-            std::fprintf(stderr,
-                "runtime_arm: SELF-HEAL bridge for 0x%08X exceeded %llu "
+            fatal_abort("runtime_arm: SELF-HEAL bridge for 0x%08X exceeded %llu "
                 "instructions without returning to stop_pc=0x%08X (current "
                 "pc=0x%08X). Aborting rather than spinning silently.\n",
                 entry_pc,
                 static_cast<unsigned long long>(kBridgeIterationCap),
                 stop_pc, cpu.R[15]);
-            runtime_trace_dump_recent(96);
-            std::abort();
         }
     }
 
@@ -866,15 +929,12 @@ extern "C" void runtime_force_interp_step(void) {
         // A genuine interpreter gap. The interpreter is the reference model here;
         // stay loud (PRINCIPLES.md "Genuine interpreter gaps still abort loudly").
         gbarecomp::store_interp_into_arm_cpu(cpu, g_cpu);
-        std::fprintf(stderr,
-            "runtime_arm: FORCE-INTERP hit interpreter %s at pc=0x%08X. The "
+        fatal_abort("runtime_arm: FORCE-INTERP hit interpreter %s at pc=0x%08X. The "
             "reference interpreter cannot execute this op; add its lowering in "
             "src/armv4t/interpreter.cpp.\n",
             r == armv4t::Interpreter::Result::Undefined ? "Undefined"
                                                         : "NotImplemented",
             pc);
-        runtime_trace_dump_recent(96);
-        std::abort();
     }
 
     ++g_interp_insns;
@@ -960,13 +1020,10 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     const bool strict_static =
         strict_env && strict_env[0] != '\0' && strict_env[0] != '0';
     if (strict_static) {
-        std::fprintf(stderr,
-            "runtime_arm: STRICT_STATIC dispatch miss for pc=0x%08X (%s) — "
+        fatal_abort("runtime_arm: STRICT_STATIC dispatch miss for pc=0x%08X (%s) — "
             "interpreter and overlay fallback are disabled. Add reviewed "
             "static discovery/code-copy metadata and regenerate.\n",
             entry_pc, entry_thumb ? "thumb" : "arm");
-        runtime_trace_dump_recent(96);
-        std::abort();
     }
     record_and_log_miss(entry_pc, entry_thumb);
     if (gbarecomp::overlay_request_compile(entry_pc, entry_thumb) &&
@@ -979,11 +1036,8 @@ extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
 
 extern "C" void runtime_unimplemented_op(const char* op_name,
                                           uint32_t pc) {
-    std::fprintf(stderr,
-                 "runtime_arm: unimplemented op %s at pc=0x%08X "
+    fatal_abort("runtime_arm: unimplemented op %s at pc=0x%08X "
                  "(a CODEGEN gap, not a dispatch miss — NOT self-healed). "
                  "Add the lowering in src/armv4t/arm_codegen.cpp.\n",
                  op_name ? op_name : "(null)", pc);
-    runtime_trace_dump_recent(96);
-    std::abort();
 }
