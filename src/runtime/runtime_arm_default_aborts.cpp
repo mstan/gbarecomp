@@ -26,6 +26,7 @@
 // and supply their own versions that record state for the diff runner.
 
 #include "runtime_arm.h"
+#include "runtime_context.h"
 #include "mod_function_hooks.h"
 #include "symbol_lookup.h"
 #include "self_heal.h"
@@ -433,6 +434,7 @@ extern "C" const char* g_tick_ctx;
 // runtime_irq() (g_call_return_floor): the floor keeps the cancel cascade from
 // corrupting mainline frames; this keeps the self-heal bridge from bailing early.
 extern "C" uint32_t g_irq_nest_depth;
+extern "C" uint32_t g_irq_iret_depth;
 
 // runtime_bridge_interpret — the interpret-the-missed-subtree core, factored out
 // of runtime_dispatch_miss so the P6 sljit differential gate can reuse it as its
@@ -673,6 +675,23 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
                     break;
                 }
             }
+        }
+        // An IRQ continuation ends at its own iret. runtime_irq() was entered
+        // from the interrupted code's runtime_tick and returns into it, so that
+        // code resumes the interrupted instruction natively. Interpreting past
+        // the iret would execute those instructions a second time when it does.
+        // Heal-to-static below does not catch this when the interrupted code is
+        // the BIOS SWI handler: the BIOS table only lists function entries, so
+        // the bridge ran on from 0x164 through `push {r2, lr}` and `bx r12`,
+        // and the native handler then pushed again (System SP off by 8, LR
+        // 0x170 as the caller's LR: a later return lands in ARM state inside
+        // Thumb code, or at the reset vector).
+        // (A resumable context has no native frame waiting: runtime_irq()
+        // returned at once and the outer dispatcher resumes by PC.)
+        if (irq_cont && r == armv4t::Interpreter::Result::ExceptionReturn &&
+            old_mode == 0x12u && g_irq_iret_depth == g_irq_nest_depth &&
+            !gbarecomp::runtime_has_resumable_context()) {
+            break;
         }
 
         // Heal-to-static: for a top-level miss (no reliable return address),
