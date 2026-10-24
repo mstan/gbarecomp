@@ -34,6 +34,7 @@
 #include "touch_input.h"
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
+#include "mobile_platform.h"
 #include "save_config.h"
 #include "self_heal.h"
 #include "overlay_loader.h"
@@ -2625,6 +2626,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         bool ctl_step_ok   = true;
 
         std::thread game_thread([&]() {
+            // Finite-stack guard: the split vblank-wait loop nests host frames
+            // per spin iteration; a post-event flow that stops unwinding it
+            // would exhaust this thread's default 8 MiB stack. Unwind through
+            // the standard yield path once within 2 MiB of the bottom.
+            gbarecomp::host_stack_guard_arm_current(2u * 1024u * 1024u);
             for (;;) {
                 int st;
                 {

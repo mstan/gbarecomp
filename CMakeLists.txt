@@ -979,6 +979,15 @@ target_include_directories(diagnostic_replay_tests PRIVATE src/runtime src/debug
 find_package(Threads REQUIRED)
 target_link_libraries(diagnostic_replay_tests PRIVATE Threads::Threads)
 add_test(NAME diagnostic_replay_tests COMMAND diagnostic_replay_tests)
+# Host-stack budget guard — pure pthread/stack logic, links only
+# src/runtime/mobile_platform.cpp.
+add_executable(stack_guard_tests
+    tests/runtime/stack_guard_test.cpp
+    src/runtime/mobile_platform.cpp)
+target_include_directories(stack_guard_tests PRIVATE src/runtime)
+find_package(Threads REQUIRED)
+target_link_libraries(stack_guard_tests PRIVATE Threads::Threads)
+add_test(NAME stack_guard_tests COMMAND stack_guard_tests)
 
 # Self-heal proposal clustering — pure logic, links only the standalone
 # clustering TU (no runtime/bus/overlay dependencies).

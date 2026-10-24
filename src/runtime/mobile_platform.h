@@ -43,6 +43,25 @@ constexpr std::size_t kMobileGameStackBytes = 256u * 1024u * 1024u;
 int mobile_run_with_stack(int (*entry)(int, char**), int argc, char** argv,
                           std::size_t stack_bytes = kMobileGameStackBytes);
 
+// Host-stack budget guard for a finite stack: the mobile game thread or the
+// desktop TCP game thread. Recompiled guest branches (and some loop back-edges)
+// map onto host C calls; a spin that outlives its expected wake — e.g. a
+// busy-wait split across two generated functions — can nest host frames
+// without bound. The runtime probes this at instruction boundaries and unwinds
+// through the standard yield path before the thread stack is exhausted. False
+// when no budget is armed (threads with generous stacks, or the desktop main
+// path) or the probe is still above the limit.
+bool mobile_stack_over_budget(const void* probe);
+
+// Critical tier of the same guard: true when the probe is within the last
+// ~0.5 MiB of the stack, where even a live IRQ handler cannot complete; the
+// runtime may unwind in that state despite g_irq_nest_depth > 0.
+bool host_stack_critically_low(const void* probe);
+
+// Arm the guard for the calling thread from its real pthread stack bounds
+// (Linux). No-op on unsupported platforms.
+void host_stack_guard_arm_current(std::size_t reserve_bytes);
+
 // True when built for a mobile platform (compile-time).
 constexpr bool mobile_platform() {
 #if defined(__ANDROID__)
