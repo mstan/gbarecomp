@@ -156,7 +156,8 @@ struct Args {
     std::uint32_t rom_crc32 = 0;  // 0 = no CRC check (per-game TOML fills)
     std::string save_path;
     // Save-state slot directory (<dir>/state<N>). Empty keeps the historical
-    // <rom>.state<N> location.
+    // <rom>.state<N> location. When set, the mobile suspend state/marker
+    // live there too instead of next to the ROM.
     std::string state_dir;
     std::optional<gba::SaveType> save_type;
     std::size_t save_size = 0;
@@ -3337,11 +3338,21 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // kills the process in the background the marker survives, and the next
     // launch resumes exactly where the player left (RunOptions opt-in).
     auto suspend_state_path = [&]() -> std::string {
+        if (!args.state_dir.empty()) {
+            return (std::filesystem::path(args.state_dir) /
+                    "suspend.state")
+                .string();
+        }
         std::filesystem::path p(args.rom);
         p.replace_extension(".suspend.state");
         return p.string();
     };
     auto suspend_marker_path = [&]() -> std::string {
+        if (!args.state_dir.empty()) {
+            return (std::filesystem::path(args.state_dir) /
+                    "suspend.pending")
+                .string();
+        }
         std::filesystem::path p(args.rom);
         p.replace_extension(".suspend.pending");
         return p.string();
