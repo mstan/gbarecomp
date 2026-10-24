@@ -1818,7 +1818,7 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     // Mobile presentation owns the whole drawable: a centered integer-scaled
     // game viewport plus dedicated side rails for touch controls.
     SDL_RenderSetLogicalSize(b->renderer, 0, 0);
-    SDL_SetRenderDrawColor(b->renderer, 7, 11, 20, 255);
+    SDL_SetRenderDrawColor(b->renderer, 0, 0, 0, 255);
 #else
     if (b->expanded_view || b->resize_driven_view) {
         // The destination viewport is computed explicitly in present() so
@@ -2261,7 +2261,14 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
         rgb888 = b->graded_fb.data();
     }
     SDL_UpdateTexture(b->texture, nullptr, rgb888, texture_w * 3);
+#if defined(__ANDROID__)
+    // Pure black around the game: on OLED panels (common on Android phones
+    // and handhelds such as the RG556) those pixels are then off, not a dim
+    // navy lit for hours in the same place.
+    SDL_SetRenderDrawColor(b->renderer, 0, 0, 0, 255);
+#else
     SDL_SetRenderDrawColor(b->renderer, 7, 11, 20, 255);
+#endif
     SDL_RenderClear(b->renderer);
 #if defined(__ANDROID__)
     if (!b->insets_from_env && g_android_insets_known.load()) {
