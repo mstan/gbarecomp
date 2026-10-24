@@ -1604,6 +1604,16 @@ extern "C" void runtime_irq(uint32_t return_address) {
     const uint32_t saved_r2  = g_cpu.R[2];
     const uint32_t saved_r3  = g_cpu.R[3];
     const uint32_t saved_r12 = g_cpu.R[12];
+    // IRQ-enable state at entry: the flow that keeps running under the drive
+    // may have disabled interrupts, leaving the game's per-frame tick (set
+    // by its VBlank handler) frozen. An abandon close restores the entry
+    // enable state — the phantom's disable is not real.
+    const uint16_t saved_ie   = bus_read_u16(0x04000200u);
+    const uint16_t saved_ime  = bus_read_u16(0x04000208u);
+    // ISR vector [0x03007FFC]: a phantom excursion can trample this IWRAM
+    // vector, killing the game's frame tick so a frame-gate wait spins
+    // forever. Restored at the abandon close like IE/IME.
+    const uint32_t saved_isr  = bus_read_u32(0x03007FFCu);
     // Record the active IRQ source(s) (IE & IF) in the trace addr field and the
     // nesting depth in aux so a ring dump names which interrupt is being
     // vectored and how deep — used to pin the MC-HP-002 IRQ storm. Reading
@@ -1690,6 +1700,20 @@ extern "C" void runtime_irq(uint32_t return_address) {
     drive_irq_instruction();
     constexpr uint32_t kMaxIrqDispatches = 4'000'000u;
     uint32_t irq_guard = 0u;
+    // Abandonment detection: if the guest's IRQ-mode exception return never
+    // happens (its call frames are consumed — the return ledger is back at
+    // this IRQ's floor — while execution has clearly left the handler and
+    // keeps running outside the BIOS), or the loop simply survives several
+    // VBlank boundaries (no legal GBA IRQ handler takes multiple frames),
+    // the loop must NOT adopt whatever executes next (typically mainline)
+    // and drive it forever: that leaves g_irq_nest_depth stuck and the host
+    // stack growing. Close the IRQ cleanly instead, as if the iret had fired
+    // at our depth.
+    constexpr uint32_t kAbandonAfterDispatches = 0x40000u;  // ~1 frame
+    constexpr unsigned long long kAbandonAfterVblanks = 4;
+    const unsigned long long entry_vbl = g_runtime_vblank_starts;
+    uint32_t abandoned_guard = 0u;
+    bool closed_by_abandon = false;
     while (g_irq_iret_depth != my_depth) {
         if (++irq_guard >= kMaxIrqDispatches) {
             std::fprintf(stderr,
@@ -1700,12 +1724,61 @@ extern "C" void runtime_irq(uint32_t return_address) {
             break;
         }
         drive_irq_instruction();
+        const bool handler_frames_gone =
+            g_call_return_depth <= g_call_return_floor;
+        if (g_runtime_vblank_starts - entry_vbl >= kAbandonAfterVblanks) {
+            std::fprintf(stderr,
+                "runtime_irq: handler at depth %u abandoned without an iret "
+                "(%llu vblanks, pc=0x%08X) — closing the IRQ\n",
+                my_depth,
+                (unsigned long long)(g_runtime_vblank_starts - entry_vbl),
+                g_cpu.R[15]);
+            g_irq_iret_depth = my_depth;  // treat as completion
+            closed_by_abandon = true;
+        } else if (handler_frames_gone && g_cpu.R[15] >= 0x00004000u) {
+            if (++abandoned_guard >= kAbandonAfterDispatches) {
+                std::fprintf(stderr,
+                    "runtime_irq: handler at depth %u abandoned without an "
+                    "iret (ledger at floor, pc=0x%08X) — closing the IRQ\n",
+                    my_depth, g_cpu.R[15]);
+                g_irq_iret_depth = my_depth;  // treat as completion
+                closed_by_abandon = true;
+            }
+        } else {
+            abandoned_guard = 0u;
+        }
     }
-    g_cpu.R[0]  = saved_r0;
-    g_cpu.R[1]  = saved_r1;
-    g_cpu.R[2]  = saved_r2;
-    g_cpu.R[3]  = saved_r3;
-    g_cpu.R[12] = saved_r12;
+    if (!closed_by_abandon) {
+        g_cpu.R[0]  = saved_r0;
+        g_cpu.R[1]  = saved_r1;
+        g_cpu.R[2]  = saved_r2;
+        g_cpu.R[3]  = saved_r3;
+        g_cpu.R[12] = saved_r12;
+    } else {
+        // The abandoned flow never returned to the interrupted context: the
+        // guest state (registers, stack, banks, call ledger) belongs to the
+        // flow that kept running and is already coherent — restoring the
+        // entry snapshot would rewind it. What IS repaired is the dispatch
+        // routing the phantom may have broken: the ISR vector and the IRQ
+        // enable state.
+        const uint16_t ie  = bus_read_u16(0x04000200u);
+        const uint16_t ime = bus_read_u16(0x04000208u);
+        const uint32_t isr = bus_read_u32(0x03007FFCu);
+        if (isr != saved_isr) {
+            bus_write_u32(0x03007FFCu, saved_isr);
+            std::fprintf(stderr,
+                "runtime_irq: restore ISR vector at close: 0x%08X->0x%08X\n",
+                isr, saved_isr);
+        }
+        if (ie != saved_ie || ime != saved_ime) {
+            bus_write_u16(0x04000200u, saved_ie);
+            bus_write_u16(0x04000208u, saved_ime);
+            std::fprintf(stderr,
+                "runtime_irq: restore IRQ enable at close: IE 0x%04X->0x%04X "
+                "IME 0x%04X->0x%04X\n",
+                ie, saved_ie, ime, saved_ime);
+        }
+    }
     g_irq_iret_depth = saved_iret;  // restore an enclosing IRQ's expectation
     g_call_return_floor = saved_floor;
     --g_irq_nest_depth;
