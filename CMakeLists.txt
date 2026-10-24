@@ -988,6 +988,12 @@ add_executable(selfheal_cluster_test
 target_include_directories(selfheal_cluster_test PRIVATE src/runtime)
 add_test(NAME selfheal_cluster_test COMMAND selfheal_cluster_test)
 
+add_executable(selfheal_persistence_test tests/selfheal/persistence_test.cpp
+    tools/bios_smoke/dispatch_stub.cpp)
+target_include_directories(selfheal_persistence_test PRIVATE src/runtime)
+target_link_gbarecomp_runtime_stack(selfheal_persistence_test)
+add_test(NAME selfheal_persistence_test COMMAND selfheal_persistence_test)
+
 add_executable(interpreter_smoke tests/armv4t/interpreter_smoke.cpp)
 target_link_libraries(interpreter_smoke PRIVATE gbarecomp_armv4t)
 add_test(NAME interpreter_smoke COMMAND interpreter_smoke)

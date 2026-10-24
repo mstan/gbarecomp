@@ -66,7 +66,10 @@ these conditions, **together**:
 1. **Loudly documented — never silent.** Every fallback is observable
    and honestly reported: a session notice appears on the first miss,
    every PC is counted and dumped in a coverage report at exit, and
-   detail is queryable live. Per-PC console lines are available with
+   detail is queryable live. The proposal frag and coverage JSON are
+   also rewritten on every new distinct miss and flushed from the
+   SIGABRT handler, so an aborted or killed run keeps its harvest
+   (the JSON's `phase` says `running`, `abort` or `exit`). Per-PC console lines are available with
    `GBARECOMP_SELFHEAL_VERBOSE=1`, not emitted by default, because
    synchronous console I/O must not stall gameplay. We must never be
    able to call a half-interpreted run "statically recompiled / done"

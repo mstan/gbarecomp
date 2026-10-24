@@ -2138,6 +2138,27 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // filenames don't clobber each other).
     gbarecomp::self_heal_set_program_identity(
         header.game_title.c_str(), header.game_code.c_str(), rom_sha1.c_str());
+    // Where the miss proposal + coverage summary persist. Per-game default
+    // filenames (overridable by env) so concurrent / serial runs of different
+    // games don't clobber each other's miss logs — the cause of "which game is
+    // this frag from?" ambiguity. Tag = sanitized 4-char game code (e.g.
+    // BPEE), falling back to "unknown". Named here, at startup, so the files
+    // are kept current all session and survive an abort or a killed process,
+    // not only a clean exit.
+    std::string self_heal_frag_path, self_heal_cov_path;
+    {
+        std::string tag;
+        for (char c : header.game_code)
+            if (std::isalnum(static_cast<unsigned char>(c))) tag += c;
+        if (tag.empty()) tag = "unknown";
+        const char* frag = std::getenv("GBARECOMP_MISS_FRAG");
+        const char* cov = std::getenv("GBARECOMP_COVERAGE_JSON");
+        self_heal_frag_path =
+            frag ? frag : "recomp_master_misses_" + tag + ".toml.frag";
+        self_heal_cov_path = cov ? cov : "recomp_coverage_" + tag + ".json";
+    }
+    gbarecomp::self_heal_set_persist_paths(self_heal_frag_path.c_str(),
+                                           self_heal_cov_path.c_str());
     // Stage-2 self-heal: wire the on-the-fly recompiler (gated behind
     // GBARECOMP_SELFHEAL_RECOMPILE; no-op + a clear banner when off). The cache
     // is keyed by the cart SHA-1 so a different ROM gets a fresh DLL set; the
@@ -2203,28 +2224,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // ring records from machine reset (no arm-then-run gap), so this is a
     // pure query of recorded history — two builds run identically diff
     // bit-for-bit on these files. (Arm with GBARECOMP_INSN_TRACE=1.)
-    // Per-game default filenames (overridable by env) so concurrent / serial
-    // runs of different games don't clobber each other's miss logs — the cause
-    // of "which game is this frag from?" ambiguity. Tag = sanitized 4-char game
-    // code (e.g. BPEE), falling back to "unknown".
-    auto game_tag = [&]() {
-        std::string t;
-        for (char c : header.game_code)
-            if (std::isalnum(static_cast<unsigned char>(c))) t += c;
-        return t.empty() ? std::string("unknown") : t;
-    };
+    // The proposal / coverage paths were named at startup (see
+    // self_heal_set_persist_paths); this is their final "exit" rewrite.
     auto emit_exit_diagnostics = [&]() {
-        const std::string tag = game_tag();
-        const std::string default_frag = "recomp_master_misses_" + tag + ".toml.frag";
-        const std::string default_cov  = "recomp_coverage_" + tag + ".json";
-        const char* frag = std::getenv("GBARECOMP_MISS_FRAG");
-        gbarecomp::self_heal_write_report(
-            frag ? frag : default_frag.c_str());
+        gbarecomp::self_heal_write_report(self_heal_frag_path.c_str());
         // Machine-readable coverage summary for the build loop / CI (written
         // every exit, FULLY_STATIC included). Override path with env.
-        const char* cov = std::getenv("GBARECOMP_COVERAGE_JSON");
-        gbarecomp::self_heal_write_coverage_json(
-            cov ? cov : default_cov.c_str());
+        gbarecomp::self_heal_write_coverage_json(self_heal_cov_path.c_str());
         if (const char* fp = std::getenv("GBARECOMP_FP_SAVE")) {
             uint32_t n = runtime_fp_save_file(fp);
             std::printf("fp_ring_saved path=\"%s\" records=%u\n", fp, n);
