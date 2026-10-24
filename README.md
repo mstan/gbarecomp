@@ -1,3 +1,11 @@
+<p align="center">
+  <b>R.A.I.D. — Retro AI Development</b> · a Discord for AI-assisted retro reverse-engineering, decomp &amp; recomp
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/Ad9BwSzctP"><img src=".github/raid-discord.png" alt="Join the Retro AI Development (R.A.I.D.) Discord" width="200"></a>
+</p>
+
 # GBARecomp
 
 **A beta static-recompilation framework for the Game Boy Advance.** GBARecomp
@@ -427,13 +435,3 @@ See [`LICENSE`](LICENSE). Nintendo GBA BIOS images, game ROMs, saves, and
 extracted game assets remain copyrighted by their respective owners and are
 not distributed by this project. Game screenshots and launcher cover art are
 used for identification and project documentation.
-
----
-
-<p align="center">
-  <sub><b>R.A.I.D. — Retro AI Development</b> · a Discord for AI-assisted retro reverse-engineering, decomp &amp; recomp</sub>
-</p>
-
-<p align="center">
-  <a href="https://discord.gg/Ad9BwSzctP"><img src=".github/raid-discord.png" alt="Join the Retro AI Development (R.A.I.D.) Discord" width="200"></a>
-</p>
