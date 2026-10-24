@@ -2764,8 +2764,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (game_thread.joinable()) game_thread.join();
         bool save_ok = flush_save() != SaveFlush::Failed;
         write_session_diagnostics(opts, "exit", ppu.frame_count());
-        gbarecomp::overlay_loader_shutdown();  // join worker + drain before banner
+        // Flush diagnostics BEFORE the worker join: the join can block behind
+        // in-flight heals, and an unclean kill during it must not lose the frag.
         emit_exit_diagnostics();
+        gbarecomp::overlay_loader_shutdown();
         runtime_shutdown();
         return (ok && save_ok) ? 0 : 1;
     }
@@ -4912,8 +4914,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     }
 
-    gbarecomp::overlay_loader_shutdown();  // join worker + drain before banner
+    // Flush diagnostics BEFORE the worker join: the join can block behind
+    // in-flight heals, and an unclean kill during it must not lose the frag.
     emit_exit_diagnostics();
+    gbarecomp::overlay_loader_shutdown();
     runtime_shutdown();
     if (diag_exit) return diag_exit;
     return save_ok ? 0 : 1;

@@ -42,11 +42,18 @@
 #include "../gba/gba_bus.h"
 
 #include <algorithm>
+#include <atomic>
+#include <filesystem>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <vector>
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -94,6 +101,101 @@ std::string g_prog_sha1;
 // that never reaches the stop address) fails loudly instead of hanging
 // forever. Far above any real BIOS/cart subroutine length.
 constexpr std::uint64_t kBridgeIterationCap = 200'000'000ull;
+
+// Durability: write (or rewrite) the reviewable miss-proposal fragment RIGHT
+// NOW from the current g_misses set. Called at exit AND the moment each new
+// miss is recorded, so an unclean end — a hung close, a SIGKILL, a crash —
+// can never lose the proposal. One format, shared by both writers so they
+// can't drift; tmp + rename so a reader never sees a torn file.
+void write_frag_file(const char* frag_path) {
+    if (g_misses.empty() || !frag_path || !frag_path[0]) return;
+
+    // Jump-table-aware grouping: a tight run of same-mode misses is the
+    // signature of a computed-jump switch the finder could not size (the
+    // Kid_Head lesson, 0x08062894..0x08062920).
+    constexpr std::uint32_t kJtMaxGap = 0x80;  // bytes between case targets
+    constexpr std::size_t   kJtMinRun = 3;     // run length to call it a table
+    std::vector<gbarecomp::SelfHealMiss> sorted;
+    sorted.reserve(g_misses.size());
+    for (const auto& kv : g_misses)
+        sorted.push_back({kv.first, kv.second.thumb, kv.second.count});
+    const auto clusters =
+        gbarecomp::self_heal_cluster_misses(sorted, kJtMaxGap, kJtMinRun);
+
+    static std::atomic<unsigned long long> sequence{0};
+#if defined(_WIN32)
+    const auto pid = _getpid();
+#else
+    const auto pid = getpid();
+#endif
+    const std::string tmp = std::string(frag_path) + "." + std::to_string(pid) + "." +
+        std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)) + ".tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "w");
+    if (!f) {
+        std::fprintf(stderr,
+                     "self_heal: could not open %s for the miss proposal\n",
+                     tmp.c_str());
+        return;
+    }
+    std::fprintf(f,
+        "# recomp_master_misses.toml.frag — AUTO-GENERATED proposal.\n"
+        "# These guest PCs were reached by runtime_dispatch with no generated\n"
+        "# function and were bridged through the interpreter this session.\n"
+        "# A HUMAN reviews these and merges the genuine ones into the binary's\n"
+        "# config; this file is NEVER auto-merged (PRINCIPLES.md \"Never\n"
+        "# auto-write game.toml\").\n"
+        "#\n"
+        "# Proposal shapes:\n"
+        "#   [[extra_func]]  — a standalone missed function entry.\n"
+        "#   [[jump_table]]  — flagged in a comment when a tight run of\n"
+        "#       consecutive same-mode misses looks like a computed-jump\n"
+        "#       switch's case targets. Sizing the table covers the whole\n"
+        "#       switch in ONE entry; prefer it over the per-case [[extra_func]].\n"
+        "# BIOS PCs (< 0x4000) belong in bios/gba_bios.toml; cart PCs in the\n"
+        "# game's game.toml.\n");
+    std::fprintf(f,
+        "#\n# game:  %s\n# code:  %s\n# sha1:  %s\n\n",
+        g_prog_title.empty() ? "(unknown)" : g_prog_title.c_str(),
+        g_prog_code.empty()  ? "(unknown)" : g_prog_code.c_str(),
+        g_prog_sha1.empty()  ? "(unknown)" : g_prog_sha1.c_str());
+    for (const auto& c : clusters) {
+        if (c.jump_table_candidate) {
+            std::fprintf(f,
+                "# ── JUMP-TABLE CANDIDATE: %zu consecutive %s misses in "
+                "[0x%08X, 0x%08X] ──\n"
+                "# Likely the case targets of a computed-jump switch the finder\n"
+                "# could not size. PREFER one sized [[jump_table]] over the %zu\n"
+                "# [[extra_func]] below: find the abs32 table base (the\n"
+                "# `ldr rT,[pc,#..]; add rT,index<<2; ldr/mov pc` dispatcher) and\n"
+                "# add `[[jump_table]] addr=<base> stride=4 count=<CMP bound> "
+                "format=\"abs32\" entries_mode=\"auto\"`.\n",
+                c.end - c.begin, sorted[c.begin].thumb ? "thumb" : "arm",
+                sorted[c.begin].pc, sorted[c.end - 1].pc, c.end - c.begin);
+        }
+        for (std::size_t k = c.begin; k < c.end; ++k) {
+            std::fprintf(f,
+                "[[extra_func]]\n"
+                "addr = 0x%08X\n"
+                "mode = \"%s\"\n"
+                "note = \"proposed from self-heal miss-log; bridged x%llu%s\"\n\n",
+                sorted[k].pc, sorted[k].thumb ? "thumb" : "arm",
+                static_cast<unsigned long long>(sorted[k].count),
+                c.jump_table_candidate
+                  ? "; part of a JUMP-TABLE CANDIDATE (prefer a sized [[jump_table]])"
+                  : "");
+        }
+    }
+    const bool wrote = std::ferror(f) == 0;
+    const bool closed = std::fclose(f) == 0;
+    std::error_code ec;
+    if (wrote && closed) std::filesystem::rename(tmp, frag_path, ec);
+    if (!wrote || !closed || ec) {
+        std::filesystem::remove(tmp, ec);
+        std::fprintf(stderr,
+                     "self_heal: could not write %s for the miss proposal\n",
+                     frag_path);
+    }
+}
 
 }  // namespace
 
@@ -187,62 +289,7 @@ void self_heal_write_report(const char* frag_path) {
     }
 
     if (g_misses.empty() || !frag_path) return;
-    std::FILE* f = std::fopen(frag_path, "w");
-    if (!f) {
-        std::fprintf(stderr,
-                     "self_heal: could not open %s for the miss proposal\n",
-                     frag_path);
-        return;
-    }
-    std::fprintf(f,
-        "# recomp_master_misses.toml.frag — AUTO-GENERATED proposal.\n"
-        "# These guest PCs were reached by runtime_dispatch with no generated\n"
-        "# function and were bridged through the interpreter this session.\n"
-        "# A HUMAN reviews these and merges the genuine ones into the binary's\n"
-        "# config; this file is NEVER auto-merged (PRINCIPLES.md \"Never\n"
-        "# auto-write game.toml\").\n"
-        "#\n"
-        "# Proposal shapes:\n"
-        "#   [[extra_func]]  — a standalone missed function entry.\n"
-        "#   [[jump_table]]  — flagged in a comment when a tight run of\n"
-        "#       consecutive same-mode misses looks like a computed-jump\n"
-        "#       switch's case targets. Sizing the table covers the whole\n"
-        "#       switch in ONE entry; prefer it over the per-case [[extra_func]].\n"
-        "# BIOS PCs (< 0x4000) belong in bios/gba_bios.toml; cart PCs in the\n"
-        "# game's game.toml.\n");
-    std::fprintf(f,
-        "#\n# game:  %s\n# code:  %s\n# sha1:  %s\n\n",
-        g_prog_title.empty() ? "(unknown)" : g_prog_title.c_str(),
-        g_prog_code.empty()  ? "(unknown)" : g_prog_code.c_str(),
-        g_prog_sha1.empty()  ? "(unknown)" : g_prog_sha1.c_str());
-    for (const auto& c : clusters) {
-        if (c.jump_table_candidate) {
-            std::fprintf(f,
-                "# ── JUMP-TABLE CANDIDATE: %zu consecutive %s misses in "
-                "[0x%08X, 0x%08X] ──\n"
-                "# Likely the case targets of a computed-jump switch the finder\n"
-                "# could not size. PREFER one sized [[jump_table]] over the %zu\n"
-                "# [[extra_func]] below: find the abs32 table base (the\n"
-                "# `ldr rT,[pc,#..]; add rT,index<<2; ldr/mov pc` dispatcher) and\n"
-                "# add `[[jump_table]] addr=<base> stride=4 count=<CMP bound> "
-                "format=\"abs32\" entries_mode=\"auto\"`.\n",
-                c.end - c.begin, sorted[c.begin].thumb ? "thumb" : "arm",
-                sorted[c.begin].pc, sorted[c.end - 1].pc, c.end - c.begin);
-        }
-        for (std::size_t k = c.begin; k < c.end; ++k) {
-            std::fprintf(f,
-                "[[extra_func]]\n"
-                "addr = 0x%08X\n"
-                "mode = \"%s\"\n"
-                "note = \"proposed from self-heal miss-log; bridged x%llu%s\"\n\n",
-                sorted[k].pc, sorted[k].thumb ? "thumb" : "arm",
-                static_cast<unsigned long long>(sorted[k].count),
-                c.jump_table_candidate
-                  ? "; part of a JUMP-TABLE CANDIDATE (prefer a sized [[jump_table]])"
-                  : "");
-        }
-    }
-    std::fclose(f);
+    write_frag_file(frag_path);
 }
 
 std::string self_heal_misses_json() {
@@ -364,6 +411,14 @@ void record_and_log_miss(std::uint32_t pc, bool thumb) {
                 "self_heal: NOT_STATIC; missing static coverage detected; "
                 "interpreter bridge active, recording a TOML proposal. Set "
                 "GBARECOMP_SELFHEAL_VERBOSE=1 for per-PC diagnostics.\n");
+        }
+
+        // Durability guard: journal the proposal fragment NOW, while the miss
+        // is fresh — an unclean end (hung close, kill, crash) then cannot lose
+        // it. Env-gated: the playtest/tooling flows (play.sh, cycle.py) set it.
+        // Quiet; one bounded rewrite per distinct missed PC.
+        if (const char* frag = std::getenv("GBARECOMP_MISS_FRAG")) {
+            if (frag[0] != '\0') write_frag_file(frag);
         }
 
         const char* trace_on_miss = std::getenv("GBARECOMP_TRACE_ON_DISPATCH_MISS");
@@ -503,6 +558,32 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
     // so the recompiled intr_main reaches its iret. (forced_stop_pc != 0 is the
     // sljit gate's bounded pass — never an IRQ continuation.)
     const bool irq_cont = (g_irq_nest_depth != 0u) && (forced_stop_pc == 0u);
+
+    // 2026-10-09: every dispatch miss logs one line of entry context —
+    // misses are rare in steady state, and the wrong-mode/computed-reach
+    // family (FFTA 0x0FF8 thumb->ARM, 0x08000494 ARM->thumb) needs the
+    // entry mode + LR/SP/CPSR at the miss instant to be classifiable from
+    // a run log alone.
+    if (self_heal_verbose()) std::fprintf(stderr,
+        "runtime_arm: bridge entry pc=0x%08X thumb=%u stop=0x%08X "
+        "lr=0x%08X sp=0x%08X cpsr=0x%08X depth=%u top_level=%u\n",
+        entry_pc, entry_thumb ? 1u : 0u, stop_pc,
+        g_cpu.R[14], g_cpu.R[13], g_cpu.cpsr,
+        entry_depth, top_level ? 1u : 0u);
+    // The bridge's own interpreted records overwrite the ring within ~1 s
+    // (every interpreted instruction records), so the ONLY moment with the
+    // pre-miss generated-code context still in the ring is entry.
+    // Env-gated: dump the ring here for wrong-mode/computed-reach
+    // post-mortems (the FFTA 0x0FF8 / 0x08000494 family).
+    {
+        const char* fp_entry = std::getenv("GBARECOMP_BRIDGE_ENTRY_FP");
+        if (fp_entry != nullptr && *fp_entry != '\0') {
+            const std::uint32_t n = runtime_fp_save_file(fp_entry);
+            std::fprintf(stderr,
+                "runtime_arm: bridge entry — instruction ring dumped to %s "
+                "(%u records)\n", fp_entry, n);
+        }
+    }
 
     // Snapshot the entry stack so we can restore it exactly (minus the popped
     // frame) regardless of how IRQ/SWI excursions perturb it mid-bridge.
@@ -711,6 +792,15 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
                 entry_pc,
                 static_cast<unsigned long long>(kBridgeIterationCap),
                 stop_pc, cpu.R[15]);
+            {
+                const char* fp_dump = std::getenv("GBARECOMP_BRIDGE_ABORT_FP");
+                if (fp_dump != nullptr && *fp_dump != '\0') {
+                    const std::uint32_t n = runtime_fp_save_file(fp_dump);
+                    std::fprintf(stderr,
+                        "runtime_arm: bridge runaway — instruction ring "
+                        "dumped to %s (%u records)\n", fp_dump, n);
+                }
+            }
             runtime_trace_dump_recent(96);
             std::abort();
         }
