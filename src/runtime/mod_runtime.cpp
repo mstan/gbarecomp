@@ -31,6 +31,11 @@
 #include <system_error>
 #include <utility>
 #include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 // Deliberately declared in this implementation file only.  This is the
 // runtime-to-engine linkage used around a selected activation callback, not a
@@ -998,7 +1003,18 @@ std::string quote_toml(const std::string& value) {
 bool save_state(Runtime& runtime, std::string* error) {
     std::error_code ec;
     fs::create_directories(runtime.root, ec);
-    const fs::path temp = runtime.root / "state.toml.tmp";
+    // Unique temp per process: concurrent launches (parallel harnesses,
+    // multiple instances) publish the same derived state. A shared temp name
+    // let one process's rename consume another's file (ENOENT), whose retry
+    // then removed the freshly published output.
+#ifdef _WIN32
+    const auto publish_pid =
+        static_cast<unsigned long long>(GetCurrentProcessId());
+#else
+    const auto publish_pid = static_cast<unsigned long long>(::getpid());
+#endif
+    const fs::path temp =
+        runtime.root / ("state.toml." + std::to_string(publish_pid) + ".tmp");
     const fs::path output = runtime.root / "state.toml";
     std::ofstream file(temp, std::ios::trunc);
     if (!file) {
