@@ -4274,12 +4274,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (diag.playing() && (diag.finished() || diag.failed()))
                     host_quit = true;
                 if (phase_active) fp_t4 = FramePhaseRing::now_ns();
+                // Banked frames for the pacer: this present covers every guest
+                // frame since the last one (normally 1; 2 after a stale-frame
+                // skip). The pacer throttles all of them.
+                const uint64_t banked_frames = frame - last_presented_frame;
                 last_presented_frame = frame;
                 if (present_frame) {
                     ++frames_presented;
                     if (args.frames >= 0 && frames_presented >= args.frames)
                         host_quit = true;
-                    if (pacer) pacer->wait_for_next_frame();
+                    if (pacer) pacer->wait_for_next_frame(banked_frames);
                 }
                 if (phase_active) {
                     frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3,
@@ -4710,6 +4714,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     host_quit = true;
                 if (phase_active) fp_t4 = FramePhaseRing::now_ns();
                 dispatches_since_pump = 0;
+                const uint64_t banked_frames = frame - last_presented_frame;
                 last_presented_frame = frame;
                 if (present_frame) {
                     ++frames_presented;
@@ -4719,7 +4724,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     // Normal play presents/paces every frame. Fast-forward
                     // runs N guest frames per one paced host presentation,
                     // making its selected multiplier independent of monitor Hz.
-                    if (pacer) pacer->wait_for_next_frame();
+                    if (pacer) pacer->wait_for_next_frame(banked_frames);
                 }
                 if (phase_active) {
                     frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3,

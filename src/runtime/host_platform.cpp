@@ -50,10 +50,20 @@ void FramePacer::reset() {
     next_ = clock::now() + period_;
 }
 
-void FramePacer::wait_for_next_frame() {
+void FramePacer::wait_for_next_frame(uint64_t frames) {
     if (uncapped_) {
         next_ = clock::now();  // keep the deadline current for re-cap
         return;
+    }
+    // Throttle banked frames: a present covering k>1 guest frames (after
+    // stale-frame skips) advances the deadline by the banked count before
+    // waiting, so this one wait paces all of them. Clamped defensively;
+    // a genuine multi-second stall still resyncs below. frames==1 skips
+    // the adjustment entirely (bit-identical to the old path).
+    if (frames > 1) {
+        uint64_t extra = frames - 1u;
+        if (extra > 15u) extra = 15u;
+        next_ += period_ * static_cast<std::chrono::nanoseconds::rep>(extra);
     }
     clock::time_point now = clock::now();
     // If we've fallen more than one whole frame behind, resync instead

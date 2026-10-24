@@ -979,6 +979,16 @@ target_include_directories(diagnostic_replay_tests PRIVATE src/runtime src/debug
 find_package(Threads REQUIRED)
 target_link_libraries(diagnostic_replay_tests PRIVATE Threads::Threads)
 add_test(NAME diagnostic_replay_tests COMMAND diagnostic_replay_tests)
+# FramePacer banked-frame throttling — wall-clock pacing, links only
+# src/runtime/host_platform.cpp.
+add_executable(pacer_tests
+    tests/runtime/pacer_test.cpp
+    src/runtime/host_platform.cpp)
+target_include_directories(pacer_tests PRIVATE src/runtime)
+if(WIN32)
+    target_link_libraries(pacer_tests PRIVATE winmm)
+endif()
+add_test(NAME pacer_tests COMMAND pacer_tests)
 
 # Self-heal proposal clustering — pure logic, links only the standalone
 # clustering TU (no runtime/bus/overlay dependencies).
