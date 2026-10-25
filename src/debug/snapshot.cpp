@@ -35,6 +35,11 @@ namespace {
 
 constexpr char kMagic[4] = {'G', 'B', 'A', 'S'};
 constexpr uint32_t kLegacySnapshotVersion = 1;
+// Version 2 predates the SWI continuations at the end of the CPU section
+// (d4c88e6); its sections are otherwise the same. It loads with no
+// continuation pending, as version-2 runtimes restored it, so suspend states
+// and save slots survive the engine update.
+constexpr uint32_t kSwiLessSnapshotVersion = 2;
 
 // FourCC section tags.
 constexpr uint32_t fourcc(char a, char b, char c, char d) {
@@ -87,14 +92,14 @@ void serialize_cpu(SnapshotWriter& w) {
     for (const auto& slot : swi) { w.u32(slot.continuation); w.u32(slot.return_pc); }
 }
 
-bool deserialize_cpu(SnapshotReader& r, bool commit) {
+bool deserialize_cpu(SnapshotReader& r, bool commit, bool has_swi) {
     ArmCpuState cpu{};
     r.bytes(&cpu, sizeof(cpu));
     uint32_t depth = r.u32();
     if (!r.ok() || depth > 1024 || depth > r.remaining() / 4u) return false;
     std::vector<uint32_t> entries(depth, 0);
     for (uint32_t i = 0; i < depth; ++i) entries[i] = r.u32();
-    const uint32_t count = r.u32();
+    const uint32_t count = has_swi ? r.u32() : 0u;
     if (!r.ok() || count > kRuntimeSwiLimit || count > r.remaining() / 8u) return false;
     std::vector<RuntimeSwiContinuation> swi(count);
     for (auto& slot : swi) { slot.continuation = r.u32(); slot.return_pc = r.u32(); }
@@ -221,7 +226,7 @@ bool load_state_bytes(const uint8_t* data, std::size_t size,
         return false;
     }
     uint32_t version = head.u32();
-    if (version != kSnapshotVersion) {
+    if (version != kSnapshotVersion && version != kSwiLessSnapshotVersion) {
         if (err) {
             *err = "snapshot: version mismatch (file v" +
                    std::to_string(version) + ", runtime v" +
@@ -346,12 +351,12 @@ bool load_state_bytes(const uint8_t* data, std::size_t size,
 
     {
         SnapshotReader r = reader_for(TAG_CPU);
-        if (!deserialize_cpu(r, false)) {
+        if (!deserialize_cpu(r, false, version != kSwiLessSnapshotVersion)) {
             if (err) *err = "snapshot: invalid CPU continuation";
             return false;
         }
     }
-    { SnapshotReader r = reader_for(TAG_CPU);   deserialize_cpu(r, true); }
+    { SnapshotReader r = reader_for(TAG_CPU);   deserialize_cpu(r, true, version != kSwiLessSnapshotVersion); }
     { SnapshotReader r = reader_for(TAG_BUS);   ctx.bus->deserialize(r); }
     { SnapshotReader r = reader_for(TAG_IO);    ctx.bus->io().deserialize(r); }
     // WAITCNT arrived with the IO page; re-derive the bus wait-state table.
