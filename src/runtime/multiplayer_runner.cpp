@@ -199,7 +199,11 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
                 window.set_view_margins((width-240)/2,(width-240)-(width-240)/2,0,0);
                 window.present(pixels,presentation->width(),presentation->height());
             }
-            window.push_audio_samples(output.audio.data(),output.audio.size());
+            std::size_t offset=0;
+            for (const auto& block:output.audio_blocks) {
+                window.push_audio_block(output.audio.data()+offset,block.count,block.rate);
+                offset+=block.count;
+            }
         }
         if (step==GbaNetplayMatch::Step::Idle) pacer.idle();
     }

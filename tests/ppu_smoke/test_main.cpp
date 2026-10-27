@@ -298,9 +298,9 @@ void test_extended_view_geometry_and_clamp() {
         std::fprintf(stderr, "50:9 odd-width geometry mismatch\n");
         std::exit(1);
     }
-    static_assert(gba::GbaPpu::kMaxExtraX == 328 &&
-                  gba::GbaPpu::kMaxRenderWidth == 896,
-                  "engine horizontal capacity must cover 50:9 (889x160)");
+    static_assert(gba::GbaPpu::kMaxExtraX == 520 &&
+                  gba::GbaPpu::kMaxRenderWidth == 1280,
+                   "engine horizontal capacity must cover 50:9 at 208 lines");
     ppu.set_view_margins(1000, 1000, 7, 9);
     if (ppu.render_width() != gba::GbaPpu::kMaxRenderWidth ||
         ppu.view_extra_left() != gba::GbaPpu::kMaxExtraX ||
@@ -352,8 +352,13 @@ void test_extended_view_capability_policy() {
         std::exit(1);
     }
     g = resolve_view_geometry(2000, 2000, false, kEngineMax);
-    if (g.width != 896 || g.extra_left != 328 || g.extra_right != 328) {
-        std::fprintf(stderr, "896x160 engine capacity was not enforced\n");
+    if (g.width != 1280 || g.extra_left != 520 || g.extra_right != 520) {
+        std::fprintf(stderr, "1280x160 engine capacity was not enforced\n");
+        std::exit(1);
+    }
+    g = resolve_view_geometry(2000, 896, false, kEngineMax);
+    if (g.width != 896) {
+        std::fprintf(stderr, "existing 896px game ceiling was not preserved\n");
         std::exit(1);
     }
     g = resolve_view_geometry(2000, 569, false, kEngineMax);
@@ -411,7 +416,7 @@ void test_resize_driven_view_policy() {
     constexpr uint32_t kEngineMax = gba::GbaPpu::kMaxRenderWidth;
     const Case wide_cases[] = {
         {5000, 900, 896, 889}, {5000, 900, 576, 576}, {5000, 900, 569, 569},
-        {5000, 900, 480, 480}, {20000, 900, 2000, 896}, {3840, 1080, 896, 569},
+        {5000, 900, 480, 480}, {20000, 900, 2000, 1280}, {3840, 1080, 896, 569},
     };
     for (const Case& c : wide_cases) {
         if (resize_driven_view_width(c.w, c.h, c.max, kEngineMax) != c.expected) {
@@ -1920,7 +1925,36 @@ void test_latched_frame_immune_to_in_progress_scanlines() {
 
 } // namespace
 
+int ui_pixel_calls = 0;
+int authored_ui_pixel(int x, int y, std::uint16_t* color) {
+    ++ui_pixel_calls;
+    if (x != -1 || y != -1) return 0;
+    *color = 31;
+    return 1;
+}
+void test_authored_ui_pixels_are_expanded_only() {
+    Fixture f;
+    store16(f.pal.data(),0x7C00);
+    gba::g_ws_ui_pixel_provider = authored_ui_pixel;
+    f.ppu.render(f.rgb.data(),0,f.io.data(),f.vram.data(),f.oam.data(),f.pal.data());
+    if (ui_pixel_calls) std::exit(1);
+    expect_pixel(f.rgb.data(),0,0,255,"native UI provider must be inert");
+    f.ppu.set_view_margins(1,1,1,1);
+    gba::g_ws_authored_margin_layers = 1;
+    gba::g_ws_tilemap_provider = test_margin_tilemap;
+    std::vector<std::uint8_t> wide(242*162*3);
+    f.ppu.render(wide.data(),0,f.io.data(),f.vram.data(),f.oam.data(),f.pal.data());
+    expect_pixel(wide.data(),255,0,0,"authored UI at portrait/landscape corner");
+    expect_pixel(wide.data()+(1*242+1)*3,0,0,255,"UI provider must preserve other pixels");
+    gba::g_ws_ui_pixel_provider = nullptr;
+    f.ppu.render(wide.data(),0,f.io.data(),f.vram.data(),f.oam.data(),f.pal.data());
+    expect_pixel(wide.data(),0,0,255,"UI provider reset");
+    gba::g_ws_authored_margin_layers = 0;
+    gba::g_ws_tilemap_provider = nullptr;
+}
+
 int main() {
+    test_authored_ui_pixels_are_expanded_only();
     test_alpha_native_domain_and_green_precision();
     test_brightness_native_domain_and_green_precision();
     test_extended_view_geometry_and_clamp();

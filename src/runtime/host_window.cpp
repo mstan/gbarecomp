@@ -385,6 +385,9 @@ struct Backend {
     // A game input policy consumes touches (RunOptions::input_frame).
     bool touch_policy = false;
     std::uint32_t touch_claims = 0;
+    // Enhanced (MP2K shadow) audio; saved = the player chose it in the menu.
+    bool audio_enhanced = false;
+    bool audio_enhanced_saved = false;
     bool touch_emulation = false;   // desktop mouse -> touch
     float px_per_mm = 96.0f / 25.4f;
     float logical_px_per_mm = 96.0f / 25.4f;  // SDL-reported (logical) density
@@ -415,6 +418,29 @@ struct Backend {
     uint64_t      audio_direct_pushes = 0;
     uint64_t      audio_direct_samples = 0;
     uint64_t      audio_direct_underruns = 0;
+    // Session health: one clock read per present, summarised in the log when
+    // the app goes to the background (it may be killed there) and on close.
+    uint64_t      health_frames = 0;
+    uint64_t      health_late = 0;      // present gap > 25 ms: a frame missed
+    uint64_t      health_hitches = 0;   // present gap > 100 ms: a visible stall
+    uint64_t      health_max_gap_us = 0;
+    Uint64        health_prev_present = 0;
+    Uint64        health_first_present = 0;
+    unsigned      health_hitch_lines = 0;  // capped, see note_present_for_health
+    // The latest present gap, counted at the next present. Android delays
+    // the last present before the app leaves the foreground (about 525 ms
+    // on the RG556 when Home is pressed); that gap is the system's
+    // transition, so it is dropped when the session is suspended or ends.
+    uint64_t      health_pending_gap_us = 0;
+    uint64_t      health_pending_frame = 0;
+    Uint64        health_pending_at = 0;
+    // Audio bridge counters (output frames played dry, source frames dropped
+    // on overflow), accumulated only across steady play: the bridge also runs
+    // dry at start-up and while a state is written before the background.
+    uint64_t      health_seen_underrun = 0;
+    uint64_t      health_seen_overflow = 0;
+    uint64_t      health_play_underrun = 0;
+    uint64_t      health_play_overflow = 0;
     uint64_t      audio_direct_probe_samples = 0;
     uint64_t      audio_direct_probe_nonzero = 0;
     long double   audio_direct_probe_square_sum = 0.0;
@@ -1113,7 +1139,9 @@ void save_touch_config(const Backend* b) {
             while (!line.empty() && line.back() == '\r') line.pop_back();
             const size_t s = line.find_first_not_of(" \t");
             const bool header = s != std::string::npos && line[s] == '[';
-            if (header) in_section = line.compare(s, 7, "[Touch]") == 0;
+            if (header)
+                in_section = line.compare(s, 7, "[Touch]") == 0 ||
+                             line.compare(s, 7, "[Audio]") == 0;
             if (in_section) continue;
             kept.push_back(line);
         }
@@ -1129,6 +1157,10 @@ void save_touch_config(const Backend* b) {
     if (b->toggle_pos_saved) {
         f << "toggle_x = " << b->toggle_fx << "\n";
         f << "toggle_y = " << b->toggle_fy << "\n";
+    }
+    if (b->audio_enhanced_saved) {
+        f << "\n[Audio]\n";
+        f << "enhanced = " << (b->audio_enhanced ? 1 : 0) << "\n";
     }
 }
 
@@ -1818,7 +1850,7 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     // Mobile presentation owns the whole drawable: a centered integer-scaled
     // game viewport plus dedicated side rails for touch controls.
     SDL_RenderSetLogicalSize(b->renderer, 0, 0);
-    SDL_SetRenderDrawColor(b->renderer, 7, 11, 20, 255);
+    SDL_SetRenderDrawColor(b->renderer, 0, 0, 0, 255);
 #else
     if (b->expanded_view || b->resize_driven_view) {
         // The destination viewport is computed explicitly in present() so
@@ -1948,7 +1980,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
 // (We are already inside namespace gbarecomp, so declare it unqualified.)
 uint64_t overlay_game_thread_compile_ns();
 
-void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
+void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
+                                  uint32_t rate) {
     if (!open_ || !impl_ || !samples || count == 0) return;
     auto* b = static_cast<Backend*>(impl_);
     if (b->audio_dev == 0) return;
@@ -2054,6 +2087,32 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
     }
     if (!b->bridge_ready) return;
 
+    // Re-tune the bridge to the block's true source rate. The mixer rate
+    // follows SOUNDBIAS (GbaAudio::sample_rate()), so a stream assumed to be
+    // 65.536 kHz while the guest mixes at 32.768 kHz drains the ring twice as
+    // fast as it fills and the stall concealment loops recent audio — heard as
+    // a sustained crackle. Rebuild the filter bank only when the source:host
+    // ratio class changes (downsampling needs a different cutoff); a pure
+    // upsampling change only moves cur_step, so it reuses the coefficients.
+    if (rate != 0 && rate != static_cast<uint32_t>(b->bridge.cfg.source_rate)) {
+        const bool was_down = b->bridge.cfg.source_rate > b->bridge.cfg.host_rate;
+        const bool now_down = static_cast<double>(rate) > b->bridge.cfg.host_rate;
+        SDL_LockMutex(b->audio_mtx);
+        if (was_down || now_down) {
+            rab_config cfg = b->bridge.cfg;
+            cfg.source_rate = static_cast<double>(rate);
+            rab_free(&b->bridge);
+            if (rab_init(&b->bridge, &cfg) != 0) {
+                SDL_UnlockMutex(b->audio_mtx);
+                b->bridge_ready = false;
+                return;
+            }
+        } else {
+            b->bridge.cfg.source_rate = static_cast<double>(rate);
+        }
+        SDL_UnlockMutex(b->audio_mtx);
+    }
+
     // Producer: append mono frames into the bridge ring. The SDL callback
     // (gba_audio_callback) drains it at the device rate with band-limited
     // resampling + a P-only fill servo — no queue underrun, no hard flush.
@@ -2096,6 +2155,11 @@ void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
     }
 }
 
+void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
+    // Legacy callers that do not tag a rate: assume the engine default.
+    push_audio_block(samples, count, 65536u);
+}
+
 void HostWindow::set_title(const char* title) {
     if (!open_ || !impl_ || !title) return;
     auto* b=static_cast<Backend*>(impl_);
@@ -2103,15 +2167,115 @@ void HostWindow::set_title(const char* title) {
     SDL_SetWindowTitle(b->window,title);
 }
 
+static void commit_pending_gap(Backend* b) {
+    const uint64_t gap_us = b->health_pending_gap_us;
+    if (!gap_us) return;
+    b->health_pending_gap_us = 0;
+    if (gap_us > 25000ull) ++b->health_late;
+    if (gap_us > 100000ull) {
+        ++b->health_hitches;
+        // Where it happened, so it can be matched with what the player was
+        // doing; rare by definition, capped regardless.
+        if (b->health_hitch_lines < 20) {
+            ++b->health_hitch_lines;
+            std::fprintf(stderr,
+                         "host_window: hitch %.1f ms at frame %llu, "
+                         "%.1f s into the session\n",
+                         gap_us / 1000.0,
+                         static_cast<unsigned long long>(b->health_pending_frame),
+                         static_cast<double>(b->health_pending_at - b->health_first_present) /
+                             SDL_GetPerformanceFrequency());
+        }
+    }
+    b->health_max_gap_us = std::max(b->health_max_gap_us, gap_us);
+}
+
+static void note_present_for_health(Backend* b) {
+    const Uint64 now = SDL_GetPerformanceCounter();
+    // Another present came, so the previous gap did not lead out of the
+    // foreground: count it.
+    commit_pending_gap(b);
+    uint64_t gap_us = UINT64_MAX;
+    if (b->health_prev_present) {
+        gap_us = (now - b->health_prev_present) * 1000000ull /
+                 SDL_GetPerformanceFrequency();
+        // Longer gaps are pauses (menus, state loads), not stutter.
+        if (gap_us < 2000000ull) {
+            b->health_pending_gap_us = gap_us;
+            b->health_pending_frame = b->health_frames;
+            b->health_pending_at = now;
+        }
+    }
+    if (!b->health_first_present) b->health_first_present = now;
+    if (b->bridge_ready) {
+        rab_stats st;
+        // The SDL audio callback writes these counters under this mutex.
+        SDL_LockMutex(b->audio_mtx);
+        rab_get_stats(&b->bridge, &st);
+        SDL_UnlockMutex(b->audio_mtx);
+        if (gap_us <= 100000ull) {
+            // A bridge restart (resume or source-rate change) resets counters.
+            // Never subtract a previous epoch's larger unsigned value.
+            if (st.underrun_events >= b->health_seen_underrun)
+                b->health_play_underrun += st.underrun_events - b->health_seen_underrun;
+            if (st.overflow_drops >= b->health_seen_overflow)
+                b->health_play_overflow += st.overflow_drops - b->health_seen_overflow;
+        }
+        b->health_seen_underrun = st.underrun_events;
+        b->health_seen_overflow = st.overflow_drops;
+    }
+    b->health_prev_present = now;
+    ++b->health_frames;
+}
+
+static void log_session_health(Backend* b, const char* when) {
+    // The gap before the last present led out of the foreground (or to the
+    // end): the system's transition, not the game's.
+    if (b->health_pending_gap_us > 100000ull) {
+        std::fprintf(stderr,
+                     "host_window: %.1f ms before the last frame (%s), "
+                     "not counted\n",
+                     b->health_pending_gap_us / 1000.0, when);
+    }
+    b->health_pending_gap_us = 0;
+    // Milliseconds of output played from an empty bridge, and of guest audio
+    // dropped because the bridge was full, during steady play.
+    double dry_ms = 0.0, dropped_ms = 0.0;
+    if (b->bridge_ready) {
+        dry_ms = b->health_play_underrun * 1000.0 / b->bridge.cfg.host_rate;
+        dropped_ms = b->health_play_overflow * 1000.0 / b->bridge.cfg.source_rate;
+    }
+    std::fprintf(stderr,
+                 "host_window: session_health (%s) frames=%llu late_frames=%llu "
+                 "hitches=%llu max_gap_ms=%.1f audio_dry_ms=%.1f "
+                 "audio_dropped_ms=%.1f\n",
+                 when, static_cast<unsigned long long>(b->health_frames),
+                 static_cast<unsigned long long>(b->health_late),
+                 static_cast<unsigned long long>(b->health_hitches),
+                 b->health_max_gap_us / 1000.0, dry_ms, dropped_ms);
+    std::fflush(stderr);
+}
+
 void HostWindow::close() {
     if (!impl_) { open_ = false; return; }
     auto* b = static_cast<Backend*>(impl_);
     b->cadence.dump();  // MC-WS-002: flush the cadence ring (verbose only)
     if (b->audio_dev) SDL_CloseAudioDevice(b->audio_dev);  // stops the callback first
+    log_session_health(b, "exit");
     if (b->bridge_ready) rab_free(&b->bridge);
     if (b->audio_mtx) SDL_DestroyMutex(b->audio_mtx);
     close_game_controller(b);
     if (b->device_gyro) SDL_SensorClose(b->device_gyro);
+#if defined(__ANDROID__)
+    // The process outlives a game session (a launcher Activity can keep it),
+    // but SDL's Android sensor driver binds every event queue to the ALooper
+    // of the thread that initialised the subsystem: this session's game
+    // thread, which ends with it. Quit the subsystem so the next session's
+    // open() initialises it again on its own thread. Otherwise the next
+    // session's SDL_SensorOpen/SDL_SensorClose went through the dead thread's
+    // looper and crashed in Looper::addFd / Looper::removeFd.
+    SDL_QuitSubSystem(SDL_INIT_SENSOR);
+#endif
     if (b->haptic) SDL_HapticClose(b->haptic);
     if (g_haptic_window == this) g_haptic_window = nullptr;
 #if defined(GBARECOMP_RUNTIME_UI)
@@ -2124,6 +2288,13 @@ void HostWindow::close() {
     delete b;
     impl_ = nullptr;
     open_ = false;
+#if defined(__ANDROID__)
+    // The process outlives the session and SDL's event queue with it. When
+    // the Activity is destroyed in the background, SDL queues SDL_QUIT then
+    // SDL_APP_TERMINATING; wait_for_foreground() returns on the first, and the
+    // second used to terminate the next session before its first frame.
+    SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
+#endif
 }
 
 bool HostWindow::set_surface_size(int base_w, int base_h) {
@@ -2253,6 +2424,7 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
         }
         rgb888 = b->presentation_upload.data();
     }
+    note_present_for_health(b);
     // Present-time color grading (opt-in). Raw is passthrough: the raw
     // PPU frame is uploaded untouched, so verify/frame-hash are unaffected.
     if (b->color_lut && !b->color_lut->is_passthrough()) {
@@ -2261,7 +2433,14 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
         rgb888 = b->graded_fb.data();
     }
     SDL_UpdateTexture(b->texture, nullptr, rgb888, texture_w * 3);
+#if defined(__ANDROID__)
+    // Pure black around the game: on OLED panels (common on Android phones
+    // and handhelds such as the RG556) those pixels are then off, not a dim
+    // navy lit for hours in the same place.
+    SDL_SetRenderDrawColor(b->renderer, 0, 0, 0, 255);
+#else
     SDL_SetRenderDrawColor(b->renderer, 7, 11, 20, 255);
+#endif
     SDL_RenderClear(b->renderer);
 #if defined(__ANDROID__)
     if (!b->insets_from_env && g_android_insets_known.load()) {
@@ -2640,6 +2819,29 @@ void HostWindow::set_touch_config_dir(const char* dir) {
             b->toggle_pos_saved = true;
         }
     });
+    ini_scan_section((b->touch_config_dir + "/config.ini").c_str(), "Audio",
+                     [b](const char* key, const char* val) {
+        if (SDL_strcasecmp(key, "enhanced") == 0) {
+            b->audio_enhanced = std::atoi(val) != 0;
+            b->audio_enhanced_saved = true;
+        }
+    });
+}
+
+bool HostWindow::saved_audio_enhanced(bool& enabled) const {
+    if (!open_ || !impl_) return false;
+    auto* b = static_cast<const Backend*>(impl_);
+    if (!b->audio_enhanced_saved) return false;
+    enabled = b->audio_enhanced;
+    return true;
+}
+
+void HostWindow::save_audio_enhanced(bool enabled) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    b->audio_enhanced = enabled;
+    b->audio_enhanced_saved = true;
+    save_touch_config(b);
 }
 
 bool HostWindow::touch_pad_visible() const {
@@ -2691,7 +2893,7 @@ bool HostWindow::wait_for_foreground() {
     if (!open_ || !impl_) return false;
     auto* b = static_cast<Backend*>(impl_);
     std::fprintf(stderr, "host_window: background — emulation suspended\n");
-    std::fflush(stderr);
+    log_session_health(b, "background");
     if (b->audio_dev) SDL_PauseAudioDevice(b->audio_dev, 1);
     TouchHub::instance().cancel_all(touch_clock_ms());
     clear_touches(b);
@@ -2705,6 +2907,7 @@ bool HostWindow::wait_for_foreground() {
         }
     }
     b->backgrounded = false;
+    b->health_prev_present = 0;  // the time away is not a stall
     if (resumed && b->audio_dev) {
         if (b->audio_direct) {
             // Rebuild the cushion rather than replaying a stale queue.
@@ -3178,6 +3381,8 @@ int  HostWindow::volume() const { return 100; }
 int  HostWindow::window_scale() const { return 1; }
 void HostWindow::set_linear_filter(bool /*enabled*/) {}
 bool HostWindow::linear_filter() const { return false; }
+bool HostWindow::saved_audio_enhanced(bool& /*enabled*/) const { return false; }
+void HostWindow::save_audio_enhanced(bool /*enabled*/) {}
 void HostWindow::set_audio_enabled(bool /*enabled*/) {}
 bool HostWindow::audio_enabled() const { return false; }
 void HostWindow::set_resize_driven_view(bool /*enabled*/) {}
@@ -3205,6 +3410,8 @@ int HostWindow::fast_forward_multiplier() const { return 4; }
 
 void HostWindow::push_audio_samples(const int16_t* /*samples*/,
                                     std::size_t /*count*/) {}
+void HostWindow::push_audio_block(const int16_t* /*samples*/,
+                                  std::size_t /*count*/, uint32_t /*rate*/) {}
 
 void HostWindow::service_events() {}
 

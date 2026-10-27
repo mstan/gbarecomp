@@ -27,6 +27,11 @@ template<class Archive, class Context> void execution_state(Archive& a, Context&
     if (count > 1024) throw std::invalid_argument("excessive IRQ depth");
     if constexpr (!std::is_const_v<Context>) state.interrupts.resize(count);
     for (auto& f : state.interrupts) a(f.preserved,f.return_floor,f.return_depth,f.iret_depth);
+    count = static_cast<std::uint32_t>(state.swi_returns.size());
+    a(count);
+    if (count > kRuntimeSwiLimit) throw std::invalid_argument("excessive SWI depth");
+    if constexpr (!std::is_const_v<Context>) state.swi_returns.resize(count);
+    for (auto& f : state.swi_returns) a(f.continuation, f.return_pc);
     a(state.return_floor,state.irq_depth,state.iret_depth,state.resume_pc,state.irq_from_halt);
     if (state.return_floor > state.returns.size() || state.irq_depth != state.interrupts.size())
         throw std::invalid_argument("inconsistent execution continuation");
@@ -36,7 +41,7 @@ template<class Archive, class Context> void execution_state(Archive& a, Context&
 }
 template<class Archive> void manifest(Archive& a, const GbaSessionConfig& config) {
     a.identity(std::uint32_t{0x53534247}); // GBSS
-    a.identity(std::uint32_t{1});
+    a.identity(std::uint32_t{2});
     a.identity(static_cast<std::uint32_t>(config.machines.size()));
     for (const auto& m : config.machines) {
         a.identity(m.id); a.text_identity(m.program_id); a.text_identity(m.rom_sha1); a.identity(m.boot);

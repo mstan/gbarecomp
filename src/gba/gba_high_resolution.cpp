@@ -52,7 +52,7 @@ GbaHighResolutionFrame::GbaHighResolutionFrame(unsigned scale) : scale_(scale) {
 }
 void GbaHighResolutionFrame::configure(unsigned width, unsigned height) {
     if (width == width_ && height == height_) return;
-    if (width < 240 || width > 576 || height < 160 || height > 864)
+    if (width < 240 || width > 1280 || height < 160 || height > 864)
         throw std::invalid_argument("invalid high-resolution presentation dimensions");
     width_ = width; height_ = height;
     top_.resize(width); second_.resize(width); windows_.resize(width); black_.resize(width);

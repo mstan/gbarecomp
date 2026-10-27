@@ -2,6 +2,7 @@
 
 #include "overlay_compile.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -121,6 +122,57 @@ std::string overlay_include_flags() {
 }
 
 #ifdef _WIN32
+// Extract the executable token from a command line. A quoted token runs to
+// its closing quote, so an install path containing spaces (for example a
+// bundled tcc under "Program Files") still yields the compiler's directory.
+std::string cmd_exe_token(const std::string& cmdline) {
+    std::size_t i = 0;
+    while (i < cmdline.size() && std::isspace(static_cast<unsigned char>(cmdline[i]))) ++i;
+    if (i < cmdline.size() && (cmdline[i] == '"' || cmdline[i] == '\'')) {
+        const char quote = cmdline[i++];
+        const std::size_t close = cmdline.find(quote, i);
+        if (close == std::string::npos) return cmdline.substr(i);
+        return cmdline.substr(i, close - i);
+    }
+    const std::size_t start = i;
+    while (i < cmdline.size() && !std::isspace(static_cast<unsigned char>(cmdline[i]))) ++i;
+    return cmdline.substr(start, i - start);
+}
+
+// Build a child environment block that puts the compiler's own directory at the
+// front of PATH.
+//
+// The self-heal child otherwise inherits the game process environment. On a
+// Windows dev box PATH normally does not contain MSYS2, so gcc cannot resolve
+// the assembler that ships beside it and Windows pops a modal
+// "as.exe - Error del sistema: no se encontro libintl-8.dll" box, which stalls
+// the heal thread behind a dialog nobody sees. Prepending the compiler's own
+// directory fixes both the as.exe lookup and its DLL resolution.
+std::string child_environment(const std::string& cmdline) {
+    const std::string exe = cmd_exe_token(cmdline);
+    const std::string dir = fs::path(exe).parent_path().string();
+    if (dir.empty()) return std::string();
+
+    const char* inherited = std::getenv("PATH");
+    std::string env = "PATH=" + dir + ";" + (inherited ? inherited : "");
+
+    LPCH block = GetEnvironmentStringsA();
+    if (block) {
+        for (LPCH p = block; *p; ) {
+            const std::size_t len = std::strlen(p);
+            if (std::strncmp(p, "PATH=", 5) != 0) {
+                env.push_back('\0');
+                env.append(p, len);
+            }
+            p += len + 1;
+        }
+        FreeEnvironmentStringsA(block);
+    }
+    env.push_back('\0');
+    env.push_back('\0');
+    return env;
+}
+
 // Spawn a child process (NOT system()), redirect stdout+stderr to logpath,
 // block until exit, return the exit code (-1 on spawn failure).
 int run_process(const std::string& cmdline, const std::string& logpath,
@@ -146,9 +198,17 @@ int run_process(const std::string& cmdline, const std::string& logpath,
     std::vector<char> cl(cmdline.begin(), cmdline.end());
     cl.push_back('\0');
 
+    std::string env_block = child_environment(cmdline);
+    std::vector<char> env_mutable;
+    if (!env_block.empty()) {
+        env_mutable.assign(env_block.begin(), env_block.end());
+        env_mutable.push_back('\0');
+    }
+
     BOOL ok = CreateProcessA(nullptr, cl.data(), nullptr, nullptr,
                              /*bInheritHandles=*/TRUE, CREATE_NO_WINDOW,
-                             nullptr, nullptr, &si, &pi);
+                             env_mutable.empty() ? nullptr : env_mutable.data(),
+                             nullptr, &si, &pi);
     if (!ok) {
         if (err) *err = "CreateProcess(compiler) failed: " +
                         std::to_string(GetLastError());

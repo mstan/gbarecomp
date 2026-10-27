@@ -327,7 +327,12 @@ void worker_main() {
         {
             std::unique_lock<std::mutex> lk(s_work_mtx);
             s_work_cv.wait(lk, [] { return s_stop.load() || !s_work.empty(); });
-            if (s_stop.load() && s_work.empty()) return;
+            // Shutdown abandons anything still queued: each queued item spawns
+            // a compiler subprocess, and draining a backlog here is what can
+            // stall the close path. The in-flight item still finishes; queued
+            // misses are already journaled (record-time frag) and are
+            // re-requested by the next session.
+            if (s_stop.load()) return;
             w = s_work.front();
             s_work.pop_front();
         }
@@ -496,7 +501,7 @@ void overlay_loader_shutdown() {
     if (s_worker.joinable()) {
         s_stop.store(true);
         s_work_cv.notify_all();
-        s_worker.join();
+        s_worker.join();  // bounded: at most the in-flight compile finishes
     }
     // DLLs are left loaded (immutable code, process-lifetime); the OS reclaims
     // them at exit. Drain any last results so counters/banner are accurate.

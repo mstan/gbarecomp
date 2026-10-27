@@ -65,7 +65,7 @@ namespace {
     X(gba::g_ws_affine_filter_provider) X(gba::g_ws_authored_margin_layers) \
     X(gba::g_ws_native_view_left) \
     X(gba::g_ws_pillarbox) X(gba::g_ws_pillarbox_left) X(gba::g_ws_pillarbox_right) \
-    X(gba::g_ws_obj_x_provider) X(gba::g_ws_obj_attr_x_provider) \
+    X(gba::g_ws_obj_x_provider) X(gba::g_ws_obj_attr_x_provider) X(gba::g_ws_obj_attr_y_provider) \
     X(gba::g_ws_obj_native_clip) X(gba::g_ws_obj_margin_provider) \
     X(g_ws_extra) X(g_ws_extra_left) X(g_ws_extra_right) X(g_ws_view_width)
 // std::tuple avoids duplicating the provider signatures or aliases.

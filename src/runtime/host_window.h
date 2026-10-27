@@ -98,6 +98,11 @@ public:
     int  window_scale() const;
     void set_linear_filter(bool enabled);
     bool linear_filter() const;
+    // The player's enhanced-audio (MP2K shadow) choice, remembered in
+    // config.ini [Audio] next to [Touch]. saved_audio_enhanced() returns
+    // false until the player has chosen.
+    bool saved_audio_enhanced(bool& enabled) const;
+    void save_audio_enhanced(bool enabled);
     void set_audio_enabled(bool enabled);
     bool audio_enabled() const;
     void set_resize_driven_view(bool enabled);
@@ -155,19 +160,18 @@ public:
     // native-resolution intermediate render target.
     void present(const uint8_t* rgb888, unsigned width, unsigned height);
 
-    // Push `count` int16_t mono samples into the audio output queue. The SDL
-    // backend configures its resampler for a 65.536 kHz source; the real
-    // mixer rate follows SOUNDBIAS (GbaAudio::sample_rate(), 32.768 to
-    // 262.144 kHz), so rate-aware callers use push_audio_block on the web.
-    // Backend converts to the host device's format.
-    // No-op if audio init failed or this build has no SDL2.
+    // Push `count` int16_t mono samples assuming the engine's 65.536 kHz
+    // source rate. Prefer push_audio_block when the caller knows the real
+    // mixer rate. No-op if audio init failed or this build has no SDL2.
     void push_audio_samples(const int16_t* samples, std::size_t count);
 
-#if defined(GBARECOMP_WEB_HOST)
     // Rate-tagged mono PCM (one SOUNDBIAS rate per block, from
-    // GbaAudio::drain_sample_block). Never blocks the guest: a full ring is
-    // counted as overflow and requests a playback reset.
+    // GbaAudio::drain_sample_block). The native SDL bridge re-tunes its
+    // resampler's source rate when this differs from its current setting; the
+    // web backend forwards it to the AudioWorklet. Never blocks the guest.
     void push_audio_block(const int16_t* samples, std::size_t count, uint32_t rate);
+
+#if defined(GBARECOMP_WEB_HOST)
     // Starts a new playback epoch (pause, state load, overflow). Samples are
     // not accepted until the AudioWorklet acknowledges the reset.
     void reset_audio();

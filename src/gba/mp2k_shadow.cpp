@@ -24,6 +24,13 @@ float clampf(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+// One-pole glide of the output gains, ~0.3 ms at 65536 Hz: fast against a
+// 16.7 ms driver tick and an attack, slow enough that a gain step is no
+// longer a broadband click. The 8-bit hardware mix has the same steps, but
+// its quantization noise masks them; the clean shadow exposed them.
+constexpr float kGainGlide = 0.05f;
+constexpr float kSilentGain = 1.0f / 65536.0f;
+
 }  // namespace
 
 const uint8_t* MemView::slice(uint32_t addr, std::size_t len) const {
@@ -104,6 +111,12 @@ void Mp2kShadow::frame_hook(const MemView& mem, uint64_t audio_cursor, uint32_t 
         if (!c) { v.on = false; continue; }
         uint8_t status = c[0x00];
         uint8_t ctype = c[0x01];
+        if ((status & 0xC7u) == 0 && v.on) {
+            // The driver ended it while mixing the last tick: fade out.
+            v.ending = true;
+            v.g0r = v.g0l = v.g1r = v.g1l = 0.0f;
+            continue;
+        }
         if ((status & 0xC7u) == 0 || (ctype & 0x07u) != 0) { v.on = false; continue; }
         if (ctype & 0x10u) { v.on = false; ++bad_waves_; continue; }  // reversed: not modeled
 
@@ -157,7 +170,15 @@ void Mp2kShadow::frame_hook(const MemView& mem, uint64_t audio_cursor, uint32_t 
                 }
             }
         }
-        if (dead) { v.on = false; continue; }
+        if (dead) {
+            // Fade out what is still sounding instead of cutting it.
+            if (v.on) {
+                v.ending = true;
+                v.g0r = v.g0l = v.g1r = v.g1l = 0.0f;
+            }
+            continue;
+        }
+        v.ending = false;
 
         uint32_t env_next;
         if (iec) {
@@ -215,8 +236,18 @@ void Mp2kShadow::render(const MemView& mem, int8_t canon_a, int8_t canon_b,
         if (v.chk_acc <= 0.0) { v.chk_hold = s; v.chk_acc += mix_step_; }
         float gr = v.g0r + (v.g1r - v.g0r) * t;
         float gl = v.g0l + (v.g1l - v.g0l) * t;
-        right += s * gr * gain;
-        left += s * gl * gain;
+        v.out_r += (gr - v.out_r) * kGainGlide;
+        v.out_l += (gl - v.out_l) * kGainGlide;
+        right += s * v.out_r * gain;
+        left += s * v.out_l * gain;
+        if (v.ending) {
+            if (v.out_r < kSilentGain && v.out_l < kSilentGain) {
+                v.on = false;
+                v.ending = false;
+                v.out_r = v.out_l = 0.0f;
+            }
+            continue;  // already gone for the driver: not in the check copy
+        }
         chk_r += v.chk_hold * v.g0r * gain;
         chk_l += v.chk_hold * v.g0l * gain;
     }

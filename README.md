@@ -1,6 +1,6 @@
 # GBARecomp
 
-**A general-purpose static recompiler for the Game Boy Advance.** GBARecomp
+**A beta static-recompilation framework for the Game Boy Advance.** GBARecomp
 translates ARM7TDMI ARM and Thumb machine code into C++, compiles it into a
 native application, and links it against a shared GBA hardware runtime.
 
@@ -16,6 +16,35 @@ profiles, save states, host-synchronized RTC, modern motion controls, Android
 support, and cartridge-specific hardware such as
 gyroscopes and solar sensors.**
 
+**[Play a game](#public-game-builds)** · **[Create your first port](docs/GETTING_STARTED.md)**
+· [Architecture for port developers](docs/ARCHITECTURE.md). The command-line
+tools and source workflow require no AI assistant.
+
+## Mario Kart: Super Circuit and Mega Man Zero
+
+**Super Circuit** combines adaptive widescreen with optional **60 FPS track
+presentation** and higher-resolution track sampling. Sprites and HUD retain
+their original artwork. Two players can race over the emulated link cable
+with input-delay or rollback netplay; this is a two-player application
+session, rather than a claim that all four hardware ports are exposed online.
+Credit to **antimattur** for the Super Circuit decompilation work and 60 FPS
+patch foundation.
+
+<p align="center">
+  <img src="docs/assets/games/mario-kart-super-circuit-wide.png" alt="Mario Kart Super Circuit race in adaptive widescreen with higher-resolution track rendering" width="800">
+  <br><sub><b>Mario Kart: Super Circuit</b> — adaptive race view and 4x track sampling.</sub>
+</p>
+
+**Mega Man Zero** has an optional expanded stage view, with fixed and adaptive
+widths up to 480×160. Its own streamers and object/HUD integration extend the
+scene; menus retain their native layout. This remains experimental and needs
+broader mission coverage.
+
+<p align="center">
+  <img src="docs/assets/games/mega-man-zero-wide.png" alt="Mega Man Zero gameplay with additional stage scenery in an expanded view" width="800">
+  <br><sub><b>Mega Man Zero</b> — expanded stage view; original 240×160 remains available.</sub>
+</p>
+
 <table>
   <tr>
     <td width="38%"><img src="docs/assets/games/minish-cap-native.webp" alt="The Legend of Zelda: The Minish Cap at its native 240 by 160 view" width="100%"></td>
@@ -27,9 +56,13 @@ gyroscopes and solar sensors.**
   </tr>
 </table>
 
-These projects are experimental previews and byproducts of developing the
-framework. The games are the proving ground; the reusable recompiler and
-hardware runtime are the larger goal.
+**GBARecomp is beta software.** Multiple game projects use the shared runtime
+for native releases, adaptive views and linked multiplayer. Individual ports,
+hardware paths and mods retain their own experimental status and validation
+limits. The comparisons below show title-specific integrations.
+
+Screenshot provenance and feature qualifications are recorded in
+[the showcase sources](docs/SHOWCASE_SOURCES.md).
 
 ## What it is
 
@@ -362,26 +395,27 @@ fails loudly instead of loading or creating a healing shard.
 
 ## Public game builds
 
-Each game repository pins a known framework revision, verifies an exact ROM,
-and ships its own ROM-free release. These are experimental preservation and
-research previews, not finished commercial ports. Back up important saves and
-consult each project for its validated revision and current limitations.
+Each game repository pins a framework revision and verifies an exact ROM.
+Some projects publish downloads; others currently provide source. The
+framework is beta, while per-game maturity varies. This public list was
+checked on **21 October 2026**; each project's release notes remain the
+source for supported platforms, BIOS/ROM identities and testing limits.
 
 | Game | Repository | Highlights |
 |---|---|---|
 | *Dragon Ball Z: The Legacy of Goku* | [DragonBallZLegacyOfGokuRecomp](https://github.com/mstan/DragonBallZLegacyOfGokuRecomp) | Optional Adaptive Widescreen through 480×160. |
 | *Dragon Ball Z: The Legacy of Goku II* | [DragonBallZLegacyofGokuIIRecomp](https://github.com/mstan/DragonBallZLegacyofGokuIIRecomp) | Optional Adaptive Widescreen with widened field planes and actor visibility. |
 | *Dragon Ball Z: Buu's Fury* | [DragonBallZBuusFuryRecomp](https://github.com/mstan/DragonBallZBuusFuryRecomp) | Optional Adaptive Widescreen with authored field continuation. |
-| *Mario Kart: Super Circuit* | [MarioKartSuperCircuitRecomp](https://github.com/mstan/MarioKartSuperCircuitRecomp) | Optional Adaptive Widescreen and 60 FPS track-rendering mods. |
+| *Mario Kart: Super Circuit* | [MarioKartSuperCircuitRecomp](https://github.com/mstan/MarioKartSuperCircuitRecomp) | Adaptive Widescreen, optional 60 FPS track presentation, higher-resolution tracks and two-player cable netplay. |
 | *WarioWare: Twisted!* | [WarioWareTwistedRecomp](https://github.com/mstan/WarioWareTwistedRecomp) | Uses GBARecomp's controller and phone gyroscope support; Windows and experimental Android arm64 builds. |
 | *Super Mario Advance 2: Super Mario World* | [SuperMarioAdvance2Recomp](https://github.com/mstan/SuperMarioAdvance2Recomp) | Optional scene-aware Adaptive Widescreen. |
 | *Super Mario Advance 4: Super Mario Bros. 3* | [SuperMarioAdvance4Recomp](https://github.com/mstan/SuperMarioAdvance4Recomp) | Native gameplay, launcher, controllers, and save states. |
 | *Shrek Movie* (GBA Video) | [ShrekGBAVideoRecomp](https://github.com/mstan/ShrekGBAVideoRecomp) | Complete movie playback; 64 MiB Matrix Memory mapper. |
 | *Pokémon FireRed* / *Pokémon LeafGreen* | [FireRedLeafGreenRecomp](https://github.com/mstan/FireRedLeafGreenRecomp) | Two verified native targets in one repository. |
 | *Pokémon Ruby* / *Pokémon Sapphire* | [RubySapphireRecomp](https://github.com/mstan/RubySapphireRecomp) | Two native targets; Flash1M, RTC, and optional host-clock mod integration. |
-| *Pokémon Emerald* | [EmeraldRecomp](https://github.com/mstan/EmeraldRecomp) | Flash1M, RTC, native gameplay, and persistent coverage healing. |
+| *Pokémon Emerald* | [EmeraldRecomp](https://github.com/mstan/EmeraldRecomp) | Flash1M, RTC, native gameplay, cable netplay and initial Wireless Adapter/Union Room support; full wireless trade/battle remains unqualified. |
 | *The Legend of Zelda: The Minish Cap* | [MinishCapRecomp](https://github.com/mstan/MinishCapRecomp) | Original target; optional Adaptive Widescreen with room-aware margins. |
-| *Mega Man Zero* | [MegaManZeroRecomp](https://github.com/mstan/MegaManZeroRecomp) | Static-first gameplay and experimental fixed/adaptive extended views. |
+| *Mega Man Zero* | [MegaManZeroRecomp](https://github.com/mstan/MegaManZeroRecomp) | Static-first gameplay, saves and experimental fixed/adaptive expanded stage views up to 480×160. |
 
 Want to contribute to an existing title or bring up a new one? Start with
 [`PRINCIPLES.md`](PRINCIPLES.md), the architecture notes, and a nearby game

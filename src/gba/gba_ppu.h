@@ -145,9 +145,9 @@ public:
     // Individual games still advertise their own ceilings (RunOptions
     // max_view_width / max_resize_view_width, GbaNetplayViewPolicy::max_width);
     // this is only the engine's storage capacity. Native remains the default.
-    static constexpr uint32_t kMaxExtraX = 328;
+    static constexpr uint32_t kMaxExtraX = 520;
     static constexpr uint32_t kMaxExtraY = 352;
-    static constexpr uint32_t kMaxRenderWidth  = kScreenWidth  + 2u * kMaxExtraX;  // 896
+    static constexpr uint32_t kMaxRenderWidth  = kScreenWidth  + 2u * kMaxExtraX;  // 1280
     static constexpr uint32_t kMaxRenderHeight = kScreenHeight + 2u * kMaxExtraY;  // 864
     static constexpr std::size_t kMaxFramebufferBytes =
         static_cast<std::size_t>(kMaxRenderWidth) * kMaxRenderHeight * 3;
@@ -270,6 +270,10 @@ extern "C" unsigned g_ws_bg_x_provider_layers;
 // the source's window masks; the guest's tilemap and graphics stay untouched.
 extern "C" int (*g_ws_bg_xy_provider)(int bg, int x, int y, int* source_x, int* source_y);
 extern "C" unsigned g_ws_bg_xy_provider_layers;
+// Optional already-composited, read-only UI pixels in expanded/native-origin
+// coordinates. Return nonzero to submit RGB555 above the scene. Native 240x160
+// rendering never calls this provider.
+extern "C" int (*g_ws_ui_pixel_provider)(int x, int y, std::uint16_t* color);
 // Optional enhancement for affine backgrounds in expanded rendering. The
 // global switch is presentation configuration; the provider lets a game
 // authorize only known-safe layers and scenes.
@@ -298,6 +302,14 @@ extern "C" int (*g_ws_obj_attr_x_provider)(int oam_index,
                                             std::uint16_t attr1,
                                             std::uint16_t attr2,
                                             int* out_x);
+// Authenticated sprite Y in native-relative coordinates. Only objects
+// accepted by this hook may draw outside the native vertical band; raw OAM
+// keeps its original 8-bit wrap interpretation and cannot authorize margins.
+extern "C" int (*g_ws_obj_attr_y_provider)(int oam_index,
+                                            std::uint16_t attr0,
+                                            std::uint16_t attr1,
+                                            std::uint16_t attr2,
+                                            int* out_y);
 // Opt-in policy for expanded rendering: when nonzero, OBJ pixels are clipped
 // to the native 240px viewport so sprites the guest parked just off-screen
 // (signed 9-bit X idiom) never appear inside widescreen margins. The OBJ x

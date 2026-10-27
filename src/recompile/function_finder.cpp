@@ -3249,8 +3249,19 @@ void FunctionFinder::run(std::size_t max_functions) {
     // resume PC becomes an interior label reached via the host's resume
     // prologue. Host extents are the just-computed CLAMPED end_addr (accurate
     // next-real-function boundary), so the resume PC is guaranteed to lie in
-    // the host's emitted body — its label exists. A candidate with no
-    // containing host (a gap / genuine standalone) is left as its own function.
+    // the host's emitted body — its label exists.
+    //
+    // Gap roll-in (2026-10-09): a candidate BEYOND every host's clamped extent
+    // can still be a branch-target block of a host inside the walk-end gap —
+    // e.g. the 2-byte back-edge block of a split busy-wait loop whose linear
+    // walk ended at an unconditional branch before the literal pool
+    // (0x08000418 → beq 0x08000428; the walk stops at `b 0x42A` at 0x08000420
+    // and the target 0x08000428 sits behind the pool). Roll it in when some
+    // host directly branches to it and it lies before the next real
+    // function start; the host extent is grown to cover the block so the
+    // label exists and the forward branch lowers to a goto
+    // (emit_function.cpp in_body_goto_targets + arm_codegen forward-goto
+    // case), removing the per-iteration host call pair entirely.
     if (!alias_candidate_keys_.empty()) {
         std::size_t aliases = 0;
         for (std::size_t i = 0; i < functions_.size(); ++i) {
@@ -3267,6 +3278,58 @@ void FunctionFinder::run(std::size_t max_functions) {
                         h.addr > functions_[best].addr) {
                         best = j;
                     }
+                }
+            }
+            if (best == SIZE_MAX) {
+                // Gap roll-in: branch-target host, strictly before the next
+                // real function start, with room for the whole block.
+                std::size_t gap_best = SIZE_MAX;
+                for (std::size_t j = 0; j < functions_.size(); ++j) {
+                    if (j == i) continue;
+                    const Function& h = functions_[j];
+                    if (is_alias_candidate(h) || h.mode != c.mode) continue;
+                    if (source_bias(h) != source_bias(c)) continue;
+                    if (!(h.addr < c.addr)) continue;
+                    bool branched = false;
+                    for (std::size_t t = 0;
+                         t < h.direct_branch_targets.size(); ++t) {
+                        if (h.direct_branch_targets[t] == c.addr) {
+                            branched = true;
+                            break;
+                        }
+                    }
+                    if (!branched) continue;
+                    uint32_t nxt = 0xFFFFFFFFu;
+                    for (std::size_t k = 0; k < functions_.size(); ++k) {
+                        if (k == j) continue;
+                        const Function& f = functions_[k];
+                        if (is_alias_candidate(f) || f.mode != h.mode) {
+                            continue;
+                        }
+                        if (source_bias(f) != source_bias(h)) continue;
+                        if (f.addr > h.addr && f.addr < nxt) nxt = f.addr;
+                    }
+                    if (!(c.addr < nxt)) continue;  // beyond a real function
+                    const uint32_t step =
+                        c.mode == CpuMode::Thumb ? 2u : 4u;
+                    const uint32_t block_end = std::max(c.end_addr, c.addr + step);
+                    if (block_end > nxt) continue;  // block crosses one
+                    if (gap_best == SIZE_MAX ||
+                        h.addr > functions_[gap_best].addr) {
+                        gap_best = j;
+                    }
+                }
+                if (gap_best != SIZE_MAX) {
+                    best = gap_best;
+                    // Grow the host over the block and the dead bytes between
+                    // the old end and it (literal pool). The host's walk ended
+                    // in a terminator, so that span is unreachable dead code;
+                    // the block itself gains its label.
+                    Function& h = functions_[best];
+                    const uint32_t step =
+                        c.mode == CpuMode::Thumb ? 2u : 4u;
+                    h.end_addr = std::max(h.end_addr,
+                                         std::max(c.end_addr, c.addr + step));
                 }
             }
             if (best != SIZE_MAX) {

@@ -65,6 +65,9 @@ extern "C" RuntimeThumbAluImmediateOverride
 extern "C" RuntimeBusReadOverride g_runtime_bus_read_override = nullptr;
 extern "C" RuntimeRamDispatchHook g_runtime_ram_dispatch_hook = nullptr;
 extern "C" RuntimeRamCodeView g_runtime_ram_code_view = nullptr;
+extern "C" RuntimeDispatchObserver g_runtime_dispatch_observer = nullptr;
+extern "C" uint32_t g_runtime_observed_pcs[RUNTIME_MAX_OBSERVED_PCS] = {};
+extern "C" unsigned g_runtime_observed_pc_count = 0;
 extern "C" RuntimeForceInterpHook g_runtime_force_interp_hook = nullptr;
 extern "C" int g_runtime_force_interp_step_active = 0;
 
@@ -411,9 +414,65 @@ extern "C" void runtime_insn_fp(void) {
     if (g_fp_count < kFpSize) ++g_fp_count;
 }
 
+// ── SWI-return continuation ledger (issue #30 R1 containment) ────────
+// An SWI executed inside a driven IRQ handler must return to the
+// continuation the engine recorded at its SVC entry (return_address, i.e.
+// the SWI site + instruction width) — LR_svc, a banked register the guest
+// cannot legally touch. But the recomp's shared R[14] slot can be clobbered
+// by the drive loop's phantom-era stack churn before the BIOS epilogue
+// (0x184 pop {fp,ip,lr} / 0x188 movs pc,lr — disarm-verified) consumes it, so the
+// exception return lands at the IRQ-interrupted PC instead (ring-proven:
+// BIOS 0x188 -> 0x080033BA while the veneer continuation 0x814186E was
+// live; BRINGUP § true root). Stack-ordered ledger: push at runtime_swi's
+// LLE entry, pop+validate at every SVC-mode exception return (generated
+// and interpreted). A legal return matches; a mismatch keeps the recorded
+// continuation, loudly. SoftReset (SWI 00) never returns — its stale entry
+// is cleared at a real machine reset. Context switches and save/load retain
+// the active ledger; resetting the trace ring does not reset execution.
+namespace {
+using SwiReturnSlot = gbarecomp::RuntimeSwiContinuation;
+constexpr unsigned kSwiLedgerCap = gbarecomp::kRuntimeSwiLimit;
+SwiReturnSlot g_swi_ledger[kSwiLedgerCap];
+unsigned       g_swi_ledger_depth = 0;
+}  // namespace
+
+// Pop the top ledger entry and validate `new_pc` against its recorded
+// continuation. Returns the pc the SVC-mode exception return must take
+// (the recorded continuation on mismatch, else new_pc unchanged). True
+// when an override fired. R[14] is deliberately NOT touched: the legal
+// post-return LR comes from bank_in (the caller's restored LR), and the
+// recorded continuation can be a `bx lr` site — writing it into R[14]
+// would self-loop that branch. The ledger guards the PC target only.
+static bool swi_ledger_validate(uint32_t new_pc, uint32_t* out_pc) {
+    *out_pc = new_pc;
+    if (g_swi_ledger_depth == 0) return false;
+    const SwiReturnSlot slot = g_swi_ledger[--g_swi_ledger_depth];
+    if ((new_pc & ~1u) == (slot.continuation & ~1u)) return false;
+    std::fprintf(stderr,
+        "runtime_arm: SWI-return ledger override: SVC return wants "
+        "pc=0x%08X but the SWI at 0x%08X recorded continuation "
+        "0x%08X — keeping the recorded continuation (issue #30 R1)\n",
+        new_pc, slot.return_pc, slot.continuation);
+    *out_pc = slot.continuation & ~1u;
+    return true;
+}
+
+static void swi_ledger_push(uint32_t continuation, uint32_t return_pc) {
+    if (g_swi_ledger_depth >= kSwiLedgerCap) {
+        // Overflow only reachable via nested SoftReset-style non-returns;
+        // drop the oldest (a legal return never consults beyond its own
+        // entry, so only stale entries are lost).
+        std::memmove(&g_swi_ledger[0], &g_swi_ledger[1],
+                     (kSwiLedgerCap - 1u) * sizeof(SwiReturnSlot));
+        --g_swi_ledger_depth;
+    }
+    g_swi_ledger[g_swi_ledger_depth++] = {continuation, return_pc};
+}
+
 extern "C" void runtime_fp_reset(void) {
     g_fp_write = 0;
     g_fp_count = 0;
+    // Trace reset also runs after load; execution continuations survive it.
 }
 
 extern "C" uint32_t runtime_fp_count(void) { return g_fp_count; }
@@ -948,6 +1007,12 @@ const DispatchEntry* dispatch_resolve(uint32_t target_pc) {
         runtime_trace_event(RUNTIME_TRACE_DISPATCH, pc, target_pc, 0, 0);
 
     bool thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+    for (unsigned i = 0; i < g_runtime_observed_pc_count; ++i) {
+        if (g_runtime_observed_pcs[i] == pc) {
+            g_runtime_dispatch_observer(pc, thumb ? 1 : 0);
+            break;
+        }
+    }
     if (g_resumable_context && g_resumable_context->program_dispatch &&
         g_resumable_context->program_dispatch(pc, thumb ? 1 : 0)) return nullptr;
     // A generated caller may enter mutable code without returning through the
@@ -1418,6 +1483,21 @@ extern "C" void runtime_exception_return(uint32_t new_pc) {
     unsigned new_bank = mode_to_bank(spsr);
     bank_in(new_bank, spsr);
 
+    // SWI-return continuation validation (issue #30 R1): a return FROM
+    // Supervisor mode is a BIOS SWI epilogue (0x184 pop {fp,ip,lr} /
+    // 0x188 movs pc,lr — disarm-verified) that must land at the
+    // continuation recorded at the SWI's SVC entry. Inside a driven
+    // IRQ handler the shared R[14] can be clobbered before the
+    // epilogue consumes it (ring-proven 2026-10-09: BIOS 0x188 ->
+    // 0x080033BA, the IRQ-interrupted mainline, instead of the
+    // recorded veneer continuation 0x814186E — the phantom-era
+    // stack churn). Keep the recorded continuation on mismatch.
+    if (old_mode == 0x13u) {
+        uint32_t ledger_pc = 0;
+        if (swi_ledger_validate(new_pc, &ledger_pc)) {
+            new_pc = ledger_pc;
+        }
+    }
     g_cpu.R[15] = new_pc;
 
     // Returning FROM IRQ mode (0x12) is the iret that ends a hardware IRQ.
@@ -1452,6 +1532,19 @@ extern "C" void runtime_note_interpreted_exception_return(uint32_t old_mode) {
     // of calling runtime_exception_return(). Preserve the runtime IRQ driver's
     // completion signal when an interpreted instruction returns from IRQ mode.
     if (old_mode == 0x12u) g_irq_iret_depth = g_irq_nest_depth;
+    // Same validation for a bridged SWI epilogue (runtime_bridge_interpret
+    // calls this right after the interpreter's internal exception return,
+    // with g_cpu synced): a return FROM Supervisor mode must land at the
+    // continuation recorded at the SWI's SVC entry. On mismatch keep the
+    // recorded continuation (issue #30 R1) — the interpreter's R[15] is the
+    // clobber-derived target; the caller (runtime_arm_default_aborts.cpp)
+    // reloads g_cpu into the interp CPUState immediately after this call.
+    if (old_mode == 0x13u) {
+        uint32_t ledger_pc = 0;
+        if (swi_ledger_validate(g_cpu.R[15], &ledger_pc)) {
+            g_cpu.R[15] = ledger_pc;
+        }
+    }
 }
 
 extern "C" void runtime_restore_cpsr_from_spsr(void) {
@@ -1563,6 +1656,17 @@ bool swi_enter(uint32_t swi_imm) {
     // then the next-boundary IRQ check sees I=1). The recompiled SWI
     // codegen does not tick this op.
     runtime_tick(3u + swi_fetch);
+
+    // Record the SVC-return continuation for the exception-return
+    // validation above (swi_ledger_*). return_address is the SWI site +
+    // instruction width — what a legal epilogue returns to. Placed after
+    // runtime_tick (the entry cost may deliver a nested IRQ, which pushes
+    // its own state but no ledger entry) and immediately before the handler
+    // dispatch (runtime_swi / runtime_swi_tail below) so the push always
+    // pairs with this SWI's SVC entry.
+    const bool swi_from_thumb = (saved_cpsr & CPSR_T_BIT) != 0;
+    swi_ledger_push(return_address,
+                    return_address - (swi_from_thumb ? 2u : 4u));
     return true;
 }
 
@@ -1751,19 +1855,31 @@ extern "C" void runtime_irq(uint32_t return_address) {
 // ── Lifecycle ──────────────────────────────────────────────────────
 
 extern "C" void runtime_init(void* bus_handle) {
+    g_swi_ledger_depth = 0;
     gbarecomp::runtime_arm::g_bus_handle = bus_handle;
     g_call_return_depth = 0;
     g_call_return_hostless = 0;
 }
 
 extern "C" void runtime_shutdown(void) {
+    g_swi_ledger_depth = 0;
     gbarecomp::runtime_arm::g_bus_handle = nullptr;
     g_call_return_depth = 0;
     g_call_return_hostless = 0;
 }
 
 namespace gbarecomp {
+void runtime_capture_swi_context(std::vector<RuntimeSwiContinuation>& out) {
+    out.assign(g_swi_ledger, g_swi_ledger + g_swi_ledger_depth);
+}
+void runtime_restore_swi_context(const std::vector<RuntimeSwiContinuation>& in) {
+    if (in.size() > kSwiLedgerCap)
+        throw std::invalid_argument("invalid SWI continuation depth");
+    std::copy(in.begin(), in.end(), g_swi_ledger);
+    g_swi_ledger_depth = static_cast<unsigned>(in.size());
+}
 void runtime_capture_arm_context(RuntimeArmContext& out) {
+    runtime_capture_swi_context(out.swi_returns);
     out.cpu = g_cpu;
     out.returns.assign(g_call_return_stack, g_call_return_stack + g_call_return_depth);
     out.return_floor = g_call_return_floor;
@@ -1780,12 +1896,15 @@ void runtime_capture_arm_context(RuntimeArmContext& out) {
     out.bios_hook = g_bios_hle_hook;
 }
 void runtime_restore_arm_context(const RuntimeArmContext& in) {
+    if (in.swi_returns.size() > kSwiLedgerCap)
+        throw std::invalid_argument("invalid SWI continuation depth");
     if (in.returns.size() > kCallReturnStackSize || in.return_floor > in.returns.size() ||
         in.irq_depth != in.interrupts.size())
         throw std::invalid_argument("invalid runtime execution context");
     for (const auto& frame : in.interrupts)
         if (frame.return_floor > frame.return_depth || frame.return_depth > in.returns.size())
             throw std::invalid_argument("invalid IRQ continuation");
+    runtime_restore_swi_context(in.swi_returns);
     g_cpu = in.cpu;
     runtime_call_stack_restore(in.returns.data(), static_cast<std::uint32_t>(in.returns.size()));
     g_call_return_floor = in.return_floor;

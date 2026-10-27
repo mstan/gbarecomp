@@ -6,6 +6,11 @@
 #include <vector>
 
 namespace gbarecomp {
+struct RuntimeSwiContinuation {
+    std::uint32_t continuation = 0;
+    std::uint32_t return_pc = 0;
+};
+constexpr std::size_t kRuntimeSwiLimit = 64;
 // Host exception metadata that used to exist only in runtime_irq's C++ frame.
 // Kept separate from the guest's banked SPSRs/registers in ArmCpuState.
 struct RuntimeIrqContinuation {
@@ -22,6 +27,7 @@ struct RuntimeArmContext {
     ArmCpuState cpu{};
     std::vector<std::uint32_t> returns;
     std::vector<RuntimeIrqContinuation> interrupts;
+    std::vector<RuntimeSwiContinuation> swi_returns;
     std::uint32_t return_floor = 0;
     std::uint32_t irq_depth = 0;
     std::uint32_t iret_depth = 0;
@@ -48,6 +54,8 @@ struct RuntimeArmContext {
 
 void runtime_capture_arm_context(RuntimeArmContext&);
 void runtime_restore_arm_context(const RuntimeArmContext&);
+void runtime_capture_swi_context(std::vector<RuntimeSwiContinuation>&);
+void runtime_restore_swi_context(const std::vector<RuntimeSwiContinuation>&);
 // Enables exception continuations for the duration of a dispatch, independently
 // of the legacy single-machine runner. The owner catches RuntimeDispatchYield
 // only after normal C++ unwinding, then captures the context.

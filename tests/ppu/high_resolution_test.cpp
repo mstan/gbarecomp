@@ -119,6 +119,10 @@ void run(unsigned scale, bool wide, bool effects) {
 }
 }
 int main() {
+    // The expanded logical view must also fit the optional internal surface.
+    gba::GbaHighResolutionFrame capacity(2);
+    capacity.configure(gba::GbaPpu::kMaxRenderWidth, 208);
+    CHECK(capacity.width() == gba::GbaPpu::kMaxRenderWidth * 2 && capacity.height() == 416);
     filter_precision();
     for (unsigned scale : {2u,3u,4u,8u,16u}) { run(scale,false,false); run(scale,true,true); }
     std::puts("high resolution: real fractional samples, HUD/blend parity, native state isolation, reset/partial-raster/resize passed");

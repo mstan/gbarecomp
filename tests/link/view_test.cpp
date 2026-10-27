@@ -178,7 +178,7 @@ int main() {
     CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,100,500)==240);
     CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,5000,900)==576);
     // Opted-in ceilings, bounded by engine capacity.
-    CHECK(gba::GbaPpu::kMaxRenderWidth==896);
+    CHECK(gba::GbaPpu::kMaxRenderWidth==1280);
     CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,5000,900,896)==889);
     CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,9999,1,896)==896);
     CHECK(gba_netplay_view_width(GbaNetplayView::Adaptive,9999,1,100000)==gba::GbaPpu::kMaxRenderWidth);

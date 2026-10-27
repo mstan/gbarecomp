@@ -262,6 +262,21 @@ void native_exchange() {
     CHECK((session->machine(10).bus.io().read16(0x130) & 0x3ff) == 0x3fd);
     CHECK((session->machine(30).bus.io().read16(0x130) & 0x3ff) == 0x3fe);
 }
+void swi_snapshot_roundtrip() {
+    using namespace gbarecomp;
+    auto session = std::make_unique<GbaMultiplayerSession>(config());
+    session->machine(10).execution.swi_returns = {{0x08001002u, 0x08001000u}};
+    session->machine(30).execution.swi_returns = {{0x08002002u, 0x08002000u}};
+    const auto saved = session->save_state();
+    session->machine(10).execution.swi_returns.clear();
+    session->machine(30).execution.swi_returns.clear();
+    std::string error;
+    CHECK(session->load_state(saved, &error));
+    CHECK(session->machine(10).execution.swi_returns.size() == 1);
+    CHECK(session->machine(10).execution.swi_returns[0].continuation == 0x08001002u);
+    CHECK(session->machine(30).execution.swi_returns[0].continuation == 0x08002002u);
+    CHECK(session->save_state() == saved);
+}
 // Same exchange with every SIOMULTI word captured (ports 2/3 included).
 int program_all(std::uint32_t pc, int) {
     if (pc < 0x08000000 || pc > 0x0800001c) return 0;
@@ -403,5 +418,6 @@ int main() {
     exception_continuations(false); exception_continuations(true);
     native_exchange(); native_exchange_n(3); native_exchange_n(4); ram_dispatch_rendezvous();
     wireless_session_restore();
+    swi_snapshot_roundtrip();
     std::puts("native multiplayer session tests passed");
 }

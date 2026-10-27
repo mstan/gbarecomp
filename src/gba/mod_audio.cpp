@@ -186,11 +186,14 @@ extern "C" void gba_mod_audio_stop(GBAModAudioClip clip) {
         if (voice.clip == clip) clear_voice(voice);
 }
 
+static void reset_converter();
+
 extern "C" void gba_mod_audio_stop_all(void) {
     State& s = state();
     for (Voice& voice : s.voices) clear_voice(voice);
     s.stream.playing = false;
     s.replace_cursor = 0;
+    reset_converter();
 }
 
 extern "C" void gba_mod_audio_on_savestate_load(void) {
@@ -270,57 +273,143 @@ extern "C" int gba_mod_audio_stream_set_native_gain_percent(
     return 1;
 }
 
-extern "C" void gba_mod_audio_mix(int16_t* dst, size_t frame_count) {
-    if (!dst || frame_count == 0) return;
-    State& s = state();
-    std::array<int16_t, GBA_MOD_AUDIO_MAX_STREAM_CALLBACK_FRAMES> stream_pcm{};
-    std::array<int32_t, GBA_MOD_AUDIO_MAX_STREAM_CALLBACK_FRAMES> mixed{};
+namespace {
 
-    for (size_t offset = 0; offset < frame_count;) {
-        const size_t count = std::min(
-            frame_count - offset,
-            static_cast<size_t>(GBA_MOD_AUDIO_MAX_STREAM_CALLBACK_FRAMES));
-        size_t stream_count = 0;
-        if (s.stream.playing && s.stream.enabled && s.stream.read) {
-            stream_pcm.fill(0);
-            stream_count = s.stream.read(s.stream.context, stream_pcm.data(), count);
-            if (stream_count > count) {
-                // A malformed trusted callback fails closed before contributing
-                // to this buffer or any later producer buffer.
-                s.stream.playing = false;
-                stream_count = 0;
-            } else if (stream_count != count) {
-                s.stream.playing = false;
-            }
+constexpr size_t kMixChunk = GBA_MOD_AUDIO_MAX_STREAM_CALLBACK_FRAMES;
+
+// Render `count` (<= kMixChunk) frames of the 65536-Hz mod overlay (fixed
+// voices + stream voice, gains applied, not yet saturated) into `out`.
+void render_overlay(int32_t* out, size_t count) {
+    State& s = state();
+    std::array<int16_t, kMixChunk> stream_pcm{};
+    size_t stream_count = 0;
+    if (s.stream.playing && s.stream.enabled && s.stream.read) {
+        stream_count = s.stream.read(s.stream.context, stream_pcm.data(), count);
+        if (stream_count > count) {
+            // A malformed trusted callback fails closed before contributing
+            // to this buffer or any later producer buffer.
+            s.stream.playing = false;
+            stream_count = 0;
+        } else if (stream_count != count) {
+            s.stream.playing = false;
+        }
+    }
+    for (size_t i = 0; i < count; ++i) out[i] = 0;
+    for (Voice& voice : s.voices) {
+        if (voice.clip == GBA_MOD_AUDIO_CLIP_INVALID) continue;
+        ClipSlot* slot = clip_slot(voice.clip);
+        if (!slot || !slot->enabled || voice.position >= slot->samples.size()) {
+            clear_voice(voice);
+            continue;
         }
         for (size_t i = 0; i < count; ++i) {
-            mixed[i] = (static_cast<int32_t>(dst[offset + i]) *
-                        s.native_gain_percent) / 100;
-        }
-        for (Voice& voice : s.voices) {
-            if (voice.clip == GBA_MOD_AUDIO_CLIP_INVALID) continue;
-            ClipSlot* slot = clip_slot(voice.clip);
-            if (!slot || !slot->enabled || voice.position >= slot->samples.size()) {
-                clear_voice(voice);
-                continue;
-            }
-            for (size_t i = 0; i < count; ++i) {
-                mixed[i] += (static_cast<int32_t>(slot->samples[voice.position++]) *
-                             voice.gain_percent) / 100;
-                if (voice.position == slot->samples.size()) {
-                    if (voice.loop) voice.position = 0;
-                    else {
-                        clear_voice(voice);
-                        break;
-                    }
+            out[i] += (static_cast<int32_t>(slot->samples[voice.position++]) *
+                       voice.gain_percent) / 100;
+            if (voice.position == slot->samples.size()) {
+                if (voice.loop) voice.position = 0;
+                else {
+                    clear_voice(voice);
+                    break;
                 }
             }
         }
-        for (size_t i = 0; i < stream_count; ++i)
-            mixed[i] += (static_cast<int32_t>(stream_pcm[i]) *
-                         s.stream.gain_percent) / 100;
-        for (size_t i = 0; i < count; ++i)
-            dst[offset + i] = clamp_s16(mixed[i]);
+    }
+    for (size_t i = 0; i < stream_count; ++i)
+        out[i] += (static_cast<int32_t>(stream_pcm[i]) *
+                   s.stream.gain_percent) / 100;
+}
+
+// Rate conversion for a producer that is not at the 65536-Hz overlay rate.
+// SOUNDBIAS only yields 32768 << k, so the ratio is an exact power of two:
+// a 32768-Hz producer frame averages two overlay frames, a 131072/262144-Hz
+// frame holds one overlay frame for 2/4 producer frames. Overlay frames are
+// rendered only as needed, so nothing is left buffered past the call except a
+// partially held frame.
+struct Converter {
+    std::array<int32_t, kMixChunk> overlay{};
+    size_t length = 0;
+    size_t position = 0;
+    int32_t hold = 0;
+    uint32_t hold_left = 0;
+};
+
+Converter& converter() {
+    static Converter c;
+    return c;
+}
+
+int32_t next_overlay_frame(size_t frames_still_needed) {
+    Converter& c = converter();
+    if (c.position == c.length) {
+        c.length = std::min(std::max<size_t>(frames_still_needed, 1), kMixChunk);
+        render_overlay(c.overlay.data(), c.length);
+        c.position = 0;
+    }
+    return c.overlay[c.position++];
+}
+
+void mix_legacy(int16_t* dst, size_t frame_count) {
+    State& s = state();
+    std::array<int32_t, kMixChunk> overlay{};
+    for (size_t offset = 0; offset < frame_count;) {
+        const size_t count = std::min(frame_count - offset, kMixChunk);
+        render_overlay(overlay.data(), count);
+        for (size_t i = 0; i < count; ++i) {
+            const int32_t native = (static_cast<int32_t>(dst[offset + i]) *
+                                    s.native_gain_percent) / 100;
+            dst[offset + i] = clamp_s16(native + overlay[i]);
+        }
         offset += count;
     }
 }
+
+}  // namespace
+
+extern "C" void gba_mod_audio_mix_at_rate(int16_t* dst, size_t frame_count,
+                                          uint32_t producer_rate) {
+    if (!dst || frame_count == 0) return;
+    Converter& c = converter();
+    const bool converter_idle = c.position == c.length && c.hold_left == 0;
+    const bool supported = producer_rate == 32768u || producer_rate == 65536u ||
+                           producer_rate == 131072u || producer_rate == 262144u;
+    if (!supported || (producer_rate == GBA_MOD_AUDIO_SAMPLE_RATE && converter_idle)) {
+        mix_legacy(dst, frame_count);
+        return;
+    }
+    State& s = state();
+    const uint32_t down = producer_rate < GBA_MOD_AUDIO_SAMPLE_RATE
+        ? GBA_MOD_AUDIO_SAMPLE_RATE / producer_rate : 1u;
+    const uint32_t up = producer_rate > GBA_MOD_AUDIO_SAMPLE_RATE
+        ? producer_rate / GBA_MOD_AUDIO_SAMPLE_RATE : 1u;
+    // A rate change away from a holding producer drops the rest of the held
+    // frame (at most 3 producer frames), so the converter can go idle again.
+    if (up == 1) c.hold_left = 0;
+    for (size_t i = 0; i < frame_count; ++i) {
+        const size_t left = frame_count - i;
+        int32_t overlay = 0;
+        if (up > 1) {
+            if (c.hold_left == 0) {
+                c.hold = next_overlay_frame((left + up - 1) / up);
+                c.hold_left = up;
+            }
+            overlay = c.hold;
+            --c.hold_left;
+        } else {
+            int32_t sum = 0;
+            for (uint32_t k = 0; k < down; ++k)
+                sum += next_overlay_frame(left * down - k);
+            overlay = sum / static_cast<int32_t>(down);
+        }
+        const int32_t native = (static_cast<int32_t>(dst[i]) *
+                                s.native_gain_percent) / 100;
+        dst[i] = clamp_s16(native + overlay);
+    }
+}
+
+extern "C" void gba_mod_audio_mix(int16_t* dst, size_t frame_count) {
+    gba_mod_audio_mix_at_rate(dst, frame_count, GBA_MOD_AUDIO_SAMPLE_RATE);
+}
+
+// Stopping delivery also discards overlay frames rendered ahead for a
+// non-65536-Hz producer, so nothing stale plays after a stop/reset/load.
+static void reset_converter() { converter() = {}; }

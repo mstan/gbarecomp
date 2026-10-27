@@ -28,6 +28,7 @@
 #include "gba_ppu.h"
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
+#include "runtime_context.h"
 
 namespace gbarecomp::debug {
 
@@ -81,14 +82,30 @@ void serialize_cpu(SnapshotWriter& w) {
     const uint32_t* data = runtime_call_stack_data();
     w.u32(depth);
     for (uint32_t i = 0; i < depth; ++i) w.u32(data[i]);
+    std::vector<RuntimeSwiContinuation> swi;
+    runtime_capture_swi_context(swi);
+    w.u32(static_cast<uint32_t>(swi.size()));
+    for (const auto& slot : swi) { w.u32(slot.continuation); w.u32(slot.return_pc); }
 }
 
-void deserialize_cpu(SnapshotReader& r) {
-    r.bytes(&g_cpu, sizeof(g_cpu));
+bool deserialize_cpu(SnapshotReader& r, bool commit) {
+    ArmCpuState cpu{};
+    r.bytes(&cpu, sizeof(cpu));
     uint32_t depth = r.u32();
+    if (!r.ok() || depth > 1024 || depth > r.remaining() / 4u) return false;
     std::vector<uint32_t> entries(depth, 0);
     for (uint32_t i = 0; i < depth; ++i) entries[i] = r.u32();
-    runtime_call_stack_restore(entries.data(), depth);
+    const uint32_t count = r.u32();
+    if (!r.ok() || count > kRuntimeSwiLimit || count > r.remaining() / 8u) return false;
+    std::vector<RuntimeSwiContinuation> swi(count);
+    for (auto& slot : swi) { slot.continuation = r.u32(); slot.return_pc = r.u32(); }
+    if (!r.ok() || r.remaining() != 0) return false;
+    if (commit) {
+        g_cpu = cpu;
+        runtime_call_stack_restore(entries.data(), depth);
+        runtime_restore_swi_context(swi);
+    }
+    return true;
 }
 
 void serialize_meta(SnapshotWriter& w, const SnapshotContext& ctx) {
@@ -323,7 +340,14 @@ bool load_state_bytes(const uint8_t* data, std::size_t size,
         }
     }
 
-    { SnapshotReader r = reader_for(TAG_CPU);   deserialize_cpu(r); }
+    {
+        SnapshotReader r = reader_for(TAG_CPU);
+        if (!deserialize_cpu(r, false)) {
+            if (err) *err = "snapshot: invalid CPU continuation";
+            return false;
+        }
+    }
+    { SnapshotReader r = reader_for(TAG_CPU);   deserialize_cpu(r, true); }
     { SnapshotReader r = reader_for(TAG_BUS);   ctx.bus->deserialize(r); }
     { SnapshotReader r = reader_for(TAG_IO);    ctx.bus->io().deserialize(r); }
     // WAITCNT arrived with the IO page; re-derive the bus wait-state table.

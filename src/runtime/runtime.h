@@ -13,6 +13,7 @@
 
 namespace gbarecomp {
 struct GbaNetplayLaunch;
+struct ViewGeometry;
 
 struct TouchFrameInfo;   // touch_input.h
 class HostOverlay;       // host_overlay.h
@@ -59,6 +60,10 @@ struct RunOptions {
     // inputs, including its fixed/initial width request. Games with unrelated
     // catalogs leave this false.
     bool mod_owns_adaptive_view = false;
+    // Game-authored framing, applied before allocating/presenting the surface.
+    // Drawable dimensions are zero for a fixed/headless view. Null preserves
+    // the existing geometry of every other title; this is not a user setting.
+    void (*view_geometry)(ViewGeometry*, int drawable_width, int drawable_height) = nullptr;
     // Read-only title authorization for finer affine presentation. Null keeps
     // internal resolution at 1x and rejects unsupported enhancement requests.
     bool (*high_resolution_affine_provider)(int bg, int screen_y) = nullptr;
@@ -133,6 +138,14 @@ struct RunOptions {
     std::uint8_t save_state_slot_count = 9;
     std::uint8_t rewind_history_seconds = 0;
     std::uint8_t rewind_capture_interval_frames = 15;
+
+    // Desktop autosave crash guard: when > 0 (and
+    // resume_suspend_state_on_launch is set) interactive windowed play
+    // snapshots the machine to the suspend-state file every N seconds and on
+    // every battery-save flush, leaving the crash marker; a launch after an
+    // unclean exit resumes it. 0 disables it. Headless, --tcp, --load-state
+    // and replay sessions never touch the suspend files.
+    std::uint8_t autosave_interval_seconds = 0;
 
     // Optional game-owned content initializer. Called exactly once, after the
     // first non-native view has been authorized and applied. For a fixed view

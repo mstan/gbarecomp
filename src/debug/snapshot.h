@@ -34,10 +34,11 @@ namespace gbarecomp::debug {
 
 class ModStateRegistry;
 
-// Build-specific snapshots include pending device timing and every PSG channel.
+// Build-specific snapshots include pending device timing, every PSG channel,
+// and the SWI-return continuation ledger.
 // Older layouts are rejected before restoration; native cartridge saves have
 // their own independent format and are unaffected.
-constexpr uint32_t kSnapshotVersion = 3;
+constexpr uint32_t kSnapshotVersion = 5;
 
 // ── SnapshotWriter ─────────────────────────────────────────────────
 // Append-only little-endian byte sink. Header-only.

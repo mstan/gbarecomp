@@ -20,6 +20,7 @@
 // step_once() becomes a real `runtime_dispatch` driver.
 
 #include "runtime.h"
+#include "suspend_guard.h"
 #include "multiplayer_launch.h"
 #include "view_config.h"
 
@@ -34,10 +35,12 @@
 #include "touch_input.h"
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
+#include "mobile_platform.h"
 #include "save_config.h"
 #include "self_heal.h"
 #include "overlay_loader.h"
 #include "../gba/mod_audio.h"
+#include "codebreaker.h"
 #if defined(GBARECOMP_ENABLE_MODS)
 #include "mod_runtime.h"
 #endif
@@ -156,7 +159,8 @@ struct Args {
     std::uint32_t rom_crc32 = 0;  // 0 = no CRC check (per-game TOML fills)
     std::string save_path;
     // Save-state slot directory (<dir>/state<N>). Empty keeps the historical
-    // <rom>.state<N> location.
+    // <rom>.state<N> location. When set, the mobile suspend state/marker
+    // live there too instead of next to the ROM.
     std::string state_dir;
     std::optional<gba::SaveType> save_type;
     std::size_t save_size = 0;
@@ -252,9 +256,12 @@ struct Args {
 #define GBARECOMP_UI_KEY_FAST_FORWARD   "assist.fast_forward"
 #define GBARECOMP_UI_KEY_FAST_FORWARD_SPEED "assist.fast_forward_speed"
 #define GBARECOMP_UI_KEY_REWIND          "assist.rewind"
+#define GBARECOMP_UI_KEY_QUIT            "system.quit"
+#define GBARECOMP_UI_KEY_AUDIO_ENHANCED  "audio.enhanced"
 
 struct RuntimeUiContext {
     HostWindow* window = nullptr;
+    gba::GbaAudio* audio = nullptr;
     RecompRuntimeUi* ui = nullptr;
     float* gyro_sensitivity = nullptr;
     int* internal_resolution = nullptr;
@@ -267,6 +274,8 @@ struct RuntimeUiContext {
     int pending_save_slot = 0;
     int pending_load_slot = 0;
     bool pending_rewind = false;
+    bool pending_quit = false;
+    std::chrono::steady_clock::time_point quit_confirmation_until{};
     bool assist_tools_exposed = false;
     bool assist_tools_enabled = true;
     bool fast_forward_latched = false;
@@ -288,6 +297,8 @@ int runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int* out) {
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) *out = c->window->volume();
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_STATE_SLOT) == 0) *out = c->state_slot;
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FPS) == 0) *out = c->window->fps_readout();
+    else if (std::strcmp(item->key, GBARECOMP_UI_KEY_AUDIO_ENHANCED) == 0 && c->audio)
+        *out = c->audio->shadow_enabled();
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_ASSIST_ENABLED) == 0)
         *out = c->assist_tools_enabled;
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FAST_FORWARD) == 0)
@@ -326,6 +337,10 @@ int runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int value) {
         c->state_slot = std::clamp(value, 1, c->state_slot_count);
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FPS) == 0)
         c->window->set_fps_readout(value != 0);
+    else if (std::strcmp(item->key, GBARECOMP_UI_KEY_AUDIO_ENHANCED) == 0 && c->audio) {
+        c->audio->set_shadow_enabled(value != 0);
+        c->window->save_audio_enhanced(value != 0);
+    }
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_ASSIST_ENABLED) == 0) {
         c->assist_tools_enabled = value != 0;
         if (!c->assist_tools_enabled) c->fast_forward_latched = false;
@@ -367,6 +382,17 @@ int runtime_ui_action(void* opaque, const RecompRuntimeUiItem* item) {
     }
     if (std::strcmp(item->key, GBARECOMP_UI_KEY_REWIND) == 0) {
         c->pending_rewind = true;
+        recomp_runtime_ui_close(c->ui);
+        return 1;
+    }
+    if (std::strcmp(item->key, GBARECOMP_UI_KEY_QUIT) == 0) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now > c->quit_confirmation_until) {
+            c->quit_confirmation_until = now + std::chrono::seconds(3);
+            return 1;
+        }
+        c->quit_confirmation_until = {};
+        c->pending_quit = true;
         recomp_runtime_ui_close(c->ui);
         return 1;
     }
@@ -1608,6 +1634,18 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             args.resize_view = gba_mod_adaptive_view_enabled() != 0;
     }
 #endif
+    // Declarative mod cheats ([[cheat]] records of enabled features). They
+    // mutate guest RAM, so they run only in a single-player session whose
+    // catalog committed them: netplay never loads the catalog (and returned
+    // above in any case), and a diagnostic replay must reproduce the recorded
+    // session, which capture never records with cheats active.
+#if defined(GBARECOMP_ENABLE_MODS)
+    const bool mod_cheats_active = mods_ready && !netplay &&
+        args.replay_diagnostic.empty() &&
+        mod_runtime_committed_cheat_count() > 0;
+#else
+    const bool mod_cheats_active = false;
+#endif
 
     gba::GbaBus bus;
     gba::GbaPpu ppu;
@@ -1811,7 +1849,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 requested_width = 240;
         }
 #endif
-        const ViewGeometry geometry = resolve_view_geometry(
+        ViewGeometry geometry = resolve_view_geometry(
             requested_width, opts.max_view_width, ws_wip_enabled,
             gba::GbaPpu::kMaxRenderWidth);
         if (geometry.width == 240 && requested_width != 240 &&
@@ -1827,7 +1865,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 "game's validated maximum; clamping to %ux160\n",
                 requested_width, geometry.width);
         }
-        ppu.set_view_margins(geometry.extra_left, geometry.extra_right, 0, 0);
+        if (opts.view_geometry) opts.view_geometry(&geometry, 0, 0);
+        ppu.set_view_margins(geometry.extra_left, geometry.extra_right,
+                             geometry.extra_top, geometry.extra_bottom);
         args.view_width = static_cast<int>(ppu.render_width());
 #if defined(GBARECOMP_RUNTIME_UI)
         runtime_ui_context.view_mode = resize_view_enabled
@@ -1871,6 +1911,18 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                               (se && se[0] && se[0] != '0'));
     }
     bus.set_rom(rom.data(), rom.size());
+    // The MP2K audio shadow re-reads the driver's channels once per tick, at
+    // the mixer's entry (SoundMainRAM), which guest code reaches through
+    // dispatch. Observing only; nothing is installed when the ROM has no MP2K.
+    g_runtime_observed_pc_count = static_cast<unsigned>(
+        bus.audio().shadow_hook_pcs(g_runtime_observed_pcs,
+                                    RUNTIME_MAX_OBSERVED_PCS));
+    g_runtime_dispatch_observer = g_runtime_observed_pc_count
+        ? [](uint32_t pc, int thumb) {
+              if (gba::GbaBus* b = gbarecomp::active_bus())
+                  b->audio().shadow_driver_tick(pc, thumb != 0);
+          }
+        : nullptr;
     if (!args.quiet && bus.matrix().active()) {
         std::printf(
             "matrix_mapper=active physical_size=%zu aperture=%zu page_size=%zu\n",
@@ -2136,6 +2188,27 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // filenames don't clobber each other).
     gbarecomp::self_heal_set_program_identity(
         header.game_title.c_str(), header.game_code.c_str(), rom_sha1.c_str());
+    // Where the miss proposal + coverage summary persist. Per-game default
+    // filenames (overridable by env) so concurrent / serial runs of different
+    // games don't clobber each other's miss logs — the cause of "which game is
+    // this frag from?" ambiguity. Tag = sanitized 4-char game code (e.g.
+    // BPEE), falling back to "unknown". Named here, at startup, so the files
+    // are kept current all session and survive an abort or a killed process,
+    // not only a clean exit.
+    std::string self_heal_frag_path, self_heal_cov_path;
+    {
+        std::string tag;
+        for (char c : header.game_code)
+            if (std::isalnum(static_cast<unsigned char>(c))) tag += c;
+        if (tag.empty()) tag = "unknown";
+        const char* frag = std::getenv("GBARECOMP_MISS_FRAG");
+        const char* cov = std::getenv("GBARECOMP_COVERAGE_JSON");
+        self_heal_frag_path =
+            frag ? frag : "recomp_master_misses_" + tag + ".toml.frag";
+        self_heal_cov_path = cov ? cov : "recomp_coverage_" + tag + ".json";
+    }
+    gbarecomp::self_heal_set_persist_paths(self_heal_frag_path.c_str(),
+                                           self_heal_cov_path.c_str());
     // Stage-2 self-heal: wire the on-the-fly recompiler (gated behind
     // GBARECOMP_SELFHEAL_RECOMPILE; no-op + a clear banner when off). The cache
     // is keyed by the cart SHA-1 so a different ROM gets a fresh DLL set; the
@@ -2201,28 +2274,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // ring records from machine reset (no arm-then-run gap), so this is a
     // pure query of recorded history — two builds run identically diff
     // bit-for-bit on these files. (Arm with GBARECOMP_INSN_TRACE=1.)
-    // Per-game default filenames (overridable by env) so concurrent / serial
-    // runs of different games don't clobber each other's miss logs — the cause
-    // of "which game is this frag from?" ambiguity. Tag = sanitized 4-char game
-    // code (e.g. BPEE), falling back to "unknown".
-    auto game_tag = [&]() {
-        std::string t;
-        for (char c : header.game_code)
-            if (std::isalnum(static_cast<unsigned char>(c))) t += c;
-        return t.empty() ? std::string("unknown") : t;
-    };
+    // The proposal / coverage paths were named at startup (see
+    // self_heal_set_persist_paths); this is their final "exit" rewrite.
     auto emit_exit_diagnostics = [&]() {
-        const std::string tag = game_tag();
-        const std::string default_frag = "recomp_master_misses_" + tag + ".toml.frag";
-        const std::string default_cov  = "recomp_coverage_" + tag + ".json";
-        const char* frag = std::getenv("GBARECOMP_MISS_FRAG");
-        gbarecomp::self_heal_write_report(
-            frag ? frag : default_frag.c_str());
+        gbarecomp::self_heal_write_report(self_heal_frag_path.c_str());
         // Machine-readable coverage summary for the build loop / CI (written
         // every exit, FULLY_STATIC included). Override path with env.
-        const char* cov = std::getenv("GBARECOMP_COVERAGE_JSON");
-        gbarecomp::self_heal_write_coverage_json(
-            cov ? cov : default_cov.c_str());
+        gbarecomp::self_heal_write_coverage_json(self_heal_cov_path.c_str());
         if (const char* fp = std::getenv("GBARECOMP_FP_SAVE")) {
             uint32_t n = runtime_fp_save_file(fp);
             std::printf("fp_ring_saved path=\"%s\" records=%u\n", fp, n);
@@ -2487,8 +2545,37 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         std::fprintf(stderr, "[gbarecomp:runtime] cheats=ENABLED count=%zu "
                              "(validation only)\n", cheats.size());
     }
-    if (opts.extended_view_frame || !cheats.empty()) {
+    // Mod cheats go through the bus like the game's own stores; the parser
+    // already confined every address to EWRAM/IWRAM.
+    codebreaker::Memory mod_cheat_memory;
+    mod_cheat_memory.ctx = &bus;
+    mod_cheat_memory.read16 = [](void* c, uint32_t a) {
+        return static_cast<gba::GbaBus*>(c)->read16(a);
+    };
+    mod_cheat_memory.write8 = [](void* c, uint32_t a, uint8_t v) {
+        static_cast<gba::GbaBus*>(c)->write8(a, v);
+    };
+    mod_cheat_memory.write16 = [](void* c, uint32_t a, uint16_t v) {
+        static_cast<gba::GbaBus*>(c)->write16(a, v);
+    };
+    std::atomic<uint64_t> mod_cheat_frames{0};
+#if defined(GBARECOMP_ENABLE_MODS)
+    if (mod_cheats_active) {
+        std::string names;
+        for (const std::string& name : mod_runtime_committed_cheat_names())
+            names += (names.empty() ? "" : ", ") + name;
+        std::fprintf(stderr, "[gbarecomp:runtime] mod cheats ENABLED count=%zu: %s\n",
+                     mod_runtime_committed_cheat_count(), names.c_str());
+    }
+#endif
+    if (opts.extended_view_frame || !cheats.empty() || mod_cheats_active) {
         runtime_set_frame_start_hook([&]() {
+#if defined(GBARECOMP_ENABLE_MODS)
+            if (mod_cheats_active) {
+                mod_runtime_run_cheats(mod_cheat_memory);
+                mod_cheat_frames.fetch_add(1, std::memory_order_relaxed);
+            }
+#endif
             for (const Cheat& c : cheats)
                 for (unsigned i = 0; i < c.bytes; ++i)
                     c.ptr[i] = static_cast<uint8_t>(c.value >> (8 * i));
@@ -2590,6 +2677,27 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // commands first, then the game's own extension.
     auto tcp_extension = [&](const std::string& request, std::string& reply) -> bool {
         if (touch_tcp_command(request, reply)) return true;
+        // Read-only: which committed mod cheats this session runs and how many
+        // frames they have been applied (always-on counter, no arming).
+        if (request.find("\"mod_cheats\"") != std::string::npos) {
+            std::string body = "{\"ok\":true,\"active\":";
+            body += mod_cheats_active ? "true" : "false";
+            body += ",\"frames_applied\":" +
+                    std::to_string(mod_cheat_frames.load(std::memory_order_relaxed));
+            body += ",\"cheats\":[";
+#if defined(GBARECOMP_ENABLE_MODS)
+            if (mod_cheats_active) {
+                bool first = true;
+                for (const std::string& name : mod_runtime_committed_cheat_names()) {
+                    body += (first ? "\"" : ",\"") + name + "\"";
+                    first = false;
+                }
+            }
+#endif
+            body += "]}";
+            reply = std::move(body);
+            return true;
+        }
         if (!opts.tcp_command) return false;
         std::string streamed;
         auto write = [](void* ctx, const char* data, std::size_t len) {
@@ -2623,6 +2731,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         bool ctl_step_ok   = true;
 
         std::thread game_thread([&]() {
+            // Finite-stack guard: the split vblank-wait loop nests host frames
+            // per spin iteration; a post-event flow that stops unwinding it
+            // would exhaust this thread's default 8 MiB stack. Unwind through
+            // the standard yield path once within 2 MiB of the bottom.
+            gbarecomp::host_stack_guard_arm_current(2u * 1024u * 1024u);
             for (;;) {
                 int st;
                 {
@@ -2762,8 +2875,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (game_thread.joinable()) game_thread.join();
         bool save_ok = flush_save() != SaveFlush::Failed;
         write_session_diagnostics(opts, "exit", ppu.frame_count());
-        gbarecomp::overlay_loader_shutdown();  // join worker + drain before banner
+        // Flush diagnostics BEFORE the worker join: the join can block behind
+        // in-flight heals, and an unclean kill during it must not lose the frag.
         emit_exit_diagnostics();
+        gbarecomp::overlay_loader_shutdown();
         runtime_shutdown();
         return (ok && save_ok) ? 0 : 1;
     }
@@ -2885,7 +3000,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             ++high_resolution_presented;
         } else win.present(live_fb.data());
     };
-    auto apply_runtime_view_geometry = [&](const ViewGeometry& geometry) -> bool {
+    auto apply_runtime_view_geometry = [&](ViewGeometry geometry) -> bool {
+        if (opts.view_geometry) opts.view_geometry(&geometry, 0, 0);
         if (geometry.width == ppu.render_width() && geometry.height == ppu.render_height()) return false;
         // Headless diagnostic playback applies recorded geometry without a
         // window; the guest-visible policy below is identical either way.
@@ -2960,6 +3076,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 opts.max_resize_view_height, gba::GbaPpu::kMaxRenderWidth,
                 gba::GbaPpu::kMaxRenderHeight);
         }
+        if (!request.native_view && opts.view_geometry)
+            opts.view_geometry(&geometry, drawable_w, drawable_h);
         if (!apply_runtime_view_geometry(geometry)) return false;
         if (!args.quiet) {
             std::fprintf(stderr,
@@ -3065,6 +3183,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                 opts.touch_gesture_claims,
                                 opts.touch_pad_default, args.touch_emulation);
             win.set_touch_config_dir(exe_dir.c_str());
+            // The player's menu choice wins over [audio].shadow;
+            // GBARECOMP_AUDIO_SHADOW still overrides both.
+            bool enhanced = false;
+            if (win.saved_audio_enhanced(enhanced) &&
+                !std::getenv("GBARECOMP_AUDIO_SHADOW"))
+                bus.audio().set_shadow_enabled(enhanced);
         }
         win.set_host_overlay(opts.host_overlay);
         win.set_view_margins(ppu.view_extra_left(), ppu.view_extra_right(),
@@ -3111,6 +3235,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         win.set_fps_readout(opts.show_fps_by_default);
 #if defined(GBARECOMP_RUNTIME_UI)
         runtime_ui_context.window = &win;
+        runtime_ui_context.audio = &bus.audio();
         runtime_ui_context.gyro_sensitivity = &args.gyro_sensitivity;
         runtime_ui_context.assist_tools_exposed = opts.expose_assist_tools;
         runtime_ui_context.assist_tools_enabled =
@@ -3191,6 +3316,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         runtime_ui_config.features |=
             RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |
             RECOMP_RUNTIME_UI_STANDARD_WINDOW_SCALE;
+#else
+        // A mobile game has no window to close and the system Back button is
+        // routed to the game, so the menu is the only clean way out: it ends
+        // the session (save flushed, no suspend state) and the Activity
+        // finishes, returning to whatever started it.
+        // Use the stable custom-action interface: maintained recomp-ui pins
+        // need not define the newer standard-quit flag or key constants.
 #endif
         runtime_ui_config.view_modes = RECOMP_RUNTIME_UI_VIEW_MODE_NATIVE;
         if (opts.launcher_expose_widescreen && opts.max_view_width > 240)
@@ -3286,6 +3418,26 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             }
         }
 
+#if defined(__ANDROID__)
+        RecompRuntimeUiItem quit_item{};
+        quit_item.key = GBARECOMP_UI_KEY_QUIT;
+        quit_item.section = "System";
+        quit_item.label = "Quit game";
+        quit_item.description = "Select twice within 3 seconds to quit.";
+        quit_item.type = RECOMP_RUNTIME_UI_ACTION;
+        runtime_ui_extras.push_back(quit_item);
+#endif
+        if (bus.audio().shadow_available()) {
+            RecompRuntimeUiItem enhanced_item{};
+            enhanced_item.key         = GBARECOMP_UI_KEY_AUDIO_ENHANCED;
+            enhanced_item.section     = "Audio";
+            enhanced_item.label       = "Enhanced audio";
+            enhanced_item.description =
+                "High-precision mix, without the 8-bit hiss.";
+            enhanced_item.type        = RECOMP_RUNTIME_UI_BOOL;
+            runtime_ui_extras.push_back(enhanced_item);
+        }
+
         RecompRuntimeUiItem fps_item{};
         fps_item.key         = GBARECOMP_UI_KEY_FPS;
         fps_item.section     = "Display";
@@ -3332,11 +3484,21 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // kills the process in the background the marker survives, and the next
     // launch resumes exactly where the player left (RunOptions opt-in).
     auto suspend_state_path = [&]() -> std::string {
+        if (!args.state_dir.empty()) {
+            return (std::filesystem::path(args.state_dir) /
+                    "suspend.state")
+                .string();
+        }
         std::filesystem::path p(args.rom);
         p.replace_extension(".suspend.state");
         return p.string();
     };
     auto suspend_marker_path = [&]() -> std::string {
+        if (!args.state_dir.empty()) {
+            return (std::filesystem::path(args.state_dir) /
+                    "suspend.pending")
+                .string();
+        }
         std::filesystem::path p(args.rom);
         p.replace_extension(".suspend.pending");
         return p.string();
@@ -3680,16 +3842,21 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             // persist the cartridge save, a suspend state and the session's
             // diagnostic rings now.
             const bool saved = flush_save_notify();
+            bus.audio().log_shadow_summary(ev.terminating ? "terminating" : "background");
             write_session_diagnostics(opts, ev.terminating ? "terminating" : "background",
                                       ppu.frame_count());
             std::string e;
             const std::string state_path = suspend_state_path();
-            const bool suspended = do_savestate_save(state_path, e);
+            // A session stopped before its first frame has nothing to keep;
+            // its state would overwrite the previous session's suspend state
+            // (and the marker the next launch resumes from).
+            const bool ran = ppu.frame_count() > 0;
+            const bool suspended = ran && do_savestate_save(state_path, e);
+            if (!ran) e = "no frame run, previous state kept";
             if (suspended) {
-                std::ofstream marker(suspend_marker_path(), std::ios::trunc);
-                marker << ppu.frame_count() << "\n";
+                write_suspend_marker(suspend_marker_path(), args.save_path, ppu.frame_count());
             }
-            if (ev.terminating) suspend_on_exit = suspended;
+            if (ev.terminating) suspend_on_exit = suspended || !ran;
             std::fprintf(stderr,
                          "[gbarecomp:runtime] %s: save=%s suspend_state=%s%s%s\n",
                          ev.terminating ? "terminating" : "entering background",
@@ -3703,7 +3870,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     clear_suspend_marker();
                     if (pacer) pacer->reset();
                 } else {
+                    // Destroyed while suspended (swiped away, or the Activity
+                    // finished): nothing ran since the state was written, so
+                    // the next launch resumes it.
                     host_quit = true;
+                    suspend_on_exit = suspended || !ran;
                 }
             }
         }
@@ -3781,6 +3952,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (runtime_ui_context.pending_load_slot) {
             ev.load_slot = runtime_ui_context.pending_load_slot;
             runtime_ui_context.pending_load_slot = 0;
+        }
+        if (runtime_ui_context.pending_quit) {
+            runtime_ui_context.pending_quit = false;
+            host_quit = true;
         }
 #endif
         if (opts.expose_assist_tools && !assist_tools_enabled()) {
@@ -3901,7 +4076,38 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     uint64_t save_last_change_frame = ppu.frame_count();
     uint64_t save_dirty_since_frame = ppu.frame_count();
     bool save_pending = false;
+    // Desktop autosave crash guard (RunOptions::autosave_interval_seconds).
+    // It feeds the existing suspend state + marker that
+    // resume_suspend_state_on_launch already understands: a clean exit clears
+    // the marker, an unclean exit leaves it, and the next launch resumes from
+    // the last snapshot. Interactive windowed play only: headless, --tcp,
+    // --load-state, input-replay and diagnostic-replay sessions never touch the
+    // suspend files, and a game without resume never pays for snapshots
+    // nobody reads.
+    const bool autosave_on =
+        opts.autosave_interval_seconds > 0 &&
+        opts.resume_suspend_state_on_launch && args.window &&
+        args.tcp_port <= 0 && args.load_state.empty() &&
+        !input_replay_requested && args.replay_diagnostic.empty();
+    const uint64_t autosave_interval_frames = autosave_on
+        ? static_cast<uint64_t>(opts.autosave_interval_seconds) * 60u : 0;
+    uint64_t next_autosave_frame = ppu.frame_count() + autosave_interval_frames;
+    bool autosave_failure_logged = false;
+    auto autosave_now = [&](uint64_t frame) {
+        std::string e;
+        if (do_savestate_save(suspend_state_path(), e)) {
+            if (!write_suspend_marker(suspend_marker_path(), args.save_path, frame))
+                std::fprintf(stderr, "[gbarecomp:runtime] autosave marker FAILED\n");
+            autosave_failure_logged = false;
+        } else if (!autosave_failure_logged) {
+            std::fprintf(stderr, "[gbarecomp:runtime] autosave FAILED: %s\n",
+                         e.c_str());
+            autosave_failure_logged = true;
+        }
+        next_autosave_frame = frame + autosave_interval_frames;
+    };
     auto maybe_flush_battery = [&](uint64_t frame) {
+        if (autosave_on && frame >= next_autosave_frame) autosave_now(frame);
         if (!bus.save().dirty()) {
             save_pending = false;
             return;
@@ -3921,6 +4127,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             flush_save_notify();
             save_last_change_frame = frame;
             save_dirty_since_frame = frame;
+            // A resumed snapshot restores its own save RAM, which the next
+            // flush writes back to disk. Refresh the snapshot with every
+            // battery flush so resuming can never roll back a newer save.
+            if (autosave_on) autosave_now(frame);
         }
     };
 #if defined(GBARECOMP_WEB_HOST)
@@ -3941,15 +4151,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             const auto n = bus.audio().drain_sample_block(audio_buf, 2048, rate);
             if (!n) break;
             if (!fast_forward_active) {
-                gba_mod_audio_mix(audio_buf, n);
+                gba_mod_audio_mix_at_rate(audio_buf, n, rate);
                 win.push_audio_block(audio_buf, n, rate);
             }
         }
 #else
-        const auto n = bus.audio().drain_samples(audio_buf, 2048);
+        uint32_t rate = 0;
+        const auto n = bus.audio().drain_sample_block(audio_buf, 2048, rate);
         if (n && !fast_forward_active) {
-            gba_mod_audio_mix(audio_buf, n);
-            win.push_audio_samples(audio_buf, n);
+            gba_mod_audio_mix_at_rate(audio_buf, n, rate);
+            win.push_audio_block(audio_buf, n, rate);
         }
 #endif
     };
@@ -4204,6 +4415,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                  "while GBARECOMP_CHEATS is active\n");
             want = false;
         }
+        if (want && mod_cheats_active) {
+            std::fprintf(stderr, "[gbarecomp:diagnostics] replay capture disabled "
+                                 "while mod cheats are enabled\n");
+            want = false;
+        }
         if (want && args.window && args.tcp_port <= 0) {
             if (present_in_place)
                 if (diag.start_recording(diag_config, diag_host))
@@ -4269,12 +4485,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (diag.playing() && (diag.finished() || diag.failed()))
                     host_quit = true;
                 if (phase_active) fp_t4 = FramePhaseRing::now_ns();
+                // Banked frames for the pacer: this present covers every guest
+                // frame since the last one (normally 1; 2 after a stale-frame
+                // skip). The pacer throttles all of them.
+                const uint64_t banked_frames = frame - last_presented_frame;
                 last_presented_frame = frame;
                 if (present_frame) {
                     ++frames_presented;
                     if (args.frames >= 0 && frames_presented >= args.frames)
                         host_quit = true;
-                    if (pacer) pacer->wait_for_next_frame();
+                    if (pacer) pacer->wait_for_next_frame(banked_frames);
                 }
                 if (phase_active) {
                     frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3,
@@ -4319,7 +4539,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         // The previous session was suspended by the OS and never came back
         // (killed in the background, or swiped away): resume it.
         std::error_code ec;
-        if (std::filesystem::exists(suspend_marker_path(), ec) &&
+        if (suspend_marker_matches_battery(suspend_marker_path(), args.save_path) &&
             std::filesystem::exists(suspend_state_path(), ec)) {
             std::string e;
             if (do_savestate_load(suspend_state_path(), e)) {
@@ -4705,6 +4925,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     host_quit = true;
                 if (phase_active) fp_t4 = FramePhaseRing::now_ns();
                 dispatches_since_pump = 0;
+                const uint64_t banked_frames = frame - last_presented_frame;
                 last_presented_frame = frame;
                 if (present_frame) {
                     ++frames_presented;
@@ -4714,7 +4935,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     // Normal play presents/paces every frame. Fast-forward
                     // runs N guest frames per one paced host presentation,
                     // making its selected multiplier independent of monitor Hz.
-                    if (pacer) pacer->wait_for_next_frame();
+                    if (pacer) pacer->wait_for_next_frame(banked_frames);
                 }
                 if (phase_active) {
                     frame_phase.record(frame, fp_t0, fp_t1, fp_t2, fp_t3,
@@ -4795,6 +5016,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // Through the wrapper: the web notice does not depend on HostWindow, so
     // running after win.close() is fine.
     bool save_ok = flush_save_notify();
+    bus.audio().log_shadow_summary("exit");
     if (!suspend_on_exit) clear_suspend_marker();
     if (args.frames >= 0) {
         std::printf("%s start_frame=%llu end_frame=%llu presented=%llu "
@@ -4907,8 +5129,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     }
 
-    gbarecomp::overlay_loader_shutdown();  // join worker + drain before banner
+    // Flush diagnostics BEFORE the worker join: the join can block behind
+    // in-flight heals, and an unclean kill during it must not lose the frag.
     emit_exit_diagnostics();
+    gbarecomp::overlay_loader_shutdown();
     runtime_shutdown();
     if (diag_exit) return diag_exit;
     return save_ok ? 0 : 1;

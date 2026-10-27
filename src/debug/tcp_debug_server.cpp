@@ -799,6 +799,15 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         cmd_read_region(ctx.bus->iwram_ptr(), 32 * 1024, req, out, 0x03000000u);
         return;
     }
+    if (contains("\"read_rom\"")) {
+        if (!ctx.bus || !ctx.bus->rom_ptr() || !ctx.bus->rom_size()) {
+            emit_error(out, "ROM unavailable"); return;
+        }
+        // Immutable backing bytes: inspection must not alter waitstates,
+        // prefetch state or cartridge-device readback.
+        cmd_read_region(ctx.bus->rom_ptr(), ctx.bus->rom_size(), req, out, 0x08000000u);
+        return;
+    }
     // Debug/validation poke: {"cmd":"write_mem","addr":A,"hex":"0a0b.."}
     // writes raw bytes into EWRAM/IWRAM/palette/VRAM/OAM backing memory (no
     // bus side effects). For cheat-assisted coverage runs, never gameplay.

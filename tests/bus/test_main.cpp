@@ -284,7 +284,7 @@ void test_older_snapshots_rejected_before_restore() {
     // Old layouts are disposable, including for an empty provider catalog.
     bus.write8(0x02000000u, 0xaa);
     error.clear();
-    for (uint32_t version : {1u,2u}) {
+    for (uint32_t version : {1u,2u,3u,4u}) {
         patch_snapshot_version(v1_path,version);
         check_bool("snapshot_old", "old version rejected",
                    debug::load_state(v1_path.string().c_str(), context, &error), false);
