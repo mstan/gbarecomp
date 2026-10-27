@@ -11,6 +11,11 @@ renderer opens, then combines the same color lookup and opaque texture packing
 in one portable C++ pass. This avoids the intermediate graded RGB24 image and
 the extra format conversion expected when RGB24 is not a native renderer
 format. Actual upload throughput still requires a built-game measurement.
+The second candidate also prepares the selected packed color table once when
+the screen model is created: each graded output pixel becomes one indexed
+32-bit load/store. It uses an additional 128 KiB for a colored native-texture
+window; Raw and LLE do not allocate that table. The cache is immutable and
+owned by its screen settings, so it needs no frame polling or invalidation.
 
 The input remains the original read-only RGB888 PPU/presentation surface. Raw
 retains all eight source bits, including filtered HD colors. Screen simulation

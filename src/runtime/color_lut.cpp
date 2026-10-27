@@ -176,7 +176,7 @@ bool screen_kind_from_name(std::string_view name, ScreenKind& out) {
     return false;
 }
 
-ColorLut::ColorLut(const ColorSettings& settings) {
+ColorLut::ColorLut(const ColorSettings& settings, UploadPixelOrder upload) {
     if (settings.screen == ScreenKind::Raw) {
         passthrough_ = true;
         return;
@@ -187,6 +187,7 @@ ColorLut::ColorLut(const ColorSettings& settings) {
     if (settings.screen == ScreenKind::Classic) {
         for (int px = 0; px < 32768; ++px)
             table[px] = classic_entry(static_cast<uint16_t>(px));
+        build_upload_table(upload);
         return;
     }
 
@@ -213,6 +214,7 @@ ColorLut::ColorLut(const ColorSettings& settings) {
         }
         table[px] = {quantize(out[0]), quantize(out[1]), quantize(out[2])};
     }
+    build_upload_table(upload);
 }
 
 void ColorLut::map_rgb888(const uint8_t* src, uint8_t* dst,
@@ -259,9 +261,30 @@ void pack_pixels(const uint8_t* src, uint32_t* dst, int count, const Table* tabl
 }
 } // namespace
 
+void ColorLut::build_upload_table(UploadPixelOrder order) {
+    if (!table_ || order == UploadPixelOrder::Rgb24) return;
+    packed_table_ = std::make_unique<std::array<uint32_t, 32768>>();
+    packed_order_ = order;
+    for (std::size_t i = 0; i < packed_table_->size(); ++i) {
+        const auto* rgb = (*table_)[i].data();
+        (*packed_table_)[i] = order == UploadPixelOrder::Abgr8888
+            ? opaque_pixel<true>(rgb) : opaque_pixel<false>(rgb);
+    }
+}
+
 void ColorLut::map_packed8888(const uint8_t* src, uint32_t* dst,
                              int width, int height, bool red_low_byte) const {
     const int count = width * height;
+    const auto order = red_low_byte ? UploadPixelOrder::Abgr8888 : UploadPixelOrder::Argb8888;
+    if (packed_table_ && packed_order_ == order) {
+        const auto& packed = *packed_table_;
+        for (int i = 0; i < count; ++i) {
+            const auto* s = src + i * 3;
+            const uint32_t index = (s[0] >> 3) | ((s[1] >> 3) << 5) | ((s[2] >> 3) << 10);
+            dst[i] = packed[index];
+        }
+        return;
+    }
     if (red_low_byte) pack_pixels<true>(src, dst, count, table_.get());
     else pack_pixels<false>(src, dst, count, table_.get());
 }

@@ -1988,7 +1988,10 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         }
     }
 
-    b->color_lut = std::make_unique<runtime::ColorLut>(resolve_color_settings(screen));
+    auto upload_order = runtime::UploadPixelOrder::Rgb24;
+    if (b->texture_format == SDL_PIXELFORMAT_ARGB8888) upload_order = runtime::UploadPixelOrder::Argb8888;
+    else if (b->texture_format == SDL_PIXELFORMAT_ABGR8888) upload_order = runtime::UploadPixelOrder::Abgr8888;
+    b->color_lut = std::make_unique<runtime::ColorLut>(resolve_color_settings(screen), upload_order);
     if (!b->color_lut->is_passthrough())
         b->graded_fb.resize(static_cast<std::size_t>(base_w) * base_h * 3);
 

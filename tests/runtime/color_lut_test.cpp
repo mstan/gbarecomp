@@ -65,6 +65,8 @@ int main() {
         for (const auto target : {DisplayTarget::Srgb, DisplayTarget::DisplayP3}) {
             ColorSettings settings{};settings.screen=screen;settings.target=target;
             ColorLut colors(settings);
+            ColorLut cached_argb(settings,UploadPixelOrder::Argb8888);
+            ColorLut cached_abgr(settings,UploadPixelOrder::Abgr8888);
             for (int filtered = 0; filtered < 2; ++filtered) {
                 auto input=src;
                 if (filtered) {
@@ -80,6 +82,12 @@ int main() {
                         if (packed[i]!=expected) {
                             std::printf("FAIL: packed upload color/channel/alpha mismatch at %zu\n",i);return 1;
                         }
+                    }
+                    const auto reference=packed;
+                    const auto& cached=red_low ? cached_abgr : cached_argb;
+                    cached.map_packed8888(input.data(),packed.data(),32768,1,red_low);
+                    if (packed!=reference) {
+                        std::printf("FAIL: prepared native color table changed output\n");return 1;
                     }
                 }
             }

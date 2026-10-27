@@ -38,6 +38,7 @@ enum class ScreenKind {
 
 // Display colorspace the emitted bytes are interpreted in.
 enum class DisplayTarget { Srgb, DisplayP3 };
+enum class UploadPixelOrder { Rgb24, Argb8888, Abgr8888 };
 
 // Parse a config/env token; returns false if unrecognized.
 bool screen_kind_from_name(std::string_view name, ScreenKind& out);
@@ -52,7 +53,8 @@ struct ColorSettings {
 // frame as one indexed lookup per pixel.
 class ColorLut {
 public:
-    explicit ColorLut(const ColorSettings& settings);
+    explicit ColorLut(const ColorSettings& settings,
+                       UploadPixelOrder upload = UploadPixelOrder::Rgb24);
 
     bool is_passthrough() const { return passthrough_; }
 
@@ -75,6 +77,11 @@ private:
     // table_[bgr555] = {R,G,B}.
     std::unique_ptr<std::array<std::array<uint8_t, 3>, 32768>> table_;
     bool passthrough_ = false;
+    // Immutable, prepared once for the selected native texture. LLE/Raw do
+    // not allocate it. Rebuilding screen settings constructs a new table.
+    std::unique_ptr<std::array<uint32_t, 32768>> packed_table_;
+    UploadPixelOrder packed_order_ = UploadPixelOrder::Rgb24;
+    void build_upload_table(UploadPixelOrder order);
 };
 
 }  // namespace gbarecomp::runtime

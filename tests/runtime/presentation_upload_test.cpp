@@ -24,7 +24,8 @@ int main() {
             CHECK(SDL_SetTextureBlendMode(texture,SDL_BLENDMODE_NONE)==0);
             if(format==SDL_PIXELFORMAT_RGB24)CHECK(SDL_UpdateTexture(texture,nullptr,graded.data(),width*3)==0);
             else {
-                colors.map_packed8888(source.data(),packed.data(),width,height,format==SDL_PIXELFORMAT_ABGR8888);
+                ColorLut native_colors(settings,format==SDL_PIXELFORMAT_ABGR8888 ? UploadPixelOrder::Abgr8888 : UploadPixelOrder::Argb8888);
+                native_colors.map_packed8888(source.data(),packed.data(),width,height,format==SDL_PIXELFORMAT_ABGR8888);
                 CHECK(SDL_UpdateTexture(texture,nullptr,packed.data(),width*4)==0);
             }
             CHECK(SDL_SetRenderDrawColor(renderer,17,29,41,255)==0);CHECK(SDL_RenderClear(renderer)==0);
