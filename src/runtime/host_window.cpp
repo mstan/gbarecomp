@@ -1739,7 +1739,9 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, linear_filter ? "linear" : "nearest");
     const int win_w = base_w * scale;
     const int win_h = base_h * scale;
-    Uint32 window_flags = SDL_WINDOW_SHOWN |
+    const char* hidden_env = std::getenv("GBARECOMP_WINDOW_HIDDEN");
+    const bool hidden_window = hidden_env && *hidden_env && *hidden_env != '0';
+    Uint32 window_flags = (hidden_window ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN) |
         ((b->expanded_view || b->resize_driven_view ||
           b->freely_resizable_window)
              ? static_cast<Uint32>(SDL_WINDOW_RESIZABLE) : Uint32{0});
@@ -1898,8 +1900,10 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         return false;
     }
     SDL_SetTextureBlendMode(b->texture, SDL_BLENDMODE_NONE);
-    std::fprintf(stderr, "host_window: upload_format=%s packing=%u\n",
-        SDL_GetPixelFormatName(b->texture_format), b->texture_format != SDL_PIXELFORMAT_RGB24 ? 1u : 0u);
+    std::fprintf(stderr, "host_window: upload_format=%s packing=%u hidden=%u focused=%u\n",
+        SDL_GetPixelFormatName(b->texture_format), b->texture_format != SDL_PIXELFORMAT_RGB24 ? 1u : 0u,
+        (SDL_GetWindowFlags(b->window) & SDL_WINDOW_HIDDEN) ? 1u : 0u,
+        (SDL_GetWindowFlags(b->window) & SDL_WINDOW_INPUT_FOCUS) ? 1u : 0u);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     SDL_SetTextureScaleMode(
         b->texture,
