@@ -80,7 +80,9 @@ larger follow-up, not an implemented or measured gain.
 The whole candidate package is generatedO2/runtimeO3, ordinary RAM HLE, existing
 HLE text/HD renderer with the new spans/occlusion work, and native presentation.
 Reference generated code isO1/runtimeO3. IPO is off; real BIOS LLE and scheduler
-behavior are common. Default promotion remains pending final qualification.
+behavior are common. Isolated candidate defaults now select the measured native
+profile; main/default-branch promotion still requires the remaining qualification
+and owner acceptance.
 
 | Game | Current correctness and feature evidence |
 | --- | --- |
@@ -108,13 +110,17 @@ throughput.
 | MMZ wide288 |9.640625s |9.1484375s | Positive:5.1% lower process CPU; AA0.96%, pair spread1.16pp |
 | MKSC wide382,8x |22.5s |20.8125s | Positive:7.5% lower process CPU; AA0.35%, pair spread2.15pp |
 | MKSC wide382,1x |10.703125s |9.7421875s | Inconclusive; pair spread4.99pp |
-| MKSC native240,1x | — | — | Short-run AA failed; longer active replay pending |
-| Emerald field/wide/battle | — | — | Pending |
+| MKSC native240,1x,4800frames |20.3125s |20.203125s | Neutral/inconclusive; one candidate non-gameplay outlier |
+| Emerald native240 field |6.2265625s |6.109375s | Neutral/inconclusive; mixed pairs within observed variation |
+| Emerald wide284 field |9.484375s |8.7265625s | Inconclusive; one reference non-gameplay outlier |
+| Emerald native240 battle |4.8984375s |4.796875s | Neutral/inconclusive; no win claim |
 
 Bounded elapsed-runtime medians improve in the positive-CPU cases, but their
-controls/pairs are noisy: no throughput win is claimed. No reproducible CPU or
-bounded-runtime regression appears in completed comparisons. Emerald and actual
-GPU timing remain pending. Earlier failed-control attempts are retained.
+controls/pairs are noisy: no throughput win is claimed. Completed CPU/software
+comparisons cover all three titles and representative features, with no
+reproducible CPU or bounded-runtime regression. Actual GPU timing remains pending.
+Earlier failed-control attempts are retained. Both arms showed occasional extra
+non-gameplay wall cost around5seconds; no samples were removed.
 
 ## Measurement and remaining handoff
 
@@ -124,15 +130,17 @@ GPU timing remain pending. Earlier failed-control attempts are retained.
 - Hold the shared named mutex and exclusive file handle; preserve nonempty
   reservations. Hosts are shared; retry an occupied slot at30-minute intervals.
 - The initial absolute10% idle-core preflight caused unnecessary waiting. A
-  separately hashed practical wrapper selects the least-loaded physical core
-  up to50% sibling load, records original eligibility and both primed1-second PDH
-  windows, and pins one logical CPU. Ordinary builds may share spare capacity;
+  separately hashed practical wrapper records load and attempts controls on the
+  least-loaded physical core, preserving original eligibility and both primed
+  1-second PDH windows, and pins one logical CPU. Ordinary builds may share capacity;
   benchmark/test/capture exclusion and reservations remain. Logical CPU usage
-  is compared with logical capacity on SMT hosts, reserving another physical
-  core's capacity. This is a preflight correction, not changed result acceptance.
+  is compared with logical capacity on SMT hosts, retaining capacity for the
+  benchmark thread. This is a preflight correction, not changed result acceptance.
 - Warm both arms, collect A/A controls, then balanced ABBA/BAAB samples. AA<=1%
   and all pairs beyond max(2%,AA+1pp), spread<=3pp, are required for a CPU win.
-  Preserve incomplete/noisy cases; never cherry-pick samples. Inspect bounded
+  Complete balanced pairs even if AA exceeds the strict CPU-win criterion; do
+  not censor an otherwise useful comparison. Preserve incomplete/noisy cases;
+  never cherry-pick samples. Inspect bounded
   seconds per useful guest frame separately; a reproducible regression blocks
   adoption. Warmed wall-minus-bounded cost includes startup/dump/shutdown and
   is not a cold-start metric. Actual GPU cases retain a separate GPU-load gate.
