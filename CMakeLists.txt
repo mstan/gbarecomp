@@ -487,8 +487,9 @@ else()
     target_sources(gbarecomp_runtime PRIVATE
         src/runtime/generated_bios/bios_dispatch_stub.cpp)
     message(STATUS "gbarecomp: BIOS recompiled output absent — placeholder dispatch only. "
-                   "Run `build/gba_recompile.exe --bios bios/gba_bios.bin` "
-                   "to populate.")
+                   "Run `build/gba_recompile.exe --bios bios/gba_bios.bin "
+                   "--config bios/gba_bios.toml --out ${GBARECOMP_GENERATED_BIOS_DIR}` "
+                   "to populate the selected directory with the audited BIOS configuration.")
 endif()
 if(GBARECOMP_SCANLINE_IMPLEMENTATION STREQUAL "HLE")
     set_property(SOURCE src/runtime/runtime.cpp APPEND PROPERTY COMPILE_DEFINITIONS GBARECOMP_SCANLINE_HLE=1)
