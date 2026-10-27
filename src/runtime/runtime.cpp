@@ -1925,7 +1925,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         bus.audio().shadow_hook_pcs(g_runtime_observed_pcs,
                                     RUNTIME_MAX_OBSERVED_PCS));
     g_runtime_dispatch_observer = g_runtime_observed_pc_count
-        ? [](uint32_t pc, int thumb) {
+        ? +[](uint32_t pc, int thumb) {
               if (gba::GbaBus* b = gbarecomp::active_bus())
                   b->audio().shadow_driver_tick(pc, thumb != 0);
           }
