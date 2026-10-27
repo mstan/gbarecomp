@@ -1,8 +1,8 @@
-# Native presentation upload candidate
+# Native presentation upload
 
 Campaign opportunity G16, owning Bead `beads-pc0o`, coordinating
-`beads-2wy8.1`. This is an unpromoted candidate. No built-game speedup has yet
-been established.
+`beads-2wy8.1`. The candidate build default is HLE. Per-game measurements are
+for the full optimization package; no isolated upload speedup is claimed.
 
 `GBARECOMP_PRESENTATION_IMPLEMENTATION=LLE|HLE` is selected at build time.
 LLE retains the established RGB888 grading scratch and SDL RGB24 upload.
@@ -10,7 +10,8 @@ HLE selects an advertised native ARGB8888 or ABGR8888 texture once when the
 renderer opens, then combines the same color lookup and opaque texture packing
 in one portable C++ pass. This avoids the intermediate graded RGB24 image and
 the extra format conversion expected when RGB24 is not a native renderer
-format. Actual upload throughput still requires a built-game measurement.
+format. Whole-game CPU and elapsed-runtime measurements are recorded separately
+in the campaign dataset, with the actual graphics API and device identified.
 The second candidate also prepares the selected packed color table once when
 the screen model is created: each graded output pixel becomes one indexed
 32-bit load/store. It uses an additional 128 KiB for a colored native-texture
@@ -41,6 +42,10 @@ variants for every screen model and both display targets. An SDL dummy-video
 software-renderer check compares actual RGB24/ARGB8888/ABGR8888 uploads and
 readback, with no visible window or sound. These checks passed in the initial
 HLE and LLE builds (two checks each). The HLE selection also compiles SDL-free
-host-window/runtime objects and passes the color check. Current-title
-continuations, resize/UI and actual ordinary/HD performance qualification remain
-required before promotion.
+host-window/runtime objects and passes the color check. Current-title full
+continuations, current-build save/load, adaptive resize and HD checks pass.
+Actual hidden Direct3D11 and NVIDIA GTX760 OpenGL readback also match for all
+screen models and both native formats. Representative built-game OpenGL
+comparisons preserve full state/images and show no reproducible regression;
+noisy results remain inconclusive. See the campaign's exact source/dependency
+identities and case dispositions rather than attributing a bundle gain to G16.

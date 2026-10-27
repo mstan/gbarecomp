@@ -1,5 +1,9 @@
 # GBA native optimization campaign
 
+Checkpoint: 2026-10-27, before owner acceptance. Later qualification, acceptance
+and release status is recorded in the owning Bead and the canonical per-game
+dataset below; this document preserves the investigation and proposed profile.
+
 Owning issue: `beads-pc0o`, under `beads-mc7`; coordinating campaign:
 `beads-2wy8.1` (`campaign:optimization-campaign`). Work is solo in isolated
 worktrees. Original checkouts, owner saves and settings are preserved.
@@ -42,22 +46,22 @@ Bundle measurements cannot establish an individual component's speedup.
 
 | ID | Opportunity | Disposition |
 | --- | --- | --- |
-| G01 | Native ordinary RAM access | implemented; performance qualification open |
+| G01 | Native ordinary RAM access | implemented in selected candidate package; portable fallback retained |
 | G02 | Direct cartridge mapping | evaluated; no additional implementation selected |
 | G03 | Dispatch lookup | evaluated; current upstream optimization reused |
 | G04 | Persistent interpreted hot code | evaluated; no missing-code payload selected |
-| G05 | Generated code optimization and cross-module calls | O2 implemented; current-source performance qualification open |
+| G05 | Generated code optimization and cross-module calls | O2 selected in candidate; IPO remains excluded |
 | G06 | Native event-horizon execution | evaluated; prototype excluded from current candidate |
 | G07 | Native wait/poll services | evaluated; existing optimization retained |
 | G08 | BIOS whole-service HLE | evaluated; existing BIOS HLE pilot not selected |
-| G09 | Adaptive text tile-row jobs | implemented; current built-game performance qualification open |
+| G09 | Adaptive text tile-row jobs | implemented in selected candidate package |
 | G10 | Winner-only composition | evaluated; unsuccessful prototype removed |
 | G11 | OBJ decode and row preparation | evaluated; persistent cache not selected |
 | G12 | Reusable tile/palette/map decode | evaluated; existing caches retained |
 | G13 | Redundant canonical/presentation rendering | evaluated; required split retained |
-| G14 | Occluded HD affine sampling | implemented; isolated correctness passed; timing open |
+| G14 | Occluded HD affine sampling | implemented; exact8x output and matched package measurements retained |
 | G15 | GPU affine rendering | evaluated; larger architecture deferred |
-| G16 | Native presentation conversion/upload | implemented; current GPU correctness passed, timing open |
+| G16 | Native presentation conversion/upload | implemented; software/Direct3D11/OpenGL exactness and representative game measurements retained |
 | G17 | Buffer-level device audio | evaluated; existing batching retained |
 | G18 | Native SoundMain / MP2K service | evaluated; substantial follow-up identified, not implemented |
 | G19 | Broader DMA/bulk services | evaluated; existing RAM pilot remains experimental |
@@ -118,9 +122,21 @@ throughput.
 Bounded elapsed-runtime medians improve in the positive-CPU cases, but their
 controls/pairs are noisy: no throughput win is claimed. Completed CPU/software
 comparisons cover all three titles and representative features, with no
-reproducible CPU or bounded-runtime regression. Actual GPU timing remains pending.
+reproducible CPU or bounded-runtime regression. Representative hardware OpenGL
+comparisons also cover every title, including HD racing, widescreen field and
+battle; complete states/PNGs remain exact. The interrupted warmup and three
+optional uncompleted hardware cases are explicitly unverified, not passes.
 Earlier failed-control attempts are retained. Both arms showed occasional extra
 non-gameplay wall cost around5seconds; no samples were removed.
+
+The earlier MKSC rows above used UI6374 and are retained as historical matched
+package evidence. Final MKSC qualification uses its committed UI0546 in both
+arms: native240 is neutral/inconclusive; wide382 at8x uses24.484375s versus
+21.796875s median process CPU, a qualified11.0% reduction (AA0.19%, spread1.68pp).
+Its remaining wide1x disposition is recorded in the canonical dataset. Both other
+titles already use UI0546. No current UI feature is rolled back to match a timing.
+Hardware Emerald wide284 shows9.0–12.0% lower CPU across all four pairs, but the
+strict spread rule leaves the formal verdict inconclusive. Keep that distinction.
 
 ## Measurement and remaining handoff
 
