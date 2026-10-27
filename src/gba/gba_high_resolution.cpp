@@ -252,6 +252,28 @@ void GbaHighResolutionFrame::resolve() {
         }
         auto* dst = work_.data() + size_t(row_ * scale_ + sy) * width() * 3;
         for (unsigned x = 0; x < width_; ++x) {
+#if defined(GBARECOMP_HD_SAMPLER_HLE)
+            // Native HUD/OBJ pixels cover a whole output block. If no affine
+            // layer can reach the winner (or its required alpha source),
+            // resolve once and expand the block rather than sampling hidden
+            // texels and rebuilding the same candidate stack per subpixel.
+            const Pixel& base = top_[x];
+            const unsigned effect = (bldcnt_ >> 6) & 3u;
+            bool fixed = !((effect == 1 || base.layer == 4) && base.target1);
+            for (unsigned i = 0; fixed && i < 2; ++i) {
+                const auto& a = affine_[i];
+                if (a.active && (windows_[x] & (1u << (i + 2))) &&
+                    int((a.cnt & 3) * 256 + 130 + i) < base.key) fixed = false;
+            }
+            if (black_[x]) {
+                std::memset(dst, 0, scale_ * 3);
+                dst += scale_ * 3;
+            } else if (fixed) {
+                uint8_t rgb[3];
+                write_color(rgb, base, second_[x]);
+                for (unsigned sx = 0; sx < scale_; ++sx, dst += 3) std::memcpy(dst,rgb,3);
+            } else
+#endif
             for (unsigned sx = 0; sx < scale_; ++sx, dst += 3) {
                 if (black_[x]) { dst[0] = dst[1] = dst[2] = 0; continue; }
                 Pixel top = top_[x], second = second_[x];

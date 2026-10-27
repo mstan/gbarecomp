@@ -19,6 +19,7 @@
 #include "mod_state.h"
 #include "snapshot.h"
 #include "runtime_bus_bridge.h"
+#include "runtime_arm.h"
 
 namespace {
 
@@ -51,6 +52,60 @@ void check_bool(const char* test, const char* tag,
                     test, tag, got ? 1 : 0, expect ? 1 : 0);
         ++failures;
     }
+}
+
+void test_native_ram_contract() {
+    constexpr const char* t = "native_ram";
+    gba::GbaBus bus;
+    uint32_t value = 0;
+    for (uint32_t region : {0x02000000u, 0x03000000u}) {
+        for (uint32_t offset : {0u, 1u, 0x123u, 0x7ffcu}) {
+            const uint32_t addr = region + offset;
+            bus.write32(addr, 0x89abcdefu);
+            check_bool(t, "read8 admitted", bus.native_ram_read<1>(addr, value), true);
+            check_eq(t, "read8 bytes", value, bus.read8(addr));
+            check_bool(t, "read16 admitted", bus.native_ram_read<2>(addr, value), true);
+            check_eq(t, "read16 bytes", value, bus.read16(addr));
+            check_bool(t, "read32 admitted", bus.native_ram_read<4>(addr, value), true);
+            check_eq(t, "read32 bytes", value, bus.read32(addr));
+            const uint32_t mirror = addr + (region == 0x02000000u ? 0x40000u : 0x8000u);
+            check_bool(t, "mirror write", bus.native_ram_write<4>(mirror, 0x76543210u), true);
+            check_eq(t, "mirror backing", bus.read32(addr), 0x76543210u);
+            check_bool(t, "byte write", bus.native_ram_write<1>(addr+1, 0xef), true);
+            check_eq(t, "byte neighbors", bus.read32(addr), 0x7654ef10u);
+            check_bool(t, "half write", bus.native_ram_write<2>(addr+1, 0xabcd), true);
+            check_eq(t, "half neighbors", bus.read32(addr), 0x76abcd10u);
+        }
+    }
+    for (uint32_t addr : {0u,0x04000000u,0x05000000u,0x06000000u,0x07000000u,
+                          0x08000000u,0x0e000000u,0x12000000u,0xffffffffu}) {
+        check_bool(t, "device read rejected", bus.native_ram_read<4>(addr,value), false);
+        check_bool(t, "device write rejected", bus.native_ram_write<4>(addr,0), false);
+    }
+    check_bool(t, "edge read rejected", bus.native_ram_read<4>(0x03007ffe,value), false);
+    check_bool(t, "edge write rejected", bus.native_ram_write<2>(0x0203ffff,0), false);
+    struct Observer : gba::BusWriteObserver {
+        unsigned calls = 0;
+        bool on_bus_write(gba::BusWriteRegion,uint32_t,uint32_t,uint8_t,uint32_t,uint32_t) override {
+            ++calls; return true;
+        }
+    } observer;
+    bus.write32(0x02000000u,0x12345678u);
+    bus.set_write_observer(&observer);
+    check_bool(t, "observer declines direct store", bus.native_ram_write<4>(0x02000000u,0), false);
+    auto* previous = gbarecomp::active_bus();
+    gbarecomp::set_active_bus(&bus);
+    bus_write_u32(0x02000000u,0);
+    check_eq(t, "observer sees runtime store", observer.calls, 1u);
+    check_eq(t, "observer suppresses runtime store", bus.read32(0x02000000u), 0x12345678u);
+    const auto previous_override = g_runtime_bus_read_override;
+    g_runtime_bus_read_override = [](uint32_t,uint32_t,uint32_t,uint32_t original,uint32_t* out) {
+        *out = original ^ 0x11223344u; return 1;
+    };
+    check_eq(t, "runtime read override", bus_read_u32(0x02000000u), 0x0316653cu);
+    g_runtime_bus_read_override = previous_override;
+    gbarecomp::set_active_bus(previous);
+    bus.set_write_observer(nullptr);
 }
 
 // Build a synthetic but valid-shape ROM and verify the parser
@@ -817,6 +872,7 @@ void test_waitstates() {
 }
 
 int main() {
+    test_native_ram_contract();
     test_minishcap_like();
     test_corrupt_header();
     test_no_save_signature();

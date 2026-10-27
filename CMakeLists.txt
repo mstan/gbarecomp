@@ -31,6 +31,17 @@ if(NOT GBARECOMP_DMA_RAM_IMPLEMENTATION MATCHES "^(LLE|HLE)$")
     message(FATAL_ERROR "GBARECOMP_DMA_RAM_IMPLEMENTATION must be LLE or HLE")
 endif()
 
+set(GBARECOMP_MEMORY_IMPLEMENTATION "LLE" CACHE STRING
+    "Ordinary RAM access: native backing arrays (HLE) or full bus (LLE)")
+set_property(CACHE GBARECOMP_MEMORY_IMPLEMENTATION PROPERTY STRINGS LLE HLE)
+if(NOT GBARECOMP_MEMORY_IMPLEMENTATION MATCHES "^(LLE|HLE)$")
+    message(FATAL_ERROR "GBARECOMP_MEMORY_IMPLEMENTATION must be LLE or HLE")
+endif()
+if(GBARECOMP_MEMORY_IMPLEMENTATION STREQUAL "HLE")
+    set_property(SOURCE src/runtime/runtime_bus_bridge.cpp src/runtime/runtime.cpp
+        APPEND PROPERTY COMPILE_DEFINITIONS GBARECOMP_NATIVE_MEMORY=1)
+endif()
+
 # Large generated corpora are expensive to rebuild in fresh build trees.
 # Reuse identical objects automatically when ccache/sccache is available, while
 # preserving an explicit launcher selected by the parent project or user.
@@ -1107,6 +1118,11 @@ target_include_directories(ppu_smoke_tests PRIVATE src/runtime src/debug)
 target_link_libraries(ppu_smoke_tests PRIVATE gbarecomp_gba)
 gbarecomp_target_link_host_stack(ppu_smoke_tests PRIVATE)
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
+
+add_executable(ppu_text_span_tests tests/ppu/text_span_contract.cpp)
+target_link_libraries(ppu_text_span_tests PRIVATE gbarecomp_gba)
+gbarecomp_target_link_host_stack(ppu_text_span_tests PRIVATE)
+add_test(NAME ppu_text_span_tests COMMAND ppu_text_span_tests)
 
 add_executable(save_config_tests
     tests/runtime/save_config_test.cpp

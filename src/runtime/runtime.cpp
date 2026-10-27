@@ -1697,6 +1697,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 #else
     std::printf("scanline_backend=LLE (per-pixel composition)\n");
 #endif
+#if defined(GBARECOMP_NATIVE_MEMORY)
+    std::printf("memory_backend=HLE (native ordinary RAM)\n");
+#else
+    std::printf("memory_backend=LLE (bus service)\n");
+#endif
     if (!args.quiet) std::printf("dma_ram_backend=%s\n", gba::dma_ram_implementation());
     std::printf("hd_sampler_backend=%s\n", gba::GbaHighResolutionFrame::sampler_implementation());
 

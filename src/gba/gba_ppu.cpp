@@ -1547,7 +1547,59 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
         uint32_t width_px = width_tiles * 8u;
         uint32_t height_px = height_tiles * 8u;
         uint32_t block_cols = width_tiles / 32u;
+#if defined(GBARECOMP_SCANLINE_HLE)
+        // Prepare ordinary text tiles as native row jobs. Mapping callbacks
+        // retain their per-pixel contract; only columns with no such callback
+        // are batched. All source bytes are live for this immutable scanline,
+        // so direct plugin writes, DMA and restore need no cross-row cache.
+        const bool span_row = native_row &&
+            !(g_ws_bg_xy_provider && (g_ws_bg_xy_provider_layers & (1u << layer))) &&
+            !(g_ws_bg_x_provider && (g_ws_bg_x_provider_layers & (1u << layer)));
+        const uint32_t span_begin = g_ws_tilemap_provider ? ox : 0u;
+        const uint32_t span_end = g_ws_tilemap_provider ? std::min(ox + kVanW, out_w) : out_w;
+        if (span_row) {
+            const uint32_t tex_y = (y + vofs) & (height_px - 1u);
+            const uint32_t tile_y = tex_y >> 3;
+            const uint32_t map_row = screen_base + (tile_y >> 5) * block_cols * 0x800u +
+                (tile_y & 31u) * 64u;
+            const int key = static_cast<int>(bg_priority * 256u + 128u + layer);
+            const bool target1 = (first_targets & (1u << layer)) != 0;
+            const bool target2 = (second_targets & (1u << layer)) != 0;
+            for (uint32_t x = span_begin; x < span_end;) {
+                const uint32_t tex_x = (x - ox + hofs) & (width_px - 1u);
+                const uint32_t begin = tex_x & 7u;
+                const uint32_t count = std::min(8u - begin, span_end - x);
+                const uint32_t map_off = map_row + ((tex_x >> 8) * 0x800u) +
+                    ((tex_x >> 3) & 31u) * 2u;
+                if (map_off + 1u >= 96u * 1024u) { x += count; continue; }
+                const uint16_t entry = load_u16_le(vram + map_off);
+                const uint32_t py = (entry & 0x0800u) ? 7u - (tex_y & 7u) : tex_y & 7u;
+                const uint32_t tile_row = char_base + (entry & 0x03ffu) *
+                    (color256 ? 64u : 32u) + py * (color256 ? 8u : 4u);
+                const uint32_t palette_bank = (entry >> 12) << 4;
+                for (uint32_t j = 0; j < count; ++j) {
+                    const uint32_t sx = x + j;
+                    const bool margin = g_ws_authored_margin_layers &&
+                        (sx < ox || sx >= ox + kVanW);
+                    if (!layer_enabled(sx, layer) && !margin) continue;
+                    const uint32_t px = (entry & 0x0400u) ? 7u - begin - j : begin + j;
+                    const uint32_t addr = tile_row + (color256 ? px : px >> 1);
+                    if (addr >= 96u * 1024u) continue;
+                    const uint8_t packed = vram[addr];
+                    uint32_t index = color256 ? packed : ((px & 1u) ? packed >> 4 : packed & 15u);
+                    if (!index) continue;
+                    if (!color256) index |= palette_bank;
+                    submit(sx, load_u16_le(pal + index * 2u), key, static_cast<uint8_t>(layer),
+                           blend_enabled(sx) && target1, target2);
+                }
+                x += count;
+            }
+        }
+#endif
         for (uint32_t x = 0; x < out_w; ++x) {
+#if defined(GBARECOMP_SCANLINE_HLE)
+            if (span_row && x >= span_begin && x < span_end) { x = span_end - 1; continue; }
+#endif
             int hx = static_cast<int>(x) - static_cast<int>(ox);
             const bool authored_margin = g_ws_authored_margin_layers &&
                 (!native_row || hx < 0 || hx >= static_cast<int>(kVanW));

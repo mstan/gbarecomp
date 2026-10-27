@@ -474,14 +474,36 @@ static inline uint32_t apply_bus_read_override(uint32_t addr, uint32_t width,
     return value;
 }
 
+// The native implementation replaces ordinary RAM transactions only. Keep
+// devices, observability, override ordering and idle-loop accounting shared.
+template<unsigned Width> static uint32_t read_memory(uint32_t addr) {
+    auto* bus = gbarecomp::g_active_bus;
+    if (!bus) return 0;
+#if defined(GBARECOMP_NATIVE_MEMORY)
+    uint32_t value;
+    if (bus->native_ram_read<Width>(addr, value)) return value;
+#endif
+    if constexpr (Width == 1) return bus->read8(addr);
+    if constexpr (Width == 2) return bus->read16(addr);
+    return bus->read32(addr);
+}
+template<unsigned Width> static void write_memory(uint32_t addr, uint32_t value) {
+    auto* bus = gbarecomp::g_active_bus;
+    if (!bus) return;
+#if defined(GBARECOMP_NATIVE_MEMORY)
+    if (bus->native_ram_write<Width>(addr, value)) return;
+#endif
+    if constexpr (Width == 1) bus->write8(addr, uint8_t(value));
+    else if constexpr (Width == 2) bus->write16(addr, uint16_t(value));
+    else bus->write32(addr, value);
+}
+
 extern "C" uint32_t bus_read_u32(uint32_t addr) {
     if (is_io_addr(addr)) runtime_mmio_catch_up();
     if (!is_idle_safe_read(addr)) ++g_idle_disturb_epoch;
     note_mmio_read(addr, 4u);
     gbarecomp::sync_bios_access();
-    uint32_t v = gbarecomp::g_active_bus
-        ? gbarecomp::g_active_bus->read32(addr)
-        : 0u;
+    uint32_t v = read_memory<4>(addr);
     v = apply_bus_read_override(addr, 4u, v);
     gbarecomp::trace_unmapped_read(addr, v, 4u);
     return v;
@@ -492,9 +514,7 @@ extern "C" uint16_t bus_read_u16(uint32_t addr) {
     if (!is_idle_safe_read(addr)) ++g_idle_disturb_epoch;
     note_mmio_read(addr, 2u);
     gbarecomp::sync_bios_access();
-    uint16_t v = gbarecomp::g_active_bus
-        ? gbarecomp::g_active_bus->read16(addr)
-        : uint16_t{0};
+    uint16_t v = static_cast<uint16_t>(read_memory<2>(addr));
     v = static_cast<uint16_t>(apply_bus_read_override(addr, 2u, v));
     gbarecomp::trace_unmapped_read(addr, v, 2u);
     return v;
@@ -505,9 +525,7 @@ extern "C" uint8_t bus_read_u8(uint32_t addr) {
     if (!is_idle_safe_read(addr)) ++g_idle_disturb_epoch;
     note_mmio_read(addr, 1u);
     gbarecomp::sync_bios_access();
-    uint8_t v = gbarecomp::g_active_bus
-        ? gbarecomp::g_active_bus->read8(addr)
-        : uint8_t{0};
+    uint8_t v = static_cast<uint8_t>(read_memory<1>(addr));
     v = static_cast<uint8_t>(apply_bus_read_override(addr, 1u, v));
     gbarecomp::trace_unmapped_read(addr, v, 1u);
     return v;
@@ -516,7 +534,7 @@ extern "C" uint8_t bus_read_u8(uint32_t addr) {
 extern "C" void bus_write_u32(uint32_t addr, uint32_t val) {
     bool io = is_io_addr(addr);
     if (io) runtime_mmio_catch_up();
-    if (gbarecomp::g_active_bus) gbarecomp::g_active_bus->write32(addr, val);
+    write_memory<4>(addr, val);
     ++g_idle_disturb_epoch;   // any guest write may change a watched poll value
     if (io) runtime_resync_horizon();
 }
@@ -524,7 +542,7 @@ extern "C" void bus_write_u32(uint32_t addr, uint32_t val) {
 extern "C" void bus_write_u16(uint32_t addr, uint16_t val) {
     bool io = is_io_addr(addr);
     if (io) runtime_mmio_catch_up();
-    if (gbarecomp::g_active_bus) gbarecomp::g_active_bus->write16(addr, val);
+    write_memory<2>(addr, val);
     ++g_idle_disturb_epoch;
     if (io) runtime_resync_horizon();
 }
@@ -532,7 +550,7 @@ extern "C" void bus_write_u16(uint32_t addr, uint16_t val) {
 extern "C" void bus_write_u8(uint32_t addr, uint8_t val) {
     bool io = is_io_addr(addr);
     if (io) runtime_mmio_catch_up();
-    if (gbarecomp::g_active_bus) gbarecomp::g_active_bus->write8(addr, val);
+    write_memory<1>(addr, val);
     ++g_idle_disturb_epoch;
     if (io) runtime_resync_horizon();
 }

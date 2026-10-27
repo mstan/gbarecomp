@@ -11,6 +11,34 @@
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "line %d: %s\n", __LINE__, #x); std::exit(1); } } while (0)
 namespace {
 bool authorize(int bg, int) { return bg == 2; }
+void opaque_and_forced_alpha() {
+    gba::GbaHighResolutionFrame hd(4);
+    hd.configure(240,160);
+    std::array<uint8_t,0x60> io{};
+    std::array<uint8_t,98304> vram{};
+    std::array<uint8_t,1024> pal{};
+    io[0x0c]=4; io[0x21]=1; io[0x27]=1;
+    // Mode-zero BLDCNT still blends a semi-transparent OBJ against BG2.
+    io[0x51]=4; io[0x52]=io[0x53]=8;
+    pal[2]=0; pal[3]=0x7c;
+    for(unsigned i=0;i<64;++i) vram[0x4000+i]=1;
+    for(unsigned y=0;y<160;++y) {
+        CHECK(hd.begin_line(y,0,0,0x0401,io.data(),vram.data(),pal.data(),authorize,false));
+        for(unsigned x=0;x<240;++x) {
+            hd.window(x,0x3f);
+            hd.submit(x,31,0,4,(x&1)!=0,false);
+        }
+        hd.resolve();
+    }
+    hd.latch(); CHECK(hd.pixels());
+    uint8_t opaque[3],alpha[3];
+    gba::color::to_rgb888(31,opaque);
+    gba::color::to_rgb888(gba::color::blend_alpha_gba555(31,0x7c00,8,8),alpha);
+    for(unsigned sx=0;sx<4;++sx) {
+        CHECK(std::memcmp(hd.pixels()+sx*3,opaque,3)==0);
+        CHECK(std::memcmp(hd.pixels()+(4+sx)*3,alpha,3)==0);
+    }
+}
 void filter_precision() {
     gba::GbaHighResolutionFrame hd(2);
     hd.configure(240,160);
@@ -123,6 +151,7 @@ int main() {
     gba::GbaHighResolutionFrame capacity(2);
     capacity.configure(gba::GbaPpu::kMaxRenderWidth, 208);
     CHECK(capacity.width() == gba::GbaPpu::kMaxRenderWidth * 2 && capacity.height() == 416);
+    opaque_and_forced_alpha();
     filter_precision();
     for (unsigned scale : {2u,3u,4u,8u,16u}) { run(scale,false,false); run(scale,true,true); }
     std::puts("high resolution: real fractional samples, HUD/blend parity, native state isolation, reset/partial-raster/resize passed");

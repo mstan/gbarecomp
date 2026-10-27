@@ -184,6 +184,36 @@ public:
     uint8_t* vram_ptr()  { return vram_.data();  }
     uint8_t* oam_ptr()   { return oam_.data();   }
 
+    // Native ordinary-memory access. Uses the same backing bytes and mirrors
+    // as the bus; device/edge accesses and observed writes use the bus service.
+    // No retained pointer/cache survives instance binding or state restoration.
+    template<unsigned Width> bool native_ram_read(uint32_t addr, uint32_t& value) const {
+        static_assert(Width == 1 || Width == 2 || Width == 4);
+        const uint32_t region = addr >> 24;
+        if (region != 2u && region != 3u) return false;
+        const uint32_t mask = region == 2u ? 0x3ffffu : 0x7fffu;
+        const uint32_t offset = addr & mask;
+        if (offset > mask + 1u - Width) return false;
+        const uint8_t* p = (region == 2u ? ewram_.data() : iwram_.data()) + offset;
+        value = p[0];
+        if constexpr (Width >= 2) value |= uint32_t(p[1]) << 8;
+        if constexpr (Width == 4) value |= (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+        return true;
+    }
+    template<unsigned Width> bool native_ram_write(uint32_t addr, uint32_t value) {
+        static_assert(Width == 1 || Width == 2 || Width == 4);
+        const uint32_t region = addr >> 24;
+        if ((region != 2u && region != 3u) || write_observer_) return false;
+        const uint32_t mask = region == 2u ? 0x3ffffu : 0x7fffu;
+        const uint32_t offset = addr & mask;
+        if (offset > mask + 1u - Width) return false;
+        uint8_t* p = (region == 2u ? ewram_.data() : iwram_.data()) + offset;
+        p[0] = uint8_t(value);
+        if constexpr (Width >= 2) p[1] = uint8_t(value >> 8);
+        if constexpr (Width == 4) { p[2] = uint8_t(value >> 16); p[3] = uint8_t(value >> 24); }
+        return true;
+    }
+
     // Cartridge ROM bytes (the buffer set via set_rom; not owned).
     // Used by observability tooling that scans the image, e.g. MP2K
     // driver detection (src/gba/gba_m4a).
