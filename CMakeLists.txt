@@ -1025,6 +1025,14 @@ add_executable(color_lut_tests
     src/runtime/color_lut.cpp)
 target_include_directories(color_lut_tests PRIVATE src/runtime)
 add_test(NAME color_lut_tests COMMAND color_lut_tests)
+if(Python3_Interpreter_FOUND AND NOT CMAKE_CROSSCOMPILING)
+    add_test(NAME netplay_optimization_identity
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/netplay/optimization_identity_test.py"
+            --cmake "${CMAKE_COMMAND}" --generator "${CMAKE_GENERATOR}"
+            --compiler "${CMAKE_CXX_COMPILER}" --make-program "${CMAKE_MAKE_PROGRAM}"
+            --output "${CMAKE_CURRENT_BINARY_DIR}/optimization-identity-test")
+endif()
 if(GBARECOMP_SDL2_OK)
     add_executable(presentation_upload_tests
         tests/runtime/presentation_upload_test.cpp src/runtime/color_lut.cpp)
