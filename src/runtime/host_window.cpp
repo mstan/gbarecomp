@@ -344,6 +344,8 @@ struct Backend {
     SDL_Window*   window   = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_Texture*  texture  = nullptr;
+    Uint32        texture_format = SDL_PIXELFORMAT_RGB24;
+    std::vector<uint32_t> packed_upload;
     unsigned      presentation_source_w = 0, presentation_source_h = 0;
     std::vector<uint8_t> presentation_upload;
     SDL_Texture*  sharp_texture = nullptr;
@@ -1865,10 +1867,28 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     }
 #endif
 
+#if defined(GBARECOMP_NATIVE_PRESENTATION)
+    // Prefer an advertised native 32-bit texture. This folds screen grading
+    // and SDL's otherwise separate RGB24 conversion into one portable pass.
+    SDL_RendererInfo upload_info{};
+    if (SDL_GetRendererInfo(b->renderer, &upload_info) == 0) {
+        for (const Uint32 wanted : {SDL_PIXELFORMAT_ARGB8888, SDL_PIXELFORMAT_ABGR8888}) {
+            for (Uint32 i = 0; i < upload_info.num_texture_formats; ++i) {
+                if (upload_info.texture_formats[i] == wanted) { b->texture_format = wanted; break; }
+            }
+            if (b->texture_format != SDL_PIXELFORMAT_RGB24) break;
+        }
+    }
+#endif
     b->texture = SDL_CreateTexture(b->renderer,
-                                   SDL_PIXELFORMAT_RGB24,
+                                   b->texture_format,
                                    SDL_TEXTUREACCESS_STREAMING,
                                    base_w, base_h);
+    if (!b->texture && b->texture_format != SDL_PIXELFORMAT_RGB24) {
+        b->texture_format = SDL_PIXELFORMAT_RGB24;
+        b->texture = SDL_CreateTexture(b->renderer, b->texture_format,
+            SDL_TEXTUREACCESS_STREAMING, base_w, base_h);
+    }
     if (!b->texture) {
         std::fprintf(stderr, "host_window: SDL_CreateTexture failed: %s\n",
                      SDL_GetError());
@@ -1877,6 +1897,9 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         delete b;
         return false;
     }
+    SDL_SetTextureBlendMode(b->texture, SDL_BLENDMODE_NONE);
+    std::fprintf(stderr, "host_window: upload_format=%s packing=%u\n",
+        SDL_GetPixelFormatName(b->texture_format), b->texture_format != SDL_PIXELFORMAT_RGB24 ? 1u : 0u);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     SDL_SetTextureScaleMode(
         b->texture,
@@ -2305,7 +2328,7 @@ bool HostWindow::set_surface_size(int base_w, int base_h) {
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY,
                 b->linear_filter ? "linear" : "nearest");
     SDL_Texture* replacement = SDL_CreateTexture(
-        b->renderer, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING,
+        b->renderer, b->texture_format, SDL_TEXTUREACCESS_STREAMING,
         base_w, base_h);
     if (!replacement) {
         std::fprintf(stderr,
@@ -2313,6 +2336,7 @@ bool HostWindow::set_surface_size(int base_w, int base_h) {
                      SDL_GetError());
         return false;
     }
+    SDL_SetTextureBlendMode(replacement, SDL_BLENDMODE_NONE);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     SDL_SetTextureScaleMode(
         replacement,
@@ -2391,7 +2415,7 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
                (info.max_texture_height > 0 && upload_h > unsigned(info.max_texture_height))) shrink();
         SDL_Texture* replacement = nullptr;
         while (upload_w != unsigned(texture_w) || upload_h != unsigned(texture_h)) {
-            replacement = SDL_CreateTexture(b->renderer, SDL_PIXELFORMAT_RGB24,
+            replacement = SDL_CreateTexture(b->renderer, b->texture_format,
                 SDL_TEXTUREACCESS_STREAMING, int(upload_w), int(upload_h));
             if (replacement) break;
             if (upload_w == 1 && upload_h == 1)
@@ -2399,6 +2423,7 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
             shrink();
         }
         if (replacement) {
+            SDL_SetTextureBlendMode(replacement, SDL_BLENDMODE_NONE);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
             SDL_SetTextureScaleMode(replacement, b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
@@ -2427,12 +2452,21 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
     note_present_for_health(b);
     // Present-time color grading (opt-in). Raw is passthrough: the raw
     // PPU frame is uploaded untouched, so verify/frame-hash are unaffected.
-    if (b->color_lut && !b->color_lut->is_passthrough()) {
-        b->graded_fb.resize(size_t(texture_w) * texture_h * 3);
-        b->color_lut->map_rgb888(rgb888, b->graded_fb.data(), texture_w, texture_h);
-        rgb888 = b->graded_fb.data();
+    if (b->texture_format != SDL_PIXELFORMAT_RGB24) {
+        b->packed_upload.resize(size_t(texture_w) * texture_h);
+        static const runtime::ColorLut raw_lut(runtime::ColorSettings{});
+        const auto& lut = b->color_lut ? *b->color_lut : raw_lut;
+        lut.map_packed8888(rgb888, b->packed_upload.data(), texture_w, texture_h,
+            b->texture_format == SDL_PIXELFORMAT_ABGR8888);
+        SDL_UpdateTexture(b->texture, nullptr, b->packed_upload.data(), texture_w * 4);
+    } else {
+        if (b->color_lut && !b->color_lut->is_passthrough()) {
+            b->graded_fb.resize(size_t(texture_w) * texture_h * 3);
+            b->color_lut->map_rgb888(rgb888, b->graded_fb.data(), texture_w, texture_h);
+            rgb888 = b->graded_fb.data();
+        }
+        SDL_UpdateTexture(b->texture, nullptr, rgb888, texture_w * 3);
     }
-    SDL_UpdateTexture(b->texture, nullptr, rgb888, texture_w * 3);
 #if defined(__ANDROID__)
     // Pure black around the game: on OLED panels (common on Android phones
     // and handhelds such as the RG556) those pixels are then off, not a dim

@@ -37,6 +37,16 @@ set_property(CACHE GBARECOMP_MEMORY_IMPLEMENTATION PROPERTY STRINGS LLE HLE)
 if(NOT GBARECOMP_MEMORY_IMPLEMENTATION MATCHES "^(LLE|HLE)$")
     message(FATAL_ERROR "GBARECOMP_MEMORY_IMPLEMENTATION must be LLE or HLE")
 endif()
+set(GBARECOMP_PRESENTATION_IMPLEMENTATION "LLE" CACHE STRING
+    "Host upload: fused native-format color conversion (HLE) or RGB24 (LLE)")
+set_property(CACHE GBARECOMP_PRESENTATION_IMPLEMENTATION PROPERTY STRINGS LLE HLE)
+if(NOT GBARECOMP_PRESENTATION_IMPLEMENTATION MATCHES "^(LLE|HLE)$")
+    message(FATAL_ERROR "GBARECOMP_PRESENTATION_IMPLEMENTATION must be LLE or HLE")
+endif()
+if(GBARECOMP_PRESENTATION_IMPLEMENTATION STREQUAL "HLE")
+    set_property(SOURCE src/runtime/host_window.cpp src/runtime/color_lut.cpp
+        APPEND PROPERTY COMPILE_DEFINITIONS GBARECOMP_NATIVE_PRESENTATION=1)
+endif()
 if(GBARECOMP_MEMORY_IMPLEMENTATION STREQUAL "HLE")
     set_property(SOURCE src/runtime/runtime_bus_bridge.cpp src/runtime/runtime.cpp
         APPEND PROPERTY COMPILE_DEFINITIONS GBARECOMP_NATIVE_MEMORY=1)
@@ -1015,6 +1025,13 @@ add_executable(color_lut_tests
     src/runtime/color_lut.cpp)
 target_include_directories(color_lut_tests PRIVATE src/runtime)
 add_test(NAME color_lut_tests COMMAND color_lut_tests)
+if(GBARECOMP_SDL2_OK)
+    add_executable(presentation_upload_tests
+        tests/runtime/presentation_upload_test.cpp src/runtime/color_lut.cpp)
+    target_include_directories(presentation_upload_tests PRIVATE src/runtime ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(presentation_upload_tests PRIVATE ${SDL2_LIBRARIES})
+    add_test(NAME presentation_upload_tests COMMAND presentation_upload_tests)
+endif()
 
 add_executable(diagnostic_capture_tests tests/runtime/diagnostic_capture_test.cpp)
 target_include_directories(diagnostic_capture_tests PRIVATE src/gba src/runtime src/armv4t)

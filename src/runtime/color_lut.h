@@ -63,6 +63,14 @@ public:
     void map_rgb888(const uint8_t* src, uint8_t* dst,
                     int width, int height) const;
 
+    // Same displayed colors, fused with opaque native-texture packing.
+    // dst holds width*height uint32_t pixels and must not overlap src.
+    // red_low_byte selects ABGR8888; false selects ARGB8888. These are
+    // logical SDL pixel values, independent of the host's byte order.
+    void map_packed8888(const uint8_t* src, uint32_t* dst,
+                        int width, int height, bool red_low_byte) const;
+    static const char* upload_implementation();
+
 private:
     // table_[bgr555] = {R,G,B}.
     std::unique_ptr<std::array<std::array<uint8_t, 3>, 32768>> table_;

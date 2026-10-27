@@ -32,6 +32,7 @@
 #include "gba_rom_header.h"
 #include "host_platform.h"
 #include "host_window.h"
+#include "color_lut.h"
 #include "touch_input.h"
 #include "runtime_arm.h"
 #include "runtime_bus_bridge.h"
@@ -1704,6 +1705,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 #endif
     if (!args.quiet) std::printf("dma_ram_backend=%s\n", gba::dma_ram_implementation());
     std::printf("hd_sampler_backend=%s\n", gba::GbaHighResolutionFrame::sampler_implementation());
+    std::printf("presentation_backend=%s\n", runtime::ColorLut::upload_implementation());
 
     // GBARECOMP_WS_WIP is an explicit development override for exercising the
     // generic expanded renderer in games that have not advertised capability.
