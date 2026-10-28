@@ -195,7 +195,8 @@ public:
     }
     std::span<const uint8_t> vram_read_view() const { return vram_; }
 #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
-    void enable_draw_memory();
+    bool enable_draw_memory();
+    void disable_draw_memory();
     bool draw_memory_supported() const;
     GbaDrawMemory* draw_memory();
     // Qualified native/DMA writers use one range transaction. Observed or

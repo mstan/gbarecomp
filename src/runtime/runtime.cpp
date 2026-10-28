@@ -2897,6 +2897,22 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
     const char* native_draw_setting=std::getenv("GBARECOMP_NATIVE_DRAW");
     const bool native_draw_requested=!native_draw_setting || native_draw_setting[0]!='0';
+    bool native_draw_active=false,native_draw_failed=false;
+    auto sync_native_draw = [&]() {
+        const bool wanted=native_draw_requested && !native_draw_failed &&
+            args.internal_resolution==1 && !ppu.view_expanded() && win.hd_jobs_available();
+        if(wanted==native_draw_active)return;
+        if(wanted) {
+            if(!bus.enable_draw_memory())return;
+            ppu.set_native_draw_enabled(true,[&](const auto& frame,auto& rgb) {
+                return win.readback_native(frame,rgb);
+            });
+        } else {
+            ppu.set_native_draw_enabled(false);
+            bus.disable_draw_memory();
+        }
+        native_draw_active=wanted;
+    };
 #endif
     // Single battery-flush entry point for the windowed/headless session. On the
     // web it also tells the page to sync /saves to IndexedDB (only when
@@ -3007,13 +3023,24 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     FramePhaseRing frame_phase;
     uint64_t high_resolution_presented = 0;
     auto present_live_frame = [&]() {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        const bool had_native_frame=bool(ppu.native_draw_frame());
+#endif
         ppu.set_internal_resolution(args.internal_resolution, opts.high_resolution_affine_provider);
 #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        sync_native_draw();
+        if(had_native_frame && !ppu.native_draw_frame())
+            std::memcpy(live_fb.data(),ppu.latched_framebuffer(),ppu.render_bytes());
         if (auto frame=ppu.native_draw_frame()) {
             const bool presented=win.present_native(frame);
             if (!presented || framedump_dir)
                 std::memcpy(live_fb.data(),ppu.latched_framebuffer(),ppu.render_bytes());
             if (presented)return;
+            // A terminal native GPU failure retires capture and its bus write
+            // bookkeeping for the rest of this process. The portable image
+            // above still supplies this frame; subsequent rows use CPU directly.
+            native_draw_failed=true;
+            sync_native_draw();
         }
 #endif
 #if defined(GBARECOMP_GPU_HD_EXPERIMENT)
@@ -3048,6 +3075,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                               static_cast<int>(geometry.height))) return false;
         ppu.set_view_margins(geometry.extra_left, geometry.extra_right,
                              geometry.extra_top, geometry.extra_bottom);
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        sync_native_draw();
+#endif
         if (windowed)
             win.set_view_margins(ppu.view_extra_left(), ppu.view_extra_right(),
                                  ppu.view_extra_top(), ppu.view_extra_bottom());
@@ -3199,7 +3229,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 #if defined(GBARECOMP_GPU_HD_EXPERIMENT)
         win.prefer_gpu_hd(args.internal_resolution > 1
 #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
-            || native_draw_requested
+            || (native_draw_requested && !ppu.view_expanded())
 #endif
         );
 #endif
@@ -3217,12 +3247,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             ppu.set_deferred_hd_rendering(win.hd_jobs_available());
 #endif
 #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
-        if (native_draw_requested && win.hd_jobs_available()) {
-            bus.enable_draw_memory();
-            ppu.set_native_draw_enabled(true,[&](const auto& frame,auto& rgb) {
-                return win.readback_native(frame,rgb);
-            });
-        }
+        sync_native_draw();
 #endif
         // Rebindable input: keybinds.ini (player buttons, recomp-ui generic
         // format) + config.ini [KeyMap] (system hotkeys), both next to the
