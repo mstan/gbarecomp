@@ -1195,6 +1195,13 @@ add_executable(ordered_scanline_corpus EXCLUDE_FROM_ALL
     tests/ppu/ordered_scanline_corpus.cpp tools/bios_smoke/dispatch_stub.cpp)
 target_include_directories(ordered_scanline_corpus PRIVATE src/gba src/debug src/armv4t src/runtime src/link)
 target_link_gbarecomp_runtime_stack(ordered_scanline_corpus)
+
+# Explicit full-byte expanded/provider corpus; it emits a large canonical
+# stream for an independent original/candidate comparison, never default CTest.
+add_executable(ordered_wide_scanline_corpus EXCLUDE_FROM_ALL
+    tests/ppu/ordered_wide_scanline_corpus.cpp tools/bios_smoke/dispatch_stub.cpp)
+target_include_directories(ordered_wide_scanline_corpus PRIVATE src/gba src/debug src/armv4t src/runtime src/link)
+target_link_gbarecomp_runtime_stack(ordered_wide_scanline_corpus)
 add_executable(high_resolution_jobs_tests tests/ppu/high_resolution_jobs_test.cpp src/gba/gba_high_resolution.cpp)
 target_include_directories(high_resolution_jobs_tests PRIVATE src/gba)
 add_test(NAME high_resolution_jobs_tests COMMAND high_resolution_jobs_tests)

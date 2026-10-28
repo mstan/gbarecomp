@@ -275,6 +275,30 @@ extern "C" unsigned g_ws_bg_x_provider_layers;
 // the source's window masks; the guest's tilemap and graphics stay untouched.
 extern "C" int (*g_ws_bg_xy_provider)(int bg, int x, int y, int* source_x, int* source_y);
 extern "C" unsigned g_ws_bg_xy_provider_layers;
+
+// A game can publish read-only BG samplers whose results depend only on the
+// row's immutable inputs. This allows candidate ordering/occlusion to omit
+// hidden samples. The exact three scalar bindings are captured here: replacing
+// any of them automatically keeps the original callback order instead.
+// No guest writes, callback-count effects or device advancement are permitted.
+// An optional complete X mapping partitions [0,out_width) into <=8 spans.
+// action is -1 (suppress), 0 (unchanged hardware X), or 1 (source_x + step*dx).
+// Invalid/incomplete span output falls back to the captured scalar callback.
+#define GBARECOMP_WIDE_BG_SAMPLER_API 1
+struct WsBgXSpan {
+    int begin = 0, end = 0;
+    int source_x = 0, step = 1, action = 0;
+};
+using WsBgXRowProvider = int (*)(int bg, int screen_y, int out_width,
+                                int native_left, WsBgXSpan* spans, int capacity);
+void publish_read_only_wide_bg_providers(WsBgXRowProvider x_rows = nullptr,
+                                         bool tilemap_tile_invariant = false);
+// Clear before changing a sampler's hidden delegate/behavior even when its
+// public function pointer remains the same.
+void clear_read_only_wide_bg_providers();
+// tilemap_tile_invariant promises the result is constant within an unwrapped
+// 8x8 text-map cell (including BG scroll), separately for each margin side.
+// Registration is host presentation state, not serialized guest state.
 // Optional already-composited, read-only UI pixels in expanded/native-origin
 // coordinates. Return nonzero to submit RGB555 above the scene. Native 240x160
 // rendering never calls this provider.
