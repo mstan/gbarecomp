@@ -298,6 +298,13 @@ void set_active_bus(gba::GbaBus* bus) {
     g_runtime_ram_code_view = [](uint32_t address, uint32_t size) -> const uint8_t* {
         return g_active_bus ? g_active_bus->native_code_view(address,size) : nullptr;
     };
+#if defined(GBARECOMP_NATIVE_RAM_CODE_VIEWS)
+    g_runtime_native_ram_code_source = {
+        g_runtime_ram_code_view,
+        bus ? bus->ewram_ptr() : nullptr,
+        bus ? bus->iwram_ptr() : nullptr
+    };
+#endif
     if (bus) {
         bus->bind_wait_table(&g_runtime_waits);
     } else if (gba::GbaBus* owner = gba::GbaBus::wait_table_owner()) {
