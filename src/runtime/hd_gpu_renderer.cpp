@@ -303,6 +303,10 @@ struct HdGpuRenderer::Impl {
             frame.width>max_texture || frame.height>max_texture)return false;
         top.assign(size_t(frame.width)*frame.height*4,0);second.assign(top.size(),0);
         meta.assign(size_t(frame.height)*8*4,0);palette.assign(size_t(frame.height)*256,0);
+        // The shader multiplies each vertical delta by sy before dividing by
+        // scale. Preserve the original <=16x admission and bound that product
+        // at the new scales; broader deltas still use the portable renderer.
+        const int64_t delta_limit=std::min<int64_t>(1ll<<27,INT_MAX/(frame.scale-1));
         for(unsigned y=0;y<frame.height;++y) {
             const auto& line=frame.lines[y];
             auto* m=meta.data()+size_t(y)*32;
@@ -333,7 +337,7 @@ struct HdGpuRenderer::Impl {
                 // Broader synthetic inputs remain supported by the CPU renderer.
                 if(a.cache!=i || !s || s->size!=(128u<<(a.cnt>>14)) || s->size>max_texture ||
                     s->texels.size()!=size_t(s->size)*s->size || !within(a.x,1ll<<29) || !within(a.v,1ll<<29) ||
-                    !within(a.pa,32768) || !within(a.pc,32768) || !within(a.dx,1ll<<27) || !within(a.dv,1ll<<27) ||
+                    !within(a.pa,32768) || !within(a.pc,32768) || !within(a.dx,delta_limit) || !within(a.dv,delta_limit) ||
                     !within(a.dpa,65535) || !within(a.dpc,65535))return false;
                 p[0]=1;p[1]=a.cnt;p[2]=GLint(a.x);p[3]=GLint(a.v);
                 p[4]=GLint(a.pa);p[5]=GLint(a.pc);p[6]=GLint(a.dx);p[7]=GLint(a.dv);
