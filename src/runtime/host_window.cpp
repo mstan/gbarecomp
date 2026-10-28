@@ -1801,8 +1801,15 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     // can opt in with GBARECOMP_VSYNC=1. GBARECOMP_NO_VSYNC remains the final
     // override for existing launch scripts and A/B diagnostics.
 #if defined(_WIN32)
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+    const bool renderer_default_owned =
+        SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER,"direct3d11",SDL_HINT_DEFAULT);
+#else
     SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER, "direct3d11",
                             SDL_HINT_DEFAULT);
+#endif
+#elif defined(GBARECOMP_GPU_HD_EXPERIMENT)
+    const bool renderer_default_owned = !SDL_GetHint(SDL_HINT_RENDER_DRIVER);
 #endif
     const char* vsync_env = std::getenv("GBARECOMP_VSYNC");
     const char* no_vsync_env = std::getenv("GBARECOMP_NO_VSYNC");
@@ -1816,18 +1823,21 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         (want_vsync ? static_cast<Uint32>(SDL_RENDERER_PRESENTVSYNC)
                     : Uint32{0});
 #if defined(GBARECOMP_GPU_HD_EXPERIMENT)
-    const char* prior_driver = SDL_GetHint(SDL_HINT_RENDER_DRIVER);
-    const std::string saved_driver = prior_driver ? prior_driver : "";
-    const bool gpu_preferred = prefer_gpu_hd_ && !std::getenv("SDL_RENDER_DRIVER") &&
-        SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER,"opengl",SDL_HINT_DEFAULT);
-#endif
-    b->renderer = SDL_CreateRenderer(b->window, -1, renderer_flags);
-#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
-    if (gpu_preferred) {
-        if (saved_driver.empty()) SDL_ResetHint(SDL_HINT_RENDER_DRIVER);
-        else SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER,saved_driver.c_str(),SDL_HINT_DEFAULT);
-        if (!b->renderer) b->renderer = SDL_CreateRenderer(b->window,-1,renderer_flags);
+    int preferred_driver = -1;
+    if (prefer_gpu_hd_ && renderer_default_owned && !std::getenv("SDL_RENDER_DRIVER")) {
+        for (int i=0;i<SDL_GetNumRenderDrivers();++i) {
+            SDL_RendererInfo info{};
+            if (SDL_GetRenderDriverInfo(i,&info)==0 && info.name && !std::strcmp(info.name,"opengl"))
+                preferred_driver=i;
+        }
     }
+    // Select this window's backend directly. Keep existing process hints and
+    // compatibility with SDL releases before SDL_ResetHint was introduced.
+    b->renderer = SDL_CreateRenderer(b->window, preferred_driver, renderer_flags);
+    if (!b->renderer && preferred_driver>=0)
+        b->renderer=SDL_CreateRenderer(b->window,-1,renderer_flags);
+#else
+    b->renderer = SDL_CreateRenderer(b->window, -1, renderer_flags);
 #endif
     if (!b->renderer && want_vsync) {
         std::fprintf(stderr,

@@ -19,7 +19,8 @@ std::shared_ptr<const Hd::IndexedSurface> surface(unsigned size,unsigned pattern
     return result;
 }
 Hd::DrawFrame fixture(unsigned scale,unsigned mode) {
-    Hd::DrawFrame frame;frame.width=257;frame.height=160;frame.scale=scale;frame.lines.resize(frame.height);
+    Hd::DrawFrame frame;frame.width=(mode&1)?325:257;frame.height=(mode&2)?208:160;
+    frame.scale=scale;frame.lines.resize(frame.height);
     auto a=surface(128,mode+1),b=surface(256,mode+7),changed=surface(128,mode+31);
     for(unsigned y=0;y<frame.height;++y) {
         auto& row=frame.lines[y];row.ox=8;
