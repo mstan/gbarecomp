@@ -1650,7 +1650,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     gba::GbaBus bus;
     gba::GbaPpu ppu;
-#if defined(GBARECOMP_DEFERRED_HD_EXPERIMENT)
+#if defined(GBARECOMP_DEFERRED_HD_EXPERIMENT) && !defined(GBARECOMP_GPU_HD_EXPERIMENT)
     ppu.set_deferred_hd_rendering(true);
 #endif
     if (args.internal_resolution > 1 && !opts.high_resolution_affine_provider) {
@@ -3004,11 +3004,27 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     uint64_t high_resolution_presented = 0;
     auto present_live_frame = [&]() {
         ppu.set_internal_resolution(args.internal_resolution, opts.high_resolution_affine_provider);
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+        const auto* current_hd = ppu.high_resolution();
+        if (current_hd && !current_hd->deferred_rendering() && win.hd_jobs_available())
+            ppu.set_deferred_hd_rendering(true);
+        current_hd = ppu.high_resolution();
+        if (current_hd) {
+            if (const auto frame = current_hd->draw_frame(); frame && win.present_hd(*frame)) {
+                ++high_resolution_presented;
+                return;
+            }
+        }
+#endif
         if (const auto* pixels = ppu.high_resolution_framebuffer()) {
             const auto* hd = ppu.high_resolution();
             win.present(pixels, hd->width(), hd->height());
             ++high_resolution_presented;
         } else win.present(live_fb.data());
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+        if (current_hd && current_hd->deferred_rendering() && !win.hd_jobs_available())
+            ppu.set_deferred_hd_rendering(false);
+#endif
     };
     auto apply_runtime_view_geometry = [&](ViewGeometry geometry) -> bool {
         if (opts.view_geometry) opts.view_geometry(&geometry, 0, 0);
@@ -3168,6 +3184,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             opts.builtin_game_name && *opts.builtin_game_name
                 ? opts.builtin_game_name : GBARECOMP_WINDOW_TITLE;
         win.set_orientation_policy(static_cast<int>(opts.orientation));
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+        win.prefer_gpu_hd(args.internal_resolution > 1);
+#endif
         if (!win.open(args.scale, ppu.render_width(), ppu.render_height(),
                       runtime_title,
                       args.screen.empty() ? nullptr : args.screen.c_str(),
@@ -3177,6 +3196,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             runtime_shutdown();
             return 1;
         }
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+        if (args.internal_resolution > 1)
+            ppu.set_deferred_hd_rendering(win.hd_jobs_available());
+#endif
         // Rebindable input: keybinds.ini (player buttons, recomp-ui generic
         // format) + config.ini [KeyMap] (system hotkeys), both next to the
         // exe. Missing files leave the built-in defaults.
@@ -5013,7 +5036,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             }
         }
     }
+    bool gpu_dump_ok = true;
     if (args.window) {
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+        if (const char* path = std::getenv("GBARECOMP_GPU_FRAME_DUMP"); path && *path) {
+            std::vector<uint8_t> pixels; unsigned width = 0, height = 0;
+            gpu_dump_ok = win.readback_hd(pixels,width,height) && write_png(path,pixels.data(),width,height);
+            std::fprintf(stderr,"hd_gpu_readback: success=%u width=%u height=%u\n",
+                         unsigned(gpu_dump_ok),width,height);
+        }
+#endif
 #if defined(GBARECOMP_RUNTIME_UI)
         win.set_runtime_ui(nullptr);
         recomp_runtime_ui_destroy(runtime_ui_context.ui);
@@ -5101,8 +5133,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     if (const auto* hd = ppu.high_resolution())
         std::printf("presentation scale=%u effective=%ux%u complete_frames=%llu affine_lines=%llu samples=%llu hd_presented=%llu\n",
-            hd->scale(), ppu.high_resolution_framebuffer() ? hd->width() : ppu.render_width(),
-            ppu.high_resolution_framebuffer() ? hd->height() : ppu.render_height(),
+            hd->scale(), hd->complete() ? hd->width() : ppu.render_width(),
+            hd->complete() ? hd->height() : ppu.render_height(),
             (unsigned long long)hd->frames(), (unsigned long long)hd->affine_lines(), (unsigned long long)hd->samples(),
             (unsigned long long)high_resolution_presented);
     if (const auto* hd = ppu.high_resolution())
@@ -5149,7 +5181,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gbarecomp::overlay_loader_shutdown();
     runtime_shutdown();
     if (diag_exit) return diag_exit;
-    return save_ok ? 0 : 1;
+    return save_ok && gpu_dump_ok ? 0 : 1;
 }
 
 }  // namespace gbarecomp

@@ -317,6 +317,9 @@ void HostWindow::close() {
 }
 bool HostWindow::set_surface_size(int w,int h) { if(!impl_||!dimensions(w,h))return false; backend(impl_)->width=w;backend(impl_)->height=h;return true; }
 bool HostWindow::drawable_size(int* w,int* h) const { if(!impl_||!w||!h)return false; auto d=backend(impl_)->shared.control.drawable.load(); *w=d&65535;*h=d>>16;return *w&&*h; }
+bool HostWindow::hd_jobs_available() { return false; }
+bool HostWindow::present_hd(const gba::GbaHighResolutionFrame::DrawFrame&) { return false; }
+bool HostWindow::readback_hd(std::vector<uint8_t>&,unsigned&,unsigned&) { return false; }
 void HostWindow::present(const uint8_t* rgb) {
     if(!impl_||!rgb)return;
     auto& b=*backend(impl_);auto& s=b.shared;auto& v=s.video[b.back];

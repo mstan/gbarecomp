@@ -4,6 +4,10 @@ project(gbarecomp C CXX)
 option(GBARECOMP_DETAILED_PHASE_PROFILE "Build additional opt-in device phase timers" OFF)
 option(GBARECOMP_NATIVE_REGIONS "Build bounded native CPU/RAM region experiment" OFF)
 option(GBARECOMP_DEFERRED_HD_EXPERIMENT "Exercise immutable HD jobs with portable readback" OFF)
+option(GBARECOMP_GPU_HD_EXPERIMENT "Render supported immutable HD jobs through resident GPU presentation" OFF)
+if(GBARECOMP_GPU_HD_EXPERIMENT)
+    set_property(SOURCE src/runtime/runtime.cpp src/runtime/host_window.cpp APPEND PROPERTY COMPILE_DEFINITIONS GBARECOMP_GPU_HD_EXPERIMENT=1)
+endif()
 if(GBARECOMP_DEFERRED_HD_EXPERIMENT)
     set_property(SOURCE src/runtime/runtime.cpp APPEND PROPERTY COMPILE_DEFINITIONS GBARECOMP_DEFERRED_HD_EXPERIMENT=1)
 endif()
@@ -539,6 +543,8 @@ if(GBARECOMP_WEB_HOST)
 else()
     target_sources(gbarecomp_runtime PRIVATE src/runtime/host_window.cpp)
 endif()
+
+target_sources(gbarecomp_runtime PRIVATE src/runtime/hd_gpu_renderer.cpp)
 
 if(GBARECOMP_RUNTIME_UI_ROOT AND
    EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/recomp_runtime_ui.h")
@@ -1180,6 +1186,17 @@ add_gbarecomp_runtime_stack_test(high_resolution_tests tests/ppu/high_resolution
 add_executable(high_resolution_jobs_tests tests/ppu/high_resolution_jobs_test.cpp src/gba/gba_high_resolution.cpp)
 target_include_directories(high_resolution_jobs_tests PRIVATE src/gba)
 add_test(NAME high_resolution_jobs_tests COMMAND high_resolution_jobs_tests)
+add_executable(high_resolution_gpu_tests EXCLUDE_FROM_ALL tests/ppu/high_resolution_gpu_test.cpp
+    src/runtime/hd_gpu_renderer.cpp src/runtime/color_lut.cpp src/gba/gba_high_resolution.cpp)
+target_include_directories(high_resolution_gpu_tests PRIVATE src/gba src/runtime)
+target_compile_definitions(high_resolution_gpu_tests PRIVATE SDL_MAIN_HANDLED=1)
+if(GBARECOMP_SDL2_OK)
+    target_compile_definitions(high_resolution_gpu_tests PRIVATE GBARECOMP_HAVE_SDL2=1)
+    target_include_directories(high_resolution_gpu_tests PRIVATE ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(high_resolution_gpu_tests PRIVATE ${SDL2_LIBRARIES})
+endif()
+# Hardware execution is deliberate and guarded, rather than an unattended
+# default CTest launch which could interfere with another console's benchmark.
 add_gbarecomp_runtime_stack_test(vertical_obj_tests tests/ppu/vertical_obj_test.cpp)
 add_gbarecomp_runtime_stack_test(dma_tests tests/dma/test_main.cpp)
 add_gbarecomp_runtime_stack_test(dma_bulk_tests tests/dma/bulk_test_main.cpp)

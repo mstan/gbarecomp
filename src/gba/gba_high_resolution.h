@@ -37,6 +37,7 @@ public:
     uint8_t* native_scratch() { return scratch_.data(); }
     unsigned width() const { return width_ * scale_; }
     unsigned height() const { return height_ * scale_; }
+    bool complete() const { return complete_; }
     uint64_t frames() const { return frames_; }
     uint64_t affine_lines() const { return affine_lines_; }
     uint64_t samples() const { return samples_; }

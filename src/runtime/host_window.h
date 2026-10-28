@@ -25,6 +25,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include "gba_high_resolution.h"
 
 struct RecompRuntimeUi;
 
@@ -159,6 +160,12 @@ public:
     // The enhanced texture is uploaded and presented directly, without a
     // native-resolution intermediate render target.
     void present(const uint8_t* rgb888, unsigned width, unsigned height);
+    // Optional resident presentation of immutable HD jobs. False leaves the
+    // same job available for portable CPU rendering, including readback.
+    void prefer_gpu_hd(bool enabled) { prefer_gpu_hd_ = enabled; }
+    bool hd_jobs_available();
+    bool present_hd(const gba::GbaHighResolutionFrame::DrawFrame& frame);
+    bool readback_hd(std::vector<uint8_t>& rgb, unsigned& width, unsigned& height);
 
     // Push `count` int16_t mono samples assuming the engine's 65.536 kHz
     // source rate. Prefer push_audio_block when the caller knows the real
@@ -241,6 +248,7 @@ private:
     bool open_ = false;
     void* impl_ = nullptr;  // backend-specific opaque
     int orientation_policy_ = 0;
+    bool prefer_gpu_hd_ = false;
 };
 
 // Engine-wide haptic hook for game input policies (touch_input.h users).

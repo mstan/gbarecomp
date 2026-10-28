@@ -57,6 +57,11 @@ public:
                        UploadPixelOrder upload = UploadPixelOrder::Rgb24);
 
     bool is_passthrough() const { return passthrough_; }
+    // Immutable native-color table for a downstream GPU presentation consumer.
+    // Raw passthrough has no table and must retain its original RGB bytes.
+    const std::array<std::array<uint8_t, 3>, 32768>* native_rgb_table() const {
+        return table_.get();
+    }
 
     // Transform a 240×160 RGB888 frame (R,G,B byte order, as the PPU and the
     // SDL RGB24 texture use) into `dst`. The 5-bit hardware index is
