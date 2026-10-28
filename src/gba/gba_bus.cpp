@@ -7,6 +7,9 @@
 // to serve bytes before the hash is verified.
 
 #include "gba_bus.h"
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+#include "gba_draw_memory.h"
+#endif
 #include <utility>
 
 #include <cstdlib>
@@ -37,6 +40,28 @@ GbaBus::~GbaBus() {
     if (g_wait_table_owner == this) g_wait_table_owner = nullptr;
 }
 
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+void GbaBus::enable_draw_memory() {
+    if (!draw_memory_) draw_memory_ = std::make_unique<GbaDrawMemory>();
+}
+bool GbaBus::draw_memory_supported() const {
+    return draw_memory_ && !draw_vram_alias_exposed_ && !write_observer_;
+}
+GbaDrawMemory* GbaBus::draw_memory() {
+    return draw_memory_supported() ? draw_memory_.get() : nullptr;
+}
+void GbaBus::invalidate_draw_memory() {
+    if (draw_memory_) draw_memory_->invalidate();
+}
+bool GbaBus::try_write_draw_vram(std::size_t offset, std::span<const uint8_t> bytes) {
+    if (write_observer_ || offset > vram_.size() || bytes.size() > vram_.size() - offset)
+        return false;
+    if (!bytes.empty()) std::memmove(vram_.data() + offset, bytes.data(), bytes.size());
+    if (draw_memory_supported()) draw_memory_->mark(offset, bytes.size());
+    return true;
+}
+#endif
+
 void GbaBus::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     w.bytes(ewram_.data(), ewram_.size());
     w.bytes(iwram_.data(), iwram_.size());
@@ -56,6 +81,9 @@ void GbaBus::serialize(gbarecomp::debug::SnapshotWriter& w) const {
 }
 
 void GbaBus::deserialize(gbarecomp::debug::SnapshotReader& r) {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    invalidate_draw_memory();
+#endif
     r.bytes(ewram_.data(), ewram_.size());
     r.bytes(iwram_.data(), iwram_.size());
     r.bytes(pal_.data(),   pal_.size());
@@ -433,7 +461,12 @@ void GbaBus::write8(uint32_t addr, uint8_t v) {
         case Region::Iwram: iwram_[off] = v; return;
         case Region::Pal:   pal_[off]   = v; return;
         case Region::Vram:
-            if (off < vram_.size()) vram_[off] = v;
+            if (off < vram_.size()) {
+                vram_[off] = v;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+                if (draw_memory_ && !draw_vram_alias_exposed_) draw_memory_->mark(off, 1);
+#endif
+            }
             return;
         case Region::Oam:   oam_[off] = v; return;
         case Region::Bios:
@@ -494,7 +527,12 @@ void GbaBus::write16(uint32_t addr, uint16_t v) {
         case Region::Iwram: store_u16(&iwram_[off], v); return;
         case Region::Pal:   store_u16(&pal_[off], v);   return;
         case Region::Vram:
-            if (off + 1 < vram_.size()) store_u16(&vram_[off], v);
+            if (off + 1 < vram_.size()) {
+                store_u16(&vram_[off], v);
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+                if (draw_memory_ && !draw_vram_alias_exposed_) draw_memory_->mark(off, 2);
+#endif
+            }
             return;
         case Region::Oam:   store_u16(&oam_[off], v); return;
         case Region::Bios:
@@ -574,7 +612,12 @@ void GbaBus::write32(uint32_t addr, uint32_t v) {
         case Region::Iwram: store_u32(&iwram_[off], v); return;
         case Region::Pal:   store_u32(&pal_[off], v);   return;
         case Region::Vram:
-            if (off + 3 < vram_.size()) store_u32(&vram_[off], v);
+            if (off + 3 < vram_.size()) {
+                store_u32(&vram_[off], v);
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+                if (draw_memory_ && !draw_vram_alias_exposed_) draw_memory_->mark(off, 4);
+#endif
+            }
             return;
         case Region::Oam:   store_u32(&oam_[off], v); return;
         case Region::Bios:
