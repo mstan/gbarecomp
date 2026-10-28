@@ -8,6 +8,46 @@
 #define CHECK(expr) do { if (!(expr)) { std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr); std::exit(1); } } while (0)
 namespace {
 using link_fixture::create;
+void checkpoint_digest_reuse(unsigned players) {
+    using namespace gbarecomp;
+    auto simulation=create(true,true,players);
+    GbaNetplayHost h(*simulation); const auto api=h.callbacks();
+    const auto check=[&] {
+        const auto expected=simulation->state_hash_parts();
+        const auto master=simulation->state_hash();
+        for (unsigned request=0;request<3;++request) {
+            RNetRbDigestParts parts{}; api.digest_parts(api.ctx,&parts);
+            CHECK(parts.master==master && api.digest_master(api.ctx)==master);
+            for (unsigned i=0;i<3;++i) CHECK(parts.part[i]==expected[i]);
+        }
+        CHECK(h.error().empty());
+    };
+    check(); CHECK(api.snap_save(api.ctx,0));
+    RNetRbFrame rows[4]{};
+    for (unsigned i=0;i<players;++i) { rows[i].is_valid=1; rows[i].buttons=1u<<i; }
+    api.publish(api.ctx,0,rows,players,0); CHECK(h.run_published_tick()); check();
+    CHECK(api.snap_save(api.ctx,1));
+    const auto at_one=simulation->save_state();
+    // Host output consumes audio but must not alter canonical state/digests.
+    GbaNetplayOutput output; CHECK(h.take_output(0,output)); check();
+    api.publish(api.ctx,1,rows,players,0); CHECK(h.run_published_tick()); check();
+    api.resim_begin(api.ctx); CHECK(api.snap_load(api.ctx,1));
+    CHECK(simulation->save_state()==at_one); check();
+    rows[0].buttons=0x20;
+    api.publish(api.ctx,1,rows,players,1); CHECK(api.run_tick(api.ctx,1));
+    api.resim_end(api.ctx); check();
+    // Bootstrap can replace state at the very same cycle, including device
+    // memory, CPU continuation and native save data. begin_match invalidates it.
+    const auto cycle=simulation->cycle();
+    auto& machine=simulation->machine(players-1);
+    machine.bus.write32(0x02001000,0x87654321);
+    machine.bus.write16(0x05000000,0x3210);
+    machine.bus.write16(0x06000000,0x7351);
+    machine.bus.write16(0x07000000,0x0037);
+    machine.bus.save().sram_write(11,0x81);
+    machine.execution.cpu.R[7]^=0x12345678;
+    h.begin_match(); CHECK(simulation->cycle()==cycle); check();
+}
 void admission_pacing() {
     using namespace std::chrono;
     using P=gbarecomp::GbaNetplayPacer;
@@ -36,6 +76,11 @@ void confirmed_session_control() {
     api.publish(api.ctx,0,rows,2,0); CHECK(host.run_published_tick());
     const auto requested=simulation->save_state();
     const auto requested_digest=api.digest_master(api.ctx);
+    RNetRbDigestParts requested_parts{}; api.digest_parts(api.ctx,&requested_parts);
+    CHECK(requested_parts.master==requested_digest);
+    const auto raw_parts=simulation->state_hash_parts();
+    CHECK(requested_parts.part[0]==raw_parts[0] && requested_parts.part[1]==raw_parts[1]);
+    CHECK(requested_parts.part[2]!=raw_parts[2]);
     CHECK(requested_digest!=simulation->state_hash());
     CHECK(api.snap_save(api.ctx,1));
     CHECK(!host.checkpoint_request(UINT32_MAX));
@@ -47,8 +92,15 @@ void confirmed_session_control() {
     CHECK(!host.checkpoint_request(0));
     CHECK(simulation->save_state()==requested); // control bit never reaches the guest
     CHECK(api.digest_master(api.ctx)!=requested_digest);
+    RNetRbDigestParts corrected_parts{}; api.digest_parts(api.ctx,&corrected_parts);
+    CHECK(corrected_parts.master==simulation->state_hash());
+    const auto corrected_raw=simulation->state_hash_parts();
+    for (unsigned i=0;i<3;++i) CHECK(corrected_parts.part[i]==corrected_raw[i]);
     CHECK(api.snap_load(api.ctx,1));
     CHECK(host.checkpoint_request(0)==0 && api.digest_master(api.ctx)==requested_digest);
+    RNetRbDigestParts restored_parts{}; api.digest_parts(api.ctx,&restored_parts);
+    CHECK(restored_parts.master==requested_parts.master);
+    for (unsigned i=0;i<3;++i) CHECK(restored_parts.part[i]==requested_parts.part[i]);
 }
 void restore_corrected_session() {
     using namespace gbarecomp;
@@ -321,4 +373,4 @@ void pinned_checkpoint() {
     CHECK(h.error().empty());
 }
 }
-int main() { n_player_host(3); n_player_host(4); n_player_delay(3); n_player_delay(4); pinned_checkpoint(); admission_pacing(); confirmed_session_control(); restore_corrected_session(); delay_publication(); local_output(); confirmed_checkpoint(); agreement_gate(); demoted_candidate(); std::puts("whole-session netplay host tests passed"); }
+int main() { for (unsigned players=2;players<=4;++players) checkpoint_digest_reuse(players); n_player_host(3); n_player_host(4); n_player_delay(3); n_player_delay(4); pinned_checkpoint(); admission_pacing(); confirmed_session_control(); restore_corrected_session(); delay_publication(); local_output(); confirmed_checkpoint(); agreement_gate(); demoted_candidate(); std::puts("whole-session netplay host tests passed"); }

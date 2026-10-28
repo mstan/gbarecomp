@@ -114,7 +114,11 @@ private:
     mutable std::uint64_t cached_generation_ = UINT64_MAX, cached_cycle_ = 0;
     mutable std::vector<std::uint8_t> cached_state_;
     mutable std::uint32_t cached_hash_ = 0;
+    mutable GbaSessionStateLayout cached_layout_;
+    mutable std::array<std::uint32_t,3> cached_parts_{};
+    mutable bool cached_parts_valid_ = false;
     const std::vector<std::uint8_t>& current_state() const;
+    const std::array<std::uint32_t,3>& current_state_parts() const;
     void mutated() { ++generation_; }
     std::uint32_t pinned_tick_ = UINT32_MAX;
     std::vector<std::uint8_t> pinned_state_;

@@ -7,6 +7,22 @@
 
 #define CHECK(expr) do { if (!(expr)) { std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr); std::exit(1); } } while (0)
 namespace {
+void checkpoint_parts(const gbarecomp::GbaMultiplayerSession& session) {
+    gbarecomp::GbaSessionStateLayout layout;
+    const auto bytes=session.save_state(&layout);
+    CHECK(bytes==session.save_state());
+    // The retained reference captures independent machine/link archives.
+    CHECK(gbarecomp::GbaMultiplayerSession::state_hash_parts(bytes,layout)==session.state_hash_parts());
+    for (const auto bad:std::array<gbarecomp::GbaSessionStateLayout,4>{{
+            {}, {layout.first_machine_end,layout.header_end,layout.machines_end},
+            {layout.header_end,layout.machines_end+1,layout.machines_end},
+            {layout.header_end,layout.first_machine_end,bytes.size()+1}}}) {
+        bool rejected=false;
+        try { (void)gbarecomp::GbaMultiplayerSession::state_hash_parts(bytes,bad); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        CHECK(rejected);
+    }
+}
 void bounded_sections() {
     using gba::SimulationArchive;
     const std::uint16_t marker=0x7351;
@@ -193,6 +209,7 @@ void wireless_session_restore() {
     }
     session->run_until(1024);
     CHECK(session->machine(10).bus.io().read16(0x128)&0x80);
+    checkpoint_parts(*session);
     const auto mid=session->save_state();
     session->run_until(2048);
     for (auto id:{10,30}) {
@@ -202,8 +219,10 @@ void wireless_session_restore() {
         CHECK(io.read32(0x120)==0);
     }
     const auto expected=session->save_state();
+    checkpoint_parts(*session);
     std::string error;
     CHECK(session->load_state(mid,&error));
+    checkpoint_parts(*session);
     session->run_until(2048);
     CHECK(session->save_state()==expected);
     auto cable=std::make_unique<GbaMultiplayerSession>(config());
@@ -229,6 +248,7 @@ void native_exchange() {
     b.bus.write32(0x02000100, 0xaaaaaaaa);
     session->run_until(100);
     CHECK(session->cable().transfer_active());
+    checkpoint_parts(*session);
     CHECK(a.bus.read32(0x02000000) == 0);
     const auto baseline = session->save_state();
     const auto baseline_hash = session->state_hash();
@@ -255,6 +275,7 @@ void native_exchange() {
     const auto expected = session->save_state();
     CHECK(session->load_state(baseline,&error));
     CHECK(session->state_hash() == baseline_hash);
+    checkpoint_parts(*session);
     session->run_until(6000);
     CHECK(session->save_state() == expected);
     const std::uint16_t inputs[] = {1, 2};
