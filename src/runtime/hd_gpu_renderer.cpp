@@ -106,7 +106,13 @@ void output_rgb(ivec3 rgb) {
     } else result=vec4(vec3(rgb)/255.0,1.0);
 }
 void main() {
-    ivec2 p=ivec2(gl_FragCoord.xy)*source_size/output_size;
+    ivec2 p=ivec2(gl_FragCoord.xy);
+    if(any(notEqual(source_size,output_size))) {
+        // Exact integer rescaling without the full coordinate*source product.
+        // At the supported maximum source dimension (1280*64), each remaining
+        // product fits signed 32 bits, including a texture-limited fallback.
+        p=p*(source_size/output_size)+p*(source_size%output_size)/output_size;
+    }
     ivec2 native=p/scale;
     int sx=p.x%scale,sy=p.y%scale;
     ivec4 config=texelFetch(metadata,ivec2(0,native.y),0);
@@ -293,7 +299,7 @@ struct HdGpuRenderer::Impl {
     }
     bool pack(const Hd::DrawFrame& frame) {
         if(frame.width<240 || frame.width>1280 || frame.height<160 || frame.height>864 ||
-            frame.scale<2 || frame.scale>16 || frame.lines.size()!=frame.height ||
+            frame.scale<2 || frame.scale>Hd::kMaxScale || frame.lines.size()!=frame.height ||
             frame.width>max_texture || frame.height>max_texture)return false;
         top.assign(size_t(frame.width)*frame.height*4,0);second.assign(top.size(),0);
         meta.assign(size_t(frame.height)*8*4,0);palette.assign(size_t(frame.height)*256,0);
@@ -403,6 +409,8 @@ SDL_Texture* HdGpuRenderer::render(const Hd::DrawFrame& frame,const runtime::Col
         SDL_SetTextureBlendMode(replacement,SDL_BLENDMODE_NONE);
         if(s.output)SDL_DestroyTexture(s.output);s.output=replacement;s.width=width;s.height=height;
         s.requested_w=frame.width*frame.scale;s.requested_h=frame.height*frame.scale;
+        std::fprintf(stderr,"hd_gpu: target requested=%ux%u allocated=%ux%u scale=%u\n",
+            s.requested_w,s.requested_h,s.width,s.height,frame.scale);
     } else {width=s.width;height=s.height;}
     SDL_Texture* old_target=SDL_GetRenderTarget(s.renderer);
     if(SDL_SetRenderTarget(s.renderer,s.output)!=0)return nullptr;

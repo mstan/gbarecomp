@@ -2617,7 +2617,7 @@ void GbaPpu::set_rasterization_enabled(bool enabled) {
 namespace gba {
 void GbaPpu::set_internal_resolution(unsigned scale, HighResolutionAffineProvider provider) {
     if (scale < 1 || scale > GbaHighResolutionFrame::kMaxScale)
-        throw std::invalid_argument("internal resolution must be from 1 through 16");
+        throw std::invalid_argument("internal resolution must be from 1 through 64");
     high_resolution_provider_ = provider;
     if (scale == internal_resolution()) return;
     if (scale == 1) high_resolution_.reset();
