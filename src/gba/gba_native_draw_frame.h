@@ -67,6 +67,7 @@ public:
     }
 
     void reset() { lines_.clear(); }
+    std::span<const GbaNativeDrawFrame::Line> lines() const { return lines_; }
 private:
     std::vector<GbaNativeDrawFrame::Line> lines_;
 };

@@ -347,6 +347,9 @@ struct Backend {
     SDL_Texture*  texture  = nullptr;
     std::unique_ptr<HdGpuRenderer> hd_gpu;
     bool hd_gpu_checked = false;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    std::shared_ptr<const gba::GbaNativeDrawFrame> native_frame;
+#endif
     SDL_Texture* resident_frame = nullptr;
     Uint32        texture_format = SDL_PIXELFORMAT_RGB24;
     std::vector<uint32_t> packed_upload;
@@ -2446,6 +2449,9 @@ bool HostWindow::hd_jobs_available() {
 bool HostWindow::present_hd(const gba::GbaHighResolutionFrame::DrawFrame& frame) {
     if (!hd_jobs_available()) return false;
     auto* b = static_cast<Backend*>(impl_);
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    b->native_frame.reset();
+#endif
     SDL_Texture* texture = b->hd_gpu->render(frame,b->color_lut.get());
     if (!texture) return false;
 #if SDL_VERSION_ATLEAST(2,0,12)
@@ -2460,6 +2466,34 @@ bool HostWindow::readback_hd(std::vector<uint8_t>& rgb,unsigned& width,unsigned&
     auto* b = static_cast<Backend*>(impl_);
     return b->hd_gpu && b->hd_gpu->readback(rgb,width,height);
 }
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+bool HostWindow::readback_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>& frame,
+                                std::vector<uint8_t>& rgb) {
+    if(!frame || !hd_jobs_available())return false;
+    auto* b=static_cast<Backend*>(impl_);
+    if(b->native_frame!=frame) {
+        if(!b->hd_gpu->render_native(*frame,nullptr))return false;
+        b->native_frame=frame;
+    }
+    return b->hd_gpu->readback_native(rgb);
+}
+bool HostWindow::present_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>& frame) {
+    if(!frame || !hd_jobs_available())return false;
+    auto* b=static_cast<Backend*>(impl_);
+    if(b->native_frame!=frame) {
+        if(!b->hd_gpu->render_native(*frame,nullptr))return false;
+        b->native_frame=frame;
+    }
+    auto* texture=b->hd_gpu->native_display(b->color_lut.get());
+    if(!texture)return false;
+#if SDL_VERSION_ATLEAST(2,0,12)
+    SDL_SetTextureScaleMode(texture,b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
+    b->resident_frame=texture;
+    present(nullptr,240,160);
+    return true;
+}
+#endif
 
 void HostWindow::present(const uint8_t* rgb888) { present(rgb888, 0, 0); }
 
@@ -3091,6 +3125,9 @@ HostWindow::Events HostWindow::pump() {
         if (e.type == SDL_RENDER_DEVICE_RESET || e.type == SDL_RENDER_TARGETS_RESET) {
             if (b->hd_gpu) b->hd_gpu->reset(e.type == SDL_RENDER_DEVICE_RESET);
             b->hd_gpu.reset(); b->hd_gpu_checked = false; b->resident_frame = nullptr;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+            b->native_frame.reset();
+#endif
         }
 #endif
 #if defined(GBARECOMP_RUNTIME_UI)
@@ -3483,6 +3520,10 @@ bool HostWindow::drawable_size(int* /*width*/, int* /*height*/) const {
 bool HostWindow::hd_jobs_available() { return false; }
 bool HostWindow::present_hd(const gba::GbaHighResolutionFrame::DrawFrame&) { return false; }
 bool HostWindow::readback_hd(std::vector<uint8_t>&,unsigned&,unsigned&) { return false; }
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+bool HostWindow::present_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>&) { return false; }
+bool HostWindow::readback_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>&,std::vector<uint8_t>&) { return false; }
+#endif
 void HostWindow::present(const uint8_t* /*rgb888*/) {}
 void HostWindow::present(const uint8_t*, unsigned, unsigned) {}
 

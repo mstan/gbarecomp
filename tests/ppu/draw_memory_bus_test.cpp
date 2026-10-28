@@ -11,7 +11,43 @@
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"line %d: %s\n",__LINE__,#x); std::exit(1); } } while (0)
 
+void check_native_lifecycle() {
+    auto bus=std::make_unique<gba::GbaBus>();
+    auto reference=std::make_unique<gba::GbaPpu>();
+    auto owned=std::make_unique<gba::GbaPpu>();
+    bus->rtc().set_emulated_clock(0);
+    bus->enable_draw_memory();owned->set_native_draw_enabled(true);
+    for(unsigned frame=0;frame<4;++frame) {
+        for(unsigned y=0;y<160;++y) {
+            const unsigned offset=(y*240+(frame*379)%240)*2;
+            bus->write32(0x06000000+offset,0x01234567u*(y+frame+1));
+            bus->write16(0x05000000,uint16_t(frame*0x421+y));
+            auto* memory=frame==2 && y>=45 ? nullptr : bus->draw_memory();
+            reference->render_scanline(y,0x403,bus->io().raw(),bus->vram_read_view().data(),bus->oam_ptr(),bus->pal_ptr());
+            owned->render_scanline(y,0x403,bus->io().raw(),bus->vram_read_view().data(),bus->oam_ptr(),bus->pal_ptr(),memory);
+            if(frame==1 && y==73) {
+                const auto original=gba::save_device_state(*bus,*reference);
+                const auto captured=gba::save_device_state(*bus,*owned);
+                CHECK(original==captured); // Includes previous latch and partial work image.
+                CHECK(gba::load_device_state(*bus,*owned,captured));
+                CHECK(!owned->native_draw_frame());
+            }
+        }
+        reference->mark_framebuffer_latched();owned->mark_framebuffer_latched();
+        CHECK(bool(owned->native_draw_frame())==(frame==0 || frame==3));
+        CHECK(gba::save_device_state(*bus,*reference)==gba::save_device_state(*bus,*owned));
+        gbarecomp::debug::SnapshotWriter a,b;
+        reference->serialize(a);owned->serialize(b);CHECK(a.buffer()==b.buffer());
+        CHECK(std::equal(reference->latched_framebuffer(),reference->latched_framebuffer()+gba::GbaPpu::kFramebufferBytes,owned->latched_framebuffer()));
+    }
+    CHECK(owned->native_draw_frames()==2);
+    owned->set_native_draw_enabled(false);
+    CHECK(!owned->native_draw_frame());
+    std::puts("native draw lifecycle: exact full and partial checkpoints, own-build restore, mid-frame admission revocation and CPU continuation");
+}
+
 int main() {
+    check_native_lifecycle();
     auto bus = std::make_unique<gba::GbaBus>();
     auto ppu = std::make_unique<gba::GbaPpu>();
     bus->rtc().set_emulated_clock(0); // Canonical device snapshots require the session RTC timeline.

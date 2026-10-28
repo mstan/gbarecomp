@@ -320,6 +320,10 @@ bool HostWindow::drawable_size(int* w,int* h) const { if(!impl_||!w||!h)return f
 bool HostWindow::hd_jobs_available() { return false; }
 bool HostWindow::present_hd(const gba::GbaHighResolutionFrame::DrawFrame&) { return false; }
 bool HostWindow::readback_hd(std::vector<uint8_t>&,unsigned&,unsigned&) { return false; }
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+bool HostWindow::present_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>&) { return false; }
+bool HostWindow::readback_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>&,std::vector<uint8_t>&) { return false; }
+#endif
 void HostWindow::present(const uint8_t* rgb) {
     if(!impl_||!rgb)return;
     auto& b=*backend(impl_);auto& s=b.shared;auto& v=s.video[b.back];

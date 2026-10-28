@@ -101,7 +101,7 @@ void update_extended_view(const gbarecomp::ExtendedViewFrameInfo* frame) {
         last_state_epoch = frame->state_epoch;
     }
     const ViewMemory memory{bus->ewram_ptr(), bus->iwram_ptr(), bus->rom_ptr(),
-                           bus->rom_size(), bus->vram_ptr(), frame->io,
+                           bus->rom_size(), bus->vram_read_view().data(), frame->io,
                            bus->oam_ptr(), bus->pal_ptr(), profile};
     const auto status = view.prepare(memory, frame->view_width, frame->view_height);
     const bool objects_ready = objects.prepare(memory, view, frame->view_width, frame->view_height);

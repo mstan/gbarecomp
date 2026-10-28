@@ -22,6 +22,8 @@ public:
 #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
     SDL_Texture* render_native(const gba::GbaNativeDrawFrame&,
                                const runtime::ColorLut*);
+    SDL_Texture* native_display(const runtime::ColorLut*);
+    bool readback_native(std::vector<uint8_t>& rgb);
 #endif
     bool readback(std::vector<uint8_t>& rgb, unsigned& width, unsigned& height);
     unsigned width() const;
