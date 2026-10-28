@@ -15,8 +15,10 @@ inline uint32_t runtime_native_region_bound(const RuntimeWaitTable& waits,
     const auto r=pc>>24;
     const uint32_t fetch=std::max({uint32_t(waits.n16[r]),uint32_t(waits.s16[r]),
                                   uint32_t(waits.n32[r]),uint32_t(waits.s32[r])});
-    const uint32_t data=std::max({uint32_t(waits.n16[2]),uint32_t(waits.n32[2]),
+    uint32_t data=std::max({uint32_t(waits.n16[2]),uint32_t(waits.n32[2]),
                                  uint32_t(waits.n16[3]),uint32_t(waits.n32[3])});
+    for(unsigned region=8;region<=12;++region)
+        data=std::max({data,uint32_t(waits.n16[region]),uint32_t(waits.n32[region])});
     return count*(8u+fetch+data+waits.s16[r]);
 }
 
@@ -194,6 +196,8 @@ struct RuntimeNativeRegion;
 extern "C" bool runtime_native_region_begin(RuntimeNativeRegion*, uint32_t instructions,
                                              uint32_t code_pc, uint32_t thumb);
 extern "C" void runtime_native_region_end(RuntimeNativeRegion*);
+extern "C" unsigned g_runtime_native_region_context;
+extern "C" uint64_t runtime_native_region_instruction_count();
 
 // Borrowed RAM and timing state last only until commit. The runtime admits a
 // region strictly before its next event, with every active observer excluded.
@@ -207,6 +211,8 @@ struct RuntimeNativeRegion {
     RuntimeWaitTable waits;
     uint8_t* ewram;
     uint8_t* iwram;
+    const uint8_t* rom;
+    uint32_t rom_bytes;
     uint32_t cycles;
     uint32_t writes;
     uint32_t bound;
@@ -225,21 +231,34 @@ struct RuntimeNativeRegion {
         const uint32_t mask = region == 2 ? 0x3ffffu : 0x7fffu;
         return (address & mask) <= mask + 1u - bytes;
     }
+    bool memory_range(uint32_t address,uint32_t bytes,bool write) const {
+        if(ram_range(address,bytes)) return true;
+        const unsigned region=address>>24;
+        // GPIO/sensors are device transactions, and region0D can select the
+        // EEPROM aperture. Matrix and active overrides are excluded at entry.
+        if(write || region<8 || region>12) return false;
+        const uint32_t offset=address&0x01ffffffu;
+        return offset<=rom_bytes && bytes<=rom_bytes-offset &&
+               !(offset<0xccu && offset+bytes>0xc0u);
+    }
     uint8_t* ram(uint32_t address) const {
         return (address >> 24) == 2 ? ewram + (address & 0x3ffffu)
                                    : iwram + (address & 0x7fffu);
     }
+    const uint8_t* read_pointer(uint32_t address) const {
+        return (address>>24)>=8 ? rom+(address&0x01ffffffu) : ram(address);
+    }
     uint32_t bus_read_u8(uint32_t address) {
-        had_read=true;last_read_pc=cpu.R[15];return *ram(address);
+        had_read=true;last_read_pc=cpu.R[15];return *read_pointer(address);
     }
     uint32_t bus_read_u16(uint32_t address) {
         had_read=true;last_read_pc=cpu.R[15];
-        const auto* p = ram(address);
+        const auto* p = read_pointer(address);
         return uint32_t(p[0]) | (uint32_t(p[1]) << 8);
     }
     uint32_t bus_read_u32(uint32_t address) {
         had_read=true;last_read_pc=cpu.R[15];
-        const auto* p = ram(address);
+        const auto* p = read_pointer(address);
         return uint32_t(p[0]) | (uint32_t(p[1]) << 8) |
                (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
     }

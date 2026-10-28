@@ -44,6 +44,7 @@
 // need to inspect (0x08004286) lives inside a single runtime_dispatch,
 // so ordinary step granularity can't enter it. 0 disables (no overhead).
 extern "C" uint32_t g_runtime_break_pc = 0;
+extern "C" unsigned g_runtime_native_region_context = 1;
 
 // Count of PPU VBlank-start events (scanline 159->160), incremented
 // unconditionally in runtime_tick regardless of DISPSTAT IRQ-enable.
@@ -1330,6 +1331,7 @@ void runtime_restore_timing_context(const RuntimeTimingContext& in) {
     ++g_runtime_state_epoch;
 }
 void runtime_session_execution(bool enabled) {
+    g_runtime_native_region_context=enabled?0u:1u;
     g_session_execution = enabled;
     g_session_instruction_started = false;
     g_session_slice = false;
@@ -1374,6 +1376,14 @@ struct NativeRegionReport {
 }
 #endif
 
+extern "C" uint64_t runtime_native_region_instruction_count() {
+#if defined(GBARECOMP_NATIVE_REGIONS)
+    return g_native_region_instructions;
+#else
+    return 0;
+#endif
+}
+
 extern "C" bool runtime_native_region_begin(RuntimeNativeRegion* region,
     uint32_t count, uint32_t pc, uint32_t thumb) {
 #if !defined(GBARECOMP_NATIVE_REGIONS) || defined(GBA_COSIM)
@@ -1411,6 +1421,7 @@ extern "C" bool runtime_native_region_begin(RuntimeNativeRegion* region,
     std::copy_n(g_cpu.R,16,region->cpu.R);
     region->waits=g_runtime_waits;
     region->ewram=bus->ewram_ptr();region->iwram=bus->iwram_ptr();
+    region->rom=bus->rom_ptr();region->rom_bytes=static_cast<uint32_t>(bus->rom_size());
     region->cycles=region->writes=region->instructions=region->last_read_pc=0;
     region->had_read=false;region->bound=bound;
     region->owner_bus=bus;region->start_cycles=g_runtime_cycles;

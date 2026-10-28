@@ -1,6 +1,7 @@
 #include "arm_codegen.h"
 #include "arm_decode.h"
 #include "thumb_decode.h"
+#include "emit_function.h"
 #include <fstream>
 #include <cstdint>
 #include <vector>
@@ -58,5 +59,26 @@ int main(int argc,char** argv) {
         for(auto address:pcs) out<<"NR_REF_"<<std::hex<<address<<std::dec<<": return "<<address<<"u;\n";
         out<<"}\n";
     }
+    out<<"#if defined(NATIVE_REGION_FULL_FUNCTION_TESTS)\n";
+    for(unsigned mode=0;mode!=2;++mode) {
+        const auto step=mode==0?2u:4u;
+        std::vector<uint8_t> image;
+        for(auto opcode:programs[mode]) for(unsigned byte=0;byte<step;++byte)
+            image.push_back(uint8_t(opcode>>(byte*8)));
+        const uint32_t ret=mode==0?0x4770u:0xe12fff1eu;
+        for(unsigned byte=0;byte<step;++byte)image.push_back(uint8_t(ret>>(byte*8)));
+        gbarecomp::Function function{};
+        function.addr=function.source_addr=0x08001000;
+        function.end_addr=function.addr+uint32_t(image.size());
+        function.mode=mode==0?gbarecomp::CpuMode::Thumb:gbarecomp::CpuMode::Arm;
+        function.alias_entries.push_back(function.addr+4*step);
+        for(unsigned native=0;native!=2;++native) {
+            out<<"void run_function_"<<mode<<"_"<<native<<"() {\n";
+            out<<gbarecomp::emit_function_body_str(function,image.data(),image.size(),function.addr,
+                {},nullptr,nullptr,false,native!=0);
+            out<<"}\n";
+        }
+    }
+    out<<"#endif\n";
     return out.good()?0:4;
 }

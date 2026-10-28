@@ -23,10 +23,13 @@ extern "C" void runtime_native_region_end(RuntimeNativeRegion* region) {
 struct Bus final:armv4t::Bus {
     std::vector<uint8_t> ewram=std::vector<uint8_t>(0x40000);
     std::vector<uint8_t> iwram=std::vector<uint8_t>(0x8000);
+    std::vector<uint8_t> rom=std::vector<uint8_t>(0x20000);
     RuntimeWaitTable waits{};
     uint8_t* ptr(uint32_t address) {
         if(address>>24==2) return ewram.data()+(address&0x3ffff);
         if(address>>24==3) return iwram.data()+(address&0x7fff);
+        if((address>>24)>=8 && (address>>24)<=12 && (address&0x1ffffff)<rom.size())
+            return rom.data()+(address&0x1ffffff);
         throw std::runtime_error("unexpected original device access before native fallback");
     }
     uint8_t read8(uint32_t address) override {return *ptr(address);}
@@ -60,6 +63,7 @@ int main() {
             Bus original;
             for(auto& byte:original.ewram) byte=uint8_t(random());
             for(auto& byte:original.iwram) byte=uint8_t(random());
+            for(auto& byte:original.rom) byte=uint8_t(random());
             auto& w=original.waits;
             w.n16[2]=w.s16[2]=uint8_t(1+test%15);w.n32[2]=w.s32[2]=uint8_t(2*w.n16[2]+1);
             const unsigned first[]={4,3,2,8};const unsigned second[]={2,1,4,8};
@@ -71,13 +75,16 @@ int main() {
             for(auto& value:cpu.R)value=random();
             cpu.R[2]=(test&1?0x02004000:0x03001000)+(test%4);
             cpu.R[3]=test%256;
-            cpu.R[4]=test%7==0?0x04000000:test%5==0?0x03007fff:0x02000100+(test%4);
+            cpu.R[4]=test%7==0?0x04000000:test%11==0?0x080000c4:
+                test%13==0?0x0d000100:test%5==0?0x03007fff:
+                (test%3==0?0x08000100:0x02000100)+(test%4);
             cpu.R[15]=0x08001000;
             cpu.cpsr.n=random()&1;cpu.cpsr.z=random()&1;cpu.cpsr.c=random()&1;cpu.cpsr.v=random()&1;
             cpu.cpsr.mode=0x1f;cpu.cpsr.t=cpu.thumb=thumb;
             RuntimeNativeRegion region{};
             std::copy_n(cpu.R,16,region.cpu.R);region.cpu.cpsr=packed(cpu.cpsr);
             region.waits=w;region.ewram=native.ewram.data();region.iwram=native.iwram.data();
+            region.rom=native.rom.data();region.rom_bytes=uint32_t(native.rom.size());
             region.bound=runtime_native_region_bound(w,16,0x08001000);
             commits=0;
             const auto next=thumb?run_native_0(region):run_native_1(region);

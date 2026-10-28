@@ -37,6 +37,13 @@ int main() {
         RuntimeNativeRegion region{};
         require(runtime_native_region_begin(&region,2,0x08001000,1),"normal region was not admitted");
         const auto bound=region.bound;
+        require(region.memory_range(0x08001000,4,false) &&
+                region.memory_range(0x0a001000,4,false),"ordinary ROM mirrors rejected");
+        require(!region.memory_range(0x080000c4,2,false) &&
+                !region.memory_range(0x0a0000c4,2,false) &&
+                !region.memory_range(0x0d001000,2,false) &&
+                !region.memory_range(0x08001000,4,true) &&
+                !region.memory_range(0x08020000,4,false),"ROM device/write/bounds guard failed");
         region.bus_write_u32(0x03000100,0x12345678);
         region.cpu.R[15]=0x08001002;region.runtime_tick(3);
         region.cpu.R[1]=region.bus_read_u32(0x03000100);
