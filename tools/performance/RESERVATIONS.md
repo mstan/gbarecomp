@@ -1,50 +1,38 @@
-# Performance test rotation
+# Shared benchmark capacity pool
 
-The owner authorized this Windows machine, SERVER and the Steam Deck as targets
-on 2026-10-28. The campaign's local `fleet-targets.json` records its destinations;
-keep personal paths and temporary campaign roots outside the source repository.
-`fleet_probe.py --registry <fleet-targets.json> --output <new-receipt.json>` checks each independently. Choose any
-eligible machine with a compatible native build; an occupied Windows host must
-not prevent testing on an eligible Deck or SERVER.
+Use the owner's installed scheduler and sibling registry/agent:
 
-Reservations belong to a **host**, not the whole fleet. Windows retains
-`Local\Codex_Performance_Benchmark` and the held exclusive handle on the existing
-empty `G:/Temp/Codex/.benchmark.lock`. Linux uses nonblocking `flock` on
-`/home/deck/.cache/codex-performance/benchmark.lock`. Never truncate, remove or
-replace these files to acquire a turn. A nonempty/unexpected file is preserved
-and admission declines. Never terminate another console's test or owner game.
+```powershell
+& 'C:/Users/Matthew/.pyenv/pyenv-win/versions/3.12.5/python.exe' `
+  'C:/Users/Matthew/.local/bin/benchmark_hosts.py' probe `
+  --cpu 1.25 --gpu 20 --memory 1 --disk 1 --owner beads-mc7.74 --out headroom.json
 
-Use `host_reservation.lease()` around a complete workload/comparison and call
-`headroom()` **inside** that lease immediately before launching. Fleet probes
-release their lease; their results do not grant a future reservation.
-`guarded_workload.py <spec.json> --output <new-receipt.json>` provides this
-contract for a batch of native executables: it rechecks between runs, retains
-one selected core, bounds each process, mutes unattended output and records
-full stdout/stderr hashes plus execution load. Its successful execution status
-does not establish workload correctness or a game speed verdict.
+& 'C:/Users/Matthew/.pyenv/pyenv-win/versions/3.12.5/python.exe' `
+  'C:/Users/Matthew/.local/bin/benchmark_hosts.py' run --os linux `
+  --cpu 1.25 --gpu 20 --memory 1 --disk 1 --owner beads-mc7.74 `
+  --job-file workload.json --out reservation.json
+```
 
-Admission requires two complete one-second samples with every sibling of the
-selected physical core at or below20% CPU, GPU at or below10% when required,
-workspace disk queue at or below2, and sufficient ready storage (default4GiB;
-raise this to cover the workload's staging/output). Linux also checks IO
-pressure, and records power and temperature. Missing required measurements
-decline admission. Headless CPU-only workloads may explicitly observe rather
-than require GPU headroom; record that distinction. Process names are evidence,
-not admission exclusions: another game/compiler can run if measured headroom
-and the subsequent comparison controls remain acceptable.
+The pool rotates this PC, SERVER and Steam Deck SSH. Both Deck aliases share
+one physical host and ledger. Choose an OS/backend-compatible native workload;
+verify its runtime before timing. Supply exact JSON `argv` and `env` in the job
+file, especially on Windows, and declare realistic physical CPU-core, GPU%, RAM
+GiB and workspace GiB costs. Adjust the sample budgets above to the actual job.
+Missing required telemetry does not pass admission.
 
-Preserve the workload's existing per-leg load, A/A, balanced-pair variation,
-correctness and per-game regression controls. Continue observing load during
-the actual workload. A ready host is not a performance result. Keep A/B on the
-same host with matched features, power settings and inputs; record its native
-binary identities. Windows EXEs require Windows; prepare and qualify native
-Linux builds before counting Deck game results. Do not pool unlike hosts or
-optimization packages. A reproducible regression for one game still blocks.
+Capacity reservations are per physical host. Work may coexist when declared
+budgets and measured headroom fit. Other games, compilers and services are not
+automatic exclusions. Never require an otherwise idle machine, stop owner work
+or force an old lock. Keep each complete matched A/B pair on one host/config.
 
-On busy hosts, preserve declined/partial receipts and recheck in about30minutes
-or after an actual relevant resource release. Rotate immediately to a different
-eligible host. Retain older frozen package helpers and evidence unchanged; new
-runs use this revision and record the updated reservation protocol separately.
-Keep all unattended work muted/hidden, owner saves/settings intact, and Deck
-staging bounded. Do not change the Deck's system configuration or owner power
-profile to create headroom.
+Retain host telemetry, source/native-binary identities, settings and raw per-game
+samples. Headroom does not establish a speed result; use the workload's A/A,
+balanced-pair variation, correctness and per-game regression checks. Preserve
+historical quiet-host gate files and receipts unchanged; label new capacity
+protocol runs separately. Target rotation does not authorize extra benchmark
+matrices or repeated accepted gameplay checks.
+
+Keep automated work hidden/muted and native saves/settings intact. Track bounded
+staging and clean disposable outputs when evidence is secured. The temporary
+exclusive reservation implementation from commit975b7a3 is superseded; new jobs
+must use the installed shared scheduler rather than recreating its ledger.
