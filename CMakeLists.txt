@@ -1140,6 +1140,24 @@ else()
     add_test(NAME mp2k_native_contract COMMAND mp2k_native_tests)
 endif()
 set_tests_properties(mp2k_native_contract PROPERTIES SKIP_RETURN_CODE 77)
+
+# Mixed local-CPU/RAM regions: authored instructions only, no ROM/BIOS input.
+# Exercise exact prefix settlement as well as the complete admitted operation.
+add_executable(gen_native_region_tests EXCLUDE_FROM_ALL tests/codegen/gen_native_region_tests.cpp)
+target_link_libraries(gen_native_region_tests PRIVATE gbarecomp_armv4t)
+set(NATIVE_REGION_TEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/native_region_tests_generated")
+set(NATIVE_REGION_TEST_SOURCE "${NATIVE_REGION_TEST_DIR}/n02_generated.inc")
+file(MAKE_DIRECTORY "${NATIVE_REGION_TEST_DIR}")
+add_custom_command(OUTPUT "${NATIVE_REGION_TEST_SOURCE}"
+    COMMAND gen_native_region_tests "${NATIVE_REGION_TEST_SOURCE}"
+    DEPENDS gen_native_region_tests
+    VERBATIM)
+add_executable(native_region_tests EXCLUDE_FROM_ALL
+    tests/codegen/native_region_test.cpp "${NATIVE_REGION_TEST_SOURCE}")
+target_include_directories(native_region_tests PRIVATE "${NATIVE_REGION_TEST_DIR}")
+target_link_libraries(native_region_tests PRIVATE gbarecomp_armv4t)
+add_test(NAME native_region_contract COMMAND native_region_tests)
+
 add_gbarecomp_runtime_stack_test(bridge_iret_tests tests/runtime/bridge_iret_test.cpp)
 add_gbarecomp_runtime_stack_test(high_resolution_tests tests/ppu/high_resolution_test.cpp)
 add_gbarecomp_runtime_stack_test(vertical_obj_tests tests/ppu/vertical_obj_test.cpp)
