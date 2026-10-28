@@ -2476,7 +2476,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         reg(0x03000000u, bus.iwram_ptr(),    32 * 1024);
         reg(0x04000000u, bus.io().raw(),     gba::GbaIo::kIoSize);
         reg(0x05000000u, bus.pal_ptr(),       1 * 1024);
-        reg(0x06000000u, bus.vram_ptr(),     96 * 1024);
+        reg(0x06000000u, bus.vram_read_view().data(), 96 * 1024);
         reg(0x07000000u, bus.oam_ptr(),       1 * 1024);
     }
     auto wram_trace_tick = [&]() {
@@ -2894,6 +2894,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     }
 
     HostWindow win;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    const char* native_draw_setting=std::getenv("GBARECOMP_NATIVE_DRAW");
+    const bool native_draw_requested=!native_draw_setting || native_draw_setting[0]!='0';
+#endif
     // Single battery-flush entry point for the windowed/headless session. On the
     // web it also tells the page to sync /saves to IndexedDB (only when
     // something was written or the write failed).
@@ -3004,6 +3008,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     uint64_t high_resolution_presented = 0;
     auto present_live_frame = [&]() {
         ppu.set_internal_resolution(args.internal_resolution, opts.high_resolution_affine_provider);
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        if (auto frame=ppu.native_draw_frame()) {
+            const bool presented=win.present_native(frame);
+            if (!presented || framedump_dir)
+                std::memcpy(live_fb.data(),ppu.latched_framebuffer(),ppu.render_bytes());
+            if (presented)return;
+        }
+#endif
 #if defined(GBARECOMP_GPU_HD_EXPERIMENT)
         const auto* current_hd = ppu.high_resolution();
         if (current_hd && !current_hd->deferred_rendering() && win.hd_jobs_available())
@@ -3185,7 +3197,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 ? opts.builtin_game_name : GBARECOMP_WINDOW_TITLE;
         win.set_orientation_policy(static_cast<int>(opts.orientation));
 #if defined(GBARECOMP_GPU_HD_EXPERIMENT)
-        win.prefer_gpu_hd(args.internal_resolution > 1);
+        win.prefer_gpu_hd(args.internal_resolution > 1
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+            || native_draw_requested
+#endif
+        );
 #endif
         if (!win.open(args.scale, ppu.render_width(), ppu.render_height(),
                       runtime_title,
@@ -3199,6 +3215,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 #if defined(GBARECOMP_GPU_HD_EXPERIMENT)
         if (args.internal_resolution > 1)
             ppu.set_deferred_hd_rendering(win.hd_jobs_available());
+#endif
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        if (native_draw_requested && win.hd_jobs_available()) {
+            bus.enable_draw_memory();
+            ppu.set_native_draw_enabled(true,[&](const auto& frame,auto& rgb) {
+                return win.readback_native(frame,rgb);
+            });
+        }
 #endif
         // Rebindable input: keybinds.ini (player buttons, recomp-ui generic
         // format) + config.ini [KeyMap] (system hotkeys), both next to the
@@ -4347,7 +4371,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         out.push_back({"IO", bus.io().raw(), gba::GbaIo::kIoSize});
         out.push_back({"call-stack", runtime_call_stack_data(),
                        runtime_call_stack_depth() * sizeof(uint32_t), true});
-        out.push_back({"VRAM", bus.vram_ptr(), 96u * 1024u});
+        out.push_back({"VRAM", bus.vram_read_view().data(), 96u * 1024u});
         out.push_back({"palette", bus.pal_ptr(), 1024u});
         out.push_back({"OAM", bus.oam_ptr(), 1024u});
     };
@@ -4492,11 +4516,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (present_frame) {
                     const bool view_changed = sync_resize_driven_view();
                     if (ppu.has_latched_framebuffer() && !view_changed) {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+                        if (!ppu.native_draw_frame())
+#endif
                         std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
                                     ppu.render_bytes());
                     } else {
                         ppu.render(live_fb.data(), bus.io().read16(0x000),
-                                   bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
+                                   bus.io().raw(), bus.vram_read_view().data(), bus.oam_ptr(),
                                    bus.pal_ptr());
                     }
                 }
@@ -4930,11 +4957,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (present_frame) {
                     const bool view_changed = sync_resize_driven_view();
                     if (ppu.has_latched_framebuffer() && !view_changed) {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+                        if (!ppu.native_draw_frame())
+#endif
                         std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
                                     ppu.render_bytes());
                     } else {
                         ppu.render(live_fb.data(), bus.io().read16(0x000),
-                                   bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
+                                   bus.io().raw(), bus.vram_read_view().data(), bus.oam_ptr(),
                                    bus.pal_ptr());
                     }
                 }
@@ -5114,7 +5144,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             std::memcpy(fb.data(), ppu.latched_framebuffer(), fb.size());
         } else {
             ppu.render(fb.data(), bus.io().read16(0x000), bus.io().raw(),
-                       bus.vram_ptr(), bus.oam_ptr(), bus.pal_ptr());
+                       bus.vram_read_view().data(), bus.oam_ptr(), bus.pal_ptr());
         }
         const uint8_t* dump_pixels = fb.data();
         unsigned dump_width = ppu.render_width(), dump_height = ppu.render_height();
@@ -5136,6 +5166,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     }
 
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    std::printf("native_draw rows=%llu frames=%llu pixel_reads=%llu\n",
+        (unsigned long long)ppu.native_draw_rows(),
+        (unsigned long long)ppu.native_draw_frames(),
+        (unsigned long long)ppu.native_pixel_reads());
+#endif
     if (const auto* hd = ppu.high_resolution())
         std::printf("presentation scale=%u effective=%ux%u complete_frames=%llu affine_lines=%llu samples=%llu hd_presented=%llu\n",
             hd->scale(), hd->complete() ? hd->width() : ppu.render_width(),
@@ -5160,7 +5196,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     std::printf("pal_nonzero=%zu/1024 vram_nonzero=%zu/98304 "
                 "oam_nonzero=%zu/1024\n",
                 count_nonzero(bus.pal_ptr(), 1024),
-                count_nonzero(bus.vram_ptr(), 96 * 1024),
+                count_nonzero(bus.vram_read_view().data(), 96 * 1024),
                 count_nonzero(bus.oam_ptr(), 1024));
     if (bus.matrix().active()) {
         std::printf("matrix_maps=%u matrix_highest_physical_end=0x%08x\n",

@@ -112,6 +112,9 @@ void run(gbarecomp::HdGpuRenderer& gpu,unsigned scenario){
     CHECK(gpu.render_native(*frame,&lut));CHECK(gpu.readback(actual,width,height));
     retain(prefix+".graded-reference.rgb",expected_graded);retain(prefix+".graded-gpu.rgb",actual);
     CHECK(actual==expected_graded);
+    CHECK(gpu.readback_native(actual));CHECK(actual==expected);
+    CHECK(gpu.native_display(nullptr));CHECK(gpu.readback(actual,width,height));CHECK(actual==expected);
+    CHECK(gpu.native_display(&lut));CHECK(gpu.readback(actual,width,height));CHECK(actual==expected_graded);
     if(!scenario){
         // Exercise the existing HD consumer and return to native on one SDL
         // context. Input texture formats and target dimensions must rebind.

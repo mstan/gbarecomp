@@ -28,6 +28,7 @@
 #include "gba_high_resolution.h"
 
 struct RecompRuntimeUi;
+namespace gba { class GbaNativeDrawFrame; }
 
 namespace gbarecomp {
 
@@ -166,6 +167,11 @@ public:
     bool hd_jobs_available();
     bool present_hd(const gba::GbaHighResolutionFrame::DrawFrame& frame);
     bool readback_hd(std::vector<uint8_t>& rgb, unsigned& width, unsigned& height);
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    bool present_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>&);
+    bool readback_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>&,
+                         std::vector<uint8_t>& rgb);
+#endif
 
     // Push `count` int16_t mono samples assuming the engine's 65.536 kHz
     // source rate. Prefer push_audio_block when the caller knows the real
