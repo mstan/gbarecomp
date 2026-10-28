@@ -29,6 +29,7 @@
 namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
 namespace gba {
+class GbaNativeDrawFrame;
 
 class GbaPpu {
 public:
@@ -203,6 +204,11 @@ public:
                            const uint8_t* oam,
                            const uint8_t* pal);
     void mark_framebuffer_latched();
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    // Materialize captured hardware rows on a portable CPU, without consulting
+    // later memory, providers or device time. Used on demand/fallback.
+    static std::vector<uint8_t> render_native_draw_frame(const GbaNativeDrawFrame&);
+#endif
     const uint8_t* latched_framebuffer() const { return latched_fb_.data(); }
     bool has_latched_framebuffer() const { return has_latched_fb_; }
 
