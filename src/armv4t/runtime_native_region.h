@@ -5,10 +5,24 @@
 #include "runtime_arm_types.h"
 #include "runtime_wait_model.h"
 #include <cstdint>
+#include <algorithm>
+
+// For the explicitly eligible straight-line GBA instruction set only. Control,
+// multiply and block-transfer operations have separate contracts and are not
+// admitted. Both runtime admission and the interpreter differential use this.
+inline uint32_t runtime_native_region_bound(const RuntimeWaitTable& waits,
+                                            uint32_t count,uint32_t pc) {
+    const auto r=pc>>24;
+    const uint32_t fetch=std::max({uint32_t(waits.n16[r]),uint32_t(waits.s16[r]),
+                                  uint32_t(waits.n32[r]),uint32_t(waits.s32[r])});
+    const uint32_t data=std::max({uint32_t(waits.n16[2]),uint32_t(waits.n32[2]),
+                                 uint32_t(waits.n16[3]),uint32_t(waits.n32[3])});
+    return count*(8u+fetch+data+waits.s16[r]);
+}
 
 struct RuntimeNativeCpu {
-    uint32_t R[16]{};
-    uint32_t cpsr = 0;
+    uint32_t R[16];
+    uint32_t cpsr;
     uint32_t cpsr_n() const { return (cpsr & CPSR_N_BIT) != 0; }
     uint32_t cpsr_z() const { return (cpsr & CPSR_Z_BIT) != 0; }
     uint32_t cpsr_c() const { return (cpsr & CPSR_C_BIT) != 0; }
@@ -187,13 +201,20 @@ extern "C" void runtime_native_region_end(RuntimeNativeRegion*);
 // body AT the unexecuted instruction; it neither replays stores nor rolls back.
 struct RuntimeNativeRegion {
     RuntimeNativeCpu cpu;
-    RuntimeWaitTable waits{};
-    uint8_t* ewram = nullptr;
-    uint8_t* iwram = nullptr;
-    uint32_t cycles = 0;
-    uint32_t writes = 0;
-    uint32_t bound = 0;
-    uint32_t instructions = 0;
+    // Admission initializes every field on success. Production callers leave
+    // this scratch uninitialized so failed admission does not clear/copy a CPU
+    // before taking the original route. Standalone tests use value-init {}.
+    RuntimeWaitTable waits;
+    uint8_t* ewram;
+    uint8_t* iwram;
+    uint32_t cycles;
+    uint32_t writes;
+    uint32_t bound;
+    uint32_t instructions;
+    uint32_t last_read_pc;
+    bool had_read;
+    void* owner_bus;
+    uint64_t start_cycles;
     static constexpr unsigned insn_trace = 0;
     static constexpr bool runtime_should_yield() { return false; }
     static constexpr bool runtime_trace_enabled() { return false; }
@@ -208,12 +229,16 @@ struct RuntimeNativeRegion {
         return (address >> 24) == 2 ? ewram + (address & 0x3ffffu)
                                    : iwram + (address & 0x7fffu);
     }
-    uint32_t bus_read_u8(uint32_t address) const { return *ram(address); }
-    uint32_t bus_read_u16(uint32_t address) const {
+    uint32_t bus_read_u8(uint32_t address) {
+        had_read=true;last_read_pc=cpu.R[15];return *ram(address);
+    }
+    uint32_t bus_read_u16(uint32_t address) {
+        had_read=true;last_read_pc=cpu.R[15];
         const auto* p = ram(address);
         return uint32_t(p[0]) | (uint32_t(p[1]) << 8);
     }
-    uint32_t bus_read_u32(uint32_t address) const {
+    uint32_t bus_read_u32(uint32_t address) {
+        had_read=true;last_read_pc=cpu.R[15];
         const auto* p = ram(address);
         return uint32_t(p[0]) | (uint32_t(p[1]) << 8) |
                (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
@@ -236,6 +261,6 @@ struct RuntimeNativeRegion {
         if(!waits.prefetch || address>=0x08000000u) return 0;
         return uint32_t(rwt_prefetch_stall(&waits,int32_t(wait),pc,thumb)-int32_t(wait));
     }
-    void runtime_tick(uint32_t elapsed) { cycles += elapsed; }
+    void runtime_tick(uint32_t elapsed) { cycles += elapsed; ++instructions; }
     void commit() { runtime_native_region_end(this); }
 };

@@ -15,7 +15,7 @@
 
 unsigned commits=0;
 extern "C" void runtime_native_region_end(RuntimeNativeRegion* region) {
-    if(region->cycles>=region->bound) throw std::runtime_error("test region exceeded admission bound");
+    if(region->cycles>region->bound) throw std::runtime_error("test region exceeded admission bound");
     ++commits;
 }
 #include "n02_generated.inc"
@@ -75,9 +75,10 @@ int main() {
             cpu.R[15]=0x08001000;
             cpu.cpsr.n=random()&1;cpu.cpsr.z=random()&1;cpu.cpsr.c=random()&1;cpu.cpsr.v=random()&1;
             cpu.cpsr.mode=0x1f;cpu.cpsr.t=cpu.thumb=thumb;
-            RuntimeNativeRegion region;
+            RuntimeNativeRegion region{};
             std::copy_n(cpu.R,16,region.cpu.R);region.cpu.cpsr=packed(cpu.cpsr);
-            region.waits=w;region.ewram=native.ewram.data();region.iwram=native.iwram.data();region.bound=100000;
+            region.waits=w;region.ewram=native.ewram.data();region.iwram=native.iwram.data();
+            region.bound=runtime_native_region_bound(w,16,0x08001000);
             commits=0;
             const auto next=thumb?run_native_0(region):run_native_1(region);
             const auto* opcodes=thumb?program_0:program_1;

@@ -234,6 +234,7 @@ public:
     // DMA loops accumulate their GBATEK transfer cost here; the runtime drains
     // it (charging the master clock + advancing devices) at a safe point. Read
     // and reset in one call. (GBATEK § "GBA DMA Transfers" timing.)
+    uint32_t pending_dma_steal_cycles() const { return dma_steal_cycles_; }
     uint32_t take_dma_steal_cycles() {
         uint32_t c = dma_steal_cycles_;
         dma_steal_cycles_ = 0;

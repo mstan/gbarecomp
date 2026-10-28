@@ -6,6 +6,7 @@
 // before any recompiled cart code executes.
 
 #include "../armv4t/runtime_arm.h"
+#include "../armv4t/runtime_native_region.h"
 #include "../armv4t/runtime_context.h"
 #include "runtime_bus_bridge.h"
 #include "mobile_platform.h"
@@ -775,6 +776,19 @@ extern "C" void runtime_resync_horizon(void) {
     recompute_event_budget(bus, ppu);
 }
 
+static uint32_t g_service_tick_divider = 0;
+static void account_host_service_instructions(uint32_t count) {
+    const uint32_t previous = g_service_tick_divider;
+    g_service_tick_divider += count;
+    if (!g_host_service_hook || (previous & 0x3fffu) + count < 0x4000u) return;
+    static auto last_service = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_service >= std::chrono::milliseconds(8)) {
+        g_host_service_hook();
+        last_service = now;
+    }
+}
+
 extern "C" void runtime_tick(uint32_t cycles) {
     if (g_session_execution) { g_runtime_cycles += cycles; return; }
     // P6 shadow-tick: a healed shard's validation re-run only accumulates its
@@ -790,17 +804,7 @@ extern "C" void runtime_tick(uint32_t cycles) {
     // reaching a GBA frame boundary. Downsample the wall-clock check so native
     // window messages keep flowing without putting a clock read on every guest
     // instruction.
-    if (g_host_service_hook) {
-        static uint32_t service_tick_divider = 0;
-        if ((++service_tick_divider & 0x3FFFu) == 0) {
-            static auto last_service = std::chrono::steady_clock::now();
-            const auto now = std::chrono::steady_clock::now();
-            if (now - last_service >= std::chrono::milliseconds(8)) {
-                g_host_service_hook();
-                last_service = now;
-            }
-        }
-    }
+    if (g_host_service_hook) account_host_service_instructions(1);
 
     cyc_probe("tick", cycles);
     g_runtime_cycles += cycles;
@@ -1354,3 +1358,89 @@ void runtime_session_tick_devices(std::uint32_t cycles) {
     if (g_active_bus && g_active_ppu) tick_devices(g_active_bus, g_active_ppu, cycles);
 }
 } // namespace gbarecomp
+
+#if defined(GBARECOMP_NATIVE_REGIONS)
+namespace {
+uint64_t g_native_region_trials=0, g_native_region_accepted=0, g_native_region_instructions=0;
+struct NativeRegionReport {
+    ~NativeRegionReport() {
+        if(g_native_region_trials) std::fprintf(stderr,
+            "native_regions trials=%llu accepted=%llu instructions=%llu\n",
+            static_cast<unsigned long long>(g_native_region_trials),
+            static_cast<unsigned long long>(g_native_region_accepted),
+            static_cast<unsigned long long>(g_native_region_instructions));
+    }
+} g_native_region_report;
+}
+#endif
+
+extern "C" bool runtime_native_region_begin(RuntimeNativeRegion* region,
+    uint32_t count, uint32_t pc, uint32_t thumb) {
+#if !defined(GBARECOMP_NATIVE_REGIONS) || defined(GBA_COSIM)
+    (void)region; (void)count; (void)pc; (void)thumb;
+    return false;
+#else
+    ++g_native_region_trials;
+    auto* bus=gbarecomp::active_bus();
+    auto* ppu=gbarecomp::active_ppu();
+    if(!region || !bus || !ppu || count==0 || count>64 ||
+       g_session_execution || g_runtime_shadow_tick || g_force_interp ||
+       g_runtime_force_interp_step_active || g_runtime_force_interp_hook ||
+       g_runtime_insn_trace || g_runtime_trace_enabled || g_runtime_break_pc ||
+       g_runtime_bus_read_override || gba::g_rom_read16_override || gba::g_rom_read32_override ||
+       bus->has_write_observer() || bus->io().halted() ||
+       bus->io().pending_dma_steal_cycles() || bus->matrix().active() ||
+       gbarecomp::g_sampling.load(std::memory_order_relaxed)) return false;
+    static const bool cycle_probe=std::getenv("GBARECOMP_CYC_HI")!=nullptr;
+    if(cycle_probe) return false;
+    const uint32_t code_region=pc>>24;
+    const uint32_t bytes=count*(thumb?2u:4u);
+    const uint32_t offset=pc&0x01ffffffu;
+    if(code_region<8 || code_region>13 || thumb>1 || (pc&(thumb?1u:3u)) || g_cpu.R[15]!=pc ||
+       bool(g_cpu.cpsr&CPSR_T_BIT)!=bool(thumb) ||
+       ((pc+bytes-1)>>24)!=code_region || offset>bus->rom_size() ||
+       bytes>bus->rom_size()-offset || (offset<0xccu && offset+bytes>0xc0u) ||
+       (!(g_cpu.cpsr&CPSR_I_BIT) && bus->io().irq_pending())) return false;
+    if(runtime_should_yield()) return false;
+    // Eligible instructions have no multiply, block transfer, branch or PC
+    // write. Eight cycles cover fixed/internal/shift costs; a positive
+    // prefetch adjustment cannot exceed the active sequential halfword wait.
+    const uint32_t bound=runtime_native_region_bound(g_runtime_waits,count,pc);
+    if(g_event_budget<=bound) return false;
+    region->cpu.cpsr=g_cpu.cpsr;
+    std::copy_n(g_cpu.R,16,region->cpu.R);
+    region->waits=g_runtime_waits;
+    region->ewram=bus->ewram_ptr();region->iwram=bus->iwram_ptr();
+    region->cycles=region->writes=region->instructions=region->last_read_pc=0;
+    region->had_read=false;region->bound=bound;
+    region->owner_bus=bus;region->start_cycles=g_runtime_cycles;
+    ++g_native_region_accepted;
+    return true;
+#endif
+}
+
+extern "C" void runtime_native_region_end(RuntimeNativeRegion* region) {
+    auto* bus=gbarecomp::active_bus();
+    if(!region || region->owner_bus!=bus || !bus ||
+       region->start_cycles!=g_runtime_cycles || region->cycles>region->bound ||
+       g_event_budget<=region->cycles) {
+        std::fprintf(stderr,"runtime: invalid native-region settlement\n");
+        std::abort();
+    }
+    std::copy_n(region->cpu.R,16,g_cpu.R);
+    g_cpu.cpsr=region->cpu.cpsr;
+    g_runtime_waits=region->waits;
+    g_idle_disturb_epoch+=region->writes;
+    if(region->had_read) {
+        bus->set_bios_access_enabled(false);
+        bus->note_pc(region->last_read_pc,(g_cpu.cpsr&CPSR_T_BIT)!=0);
+    }
+    const uint32_t instructions=region->instructions;
+#if defined(GBARECOMP_NATIVE_REGIONS)
+    g_native_region_instructions+=instructions;
+#endif
+    region->owner_bus=nullptr;
+    runtime_tick(region->cycles);
+    if(g_host_service_hook && instructions>1)
+        account_host_service_instructions(instructions-1);
+}

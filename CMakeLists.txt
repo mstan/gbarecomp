@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(gbarecomp C CXX)
 
 option(GBARECOMP_DETAILED_PHASE_PROFILE "Build additional opt-in device phase timers" OFF)
+option(GBARECOMP_NATIVE_REGIONS "Build bounded native CPU/RAM region experiment" OFF)
 if(GBARECOMP_DETAILED_PHASE_PROFILE)
     set_property(SOURCE src/runtime/runtime_bus_bridge.cpp src/armv4t/runtime_arm.cpp APPEND PROPERTY
         COMPILE_DEFINITIONS GBARECOMP_DETAILED_PHASE_PROFILE=1)
@@ -292,6 +293,9 @@ target_include_directories(gbarecomp_armv4t PUBLIC
     src/armv4t
     ${GBA_ARM_RECOMP_CORE_INCLUDE_DIRS})
 set_property(TARGET gbarecomp_armv4t PROPERTY POSITION_INDEPENDENT_CODE ON)
+if(GBARECOMP_NATIVE_REGIONS)
+    target_compile_definitions(gbarecomp_armv4t PUBLIC GBARECOMP_NATIVE_REGIONS=1)
+endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # recompile_core — function discovery + per-function codegen, as a LIBRARY.
@@ -1159,6 +1163,10 @@ target_link_libraries(native_region_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME native_region_contract COMMAND native_region_tests)
 
 add_gbarecomp_runtime_stack_test(bridge_iret_tests tests/runtime/bridge_iret_test.cpp)
+if(GBARECOMP_NATIVE_REGIONS)
+    add_gbarecomp_runtime_stack_test(native_region_admission_tests tests/runtime/native_region_admission_test.cpp)
+    set_tests_properties(native_region_admission_tests PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 add_gbarecomp_runtime_stack_test(high_resolution_tests tests/ppu/high_resolution_test.cpp)
 add_gbarecomp_runtime_stack_test(vertical_obj_tests tests/ppu/vertical_obj_test.cpp)
 add_gbarecomp_runtime_stack_test(dma_tests tests/dma/test_main.cpp)
