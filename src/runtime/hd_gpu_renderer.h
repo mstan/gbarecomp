@@ -4,6 +4,7 @@
 #include <vector>
 struct SDL_Renderer;
 struct SDL_Texture;
+namespace gba { class GbaNativeDrawFrame; }
 namespace gbarecomp {
 namespace runtime { class ColorLut; }
 
@@ -18,6 +19,10 @@ public:
     bool available() const;
     SDL_Texture* render(const gba::GbaHighResolutionFrame::DrawFrame&,
                         const runtime::ColorLut*);
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    SDL_Texture* render_native(const gba::GbaNativeDrawFrame&,
+                               const runtime::ColorLut*);
+#endif
     bool readback(std::vector<uint8_t>& rgb, unsigned& width, unsigned& height);
     unsigned width() const;
     unsigned height() const;

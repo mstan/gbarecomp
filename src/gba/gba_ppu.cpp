@@ -4,6 +4,9 @@
 #include "gba_color.h"
 #include "gba_render_profile.h"
 #include "foreign_presentation_internal.h"
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+#include "gba_native_draw_frame.h"
+#endif
 
 #include <algorithm>
 #include <cstddef>
@@ -705,7 +708,7 @@ void mark_obj_window_scanline(bool* mask,
     }
 }
 
-template<bool Ordered>
+template<bool Ordered, bool HardwareOnly = false>
 void render_scanline_impl(uint8_t* rgb,
                               uint32_t y,
                               uint16_t dispcnt,
@@ -826,7 +829,7 @@ void render_scanline_impl(uint8_t* rgb,
     // only the explicitly declared source map cells keeps that room terrain
     // out of the foreign frame.
     PixelCandidate foreign_hud_bg[GbaPpu::kScreenWidth] = {};
-    const GbaForeignObjFocusTransform* foreign_focus = Ordered ? nullptr :
+    const GbaForeignObjFocusTransform* foreign_focus = (Ordered || HardwareOnly) ? nullptr :
         foreign_presentation_internal::obj_focus();
     const uint16_t backdrop_color = load_u16_le(&pal[0]);
 #if !defined(GBARECOMP_SCANLINE_HLE)
@@ -947,7 +950,7 @@ void render_scanline_impl(uint8_t* rgb,
                 if (!color256) index |= palette_bank << 4;
                 const uint16_t color = load_u16_le(&pal[index * 2]);
                 const bool t1 = blend_enabled(screen_x) && target1;
-                if (!Ordered && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
+                if (!Ordered && !HardwareOnly && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
                                                 tile_y, screen_x, y)) {
                     PixelCandidate& hud = foreign_hud_bg[screen_x];
                     hud.color = color; hud.key = key;
@@ -997,7 +1000,7 @@ void render_scanline_impl(uint8_t* rgb,
             if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
 
             const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
-            if (!Ordered && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
+            if (!Ordered && !HardwareOnly && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
                                             tile_y, x, y)) {
                 PixelCandidate& hud = foreign_hud_bg[x];
                 hud.color = color;
@@ -1167,7 +1170,7 @@ void render_scanline_impl(uint8_t* rgb,
     // BG2 identity for native WIN0/WIN1/OBJ-window and color-effect routing,
     // so room-authored masks and fades still apply. A full foreign background
     // is authoritative and therefore suppresses this overlay automatically.
-    if constexpr (!Ordered) {
+    if constexpr (!Ordered && !HardwareOnly) {
         if (foreign_presentation_internal::background() == nullptr) {
             if (const auto* overlay = foreign_presentation_internal::screen_overlay();
                 valid_foreign_screen_overlay(overlay)) {
@@ -1326,7 +1329,7 @@ void render_scanline_impl(uint8_t* rgb,
         if (rot_scale) {
             int bw = disable_or_double ? sw * 2 : sw;
             int bh = disable_or_double ? sh * 2 : sh;
-            if (!Ordered && apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num,
+            if (!Ordered && !HardwareOnly && apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num,
                                         false, static_cast<uint32_t>(idx)).action ==
                 ForeignObjFocusAction::kSuppress) return;
             int j = static_cast<int>(y) - sy;
@@ -1353,7 +1356,7 @@ void render_scanline_impl(uint8_t* rgb,
             return;
         }
         const ForeignObjFocusResult focus_result = [&] {
-            if constexpr (Ordered) return ForeignObjFocusResult{};
+            if constexpr (Ordered || HardwareOnly) return ForeignObjFocusResult{};
             else return apply_foreign_obj_focus(&sx, &sy, sw, sh, tile_num, true,
                                                static_cast<uint32_t>(idx));
         }();
@@ -2975,6 +2978,24 @@ void GbaPpu::mark_framebuffer_latched() {
     if (high_resolution_) high_resolution_->latch();
     if (presentation_) presentation_->frame_ready();
 }
+
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+std::vector<uint8_t> GbaPpu::render_native_draw_frame(const GbaNativeDrawFrame& frame) {
+    if(frame.lines().size()!=kLinesVisible || !frame.lines().front().memory.reset)
+        throw std::invalid_argument("incomplete owned native frame");
+    std::array<uint8_t,GbaDrawMemory::kVramBytes> vram{};
+    std::uint64_t sequence=0;
+    std::vector<uint8_t> rgb(kFramebufferBytes);
+    for(unsigned y=0;y<kLinesVisible;++y) {
+        const auto& line=frame.lines()[y];
+        if(!GbaDrawMemory::apply(line.memory,vram,sequence))
+            throw std::invalid_argument("invalid owned native memory transaction");
+        render_scanline_impl<false,true>(rgb.data(),y,line.dispcnt,line.io.data(),
+            vram.data(),line.oam.data(),line.palette.data(),kScreenWidth,kScreenHeight);
+    }
+    return rgb;
+}
+#endif
 
 void GbaPpu::set_rasterization_enabled(bool enabled) {
     rasterization_enabled_ = enabled;

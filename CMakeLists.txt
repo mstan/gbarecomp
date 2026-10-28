@@ -1170,6 +1170,15 @@ target_include_directories(draw_memory_tests PRIVATE src/gba)
 add_test(NAME draw_memory_tests COMMAND draw_memory_tests)
 if(GBARECOMP_NATIVE_DRAW_JOBS)
     add_gbarecomp_runtime_stack_test(draw_memory_bus_tests tests/ppu/draw_memory_bus_test.cpp)
+    if(GBARECOMP_SDL2_OK)
+        add_executable(native_gpu_jobs_tests EXCLUDE_FROM_ALL
+            tests/ppu/native_gpu_jobs_test.cpp src/runtime/hd_gpu_renderer.cpp src/runtime/color_lut.cpp)
+        target_include_directories(native_gpu_jobs_tests PRIVATE src/runtime ${SDL2_INCLUDE_DIRS})
+        target_compile_definitions(native_gpu_jobs_tests PRIVATE SDL_MAIN_HANDLED=1 GBARECOMP_HAVE_SDL2=1)
+        target_link_libraries(native_gpu_jobs_tests PRIVATE gbarecomp_gba ${SDL2_LIBRARIES})
+        # Deliberate hardware qualification under the shared capacity pool,
+        # never an automatic visible/default CTest launch.
+    endif()
 endif()
 
 # The SDK original-code differential gate takes an owner-provided cartridge;
