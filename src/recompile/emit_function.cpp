@@ -598,7 +598,10 @@ std::string emit_function_body_str(
                 std::vector<armv4t::Instr> block;
                 const uint32_t first=scan;
                 while(scan<span.end && block.size()<8) {
-                    if(scan!=first && (backward_targets.count(scan) || alias_set.count(scan))) break;
+                    // Resume aliases are side entries to the maintained body,
+                    // not barriers for a fresh straight-line native entry.
+                    // Actual loop headers retain their own fast entry.
+                    if(scan!=first && backward_targets.count(scan)) break;
                     std::size_t offset=0;
                     if(!source_offset_for(scan,step,&offset)) break;
                     uint32_t opcode=0;
@@ -610,7 +613,14 @@ std::string emit_function_body_str(
                     block.push_back(instruction);scan+=step;
                 }
                 if(block.size()>=4) {
-                    for(const auto& instruction:block) native_refs.insert(instruction.pc);
+                    for(const auto& instruction:block) switch(instruction.op) {
+                        case armv4t::IrOp::LDR: case armv4t::IrOp::LDRB:
+                        case armv4t::IrOp::LDRH: case armv4t::IrOp::LDRSB:
+                        case armv4t::IrOp::LDRSH: case armv4t::IrOp::STR:
+                        case armv4t::IrOp::STRB: case armv4t::IrOp::STRH:
+                            native_refs.insert(instruction.pc);break;
+                        default:break;
+                    }
                     native_ends[scan]=first;native_blocks[first]=std::move(block);
                 }
                 if(scan==first) scan+=step;
@@ -651,7 +661,8 @@ std::string emit_function_body_str(
                 appendf(out,"        _region.commit(); goto NR_END_%x;\n"
                     "    }\n    }\n#endif\n",pc);
             }
-            if(native_refs.count(pc)) appendf(out,"NR_REF_%x:\n",pc);
+            if(native_refs.count(pc)) appendf(out,
+                "#if defined(GBARECOMP_NATIVE_REGIONS) && defined(__cplusplus) && !defined(GBA_COSIM)\nNR_REF_%x:\n#endif\n",pc);
 
             std::string line = armv4t::format_ir(ins);
             appendf(out, "    /* %08X  %s */\n", pc, line.c_str());
@@ -704,7 +715,7 @@ std::string emit_function_body_str(
             (void)ni;  // tracked for diagnostics; abort path is in the emit.
             pc += step;
             if(const auto end=native_ends.find(pc);end!=native_ends.end())
-                appendf(out,"NR_END_%x:;\n",end->second);
+                appendf(out,"#if defined(GBARECOMP_NATIVE_REGIONS) && defined(__cplusplus) && !defined(GBA_COSIM)\nNR_END_%x:;\n#endif\n",end->second);
         }
         // Fall-through tail-call dispatch.
         //

@@ -23,7 +23,8 @@ std::vector<uint8_t> run(unsigned mode,unsigned scenario,bool native) {
     auto bus=std::make_unique<gba::GbaBus>();auto ppu=std::make_unique<gba::GbaPpu>();
     std::vector<uint8_t> rom(0x20000);
     for(unsigned i=0;i<rom.size();++i)rom[i]=uint8_t(i*17+0x69);
-    bus->set_rom(rom.data(),rom.size());bus->io().set_bus(bus.get());bus->io().set_ppu(ppu.get());
+    bus->set_rom(rom.data(),rom.size());bus->rtc().set_emulated_clock(946684800);
+    bus->io().set_bus(bus.get());bus->io().set_ppu(ppu.get());
     bus->write32(0x02000100,0x81fedcba);bus->write32(0x0300100c,0x73abcdef);
     gbarecomp::set_active_bus(bus.get());gbarecomp::set_active_ppu(ppu.get());runtime_init(bus.get());
     gbarecomp::runtime_restore_timing_values({});runtime_call_stack_restore(nullptr,0);

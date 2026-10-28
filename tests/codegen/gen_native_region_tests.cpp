@@ -71,7 +71,9 @@ int main(int argc,char** argv) {
         function.addr=function.source_addr=0x08001000;
         function.end_addr=function.addr+uint32_t(image.size());
         function.mode=mode==0?gbarecomp::CpuMode::Thumb:gbarecomp::CpuMode::Arm;
-        function.alias_entries.push_back(function.addr+4*step);
+        // Production corpora register instruction-sized resume aliases. They
+        // must not silently reduce every region to one instruction.
+        for(unsigned i=1;i<17;++i)function.alias_entries.push_back(function.addr+i*step);
         for(unsigned native=0;native!=2;++native) {
             out<<"void run_function_"<<mode<<"_"<<native<<"() {\n";
             out<<gbarecomp::emit_function_body_str(function,image.data(),image.size(),function.addr,
