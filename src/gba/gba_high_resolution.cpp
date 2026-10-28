@@ -87,7 +87,7 @@ GbaHighResolutionFrame::Surface::publish() {
 }
 GbaHighResolutionFrame::GbaHighResolutionFrame(unsigned scale) : scale_(scale) {
     if (scale < 2 || scale > kMaxScale)
-        throw std::invalid_argument("internal resolution must be from 1 through 16");
+        throw std::invalid_argument("internal resolution must be from 1 through 64");
 }
 void GbaHighResolutionFrame::configure(unsigned width, unsigned height) {
     if (width == width_ && height == height_) return;
