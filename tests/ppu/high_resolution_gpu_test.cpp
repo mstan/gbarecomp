@@ -8,6 +8,7 @@
 #include <cstring>
 #if defined(GBARECOMP_HAVE_SDL2)
 #include <SDL.h>
+#include <SDL_opengl.h>
 #define CHECK(x) do { if(!(x)){std::fprintf(stderr,"line %d: %s (%s)\n",__LINE__,#x,SDL_GetError());std::exit(1);} }while(0)
 namespace {
 using Hd=gba::GbaHighResolutionFrame;
@@ -74,10 +75,17 @@ int main() {
     if(!renderer){SDL_DestroyWindow(window);SDL_Quit();return 77;}
     SDL_Texture* activation=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ARGB8888,SDL_TEXTUREACCESS_STREAMING,257,160);
     CHECK(activation);
+    CHECK(SDL_GL_BindTexture(activation,nullptr,nullptr)==0);
+    using GetString=const GLubyte*(APIENTRY*)(GLenum);
+    auto get_string=reinterpret_cast<GetString>(SDL_GL_GetProcAddress("glGetString"));
+    const char* version=get_string?reinterpret_cast<const char*>(get_string(GL_VERSION)):nullptr;
+    int major=0;if(version)std::sscanf(version,"%d",&major);
+    std::fprintf(stderr,"GPU contract context=%s\n",version?version:"unavailable");
+    SDL_GL_UnbindTexture(activation);
     gbarecomp::HdGpuRenderer gpu;
     if(!gpu.initialize(renderer,activation)) {
-        std::fprintf(stderr,"GPU contract skipped: supported GL3 context unavailable\n");
-        gpu.reset();SDL_DestroyTexture(activation);SDL_DestroyRenderer(renderer);SDL_DestroyWindow(window);SDL_Quit();return 77;
+        std::fprintf(stderr,"GPU contract %s: optional consumer unavailable\n",major>=3?"FAILED":"skipped");
+        gpu.reset();SDL_DestroyTexture(activation);SDL_DestroyRenderer(renderer);SDL_DestroyWindow(window);SDL_Quit();return major>=3?1:77;
     }
     unsigned cases=0;
     for(unsigned scale:{2u,3u,8u,16u})for(unsigned mode=0;mode<4;++mode) {

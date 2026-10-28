@@ -51,7 +51,12 @@ ivec3 channels(uint color) {
     return ivec3(int(color&31u),int((color>>5u)&31u),int((color>>10u)&31u));
 }
 uint pack_color(ivec3 c) { return uint(c.x|(c.y<<5)|(c.z<<10)); }
-bool sample_color(int surface,int cnt,int u,int v,int row,bool filter,out uint color) {
+int divide_zero(int numerator,int denominator) {
+    // All intermediate magnitudes are proven below INT_MAX by pack(). Make
+    // CPU truncation explicit instead of relying on legacy signed division.
+    return numerator<0 ? -((-numerator)/denominator) : numerator/denominator;
+}
+bool sample_color(int surface,int cnt,int u,int v,int row,bool filtering,out uint color) {
     int size=128<<((cnt>>14)&3);
     // Explicit floor keeps negative fixed-point coordinates independent of
     // a driver's signed right-shift lowering.
@@ -63,7 +68,7 @@ bool sample_color(int surface,int cnt,int u,int v,int row,bool filter,out uint c
     uint c00=index_at(surface,ivec2(x,y));
     if(c00==0u) return false;
     color=texelFetch(palette_plane,ivec2(int(c00),row),0).r;
-    if(!filter) return true;
+    if(!filtering) return true;
     int x1=x+1,y1=y+1;
     if(wrap) { x1&=size-1; y1&=size-1; }
     else if(x1==size || y1==size) return true;
@@ -120,10 +125,9 @@ void main() {
         if(a.x==0 || (window&(1<<layer))==0) continue;
         ivec4 step=texelFetch(metadata,ivec2(3+i*3,native.y),0);
         ivec4 delta=texelFetch(metadata,ivec2(4+i*3,native.y),0);
-        // GLSL integer division truncates toward zero, as the CPU formulas do.
-        int pa=step.x+delta.x*sy/scale,pc=step.y+delta.y*sy/scale;
-        int u=a.z+step.z*sy/scale-config.y*pa+native.x*pa+pa*sx/scale;
-        int v=a.w+step.w*sy/scale-config.y*pc+native.x*pc+pc*sx/scale;
+        int pa=step.x+divide_zero(delta.x*sy,scale),pc=step.y+divide_zero(delta.y*sy,scale);
+        int u=a.z+divide_zero(step.z*sy,scale)-config.y*pa+native.x*pa+divide_zero(pa*sx,scale);
+        int v=a.w+divide_zero(step.w*sy,scale)-config.y*pc+native.x*pc+divide_zero(pc*sx,scale);
         uint color;
         if(!sample_color(i,a.y,u,v,native.y,extra.y!=0,color)) continue;
         insert_pixel(top,second,Pixel(color,(a.y&3)*256+130+i,layer,
