@@ -14,6 +14,9 @@
 #pragma once
 
 #include <stdint.h>
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
 
 // Shared POD types + bit/constant macros (ArmCpuState, CPSR_*_BIT,
 // RUNTIME_TRACE_*, RuntimeTraceEntry, RuntimeFpEntry). Split out so the
