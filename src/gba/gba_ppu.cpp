@@ -21,6 +21,8 @@ static uint64_t ordered_draw_test_rows = 0;
 extern "C" uint64_t gba_ordered_draw_test_rows() { return ordered_draw_test_rows; }
 static uint64_t ordered_wide_draw_test_rows = 0;
 extern "C" uint64_t gba_ordered_wide_draw_test_rows() { return ordered_wide_draw_test_rows; }
+static uint64_t ordered_wide_text_span_test_jobs = 0;
+extern "C" uint64_t gba_ordered_wide_text_span_test_jobs() { return ordered_wide_text_span_test_jobs; }
 #endif
 
 // Widescreen margin tilemap provider (Step C). When set (by the runtime-side
@@ -1733,6 +1735,122 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
         int cached_action = 0;
         uint16_t cached_entry = 0;
 #if defined(GBARECOMP_SCANLINE_HLE)
+        if constexpr (Ordered) {
+            const bool mapped_x = g_ws_bg_x_provider &&
+                (g_ws_bg_x_provider_layers & (1u << layer));
+            const bool mapped_xy = g_ws_bg_xy_provider &&
+                (g_ws_bg_xy_provider_layers & (1u << layer));
+            // A published mapping is the input to the complete text-plane
+            // job. Installation of the scalar callback no longer forces tile,
+            // palette and map preparation back into a per-pixel service.
+            // Pixel-dependent/unknown mappings retain the maintained path.
+            if (!mapped_xy && (!mapped_x || x_span_count) &&
+                (!g_ws_tilemap_provider || read_only_wide_bg.tilemap_tile_invariant)) {
+#if defined(GBARECOMP_ORDERED_DRAW_TEST_COVERAGE)
+                ++ordered_wide_text_span_test_jobs;
+#endif
+                if (!mapped_x) {
+                    x_spans[0] = {0, static_cast<int>(out_w), 0, 1, 0};
+                    x_span_count = 1;
+                }
+                const uint32_t tex_y = static_cast<uint32_t>(y + vofs) & (height_px - 1u);
+                const uint32_t tile_y = tex_y >> 3;
+                const uint32_t map_row = screen_base + (tile_y >> 5) * block_cols * 0x800u +
+                    (tile_y & 31u) * 64u;
+                const bool target1 = (first_targets & (1u << layer)) != 0;
+                const bool target2 = (second_targets & (1u << layer)) != 0;
+                for (int span_index = 0; span_index < x_span_count; ++span_index) {
+                    const auto& span = x_spans[span_index];
+                    if (span.action < 0) {
+                        if (native_equivalent) *native_equivalent = false;
+                        continue;
+                    }
+                    const bool remapped = span.action > 0;
+                    const int direction = remapped ? span.step : 1;
+                    if (native_equivalent && remapped &&
+                        (direction != 1 || span.source_x != span.begin - static_cast<int>(ox)))
+                        *native_equivalent = false;
+                    for (uint32_t x = static_cast<uint32_t>(span.begin);
+                         x < static_cast<uint32_t>(span.end);) {
+                        const int source_x = remapped
+                            ? span.source_x + direction * (static_cast<int>(x) - span.begin)
+                            : static_cast<int>(x) - static_cast<int>(ox);
+                        const uint32_t tex_x = static_cast<uint32_t>(source_x + static_cast<int>(hofs)) &
+                            (width_px - 1u);
+                        const uint32_t begin = tex_x & 7u;
+                        uint32_t count = static_cast<uint32_t>(span.end) - x;
+                        if (direction > 0) count = std::min(count, 8u - begin);
+                        else if (direction < 0) count = std::min(count, begin + 1u);
+                        // The same scrolled tile can straddle native/margin
+                        // domains. A provider's tile-invariance promise covers
+                        // each domain separately, including signed outer rows.
+                        if (direction > 0) {
+                            if (source_x < 0) count = std::min(count, static_cast<uint32_t>(-source_x));
+                            else if (source_x < 240) count = std::min(count, 240u - static_cast<uint32_t>(source_x));
+                        } else if (direction < 0) {
+                            if (source_x >= 240) count = std::min(count, static_cast<uint32_t>(source_x - 239));
+                            else if (source_x >= 0) count = std::min(count, static_cast<uint32_t>(source_x + 1));
+                        }
+                        const uint32_t map_off = map_row + (tex_x >> 8) * 0x800u +
+                            ((tex_x >> 3) & 31u) * 2u;
+                        bool prepared = false, present = false;
+                        uint16_t entry = 0;
+                        uint64_t texels = 0;
+                        uint32_t palette_bank = 0;
+                        for (uint32_t j = 0; j < count; ++j) {
+                            const uint32_t output_x = x + j;
+                            if (!useful(output_x, candidate_key)) continue;
+                            const int hx = static_cast<int>(output_x) - static_cast<int>(ox);
+                            const bool authored_margin = g_ws_authored_margin_layers &&
+                                (!native_row || hx < 0 || hx >= 240);
+                            if (!layer_enabled(output_x, layer) && !authored_margin) continue;
+                            const int sample_x = source_x + direction * static_cast<int>(j);
+                            if (remapped && (hx < 0 || hx >= 240) && sample_x >= 0 && sample_x < 240 &&
+                                !(window_control_at_xy(sample_x, y) & (1u << layer))) continue;
+                            if (!prepared) {
+                                prepared = true;
+                                if (map_off + 1u >= 96u * 1024u) continue;
+                                entry = load_u16_le(vram + map_off);
+                                if (g_ws_tilemap_provider &&
+                                    (sample_x < 0 || sample_x >= 240 || y < 0 || y >= 160)) {
+                                    uint16_t ext = 0;
+                                    const int action = g_ws_tilemap_provider(static_cast<int>(layer), sample_x, y, &ext);
+                                    if (action == kWsTilemapReplace) entry = ext;
+                                    else if (action != kWsTilemapKeepWrapped) continue;
+                                }
+                                const uint32_t py = (entry & 0x0800u) ? 7u - (tex_y & 7u) : tex_y & 7u;
+                                const uint32_t row_bytes = color256 ? 8u : 4u;
+                                const uint32_t row = char_base + (entry & 0x03FFu) *
+                                    (color256 ? 64u : 32u) + py * row_bytes;
+                                if (row + row_bytes > 96u * 1024u) continue;
+                                // One portable row load serves forward, reversed
+                                // and repeated-column runs. No cached data lives
+                                // across a raster/guest-write boundary.
+                                texels = uint64_t(load_u16_le(vram + row)) |
+                                    (uint64_t(load_u16_le(vram + row + 2u)) << 16);
+                                if (color256) texels |=
+                                    (uint64_t(load_u16_le(vram + row + 4u)) << 32) |
+                                    (uint64_t(load_u16_le(vram + row + 6u)) << 48);
+                                palette_bank = color256 ? 0u : (entry >> 12) << 4;
+                                present = true;
+                            }
+                            if (!present) continue;
+                            uint32_t px = static_cast<uint32_t>(static_cast<int>(begin) +
+                                direction * static_cast<int>(j));
+                            if (entry & 0x0400u) px = 7u - px;
+                            uint32_t index = static_cast<uint32_t>(texels >> (px * (color256 ? 8u : 4u))) &
+                                (color256 ? 255u : 15u);
+                            if (!index) continue;
+                            index |= palette_bank;
+                            submit(output_x, load_u16_le(pal + index * 2u), candidate_key,
+                                   static_cast<uint8_t>(layer), blend_enabled(output_x) && target1, target2);
+                        }
+                        x += count;
+                    }
+                }
+                return;
+            }
+        }
         // Prepare ordinary text tiles as native row jobs. Mapping callbacks
         // retain their per-pixel contract; only columns with no such callback
         // are batched. All source bytes are live for this immutable scanline,

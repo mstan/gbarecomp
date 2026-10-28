@@ -17,6 +17,7 @@
 // at dot 252 (cycle 1008 of the line), clears at start of next line.
 
 #pragma once
+#define GBARECOMP_PUBLISHED_TEXT_SPANS_API 1
 
 #include <array>
 #include <cstdint>

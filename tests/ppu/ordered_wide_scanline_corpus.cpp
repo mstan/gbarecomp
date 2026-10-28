@@ -20,6 +20,9 @@
 
 #if defined(GBARECOMP_ORDERED_SCANLINE_EXPERIMENT) && defined(GBARECOMP_ORDERED_DRAW_TEST_COVERAGE)
 extern "C" uint64_t gba_ordered_draw_test_rows();
+#if defined(GBARECOMP_PUBLISHED_TEXT_SPANS_API)
+extern "C" uint64_t gba_ordered_wide_text_span_test_jobs();
+#endif
 #endif
 
 
@@ -60,7 +63,7 @@ std::vector<uint32_t> callback_trace;
 
 int bg_x(int bg, int x, int, int* source) {
     if (bg >= 2) return 0;
-    if (x < output_width / 3) { *source = x; return 1; }
+    if (x < output_width / 3) { *source = (current_case & 1u) ? output_width - 1 - x : x; return 1; }
     if (x < output_width * 2 / 3) return -1;
     *source = 239; return 1;
 }
@@ -125,7 +128,7 @@ int bg_x_row(int bg,int,int width,int,gba::WsBgXSpan* spans,int capacity) {
         }
     }
     if (bg>=2) {spans[0]={0,width,0,1,0};return 1;}
-    spans[0]={0,width/3,0,1,1};
+    spans[0]={0,width/3,(current_case & 1u) ? width-1 : 0,(current_case & 1u) ? -1 : 1,1};
     spans[1]={width/3,width*2/3,0,1,-1};
     spans[2]={width*2/3,width,239,0,1};
     return 3;
@@ -331,5 +334,9 @@ int main() {
     std::fprintf(stderr,"88 expanded cases,all modes,scalar/row/tile providers,8 malformed spans,uncertified/changed/foreign fallbacks,full callback trace,HD2x,public user-state restored branches; %llu exact-oracle bytes\n",emitted);
 #if defined(GBARECOMP_WIDE_BG_SAMPLER_API) && defined(GBARECOMP_ORDERED_SCANLINE_EXPERIMENT) && defined(GBARECOMP_ORDERED_DRAW_TEST_COVERAGE)
     std::fprintf(stderr,"actual ordered expanded rows=%llu\n",(unsigned long long)gba_ordered_wide_draw_test_rows());
+#if defined(GBARECOMP_PUBLISHED_TEXT_SPANS_API) && defined(GBARECOMP_SCANLINE_HLE)
+    if (!gba_ordered_wide_text_span_test_jobs()) return 11;
+    std::fprintf(stderr,"actual published text span jobs=%llu\n",(unsigned long long)gba_ordered_wide_text_span_test_jobs());
+#endif
 #endif
 }
