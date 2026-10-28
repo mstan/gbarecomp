@@ -5,9 +5,27 @@
 #include <cstdint>
 #include <vector>
 #include <cstdio>
+#include <unordered_set>
+#include <stdexcept>
 
 int main(int argc,char** argv) {
     if(argc!=2) return 2;
+    // A native block must never bypass a configured callback, relocation or
+    // a control transfer just because its ordinary lowering exists.
+    const auto instruction=armv4t::ThumbDecoder::decode(0x2001,0x08001000);
+    for(unsigned reject=0;reject!=4;++reject) {
+        armv4t::CodegenCtx ctx;ctx.native_region=true;
+        const std::unordered_set<uint32_t> overrides{instruction.pc};
+        if(reject==0)ctx.runtime_pc_base="_relocated";
+        if(reject==1)ctx.runtime_arm_immediate=true;
+        if(reject==2)ctx.alu_immediate_override_pcs=&overrides;
+        bool rejected=false;
+        try {
+            const auto candidate=reject==3 ? armv4t::ThumbDecoder::decode(0xe000,instruction.pc):instruction;
+            (void)armv4t::ArmCodegen::emit_instr(candidate,ctx,nullptr);
+        }catch(const std::invalid_argument&){rejected=true;}
+        if(!rejected)throw std::runtime_error("unsupported native block bypassed its declared contract");
+    }
     std::ofstream out(argv[1]);
     const std::vector<std::vector<uint32_t>> programs{
         {0x4148,0x4188,0x60d0,0x8821,0x4058,0x4098,0x40d9,0x4119,
