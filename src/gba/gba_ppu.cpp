@@ -1374,13 +1374,15 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
                           const uint8_t* io, const uint8_t* vram,
                           const uint8_t* oam, const uint8_t* pal,
                           uint32_t out_w, uint32_t ox, uint32_t oy = 0,
-                          GbaHighResolutionFrame* hd = nullptr) {
+                          GbaHighResolutionFrame* hd = nullptr,
+                          bool* native_equivalent = nullptr) {
     GBA_RENDER_PHASE_BEGIN(profile, WidePrepare);
     constexpr uint32_t kVanW = GbaPpu::kScreenWidth;   // 240
     constexpr uint32_t kVanH = GbaPpu::kScreenHeight;  // 160
     if (g_ws_native_view_left >= 0)
         ox = std::min(static_cast<uint32_t>(g_ws_native_view_left), out_w - kVanW);
     const bool native_row = y >= 0 && y < static_cast<int>(kVanH);
+    if (native_equivalent) *native_equivalent=native_row && out_w==kVanW && ox==0 && oy==0;
     uint8_t* row = rgb + (y + static_cast<int>(oy)) * out_w * 3;
     if (!native_row && (!g_ws_authored_margin_layers || !g_ws_tilemap_provider || g_ws_pillarbox)) {
         std::memset(row, 0, out_w * 3); return;
@@ -1621,6 +1623,8 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
             if (g_ws_bg_xy_provider && (g_ws_bg_xy_provider_layers & (1u << layer))) {
                 int provided_x = hx, provided_y = y;
                 const int action = g_ws_bg_xy_provider(layer, hx, y, &provided_x, &provided_y);
+                if (native_equivalent && (action<0 || (action>0 && (provided_x!=hx || provided_y!=y))))
+                    *native_equivalent=false;
                 if (action < 0) continue;
                 if (action > 0) {
                     sample_hx = provided_x; sample_y = provided_y;
@@ -1634,6 +1638,8 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
                 const int action = g_ws_bg_x_provider(
                     static_cast<int>(layer), static_cast<int>(x),
                     static_cast<int>(y), &provided_hx);
+                if (native_equivalent && (action<0 || (action>0 && provided_hx!=hx)))
+                    *native_equivalent=false;
                 if (action < 0) continue;
                 if (action > 0) { sample_hx = provided_hx; remapped = true; }
             }
@@ -1961,6 +1967,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
             int authored_sy = sy;
             const bool authored_y = g_ws_obj_attr_y_provider &&
                 g_ws_obj_attr_y_provider(idx, attr0, attr1, attr2, &authored_sy);
+            if (native_equivalent && authored_y && authored_sy!=sy) *native_equivalent=false;
             if (!native_row && !authored_y) continue;
             if (authored_y) sy = authored_sy;
             auto resolve_sx = [&] {
@@ -1975,6 +1982,8 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
                 } else if (sx & 0x100) {
                     sx -= 0x200;
                 }
+                if (native_equivalent && sx!=(raw_sx&0x100 ? raw_sx-512 : raw_sx))
+                    *native_equivalent=false;
             };
             const bool obj_focus_active =
                 valid_foreign_obj_focus(foreign_presentation_internal::obj_focus());
@@ -2135,8 +2144,10 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
     for (uint32_t x = 0; x < out_w; ++x) {
         uint16_t ui_color = 0;
         if (g_ws_ui_pixel_provider &&
-            g_ws_ui_pixel_provider(static_cast<int>(x) - static_cast<int>(ox), y, &ui_color))
+            g_ws_ui_pixel_provider(static_cast<int>(x) - static_cast<int>(ox), y, &ui_color)) {
+            if (native_equivalent) *native_equivalent=false;
             submit(x, ui_color & 0x7FFFu, -1, 0, false, false);
+        }
         uint8_t* dst = row + x * 3;
         // OBJ-only presentations (notably the real GBA BIOS logo) author the
         // whole backdrop through palette entry 0. There is no regular-BG
@@ -2524,19 +2535,14 @@ void GbaPpu::render_scanline(uint32_t y,
         // remain different: native samples are unfiltered and never use HD
         // interpolation. Materialize them immediately for snapshots/readers.
         const bool shared=hd_line && hd->deferred_rendering() &&
-            !g_ws_tilemap_provider && !g_ws_bg_x_provider && !g_ws_bg_xy_provider &&
-            !g_ws_ui_pixel_provider && !g_ws_obj_x_provider && !g_ws_obj_attr_x_provider &&
-            !g_ws_obj_attr_y_provider && !g_ws_obj_margin_provider &&
-            !g_ws_affine_filter_enabled && !g_ws_affine_filter_provider &&
-            !g_ws_authored_margin_layers && !g_ws_pillarbox &&
-            g_ws_native_view_left<0 &&
             !foreign_presentation_internal::background() &&
             !foreign_presentation_internal::obj_focus() &&
             !foreign_presentation_internal::screen_overlay();
         if (shared) {
+            bool native_equivalent=false;
             render_scanline_wide(hd->native_scratch(),int(y),dispcnt,
-                affine_io.data(),vram,oam,pal,render_width(),0,0,hd);
-            if (hd->try_render_native_line(work_fb_.data()+y*kScreenWidth*3)) return;
+                affine_io.data(),vram,oam,pal,render_width(),0,0,hd,&native_equivalent);
+            if (native_equivalent && hd->try_render_native_line(work_fb_.data()+y*kScreenWidth*3,dispcnt)) return;
         }
         render_scanline_internal(work_fb_.data(), y, dispcnt,
                                  affine_io.data(), vram, oam, pal,

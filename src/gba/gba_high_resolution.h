@@ -35,7 +35,7 @@ public:
     // Resolve this prepared, captured line at exact native sample positions.
     // The PPU first excludes presentation-only coordinate/content policies.
     // Refusal leaves dst untouched; ordinary CPU rendering remains available.
-    bool try_render_native_line(uint8_t* dst);
+    bool try_render_native_line(uint8_t* dst, uint16_t dispcnt);
     void upscale_line(unsigned y, const uint8_t* native_row);
     void latch();
     const uint8_t* pixels() const;

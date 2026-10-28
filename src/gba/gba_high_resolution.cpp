@@ -345,8 +345,11 @@ void GbaHighResolutionFrame::resolve_prepared() {
     }
     wrote_line(row_);
 }
-bool GbaHighResolutionFrame::try_render_native_line(uint8_t* dst) {
+bool GbaHighResolutionFrame::try_render_native_line(uint8_t* dst,uint16_t dispcnt) {
+    const unsigned mode=dispcnt&7;
+    const unsigned native_affine=((dispcnt>>8)&15)&(mode==1 ? 4u : mode==2 ? 12u : 0u);
     if (!dst || !deferred_ || width_!=240 || height_!=160 || ox_!=0 ||
+        !native_affine || (selected_&native_affine)!=native_affine ||
         !pending_jobs_ || row_>=pending_jobs_->lines.size() ||
         pending_jobs_->lines[row_].kind!=LineJob::AffineLine) return false;
     // Native positions have neither the presentation filter nor subscanline

@@ -13,13 +13,23 @@
 bool authorize(int bg,int) { return bg==2 || bg==3; }
 int bg_provider(int,int x,int,int* output) {*output=x+17;return 1;}
 int obj_provider(int x,int* output) {*output=x+11;return 1;}
+int identity_bg(int,int x,int,int* output) {*output=x;return 1;}
+int identity_obj(int x,int* output) {*output=x&0x100 ? x-512 : x;return 1;}
+int identity_xy(int,int x,int y,int* ox,int* oy) {*ox=x;*oy=y;return 1;}
+int suppress_bg(int,int x,int,int*) {return x==3 ? -1 : 0;}
+int obj_y(int,uint16_t a0,uint16_t,uint16_t,int* output) {
+    int y=a0&255;if(y>=160)y-=256;*output=y+5;return 1;
+}
+int ui(int x,int y,uint16_t* color) {*color=(x+y)&31;return 1;}
+int filter_provider(int,int) {return 1;}
+bool only_bg2(int bg,int) {return bg==2;}
 void policy_fallbacks() {
-    for(unsigned policy=0;policy<5;++policy) {
+    for(unsigned policy=0;policy<11;++policy) {
         auto bus=std::make_unique<gba::GbaBus>();
         auto candidate=std::make_unique<gba::GbaPpu>();
         auto reference=std::make_unique<gba::GbaPpu>();
         bus->rtc().set_emulated_clock(0);
-        candidate->set_internal_resolution(2,authorize);
+        candidate->set_internal_resolution(2,policy==10 ? only_bg2 : authorize);
         candidate->set_deferred_hd_rendering(true);
         std::array<uint16_t,240*160> foreign{};
         foreign.fill(0x7c00);
@@ -28,20 +38,40 @@ void policy_fallbacks() {
         if(policy==2)gba::g_ws_obj_x_provider=obj_provider;
         if(policy==3)gba::g_ws_native_view_left=0;
         if(policy==4)gba::foreign_presentation_internal::set_background(foreign.data());
+        if(policy==5) {
+            gba::g_ws_bg_x_provider=identity_bg;gba::g_ws_obj_x_provider=identity_obj;
+            gba::g_ws_authored_margin_layers=1;gba::g_ws_pillarbox=1;
+            gba::g_ws_affine_filter_enabled=1;gba::g_ws_affine_filter_provider=filter_provider;
+        }
+        if(policy==6)gba::g_ws_ui_pixel_provider=ui;
+        if(policy==7)gba::g_ws_bg_x_provider=suppress_bg;
+        if(policy==8)gba::g_ws_obj_attr_y_provider=obj_y;
+        if(policy==9)gba::g_ws_bg_xy_provider=identity_xy;
+        if(policy==10)gba::g_ws_affine_filter_enabled=1;
         std::array<uint8_t,1024> io{};
         io[0x0c]=4;io[0x0d]=0x20;io[0x21]=1;io[0x27]=1;
+        io[0x0e]=4;io[0x0f]=0x20;io[0x31]=1;io[0x37]=1;
         for(unsigned i=0;i<16384;++i)bus->vram_ptr()[0x4000+i]=(i%251)+1;
         for(unsigned i=0;i<1024;++i)bus->pal_ptr()[i]=i*13;
         for(unsigned i=0;i<128;++i)bus->oam_ptr()[i*8+1]=2;
+        bus->oam_ptr()[1]=0;
+        for(unsigned i=0;i<64;++i)bus->vram_ptr()[0x10000+i]=0x11;
+        const unsigned dispcnt=policy==10 ? 0x1d02 : 0x1501;
         for(unsigned y=0;y<160;++y)for(auto* p:{candidate.get(),reference.get()})
-            p->render_scanline(y,0x0401,io.data(),bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
+            p->render_scanline(y,dispcnt,io.data(),bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
         candidate->mark_framebuffer_latched();reference->mark_framebuffer_latched();
-        if(candidate->high_resolution()->canonical_shared_lines()!=0 ||
+        const auto lines=candidate->high_resolution()->canonical_shared_lines();
+        const bool full=policy==0 || policy==3 || policy==5 || policy==9;
+        const bool correct_count=full ? lines==160 : policy==2 ? lines<160 : lines==0;
+        if(!correct_count ||
            gba::save_device_state(*bus,*candidate)!=gba::save_device_state(*bus,*reference)) {
-            std::fprintf(stderr,"presentation policy fallback differs: %u\n",policy);std::exit(1);
+            std::fprintf(stderr,"presentation policy differs: %u shared=%llu\n",policy,(unsigned long long)lines);std::exit(1);
         }
         gba::g_ws_affine_filter_enabled=0;gba::g_ws_bg_x_provider=nullptr;
         gba::g_ws_obj_x_provider=nullptr;gba::g_ws_native_view_left=-1;
+        gba::g_ws_bg_xy_provider=nullptr;gba::g_ws_ui_pixel_provider=nullptr;
+        gba::g_ws_obj_attr_y_provider=nullptr;gba::g_ws_affine_filter_provider=nullptr;
+        gba::g_ws_authored_margin_layers=0;gba::g_ws_pillarbox=0;
         gba::foreign_presentation_internal::clear();
     }
 }
@@ -50,7 +80,7 @@ int main() {
     untouched.configure(240,160); untouched.set_deferred_rendering(true);
     std::array<uint8_t,240*3> sentinel{}; sentinel.fill(0xa5);
     const auto before=sentinel;
-    if(untouched.try_render_native_line(sentinel.data()) || sentinel!=before) return 1;
+    if(untouched.try_render_native_line(sentinel.data(),0x0401) || sentinel!=before) return 1;
     policy_fallbacks();
     unsigned mismatched=0,affine_rows=0,shared_rows=0;
     for (unsigned test=0;test<32;++test) {
