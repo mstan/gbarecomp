@@ -3,8 +3,13 @@ project(gbarecomp C CXX)
 
 option(GBARECOMP_DETAILED_PHASE_PROFILE "Build additional opt-in device phase timers" OFF)
 option(GBARECOMP_NATIVE_REGIONS "Build bounded native CPU/RAM region experiment" OFF)
+option(GBARECOMP_DEFERRED_HD_EXPERIMENT "Exercise immutable HD jobs with portable readback" OFF)
+if(GBARECOMP_DEFERRED_HD_EXPERIMENT)
+    set_property(SOURCE src/runtime/runtime.cpp APPEND PROPERTY COMPILE_DEFINITIONS GBARECOMP_DEFERRED_HD_EXPERIMENT=1)
+endif()
 if(GBARECOMP_DETAILED_PHASE_PROFILE)
-    set_property(SOURCE src/runtime/runtime_bus_bridge.cpp src/armv4t/runtime_arm.cpp APPEND PROPERTY
+    set_property(SOURCE src/runtime/runtime_bus_bridge.cpp src/armv4t/runtime_arm.cpp
+        src/gba/gba_ppu.cpp src/gba/gba_high_resolution.cpp APPEND PROPERTY
         COMPILE_DEFINITIONS GBARECOMP_DETAILED_PHASE_PROFILE=1)
 endif()
 
@@ -1172,6 +1177,9 @@ if(GBARECOMP_NATIVE_REGIONS)
     set_tests_properties(native_region_function_tests PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 add_gbarecomp_runtime_stack_test(high_resolution_tests tests/ppu/high_resolution_test.cpp)
+add_executable(high_resolution_jobs_tests tests/ppu/high_resolution_jobs_test.cpp src/gba/gba_high_resolution.cpp)
+target_include_directories(high_resolution_jobs_tests PRIVATE src/gba)
+add_test(NAME high_resolution_jobs_tests COMMAND high_resolution_jobs_tests)
 add_gbarecomp_runtime_stack_test(vertical_obj_tests tests/ppu/vertical_obj_test.cpp)
 add_gbarecomp_runtime_stack_test(dma_tests tests/dma/test_main.cpp)
 add_gbarecomp_runtime_stack_test(dma_bulk_tests tests/dma/bulk_test_main.cpp)

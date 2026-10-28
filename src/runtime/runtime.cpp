@@ -1650,6 +1650,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     gba::GbaBus bus;
     gba::GbaPpu ppu;
+#if defined(GBARECOMP_DEFERRED_HD_EXPERIMENT)
+    ppu.set_deferred_hd_rendering(true);
+#endif
     if (args.internal_resolution > 1 && !opts.high_resolution_affine_provider) {
         std::fprintf(stderr, "This game has not enabled higher internal resolution.\n");
         return 1;
@@ -5102,6 +5105,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             ppu.high_resolution_framebuffer() ? hd->height() : ppu.render_height(),
             (unsigned long long)hd->frames(), (unsigned long long)hd->affine_lines(), (unsigned long long)hd->samples(),
             (unsigned long long)high_resolution_presented);
+    if (const auto* hd = ppu.high_resolution())
+        std::printf("presentation_jobs deferred=%u captured_lines=%llu cpu_materializations=%llu\n",
+            unsigned(hd->deferred_rendering()), (unsigned long long)hd->captured_lines(),
+            (unsigned long long)hd->cpu_materializations());
     std::printf("\nfinal_pc=0x%08x unmapped=%zu io_unhandled=%zu "
                 "steps=%llu cycles=%llu ppu_vcount=%u ppu_frames=%llu "
                 "frames_presented=%d\n",

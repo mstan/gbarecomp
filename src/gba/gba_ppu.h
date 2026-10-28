@@ -34,6 +34,10 @@ public:
     // Optional downstream sampling density. Source artwork stays native;
     // approved affine backgrounds receive fractional samples. Never serialized.
     void set_internal_resolution(unsigned scale, HighResolutionAffineProvider provider = nullptr);
+    void set_deferred_hd_rendering(bool enabled) {
+        deferred_hd_ = enabled;
+        if (high_resolution_) high_resolution_->set_deferred_rendering(enabled);
+    }
     unsigned internal_resolution() const { return high_resolution_ ? high_resolution_->scale() : 1; }
     const GbaHighResolutionFrame* high_resolution() const { return high_resolution_.get(); }
     const uint8_t* high_resolution_framebuffer() const {
@@ -204,6 +208,7 @@ public:
 private:
     friend class SimulationStateCodec;
     std::unique_ptr<GbaHighResolutionFrame> high_resolution_;
+    bool deferred_hd_ = false;
     HighResolutionAffineProvider high_resolution_provider_ = nullptr;
     PresentationObserver* presentation_ = nullptr; // borrowed; not serialized
     bool rasterization_enabled_ = true; // host configuration, not serialized

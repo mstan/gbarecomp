@@ -1,7 +1,8 @@
-// gba_ppu.cpp — see gba_ppu.h.
+// gba_ppu.cpp â€” see gba_ppu.h.
 
 #include "gba_ppu.h"
 #include "gba_color.h"
+#include "gba_render_profile.h"
 #include "foreign_presentation_internal.h"
 
 #include <algorithm>
@@ -36,7 +37,7 @@ extern "C" int g_ws_native_view_left = -1;
 
 // Widescreen pillarbox (Step C policy): when nonzero, the wide path renders the
 // margin columns (outside the central 240) as solid black instead of extended
-// world — used for non-overworld screens (menus, battles, transitions) so they
+// world â€” used for non-overworld screens (menus, battles, transitions) so they
 // are letterboxed rather than garbled. Set per-frame by the runtime policy.
 extern "C" int g_ws_pillarbox = 0;
 extern "C" int g_ws_pillarbox_left = 0;
@@ -253,20 +254,20 @@ uint32_t GbaPpu::cycles_until_next_event() const {
     return cycles ? cycles : 1;
 }
 
-// ─────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Renderer (Phase 2.4)
-// ─────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //
 // Scope: enough to draw the GBA BIOS boot intro. The BIOS intro uses
 // DISPCNT = 0x1002 (BG mode 2, OBJ enabled, all BGs disabled), so we
 // only need OBJ (sprite) compositing for this milestone.
 //
-// References: GBATEK § "GBA OBJs - OAM", § "GBA Palettes",
-//             § "GBA VRAM Character Data".
+// References: GBATEK Â§ "GBA OBJs - OAM", Â§ "GBA Palettes",
+//             Â§ "GBA VRAM Character Data".
 
 namespace {
 
-// Sprite shape × size → (width, height) in pixels.
+// Sprite shape Ã— size â†’ (width, height) in pixels.
 //   shape: 0=square, 1=horizontal, 2=vertical
 //   size:  0..3
 constexpr int kSpriteWH[3][4][2] = {
@@ -682,6 +683,7 @@ void render_scanline_internal(uint8_t* rgb,
                               const uint8_t* pal,
                               uint32_t kScreenWidth,
                               uint32_t kScreenHeight) {
+    GBA_RENDER_PHASE_BEGIN(profile, NativePrepare);
     if (y >= kScreenHeight) return;
 
     uint8_t* row = rgb + y * kScreenWidth * 3;
@@ -702,12 +704,12 @@ void render_scanline_internal(uint8_t* rgb,
         bool valid = false;
     };
 
-    // ── Windows (GBATEK "LCD I/O Windows") ──────────────────────────────
+    // â”€â”€ Windows (GBATEK "LCD I/O Windows") â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // window_control(x) returns the 6-bit per-pixel mask (BG0-3, OBJ, and bit5
     // = color-special-effect enable) chosen by region, priority WIN0 > WIN1 >
     // OBJ-window > outside. WIN0/WIN1 are COORDINATE windows: WINnH gives
     // [X1,X2), WINnV gives [Y1,Y2). The per-scanline WIN0H the game rewrites
-    // each line is what carves the circular IRIS used by room transitions — it
+    // each line is what carves the circular IRIS used by room transitions â€” it
     // blanks everything outside the circle to the backdrop, hiding the room's
     // VRAM/palette reload (MC-HP-003). With no window enabled, every layer is on.
     const bool win0_en   = (dispcnt & 0x2000u) != 0;
@@ -716,14 +718,14 @@ void render_scanline_internal(uint8_t* rgb,
     const bool any_window = win0_en || win1_en || objwin_en;
     uint16_t winin  = static_cast<uint16_t>(io[0x48] | (io[0x49] << 8));
     uint16_t winout = static_cast<uint16_t>(io[0x4A] | (io[0x4B] << 8));
-    // y within WINnV [Y1,Y2)? GBATEK: Y2>height or Y1>Y2 → Y2=height.
+    // y within WINnV [Y1,Y2)? GBATEK: Y2>height or Y1>Y2 â†’ Y2=height.
     auto win_v_row = [&](uint32_t vreg) -> bool {
         uint32_t v  = static_cast<uint32_t>(io[vreg] | (io[vreg + 1] << 8));
         uint32_t y1 = (v >> 8) & 0xFFu, y2 = v & 0xFFu;
         if (y2 > kScreenHeight || y1 > y2) y2 = kScreenHeight;
         return y >= y1 && y < y2;
     };
-    // x within WINnH [X1,X2)? GBATEK: X2>width or X1>X2 → X2=width.
+    // x within WINnH [X1,X2)? GBATEK: X2>width or X1>X2 â†’ X2=width.
     auto win_h_in = [&](uint32_t hreg, uint32_t x) -> bool {
         uint32_t h  = static_cast<uint32_t>(io[hreg] | (io[hreg + 1] << 8));
         uint32_t x1 = (h >> 8) & 0xFFu, x2 = h & 0xFFu;
@@ -1013,7 +1015,7 @@ void render_scanline_internal(uint8_t* rgb,
         }
     };
 
-    // ── Bitmap BG modes 3/4/5 (GBATEK "LCD VRAM Bitmap BG Modes") ───────
+    // â”€â”€ Bitmap BG modes 3/4/5 (GBATEK "LCD VRAM Bitmap BG Modes") â”€â”€â”€â”€â”€â”€â”€
     // All three present a single framebuffer through BG2's affine transform,
     // so the sampling loop mirrors render_affine_bg above:
     //   Mode 3  240x160, 16bpp BGR555 direct colour, one frame at 0x00000.
@@ -1024,7 +1026,7 @@ void render_scanline_internal(uint8_t* rgb,
     // Transparency: mode 4 is palette-indexed, so index 0 is transparent
     // exactly like the tiled layers. Modes 3/5 are direct colour and have no
     // transparent index, so every in-bounds texel is opaque. Texels outside
-    // the bitmap stay transparent and show the backdrop — that is what
+    // the bitmap stay transparent and show the backdrop â€” that is what
     // letterboxes mode 5's 160x128 image inside the 240x160 screen.
     //
     // BG2CNT bit13 (display-area overflow / wraparound) is defined for the
@@ -1079,6 +1081,7 @@ void render_scanline_internal(uint8_t* rgb,
         }
     };
 
+    GBA_RENDER_PHASE_MARK(profile, NativeBackground);
     if (bg_mode == 0) {
         render_regular_bg(3, 0x0E, 0x1C);
         render_regular_bg(2, 0x0C, 0x18);
@@ -1096,6 +1099,7 @@ void render_scanline_internal(uint8_t* rgb,
         render_bitmap_bg();
     }
 
+    GBA_RENDER_PHASE_MARK(profile, NativeForeign);
     // A bounded host-owned overlay is intentionally a native-world-only
     // presentation layer. It is composed after every guest BG candidate has
     // resolved but before the normal guest OBJ pass, so Link/HUD objects remain
@@ -1181,6 +1185,7 @@ void render_scanline_internal(uint8_t* rgb,
         }
     }
 
+    GBA_RENDER_PHASE_MARK(profile, NativeObjects);
     if (dispcnt & 0x1000u) {
         constexpr uint32_t obj_tile_base = 0x10000u;
         bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
@@ -1312,6 +1317,7 @@ void render_scanline_internal(uint8_t* rgb,
         }
     }
 
+    GBA_RENDER_PHASE_MARK(profile, NativeOutput);
     // BLDY brightness coefficient (clamped to 16/16 = full).
     uint32_t bldy = static_cast<uint32_t>(io[0x54] | (io[0x55] << 8)) & 0x1Fu;
     if (bldy > 16u) bldy = 16u;
@@ -1320,7 +1326,7 @@ void render_scanline_internal(uint8_t* rgb,
         // Alpha blend top (1st target) with the layer below (2nd target). Per
         // GBATEK this occurs when effect==1 OR top is a semi-transparent OBJ
         // (mode 1 forces alpha regardless of BLDCNT). NOT gated on EVA!=0:
-        // EVA=0/EVB=16 is a valid blend (1st target fully fades into the 2nd) —
+        // EVA=0/EVB=16 is a valid blend (1st target fully fades into the 2nd) â€”
         // the Oak-intro character fade endpoint that previously snapped back to
         // opaque, leaving body/feet (BG2 + semi-transparent OBJ) out of sync.
         if ((effect == 1 || top[x].layer == 4) &&
@@ -1350,14 +1356,14 @@ void render_scanline_internal(uint8_t* rgb,
     return;
 }
 
-// ── Wide (view-expanded) scanline compositor ────────────────────────────────
+// â”€â”€ Wide (view-expanded) scanline compositor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Renders output scanline `y` into an `out_w`-pixel row, where output column x
 // maps to hardware column hx = x - ox (ox = left margin). This path is ONLY
 // entered when view-area expansion is active; the faithful build always takes
 // render_scanline_internal above, so OFF-mode stays byte-identical by construc-
 // tion. For central hx in [0,240) the per-pixel logic is the same as vanilla;
 // margin columns extend the BG scroll / affine extrapolation / OBJ sampling into
-// the surrounding map. WIN0/WIN1 register tests are NOT widened — a margin hx
+// the surrounding map. WIN0/WIN1 register tests are NOT widened â€” a margin hx
 // falls outside [X1,X2) so it naturally resolves to WINOUT (the conservative
 // policy for columns the game never authored). OAM X keeps its 9-bit signed
 // decode and is tested against the expanded viewport, so wrapped-negative sprites
@@ -1369,6 +1375,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
                           const uint8_t* oam, const uint8_t* pal,
                           uint32_t out_w, uint32_t ox, uint32_t oy = 0,
                           GbaHighResolutionFrame* hd = nullptr) {
+    GBA_RENDER_PHASE_BEGIN(profile, WidePrepare);
     constexpr uint32_t kVanW = GbaPpu::kScreenWidth;   // 240
     constexpr uint32_t kVanH = GbaPpu::kScreenHeight;  // 160
     if (g_ws_native_view_left >= 0)
@@ -1804,7 +1811,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
                    (second_targets & (1u << layer)) != 0);
         }
     };
-    // Bitmap BG modes 3/4/5 — see the commentary on render_bitmap_bg in
+    // Bitmap BG modes 3/4/5 â€” see the commentary on render_bitmap_bg in
     // render_scanline_internal above for the format/transparency rules.
     // A bitmap has a fixed width (240, or 160 in mode 5), so there is no
     // extra image data to reveal in the expanded margins: the affine
@@ -1861,6 +1868,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
                    (second_targets & (1u << layer)) != 0);
         }
     };
+    GBA_RENDER_PHASE_MARK(profile, WideBackground);
     if (bg_mode == 0) {
         render_regular_bg(3, 0x0E, 0x1C);
         render_regular_bg(2, 0x0C, 0x18);
@@ -1878,6 +1886,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
         render_bitmap_bg();
     }
 
+    GBA_RENDER_PHASE_MARK(profile, WideForeign);
     // Keep the bounded native-screen overlay in the centered hardware
     // viewport when adaptive view expansion is active. It deliberately does
     // not extend into either margin: its coordinates are still the canonical
@@ -1923,6 +1932,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
         }
     }
 
+    GBA_RENDER_PHASE_MARK(profile, WideObjects);
     if ((native_row || g_ws_obj_attr_y_provider) && (dispcnt & 0x1000u)) {
         constexpr uint32_t obj_tile_base = 0x10000u;
         bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
@@ -2121,6 +2131,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
             }
         }
     }
+    GBA_RENDER_PHASE_MARK(profile, WideOutput);
     for (uint32_t x = 0; x < out_w; ++x) {
         uint16_t ui_color = 0;
         if (g_ws_ui_pixel_provider &&
@@ -2149,7 +2160,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
         // Alpha blend top (1st target) with the layer below (2nd target). Per
         // GBATEK this occurs when effect==1 OR top is a semi-transparent OBJ
         // (mode 1 forces alpha regardless of BLDCNT). NOT gated on EVA!=0:
-        // EVA=0/EVB=16 is a valid blend (1st target fully fades into the 2nd) —
+        // EVA=0/EVB=16 is a valid blend (1st target fully fades into the 2nd) â€”
         // the Oak-intro character fade endpoint that previously snapped back to
         // opaque, leaving body/feet (BG2 + semi-transparent OBJ) out of sync.
         if ((effect == 1 || top[x].layer == 4) &&
@@ -2174,6 +2185,7 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
 #endif
         }
     }
+    GBA_RENDER_PHASE_STOP(profile);
     if (hd) hd->resolve();
 }
 
@@ -2186,7 +2198,7 @@ void GbaPpu::render(uint8_t* rgb,
                     const uint8_t* oam,
                     const uint8_t* pal) const {
     if (!view_expanded()) {
-        // Faithful path — literally unchanged from before view expansion existed.
+        // Faithful path â€” literally unchanged from before view expansion existed.
         for (uint32_t y = 0; y < kScreenHeight; ++y) {
             render_scanline_internal(rgb, y, dispcnt, io, vram, oam, pal,
                                      kScreenWidth, kScreenHeight);
@@ -2245,7 +2257,7 @@ void GbaPpu::render(uint8_t* rgb,
 
     // Walk 128 OAM entries in priority-table order. For Phase 2.4 we
     // ignore priority bits and just back-to-front-draw so higher
-    // OAM indices appear on top — close enough for the BIOS intro.
+    // OAM indices appear on top â€” close enough for the BIOS intro.
     for (int idx = 127; idx >= 0; --idx) {
         const uint8_t* entry = oam + idx * 8;
         uint16_t attr0 = load_u16_le(&entry[0]);
@@ -2261,7 +2273,7 @@ void GbaPpu::render(uint8_t* rgb,
         // by setting these bits.
         if (!rot_scale && disable_or_double) continue;
 
-        // OBJ Mode (attr0 bits 10-11) per GBATEK § "GBA OBJs — OAM
+        // OBJ Mode (attr0 bits 10-11) per GBATEK Â§ "GBA OBJs â€” OAM
         // Attribute 0":
         //   0 = Normal  (visible pixel)
         //   1 = Semi-Transparent (alpha-blend with BLDALPHA)
@@ -2271,7 +2283,7 @@ void GbaPpu::render(uint8_t* rgb,
         // Without this check the BIOS intro's OBJ-Window stencil
         // sprites leak into the visible frame as garbage pink pixels.
         uint32_t obj_mode = (attr0 >> 10) & 0x3u;
-        if (obj_mode == 2) continue;            // window stencil — invisible
+        if (obj_mode == 2) continue;            // window stencil â€” invisible
         if (obj_mode == 3) continue;            // prohibited
         // Semi-transparent (mode 1) renders as normal for now; proper
         // alpha blending lands when we wire BLDCNT / BLDALPHA.
@@ -2586,6 +2598,7 @@ void GbaPpu::set_internal_resolution(unsigned scale, HighResolutionAffineProvide
     if (scale == 1) high_resolution_.reset();
     else {
         high_resolution_ = std::make_unique<GbaHighResolutionFrame>(scale);
+        high_resolution_->set_deferred_rendering(deferred_hd_);
         high_resolution_->configure(render_width(), render_height());
     }
 }
