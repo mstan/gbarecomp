@@ -3,6 +3,7 @@
 #include "color_lut.h"
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -115,6 +116,18 @@ int main() {
         // Invalid inputs fall back before changing the SDL target or output.
         frame.lines[1].affine[0].cache=2;CHECK(!gpu.render(frame,nullptr));CHECK(SDL_GetRenderTarget(renderer)==nullptr);
         ++cases;
+    }
+    // Higher scales can overflow a shader's delta*subpixel intermediate even
+    // when the divided result is representable. Reject before changing the
+    // existing GPU output or SDL target; the caller retains its CPU fallback.
+    for(unsigned scale:{32u,64u})for(int sign:{-1,1})for(bool vertical:{false,true}) {
+        auto frame=fixture(scale,0);
+        const int64_t outside=int64_t(INT_MAX/(scale-1))+1;
+        auto& affine=frame.lines[1].affine[0];
+        if(vertical)affine.dv=sign*outside;else affine.dx=sign*outside;
+        const auto width=gpu.width(),height=gpu.height();
+        CHECK(!gpu.render(frame,nullptr));CHECK(SDL_GetRenderTarget(renderer)==nullptr);
+        CHECK(gpu.width()==width && gpu.height()==height);
     }
     // A software renderer must never enter GL, but keeps the same caller ABI.
     SDL_Window* other_window=SDL_CreateWindow("GBA hidden portable contract",0,0,16,16,SDL_WINDOW_HIDDEN);CHECK(other_window);
