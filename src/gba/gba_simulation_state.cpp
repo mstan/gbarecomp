@@ -108,6 +108,9 @@ void append_device_state(SimulationArchive<false>& archive, const GbaBus& bus, c
     SimulationStateCodec::visit(archive,bus,ppu);
 }
 bool load_device_state(GbaBus& bus, GbaPpu& ppu, std::span<const std::uint8_t> bytes) {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    bus.invalidate_draw_memory();
+#endif
     try {
         SimulationArchive<true> archive(bytes);
         SimulationStateCodec::visit(archive,bus,ppu);
