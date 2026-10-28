@@ -309,25 +309,54 @@ static void rab__update_controller(rab_bridge *b) {
     b->stats.last_correction = b->corr;
 }
 
+/* Consume one complete FIR window in coefficient order. Map its first frame
+ * once, then walk contiguous ring spans. Keeping the accumulation order and
+ * the clamped pre-history samples preserves the scalar filter exactly. */
+static void rab__filter_window(const rab_bridge *b, int64_t first,
+                               const float *cz, float *s) {
+    const int ch = b->cfg.channels;
+    const int taps = b->cfg.taps;
+    float s0 = 0.0f, s1 = 0.0f;
+    int k = 0;
+    while (first < 0 && k < taps) {
+        s0 += cz[k] * b->ring[0];
+        if (ch == 2) s1 += cz[k] * b->ring[1];
+        ++first;
+        ++k;
+    }
+    if (k < taps) {
+        int64_t frame = first % b->cap;
+        while (k < taps) {
+            int count = taps - k;
+            const int64_t available = b->cap - frame;
+            if (available < count) count = (int)available;
+            const float *sl = b->ring + frame * ch;
+            const int end = k + count;
+            if (ch == 1) {
+                for (; k < end; ++k, ++sl) s0 += cz[k] * sl[0];
+            } else {
+                for (; k < end; ++k, sl += 2) {
+                    s0 += cz[k] * sl[0];
+                    s1 += cz[k] * sl[1];
+                }
+            }
+            frame = 0;
+        }
+    }
+    s[0] = s0;
+    s[1] = (ch == 2) ? s1 : 0.0f;
+}
+
 /* Evaluate the polyphase resampler at an absolute fractional source position.
  * Caller guarantees [floor(pos)-half+1 .. floor(pos)+half] are live ring frames. */
 static void rab__sample_at(const rab_bridge *b, double pos, float *s) {
-    int ch = b->cfg.channels;
     int64_t i  = (int64_t)floor(pos);
     double  fr = pos - (double)i;
     int phase = (int)(fr * b->cfg.phases);
     if (phase >= b->cfg.phases) phase = b->cfg.phases - 1;
     if (phase < 0) phase = 0;
     const float *cz = b->coeffs + (size_t)phase * b->cfg.taps;
-    float s0 = 0.0f, s1 = 0.0f;
-    for (int k = 0; k < b->cfg.taps; ++k) {
-        int64_t m = i - b->half + 1 + k;
-        if (m < 0) m = 0;
-        const float *sl = b->ring + (m % b->cap) * ch;
-        s0 += cz[k] * sl[0];
-        if (ch == 2) s1 += cz[k] * sl[1];
-    }
-    s[0] = s0; s[1] = (ch == 2) ? s1 : 0.0f;
+    rab__filter_window(b, i - b->half + 1, cz, s);
 }
 
 /* Choose a loop length (source frames) ending at end_i whose period best matches
@@ -383,12 +412,7 @@ void rab_pull(rab_bridge *b, int16_t *out, int frames) {
             int phase = (int)(fr * b->cfg.phases);
             if (phase >= b->cfg.phases) phase = b->cfg.phases - 1;
             const float *cz = b->coeffs + (size_t)phase * b->cfg.taps;
-            for (int k = 0; k < b->cfg.taps; ++k) {
-                int64_t m = i - b->half + 1 + k;
-                const float *sl = b->ring + (m % b->cap) * ch;
-                s[0] += cz[k] * sl[0];
-                if (ch == 2) s[1] += cz[k] * sl[1];
-            }
+            rab__filter_window(b, i - b->half + 1, cz, s);
             b->out_pos += step;             /* advance only when we consumed live */
             delivering = 1;
         } else if (b->primed && b->cfg.stretch_enable
