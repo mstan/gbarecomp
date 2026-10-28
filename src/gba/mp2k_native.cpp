@@ -24,6 +24,12 @@ int32_t signed_byte(uint8_t value) { return std::bit_cast<int8_t>(value); }
 int32_t arithmetic_shift(uint32_t bits, unsigned n) {
     return std::bit_cast<int32_t>(bits) >> n;
 }
+bool overlaps(const uint8_t* a, std::size_t a_bytes,
+              const uint8_t* b, std::size_t b_bytes) {
+    const auto left = reinterpret_cast<uintptr_t>(a);
+    const auto right = reinterpret_cast<uintptr_t>(b);
+    return left < right + b_bytes && right < left + a_bytes;
+}
 
 struct Channel {
     std::array<uint8_t, kStride> bytes{};
@@ -40,13 +46,21 @@ struct Channel {
 };
 
 bool prepare_channel(const Mp2kNativeMemory& memory, const uint8_t* source,
-                     uint32_t period, uint8_t master, Channel& channel) {
+                     uint32_t period, uint8_t master, const uint8_t* info,
+                     Channel& channel) {
     std::memcpy(channel.bytes.data(), source, kStride);
     auto* c = channel.bytes.data();
     unsigned status = c[0];
     if ((status & 0xc7) == 0) return true;
     unsigned envelope = c[9];
     const uint32_t wave_address = load32(c + 0x24);
+    // Planning all voices before committing is valid only when a preceding
+    // voice cannot rewrite a later voice's wave header or sample data.
+    if (status & 0x90) {
+        const auto* wave = memory.read(wave_address, 16);
+        if ((wave_address & 3) || !wave ||
+            overlaps(wave, 16, info, kPcm + kPcmBytes)) return false;
+    }
     if (status & 0x80) {
         if (status & 0x40) { c[0] = 0; return true; }
         const auto* wave = memory.read(wave_address, 16);
@@ -109,11 +123,13 @@ bool prepare_channel(const Mp2kNativeMemory& memory, const uint8_t* source,
     if (channel.remaining == 0 || channel.remaining > 0x01000000) return false;
     channel.data = memory.read(channel.data_address,
                                std::size_t(channel.remaining) + 1);
-    if (!channel.data) return false;
+    if (!channel.data || overlaps(channel.data, std::size_t(channel.remaining) + 1,
+                                  info, kPcm + kPcmBytes)) return false;
     if (channel.loop_length) {
         channel.loop = memory.read(channel.loop_address,
                                    std::size_t(channel.loop_length) + 1);
-        if (!channel.loop) return false;
+        if (!channel.loop || overlaps(channel.loop, std::size_t(channel.loop_length) + 1,
+                                      info, kPcm + kPcmBytes)) return false;
     }
     // The reviewed PCM mixer has no compressed/reverse decode branch. Other
     // driver families must get their own qualified operation, not this one.
@@ -145,7 +161,8 @@ Mp2kNativeResult mp2k_native_mix(const Mp2kNativeMemory& memory,
                                const Mp2kNativeCall& call,
                                Mp2kNativeStats* stats) {
     auto* info = memory.write(call.sound_info, kPcm + kPcmBytes);
-    if (!info || load32(info) != kMagic + 1 ||
+    if (!info || ((call.sound_info | call.pcm_buffer) & 3) ||
+        load32(info) != kMagic + 1 ||
         info[6] == 0 || info[6] > 12 || call.samples < 16 ||
         call.samples > kPcmBytes || (call.samples & 3) ||
         call.pcm_buffer < call.sound_info + kPcm ||
@@ -165,11 +182,30 @@ Mp2kNativeResult mp2k_native_mix(const Mp2kNativeMemory& memory,
     std::array<Channel, 12> channels{};
     for (unsigned i = 0; i < info[6]; ++i) {
         if (!prepare_channel(memory, info + kChannels + i * kStride,
-                             period, info[7], channels[i]))
+                             period, info[7], info, channels[i]))
             return Mp2kNativeResult::UnsupportedInput;
     }
 
+    // A conservative instruction/data-wait bound for an atomic service window.
+    // Source advances and short loops are included, so high pitches cannot
+    // turn a small PCM block into unbounded SDK loop work. The reference
+    // differential gate checks this against worst supported region waits.
+    uint64_t bound = 200 + uint64_t(call.samples) * (reverb ? 40 : 4) +
+        uint64_t(info[6]) * 240;
+    for (unsigned i = 0; i < info[6]; ++i) {
+        const auto& channel = channels[i];
+        if (!channel.active) continue;
+        bound += uint64_t(call.samples) * (channel.fixed_rate ? 40 : 64);
+        if (!channel.fixed_rate) {
+            const uint64_t advances = (uint64_t(channel.fraction) +
+                uint64_t(channel.step) * call.samples) >> 23;
+            bound += advances * 16;
+            if (channel.loop_length) bound += (1 + advances / channel.loop_length) * 12;
+        }
+    }
+    if (bound > call.max_guest_cycles) return Mp2kNativeResult::UnsupportedInput;
     Mp2kNativeStats work{};
+    work.guest_cycle_upper_bound = uint32_t(bound);
     if (!reverb) std::memset(output, 0, call.samples);
     else for (uint32_t i = 0; i < call.samples; ++i) {
         int32_t value = ((signed_byte(output[i]) + signed_byte(other[i])) * reverb) >> 8;
@@ -250,6 +286,9 @@ Mp2kNativeResult mp2k_native_mix(const Mp2kNativeMemory& memory,
         }
     }
     store32(info, kMagic);
+    work.guest_cycle_estimate = 100 + call.samples * (reverb ? 20u : 2u) +
+        work.channels * 60 + work.direct_samples * 12 +
+        work.interpolated_samples * 24 + work.source_advances * 8 + work.loop_wraps * 12;
     if (stats) *stats = work;
     return Mp2kNativeResult::Complete;
 }

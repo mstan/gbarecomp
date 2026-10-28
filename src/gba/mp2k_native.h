@@ -21,6 +21,7 @@ struct Mp2kNativeCall {
     uint32_t pcm_buffer = 0;
     uint32_t samples = 0;
     uint32_t dma_counter = 0;
+    uint32_t max_guest_cycles = 0xffffffffu;
 };
 
 struct Mp2kNativeStats {
@@ -30,6 +31,8 @@ struct Mp2kNativeStats {
     uint32_t interpolated_samples = 0;
     uint32_t source_advances = 0;
     uint32_t loop_wraps = 0;
+    uint32_t guest_cycle_upper_bound = 0;
+    uint32_t guest_cycle_estimate = 0;
 };
 
 enum class Mp2kNativeResult {
