@@ -2519,15 +2519,34 @@ void GbaPpu::render_scanline(uint32_t y,
         foreign_presentation_internal::screen_overlay() ? nullptr : high_resolution_provider_,
         g_ws_affine_filter_enabled != 0);
     if (!view_expanded()) {
+        // Canonical and enhanced pixels can share preparation when the latter
+        // has no presentation-only coordinate/content policy. Their outputs
+        // remain different: native samples are unfiltered and never use HD
+        // interpolation. Materialize them immediately for snapshots/readers.
+        const bool shared=hd_line && hd->deferred_rendering() &&
+            !g_ws_tilemap_provider && !g_ws_bg_x_provider && !g_ws_bg_xy_provider &&
+            !g_ws_ui_pixel_provider && !g_ws_obj_x_provider && !g_ws_obj_attr_x_provider &&
+            !g_ws_obj_attr_y_provider && !g_ws_obj_margin_provider &&
+            !g_ws_affine_filter_enabled && !g_ws_affine_filter_provider &&
+            !g_ws_authored_margin_layers && !g_ws_pillarbox &&
+            g_ws_native_view_left<0 &&
+            !foreign_presentation_internal::background() &&
+            !foreign_presentation_internal::obj_focus() &&
+            !foreign_presentation_internal::screen_overlay();
+        if (shared) {
+            render_scanline_wide(hd->native_scratch(),int(y),dispcnt,
+                affine_io.data(),vram,oam,pal,render_width(),0,0,hd);
+            if (hd->try_render_native_line(work_fb_.data()+y*kScreenWidth*3)) return;
+        }
         render_scanline_internal(work_fb_.data(), y, dispcnt,
                                  affine_io.data(), vram, oam, pal,
                                  kScreenWidth, kScreenHeight);
-        if (hd_line) {
+        if (hd_line && !shared) {
             // The expanded compositor may apply optional presentation filters.
             // Keep its native scratch entirely separate from canonical pixels.
             render_scanline_wide(hd->native_scratch(), int(y), dispcnt,
                 affine_io.data(), vram, oam, pal, render_width(), 0, 0, hd);
-        } else if (hd) hd->upscale_line(y, work_fb_.data() + y * render_width() * 3);
+        } else if (hd && !hd_line) hd->upscale_line(y, work_fb_.data() + y * render_width() * 3);
         return;
     }
     // Host-authored extra rows use this frame's published state once, at

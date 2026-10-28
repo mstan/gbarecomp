@@ -13,7 +13,8 @@ using HighResolutionAffineProvider = bool (*)(int bg, int screen_y);
 // Downstream presentation only. Native layers retain their authored pixels;
 // approved affine BGs are sampled again at fractional output coordinates and
 // inserted into the same priority/window/blend stack. No guest state is owned
-// here. The caller must not serialize this object or use its output for reads.
+// here. The caller must not serialize this object. The PPU may also resolve
+// exact unfiltered native samples from a qualified shared preparation.
 class GbaHighResolutionFrame {
 public:
     static constexpr unsigned kMaxScale = 16;
@@ -31,6 +32,10 @@ public:
                 bool target1, bool target2);
     void black_column(unsigned x) { black_[x] = true; }
     void resolve();
+    // Resolve this prepared, captured line at exact native sample positions.
+    // The PPU first excludes presentation-only coordinate/content policies.
+    // Refusal leaves dst untouched; ordinary CPU rendering remains available.
+    bool try_render_native_line(uint8_t* dst);
     void upscale_line(unsigned y, const uint8_t* native_row);
     void latch();
     const uint8_t* pixels() const;
@@ -43,6 +48,7 @@ public:
     uint64_t samples() const { return samples_; }
     uint64_t captured_lines() const { return captured_lines_; }
     uint64_t cpu_materializations() const { return cpu_materializations_; }
+    uint64_t canonical_shared_lines() const { return canonical_shared_lines_; }
 
     // Downstream immutable draw inputs. Capturing these replaces the HD CPU
     // raster; a consumer may render them without reading live guest memory.
@@ -100,7 +106,7 @@ private:
         std::shared_ptr<const IndexedSurface> publish();
     };
     static void insert(Pixel& top, Pixel& second, const Pixel& candidate);
-    bool sample(const Affine& bg, int64_t u, int64_t v, uint16_t& color) const;
+    bool sample(const Affine& bg, int64_t u, int64_t v, uint16_t& color, bool filter) const;
     void write_color(uint8_t* dst, const Pixel& top, const Pixel& second) const;
     void wrote_line(unsigned y);
     void resolve_prepared();
@@ -120,6 +126,7 @@ private:
     std::vector<uint8_t> windows_, black_, written_, work_, latched_, scratch_;
     unsigned written_lines_ = 0;
     uint64_t frames_ = 0, affine_lines_ = 0, samples_ = 0;
+    uint64_t canonical_shared_lines_ = 0;
     bool deferred_ = false;
     std::shared_ptr<DrawFrame> pending_jobs_;
     std::shared_ptr<const DrawFrame> latched_jobs_;

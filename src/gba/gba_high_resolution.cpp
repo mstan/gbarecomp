@@ -192,16 +192,16 @@ __forceinline
 __attribute__((always_inline)) inline
 #endif
 bool GbaHighResolutionFrame::sample(const Affine& a, int64_t u, int64_t v,
-                                    uint16_t& color) const {
+                                    uint16_t& color, bool filter) const {
     const unsigned size = 128u << (a.cnt >> 14);
 #if defined(GBARECOMP_HD_SAMPLER_HLE)
     const auto* texels = borrowed_surfaces_[a.cache]
         ? borrowed_surfaces_[a.cache]->texels.data() : surfaces_[a.cache].texels.data();
-    return sample_indexed(texels, size, a.cnt, filter_, palette_, filter_palette_, u, v, color);
+    return sample_indexed(texels, size, a.cnt, filter, palette_, filter_palette_, u, v, color);
 #else
     if (borrowed_surfaces_[a.cache])
         return sample_indexed(borrowed_surfaces_[a.cache]->texels.data(), size,
-            a.cnt, filter_, palette_, filter_palette_, u, v, color);
+            a.cnt, filter, palette_, filter_palette_, u, v, color);
     const unsigned chars = ((a.cnt >> 2) & 3) * 0x4000;
     const unsigned map = ((a.cnt >> 8) & 31) * 0x800;
     auto texel = [&](int64_t x, int64_t y, uint16_t& c) {
@@ -218,7 +218,7 @@ bool GbaHighResolutionFrame::sample(const Affine& a, int64_t u, int64_t v,
     };
     const int64_t x = u >> 8, y = v >> 8;
     if (!texel(x, y, color)) return false;
-    if (!filter_) return true;
+    if (!filter) return true;
     uint16_t c10, c01, c11;
     if (!texel(x + 1, y, c10) || !texel(x, y + 1, c01) || !texel(x + 1, y + 1, c11)) return true;
     const unsigned fx = unsigned(u) & 255, fy = unsigned(v) & 255;
@@ -333,7 +333,7 @@ void GbaHighResolutionFrame::resolve_prepared() {
                     const auto& r = rows[i];
                     uint16_t color;
                     ++samples_;
-                    if (!sample(a, r.u + r.du[sx], r.v + r.dv[sx], color)) continue;
+                    if (!sample(a, r.u + r.du[sx], r.v + r.dv[sx], color, filter_)) continue;
                     insert(top, second, {color, int((a.cnt & 3) * 256 + 128 + layer), uint8_t(layer),
                         bool((windows_[x] & 0x20) && (bldcnt_ & (1u << layer))),
                         bool(bldcnt_ & (0x100u << layer)), true});
@@ -344,6 +344,35 @@ void GbaHighResolutionFrame::resolve_prepared() {
         }
     }
     wrote_line(row_);
+}
+bool GbaHighResolutionFrame::try_render_native_line(uint8_t* dst) {
+    if (!dst || !deferred_ || width_!=240 || height_!=160 || ox_!=0 ||
+        !pending_jobs_ || row_>=pending_jobs_->lines.size() ||
+        pending_jobs_->lines[row_].kind!=LineJob::AffineLine) return false;
+    // Native positions have neither the presentation filter nor subscanline
+    // interpolation. Reuse the prepared windows, non-affine candidates,
+    // palettes and indexed surfaces; do not run a second compositor setup.
+    std::array<int64_t,2> u{},v{};
+    for (unsigned i=0;i<2;++i) {u[i]=affine_[i].x;v[i]=affine_[i].v;}
+    for (unsigned x=0;x<width_;++x,dst+=3) {
+        if (black_[x]) {dst[0]=dst[1]=dst[2]=0;}
+        else {
+            Pixel top=top_[x],second=second_[x];
+            for (unsigned i=0;i<2;++i) {
+                const auto& a=affine_[i]; const unsigned layer=i+2;
+                if (!a.active || !(windows_[x]&(1u<<layer))) continue;
+                uint16_t color;
+                if (!sample(a,u[i],v[i],color,false)) continue;
+                insert(top,second,{color,int((a.cnt&3)*256+128+layer),uint8_t(layer),
+                    bool((windows_[x]&0x20)&&(bldcnt_&(1u<<layer))),
+                    bool(bldcnt_&(0x100u<<layer)),true});
+            }
+            write_color(dst,top,second);
+        }
+        for(unsigned i=0;i<2;++i) {u[i]+=affine_[i].pa;v[i]+=affine_[i].pc;}
+    }
+    ++canonical_shared_lines_;
+    return true;
 }
 void GbaHighResolutionFrame::upscale_line(unsigned y, const uint8_t* native_row) {
     GBA_RENDER_PHASE_BEGIN(profile, HdUpscale);

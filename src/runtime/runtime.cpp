@@ -5138,9 +5138,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             (unsigned long long)hd->frames(), (unsigned long long)hd->affine_lines(), (unsigned long long)hd->samples(),
             (unsigned long long)high_resolution_presented);
     if (const auto* hd = ppu.high_resolution())
-        std::printf("presentation_jobs deferred=%u captured_lines=%llu cpu_materializations=%llu\n",
+        std::printf("presentation_jobs deferred=%u captured_lines=%llu cpu_materializations=%llu canonical_shared_lines=%llu\n",
             unsigned(hd->deferred_rendering()), (unsigned long long)hd->captured_lines(),
-            (unsigned long long)hd->cpu_materializations());
+            (unsigned long long)hd->cpu_materializations(),
+            (unsigned long long)hd->canonical_shared_lines());
     std::printf("\nfinal_pc=0x%08x unmapped=%zu io_unhandled=%zu "
                 "steps=%llu cycles=%llu ppu_vcount=%u ppu_frames=%llu "
                 "frames_presented=%d\n",
