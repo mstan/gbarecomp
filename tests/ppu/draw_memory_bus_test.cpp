@@ -41,8 +41,20 @@ void check_native_lifecycle() {
         CHECK(std::equal(reference->latched_framebuffer(),reference->latched_framebuffer()+gba::GbaPpu::kFramebufferBytes,owned->latched_framebuffer()));
     }
     CHECK(owned->native_draw_frames()==2);
+    unsigned rejected_reads=0;
+    owned->set_native_draw_enabled(true,[&](const auto&,auto&) {++rejected_reads;return false;});
+    for(unsigned y=0;y<160;++y) {
+        reference->render_scanline(y,0x403,bus->io().raw(),bus->vram_read_view().data(),bus->oam_ptr(),bus->pal_ptr());
+        owned->render_scanline(y,0x403,bus->io().raw(),bus->vram_read_view().data(),bus->oam_ptr(),bus->pal_ptr(),bus->draw_memory());
+    }
+    reference->mark_framebuffer_latched();owned->mark_framebuffer_latched();
     owned->set_native_draw_enabled(false);
     CHECK(!owned->native_draw_frame());
+    CHECK(rejected_reads==1);
+    CHECK(gba::save_device_state(*bus,*reference)==gba::save_device_state(*bus,*owned));
+    bus->disable_draw_memory();CHECK(!bus->draw_memory_supported());
+    CHECK(bus->enable_draw_memory());
+    CHECK(bus->draw_memory()->publish(bus->vram_read_view()).reset);
     std::puts("native draw lifecycle: exact full and partial checkpoints, own-build restore, mid-frame admission revocation and CPU continuation");
 }
 

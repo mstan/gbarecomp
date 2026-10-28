@@ -41,9 +41,12 @@ GbaBus::~GbaBus() {
 }
 
 #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
-void GbaBus::enable_draw_memory() {
+bool GbaBus::enable_draw_memory() {
+    if (draw_vram_alias_exposed_ || write_observer_) return false;
     if (!draw_memory_) draw_memory_ = std::make_unique<GbaDrawMemory>();
+    return true;
 }
+void GbaBus::disable_draw_memory() { draw_memory_.reset(); }
 bool GbaBus::draw_memory_supported() const {
     return draw_memory_ && !draw_vram_alias_exposed_ && !write_observer_;
 }
