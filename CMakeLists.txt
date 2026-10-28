@@ -12,6 +12,13 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+set(GBARECOMP_MP2K_IMPLEMENTATION "LLE" CACHE STRING
+    "Reviewed MP2K mono mixer service: LLE or native HLE (qualification build)")
+set_property(CACHE GBARECOMP_MP2K_IMPLEMENTATION PROPERTY STRINGS LLE HLE)
+if(NOT GBARECOMP_MP2K_IMPLEMENTATION MATCHES "^(LLE|HLE)$")
+    message(FATAL_ERROR "GBARECOMP_MP2K_IMPLEMENTATION must be LLE or HLE")
+endif()
+
 set(GBARECOMP_SCANLINE_IMPLEMENTATION "HLE" CACHE STRING
     "Shared native scanline renderer implementation (LLE or HLE)")
 set_property(CACHE GBARECOMP_SCANLINE_IMPLEMENTATION PROPERTY STRINGS LLE HLE)
@@ -329,6 +336,7 @@ add_library(gbarecomp_gba STATIC
     src/gba/gba_m4a.cpp
     src/gba/audio_shadow.cpp
     src/gba/mp2k_shadow.cpp
+    src/gba/mp2k_native.cpp
     src/gba/gba_input.cpp
     src/gba/gba_save.cpp
     src/gba/gba_gpio.cpp
@@ -1120,6 +1128,18 @@ target_link_libraries(thumb_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME thumb_tests COMMAND thumb_tests)
 
 add_gbarecomp_runtime_stack_test(bus_tests tests/bus/test_main.cpp)
+
+# The SDK original-code differential gate takes an owner-provided cartridge;
+# the test embeds no cartridge/BIOS data and skips when no input is supplied.
+add_executable(mp2k_native_tests tests/gba/mp2k_native_test.cpp)
+target_link_libraries(mp2k_native_tests PRIVATE gbarecomp_gba gbarecomp_armv4t)
+set(GBARECOMP_MP2K_TEST_ROM "" CACHE FILEPATH "Owner-provided MKSC USA ROM for native mixer contract checks")
+if(GBARECOMP_MP2K_TEST_ROM)
+    add_test(NAME mp2k_native_contract COMMAND mp2k_native_tests "${GBARECOMP_MP2K_TEST_ROM}")
+else()
+    add_test(NAME mp2k_native_contract COMMAND mp2k_native_tests)
+endif()
+set_tests_properties(mp2k_native_contract PROPERTIES SKIP_RETURN_CODE 77)
 add_gbarecomp_runtime_stack_test(bridge_iret_tests tests/runtime/bridge_iret_test.cpp)
 add_gbarecomp_runtime_stack_test(high_resolution_tests tests/ppu/high_resolution_test.cpp)
 add_gbarecomp_runtime_stack_test(vertical_obj_tests tests/ppu/vertical_obj_test.cpp)
