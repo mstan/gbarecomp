@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.20)
 project(gbarecomp C CXX)
 
 option(GBARECOMP_DETAILED_PHASE_PROFILE "Build additional opt-in device phase timers" OFF)
+option(GBARECOMP_ORDERED_SCANLINE_EXPERIMENT "Render native jobs in visible front-to-back order" OFF)
+if(GBARECOMP_ORDERED_SCANLINE_EXPERIMENT)
+    set_property(SOURCE src/gba/gba_ppu.cpp APPEND PROPERTY COMPILE_DEFINITIONS GBARECOMP_ORDERED_SCANLINE_EXPERIMENT=1)
+endif()
 option(GBARECOMP_NATIVE_REGIONS "Build bounded native CPU/RAM region experiment" OFF)
 option(GBARECOMP_DEFERRED_HD_EXPERIMENT "Exercise immutable HD jobs with portable readback" OFF)
 option(GBARECOMP_GPU_HD_EXPERIMENT "Render supported immutable HD jobs through resident GPU presentation" OFF)
@@ -1184,6 +1188,13 @@ if(GBARECOMP_NATIVE_REGIONS)
 endif()
 add_gbarecomp_runtime_stack_test(high_resolution_tests tests/ppu/high_resolution_test.cpp)
 add_gbarecomp_runtime_stack_test(native_draw_reuse_tests tests/ppu/native_draw_reuse_test.cpp)
+# Deliberate separate-build oracle: stdout is a binary canonical-state corpus
+# (about0.8GB), not routine CTest text. Build/run reference and candidate
+# explicitly and compare the complete streams under a shared QA reservation.
+add_executable(ordered_scanline_corpus EXCLUDE_FROM_ALL
+    tests/ppu/ordered_scanline_corpus.cpp tools/bios_smoke/dispatch_stub.cpp)
+target_include_directories(ordered_scanline_corpus PRIVATE src/gba src/debug src/armv4t src/runtime src/link)
+target_link_gbarecomp_runtime_stack(ordered_scanline_corpus)
 add_executable(high_resolution_jobs_tests tests/ppu/high_resolution_jobs_test.cpp src/gba/gba_high_resolution.cpp)
 target_include_directories(high_resolution_jobs_tests PRIVATE src/gba)
 add_test(NAME high_resolution_jobs_tests COMMAND high_resolution_jobs_tests)
