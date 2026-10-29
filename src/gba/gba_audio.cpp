@@ -1138,4 +1138,11 @@ uint32_t GbaAudio::cycles_until_next_sample() const {
     return cycles_until_next_sample_event();
 }
 
+uint32_t GbaAudio::cycles_until_next_shared_event() const {
+#if defined(GBARECOMP_DEVICE_AUDIO_WINDOWS)
+    if (!shadow_enabled_) return UINT32_MAX;
+#endif
+    return cycles_until_next_sample_event();
+}
+
 }  // namespace gba

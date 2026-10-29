@@ -339,7 +339,9 @@ int runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int value) {
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FPS) == 0)
         c->window->set_fps_readout(value != 0);
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_AUDIO_ENHANCED) == 0 && c->audio) {
+        runtime_mmio_catch_up();
         c->audio->set_shadow_enabled(value != 0);
+        runtime_resync_horizon();
         c->window->save_audio_enhanced(value != 0);
     }
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_ASSIST_ENABLED) == 0) {
@@ -2263,7 +2265,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     auto pump_idle = [&](uint32_t max_cycles) -> uint32_t {
         uint32_t chunk = ppu.cycles_until_next_event();
         uint32_t until_timer = bus.io().cycles_until_next_timer_event();
-        uint32_t until_sample = bus.audio().cycles_until_next_sample();
+        uint32_t until_sample = bus.audio().cycles_until_next_shared_event();
         if (until_timer < chunk) chunk = until_timer;
         if (until_sample < chunk) chunk = until_sample;
         if (chunk == 0 || chunk == 0xFFFFFFFFu) chunk = 1;
@@ -3269,8 +3271,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             // GBARECOMP_AUDIO_SHADOW still overrides both.
             bool enhanced = false;
             if (win.saved_audio_enhanced(enhanced) &&
-                !std::getenv("GBARECOMP_AUDIO_SHADOW"))
+                  !std::getenv("GBARECOMP_AUDIO_SHADOW")) {
+                runtime_mmio_catch_up();
                 bus.audio().set_shadow_enabled(enhanced);
+                runtime_resync_horizon();
+              }
         }
         win.set_host_overlay(opts.host_overlay);
         win.set_view_margins(ppu.view_extra_left(), ppu.view_extra_right(),
