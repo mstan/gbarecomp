@@ -11,7 +11,7 @@
 
 namespace gba::render_profile {
 enum Stage {
-    NativePrepare, NativeBackground, NativeForeign, NativeObjects, NativeOutput,
+    NativePrepare, NativeBackground, NativeForeign, NativeObjects, NativeJobs, NativeOutput,
     WidePrepare, WideBackground, WideForeign, WideObjects, WideOutput,
     HdInput, HdPrepare, HdRaster, HdUpscale, HdLatch, Count
 };
@@ -25,7 +25,7 @@ inline bool enabled() {
         const bool on = env && !(env[0] == '0' && env[1] == '\0');
         if (on) std::atexit([] {
             constexpr const char* names[] = {
-                "native-prepare", "native-background", "native-foreign", "native-objects", "native-output",
+                "native-prepare", "native-background", "native-foreign", "native-objects", "native-jobs", "native-output",
                 "wide-prepare", "wide-background", "wide-foreign", "wide-objects", "wide-output",
                 "hd-input", "hd-surface-palette", "hd-raster", "hd-upscale", "hd-latch"
             };
