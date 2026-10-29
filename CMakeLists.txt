@@ -1311,6 +1311,7 @@ add_test(NAME presentation_layout_tests COMMAND presentation_layout_tests)
 # Touch input: gesture recognizer, hub rings/scripts, key synthesis, JSON.
 add_gbarecomp_runtime_stack_test(touch_input_tests tests/touch_input/test_main.cpp)
 add_gbarecomp_runtime_stack_test(multiplayer_session_tests tests/link/session_test.cpp)
+add_gbarecomp_runtime_stack_test(multiplayer_device_interval_tests tests/link/device_interval_test.cpp)
 add_gbarecomp_runtime_stack_test(wireless_tests tests/link/wireless_test.cpp)
 add_subdirectory(tests/link)
 add_subdirectory(tests/timing)

@@ -95,9 +95,11 @@ GbaMultiplayerSession::GbaMultiplayerSession(GbaSessionConfig config) : config_(
     if (config_.links[0].medium==GbaLinkMedium::Wireless)
         wireless_=std::make_unique<gba::GbaWirelessDomain>(config_.links[0].machines.size());
     else cable_ = std::make_unique<gba::GbaLinkHub>(config_.links[0].machines.size());
-    for (std::size_t port = 0; port < config_.links[0].machines.size(); ++port)
-        machine(config_.links[0].machines[port]).bus.io().set_serial_device(
-            wireless_ ? &wireless_->endpoint(port) : &cable_->endpoint(port));
+    for (std::size_t port = 0; port < config_.links[0].machines.size(); ++port) {
+        auto& instance = machine(config_.links[0].machines[port]);
+        instance.session_endpoint_ = wireless_ ? &wireless_->endpoint(port) : &cable_->endpoint(port);
+        instance.bus.io().set_serial_device(instance.session_endpoint_);
+    }
 }
 GbaMultiplayerSession::~GbaMultiplayerSession() = default;
 gba::GbaLinkHub& GbaMultiplayerSession::cable() {
@@ -227,13 +229,24 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
         for (auto& ptr : machines_) {
             auto& instance = *ptr;
             auto bind_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
-            bind(instance);
-            if (profile) binding_time += ProfileClock::now() - bind_start;
-            runtime_session_tick_devices(delta);
+            // Serial endpoints and DMA buses are publicly replaceable. Only
+            // the session-owned implementations have a callback-free contract.
+            const bool owned = owned_device_intervals_ &&
+                instance.bus.io().serial_device() == instance.session_endpoint_ &&
+                instance.bus.io().bus() == &instance.bus && !instance.execution.read_override &&
+                runtime_session_tick_owned_devices(instance.bus, instance.ppu,
+                    instance.timing, instance.execution.cpu.R[15], delta);
+            if (!owned) {
+                bind(instance);
+                if (profile) binding_time += ProfileClock::now() - bind_start;
+                runtime_session_tick_devices(delta);
+            }
             instance.bus.rtc().advance_emulated_clock(delta);
-            bind_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
-            capture(instance);
-            if (profile) binding_time += ProfileClock::now() - bind_start;
+            if (!owned) {
+                bind_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
+                capture(instance);
+                if (profile) binding_time += ProfileClock::now() - bind_start;
+            }
             instance.timing.cycles += instance.bus.io().take_dma_steal_cycles();
         }
         if (profile) {

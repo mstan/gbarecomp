@@ -55,5 +55,12 @@ void runtime_session_begin_instruction();
 void runtime_session_begin_slice(std::uint64_t deadline);
 void runtime_session_ram_dispatch_boundary(std::uint32_t pc);
 void runtime_session_tick_devices(std::uint32_t cycles);
+// Advance a callback-free interval with explicit device/timing ownership.
+// The session must first verify its owned DMA bus and serial endpoint and
+// exclude per-program read observers. Returns false without side effects at
+// render/event boundaries or other observation surfaces requiring full ARM
+// binding. Diagnostic PC/cycle stamps remain those of this device's CPU.
+bool runtime_session_tick_owned_devices(gba::GbaBus&, gba::GbaPpu&,
+    RuntimeTimingContext&, std::uint32_t pc, std::uint32_t cycles);
 
 }  // namespace gbarecomp
