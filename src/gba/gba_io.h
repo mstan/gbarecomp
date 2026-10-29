@@ -106,6 +106,7 @@ public:
     // to DMAxCNT_H silently store the register without copying any
     // bytes and the BIOS's VRAM/PAL/OAM uploads vanish.
     void set_bus(armv4t::Bus* b) { bus_ = b; }
+    armv4t::Bus* bus() const { return bus_; }
     void set_audio(GbaAudio* a) { audio_ = a; }
 
     // Bus-side entry points. `off` is the offset into the IO region

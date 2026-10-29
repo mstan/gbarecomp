@@ -22,6 +22,9 @@ struct GbaInstance {
     // Allows generated instruction batching with an observation callback.
     bool immediate_override_is_observer = false;
     explicit GbaInstance(GbaMachineDescriptor descriptor);
+private:
+    friend class GbaMultiplayerSession;
+    gba::GbaSerialDevice* session_endpoint_ = nullptr;
 };
 
 // Host-owned ranges in one exact save_state() result. These are not wire or
@@ -63,6 +66,9 @@ public:
     // Differential/performance reference: keep exception-based suspension
     // while retaining the same slice and device boundaries.
     void set_return_yields(bool enabled) { return_yields_ = enabled; }
+    // Differential reference for the host-only device ownership path. The
+    // interval, device order and serialized simulation state are unchanged.
+    void set_owned_device_intervals(bool enabled) { owned_device_intervals_ = enabled; }
     std::uint64_t cycle() const { return cycle_; }
     std::size_t machine_count() const { return machines_.size(); }
     gba::GbaLinkHub& cable();
@@ -77,5 +83,6 @@ private:
     std::uint64_t cycle_ = 0;
     bool native_slices_ = false;
     bool return_yields_ = true;
+    bool owned_device_intervals_ = true;
 };
 } // namespace gbarecomp

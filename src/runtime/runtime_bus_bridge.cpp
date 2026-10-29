@@ -1370,6 +1370,33 @@ void runtime_session_ram_dispatch_boundary(std::uint32_t pc) {
 void runtime_session_tick_devices(std::uint32_t cycles) {
     if (g_active_bus && g_active_ppu) tick_devices(g_active_bus, g_active_ppu, cycles);
 }
+bool runtime_session_tick_owned_devices(gba::GbaBus& bus, gba::GbaPpu& ppu,
+    RuntimeTimingContext& timing, std::uint32_t pc, std::uint32_t cycles) {
+#if defined(GBA_COSIM)
+    return false;
+#else
+    // All raster/provider callbacks retain their complete legacy execution
+    // window. DMA observers and cartridge hooks may also inspect guest CPU
+    // state; ordinary hardware audio/timers/SIO operate on their owned devices.
+    if (!g_session_execution || !cycles || cycles >= ppu.cycles_until_next_event() ||
+        bus.has_write_observer() || gba::g_rom_read16_override ||
+        gba::g_rom_read32_override || g_runtime_shadow_tick)
+        return false;
+    set_active_bus(&bus); set_active_ppu(&ppu);
+    runtime_restore_timing_context(timing);
+    // GbaIo records DMA/IRQ diagnostics through runtime_current_pc(). No
+    // instruction/continuation executes in this interval. Restore even when
+    // device advancement throws, leaving the last bound ARM window intact.
+    struct DiagnosticPcScope {
+        std::uint32_t previous = g_cpu.R[15];
+        explicit DiagnosticPcScope(std::uint32_t value) { g_cpu.R[15] = value; }
+        ~DiagnosticPcScope() { g_cpu.R[15] = previous; }
+    } diagnostic_pc(pc);
+    tick_devices(&bus, &ppu, cycles);
+    runtime_capture_timing_context(timing);
+    return true;
+#endif
+}
 } // namespace gbarecomp
 
 #if defined(GBARECOMP_NATIVE_REGIONS)
