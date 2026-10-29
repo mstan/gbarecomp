@@ -321,6 +321,13 @@ bool HostWindow::hd_jobs_available() { return false; }
 bool HostWindow::present_hd(const gba::GbaHighResolutionFrame::DrawFrame&) { return false; }
 bool HostWindow::readback_hd(std::vector<uint8_t>&,unsigned&,unsigned&) { return false; }
 #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+// Native GL jobs are unavailable in this browser backend. Declining keeps
+// the ordinary CPU compositor and page-owned RGB presentation active.
+bool HostWindow::present_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>&) { return false; }
+bool HostWindow::readback_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>&,
+                                 std::vector<uint8_t>&) { return false; }
+#endif
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
 bool HostWindow::present_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>&) { return false; }
 bool HostWindow::readback_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>&,std::vector<uint8_t>&) { return false; }
 #endif
