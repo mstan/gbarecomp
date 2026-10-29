@@ -25,6 +25,10 @@ void set_active_ppu(gba::GbaPpu* ppu);
 gba::GbaBus* active_bus();
 gba::GbaPpu* active_ppu();
 
+// A whole native service may settle ordinary memory atomically only when a
+// session owner or shadow validation is not executing instruction-sized slices.
+bool native_service_window_allowed();
+
 struct RuntimeTimingContext {
     std::uint64_t cycles = 0;
     std::uint64_t vblank_starts = 0;

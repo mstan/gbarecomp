@@ -301,6 +301,7 @@ public:
     // normal play / the gcc path → the hook is one predicted-untaken branch per
     // store. Owned by the caller (the gate); GbaBus only holds the pointer.
     void set_write_observer(BusWriteObserver* obs) { write_observer_ = obs; }
+    bool has_write_observer() const { return write_observer_ != nullptr; }
     BusWriteObserver* exchange_write_observer(BusWriteObserver* obs) {
         BusWriteObserver* previous = write_observer_;
         write_observer_ = obs;

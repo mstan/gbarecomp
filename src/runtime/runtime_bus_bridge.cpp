@@ -1301,6 +1301,9 @@ void runtime_capture_timing_context(RuntimeTimingContext& out) {
     out.pending_cycles = g_pending_cycles;
     out.event_budget = g_event_budget;
 }
+bool native_service_window_allowed() {
+    return !g_session_execution && !g_runtime_shadow_tick;
+}
 void runtime_restore_timing_values(const RuntimeTimingContext& in) {
     g_runtime_cycles = in.cycles;
     g_runtime_vblank_starts = in.vblank_starts;
