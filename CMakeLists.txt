@@ -1211,7 +1211,7 @@ add_custom_command(OUTPUT "${NATIVE_REGION_TEST_SOURCE}"
     COMMAND gen_native_region_tests "${NATIVE_REGION_TEST_SOURCE}"
     DEPENDS gen_native_region_tests
     VERBATIM)
-add_executable(native_region_tests EXCLUDE_FROM_ALL
+add_executable(native_region_tests
     tests/codegen/native_region_test.cpp "${NATIVE_REGION_TEST_SOURCE}")
 target_include_directories(native_region_tests PRIVATE "${NATIVE_REGION_TEST_DIR}")
 target_link_libraries(native_region_tests PRIVATE gbarecomp_armv4t)
