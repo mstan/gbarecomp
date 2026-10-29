@@ -261,7 +261,7 @@ struct HdGpuRenderer::Impl {
     SDL_Texture* last_output{};
     bool native_output=false;
     bool native_planes=false,native_failed=false;
-    uint64_t native_frames=0,native_uploaded_bytes=0;
+    uint64_t native_frames=0,native_uploaded_bytes=0,native_draw_calls=0;
     std::vector<uint8_t> native_raster;
 #endif
     unsigned plane_w{},plane_h{};
@@ -293,8 +293,9 @@ struct HdGpuRenderer::Impl {
         if(frames)std::fprintf(stderr,"hd_gpu: frames=%llu surface_uploads=%llu\n",
             (unsigned long long)frames,(unsigned long long)uploaded_surfaces);
 #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
-        if(native_frames)std::fprintf(stderr,"native_gpu: frames=%llu vram_uploaded_bytes=%llu\n",
-            (unsigned long long)native_frames,(unsigned long long)native_uploaded_bytes);
+        if(native_frames)std::fprintf(stderr,"native_gpu: frames=%llu vram_uploaded_bytes=%llu draw_calls=%llu\n",
+            (unsigned long long)native_frames,(unsigned long long)native_uploaded_bytes,
+            (unsigned long long)native_draw_calls);
 #endif
     }
     GLuint shader(GLenum type,const char* source) {
@@ -579,8 +580,7 @@ SDL_Texture* HdGpuRenderer::render_native(const gba::GbaNativeDrawFrame& frame,
             s.gl.Uniform1i(s.gl.GetUniformLocation(s.native_program,"grading"),6);
             s.gl.Uniform1i(s.gl.GetUniformLocation(s.native_program,"graded"),0);
             s.gl.Viewport(0,0,width,height);s.gl.Enable(GL_SCISSOR_TEST);
-            const auto row_uniform=s.gl.GetUniformLocation(s.native_program,"row_id");
-            for(unsigned y=0;y<height;++y) {
+            for(unsigned y=0;y<height;) {
                 const auto& memory=frame.lines()[y].memory;s.bind(0,s.textures[0]);
                 for(const auto& range:memory.ranges) {
                     unsigned offset=range.offset,left=range.size,payload=range.payload_offset;
@@ -593,7 +593,13 @@ SDL_Texture* HdGpuRenderer::render_native(const gba::GbaNativeDrawFrame& frame,
                         offset+=bytes;payload+=bytes;left-=bytes;s.native_uploaded_bytes+=bytes;
                     }
                 }
-                s.gl.Uniform1i(row_uniform,y);s.gl.Scissor(0,y,width,1);s.gl.DrawArrays(GL_TRIANGLES,0,3);
+                // Raster registers/OAM/palette already live in a row-indexed
+                // immutable plane. Only a VRAM write requires an ordering
+                // boundary; submit every intervening row in one operation.
+                unsigned end=y+1;
+                while(end<height && frame.lines()[end].memory.ranges.empty())++end;
+                s.gl.Scissor(0,y,width,end-y);s.gl.DrawArrays(GL_TRIANGLES,0,3);
+                ++s.native_draw_calls;y=end;
             }
             if(const auto error=s.gl.GetError();error!=GL_NO_ERROR) {
                 std::fprintf(stderr,"native_gpu: render GL error=0x%x; portable fallback\n",unsigned(error));good=false;
