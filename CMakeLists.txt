@@ -1172,7 +1172,7 @@ add_test(NAME thumb_tests COMMAND thumb_tests)
 
 add_gbarecomp_runtime_stack_test(bus_tests tests/bus/test_main.cpp)
 
-add_executable(draw_memory_tests EXCLUDE_FROM_ALL tests/ppu/draw_memory_test.cpp)
+add_executable(draw_memory_tests tests/ppu/draw_memory_test.cpp)
 target_include_directories(draw_memory_tests PRIVATE src/gba)
 add_test(NAME draw_memory_tests COMMAND draw_memory_tests)
 if(GBARECOMP_NATIVE_DRAW_JOBS)
