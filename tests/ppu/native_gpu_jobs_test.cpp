@@ -68,9 +68,17 @@ void run(gbarecomp::HdGpuRenderer& gpu,unsigned scenario){
         half(io.data()+72,(y&1)?0x2d3b:0x3f1f);half(io.data()+74,(y&2)?0x3f20:0x1b3f);
         half(io.data()+80,63u|(((y/7)&3)<<6)|(63u<<8));
         half(io.data()+82,(y%32)|((31-y%32)<<8));half(io.data()+84,y%32);
-        const auto offset=(y*619u)%(vram.size()-9);
-        for(unsigned j=0;j<9;++j)vram[offset+j]=uint8_t(random());
-        CHECK(memory->mark(offset,9));
+        // Preserve the original12 per-row-write oracles. Additional cases
+        // vary every row's registers/OAM/palette across unchanged VRAM,
+        // including writes at irregular boundaries between long spans.
+        const bool write_vram=scenario<12 ||
+            (scenario%3==1 && (y==53 || y==119)) ||
+            (scenario%3==2 && y%7==0);
+        if(write_vram) {
+            const auto offset=(y*619u)%(vram.size()-9);
+            for(unsigned j=0;j<9;++j)vram[offset+j]=uint8_t(random());
+            CHECK(memory->mark(offset,9));
+        }
         const unsigned palette_offset=(y*23u)%1022;
         half(palette.data()+palette_offset,unsigned(random()));
         half(oam.data()+8*127+2,y%200);
@@ -140,8 +148,8 @@ int main(){
     auto* texture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ARGB8888,SDL_TEXTUREACCESS_STREAMING,240,160);CHECK(texture);
     {
         gbarecomp::HdGpuRenderer gpu;CHECK(gpu.initialize(renderer,texture));
-        for(unsigned scenario=0;scenario<12;++scenario)run(gpu,scenario);
+        for(unsigned scenario=0;scenario<24;++scenario)run(gpu,scenario);
     }
     SDL_DestroyTexture(texture);SDL_DestroyRenderer(renderer);SDL_DestroyWindow(window);SDL_Quit();
-    std::puts("Native GPU:12 complete owned frames match CPU oracle across modes0..7,OBJ/windows/effects and historical writes; no game-speed claim");
+    std::puts("Native GPU:24 complete owned frames match CPU oracle across modes0..7,OBJ/windows/effects, historical writes and unchanged-memory row spans; no game-speed claim");
 }

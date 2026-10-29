@@ -1,12 +1,13 @@
 #pragma once
 
-// Hardware native-resolution raster from one owned historical row. Unknown
+// Hardware native-resolution raster from owned historical row spans. Unknown
 // presentation providers are excluded by the producer, before capture. All
 // integer bounds derive from16-bit registers,28-bit references and240x160.
 inline constexpr const char* gba_native_fragment_source=R"GLSL(#version 130
 uniform usampler2D vram_plane, raster_plane;
 uniform sampler2D grading;
-uniform int row_id, graded;
+uniform int graded;
+int row_id;
 out vec4 result;
 uint byte_at(int offset) { return texelFetch(raster_plane,ivec2(offset,row_id),0).r; }
 int half_at(int offset) { return int(byte_at(offset)|(byte_at(offset+1)<<8u)); }
@@ -144,6 +145,7 @@ void output_color(uint color) {
     else result=vec4(vec3(rgb)/255.0,1.0);
 }
 void main() {
+    row_id=int(gl_FragCoord.y);
     int x=int(gl_FragCoord.x),y=row_id,dispcnt=half_at(0);
     if((dispcnt&128)!=0){output_color(32767u);return;}
     int bldcnt=half_at(80),alpha=half_at(82),effect=(bldcnt>>6)&3;
