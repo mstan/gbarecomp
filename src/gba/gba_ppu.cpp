@@ -4,6 +4,9 @@
 #include "gba_color.h"
 #include "gba_render_profile.h"
 #include "foreign_presentation_internal.h"
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+#include "gba_native_draw_frame.h"
+#endif
 
 #include <algorithm>
 #include <cstddef>
@@ -124,6 +127,9 @@ GbaPpu::GbaPpu()  = default;
 GbaPpu::~GbaPpu() = default;
 
 void GbaPpu::serialize(gbarecomp::debug::SnapshotWriter& w) const {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    materialize_native_latch();
+#endif
     w.u32(scanline_);
     w.u32(dot_in_scanline_);
     w.u32(cycle_in_dot_);
@@ -152,6 +158,9 @@ void GbaPpu::serialize(gbarecomp::debug::SnapshotWriter& w) const {
 }
 
 void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    invalidate_native_draw();
+#endif
     if (high_resolution_) high_resolution_->invalidate();
     // Foreign presentation is intentionally not save-state data.  A selected
     // trusted mod must explicitly republish a newly valid buffer after load.
@@ -205,6 +214,9 @@ void GbaPpu::deserialize(gbarecomp::debug::SnapshotReader& r) {
 }
 
 void GbaPpu::reset() {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    invalidate_native_draw();
+#endif
     if (high_resolution_) high_resolution_->invalidate();
     foreign_presentation_internal::clear();
     scanline_ = 0;
@@ -228,6 +240,10 @@ void GbaPpu::set_view_margins(uint32_t left, uint32_t right,
     const uint32_t next_bottom = bottom > kMaxExtraY ? kMaxExtraY : bottom;
     if (next_left != extra_left_ || next_right != extra_right_ ||
         next_top != extra_top_ || next_bottom != extra_bottom_) {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        materialize_native_pixels();
+        invalidate_native_draw();
+#endif
         // A latched frame is laid out at the old stride. Force one fresh
         // render after a live resize rather than interpreting it at the new
         // dimensions. Timing state and guest memory remain untouched.
@@ -705,7 +721,7 @@ void mark_obj_window_scanline(bool* mask,
     }
 }
 
-template<bool Ordered>
+template<bool Ordered, bool HardwareOnly = false>
 void render_scanline_impl(uint8_t* rgb,
                               uint32_t y,
                               uint16_t dispcnt,
@@ -826,7 +842,7 @@ void render_scanline_impl(uint8_t* rgb,
     // only the explicitly declared source map cells keeps that room terrain
     // out of the foreign frame.
     PixelCandidate foreign_hud_bg[GbaPpu::kScreenWidth] = {};
-    const GbaForeignObjFocusTransform* foreign_focus = Ordered ? nullptr :
+    const GbaForeignObjFocusTransform* foreign_focus = (Ordered || HardwareOnly) ? nullptr :
         foreign_presentation_internal::obj_focus();
     const uint16_t backdrop_color = load_u16_le(&pal[0]);
 #if !defined(GBARECOMP_SCANLINE_HLE)
@@ -947,7 +963,7 @@ void render_scanline_impl(uint8_t* rgb,
                 if (!color256) index |= palette_bank << 4;
                 const uint16_t color = load_u16_le(&pal[index * 2]);
                 const bool t1 = blend_enabled(screen_x) && target1;
-                if (!Ordered && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
+                if (!Ordered && !HardwareOnly && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
                                                 tile_y, screen_x, y)) {
                     PixelCandidate& hud = foreign_hud_bg[screen_x];
                     hud.color = color; hud.key = key;
@@ -997,7 +1013,7 @@ void render_scanline_impl(uint8_t* rgb,
             if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
 
             const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
-            if (!Ordered && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
+            if (!Ordered && !HardwareOnly && foreign_hud_bg_map_contains(foreign_focus, layer, tile_x,
                                             tile_y, x, y)) {
                 PixelCandidate& hud = foreign_hud_bg[x];
                 hud.color = color;
@@ -1167,7 +1183,7 @@ void render_scanline_impl(uint8_t* rgb,
     // BG2 identity for native WIN0/WIN1/OBJ-window and color-effect routing,
     // so room-authored masks and fades still apply. A full foreign background
     // is authoritative and therefore suppresses this overlay automatically.
-    if constexpr (!Ordered) {
+    if constexpr (!Ordered && !HardwareOnly) {
         if (foreign_presentation_internal::background() == nullptr) {
             if (const auto* overlay = foreign_presentation_internal::screen_overlay();
                 valid_foreign_screen_overlay(overlay)) {
@@ -1326,7 +1342,7 @@ void render_scanline_impl(uint8_t* rgb,
         if (rot_scale) {
             int bw = disable_or_double ? sw * 2 : sw;
             int bh = disable_or_double ? sh * 2 : sh;
-            if (!Ordered && apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num,
+            if (!Ordered && !HardwareOnly && apply_foreign_obj_focus(&sx, &sy, bw, bh, tile_num,
                                         false, static_cast<uint32_t>(idx)).action ==
                 ForeignObjFocusAction::kSuppress) return;
             int j = static_cast<int>(y) - sy;
@@ -1353,7 +1369,7 @@ void render_scanline_impl(uint8_t* rgb,
             return;
         }
         const ForeignObjFocusResult focus_result = [&] {
-            if constexpr (Ordered) return ForeignObjFocusResult{};
+            if constexpr (Ordered || HardwareOnly) return ForeignObjFocusResult{};
             else return apply_foreign_obj_focus(&sx, &sy, sw, sh, tile_num, true,
                                                static_cast<uint32_t>(idx));
         }();
@@ -2851,7 +2867,11 @@ void GbaPpu::render_scanline(uint32_t y,
                              const uint8_t* io,
                              const uint8_t* vram,
                              const uint8_t* oam,
-                             const uint8_t* pal) {
+                             const uint8_t* pal
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+                             , GbaDrawMemory* draw_memory
+#endif
+                             ) {
     if (high_resolution_) {
         high_resolution_->configure(render_width(), render_height());
         if (y == 0) high_resolution_->begin_frame();
@@ -2893,6 +2913,31 @@ void GbaPpu::render_scanline(uint32_t y,
     }
 
     if (!rasterization_enabled_) return;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    // Capture at the existing post-affine, pre-HBlank-DMA boundary. Foreign
+    // content is not hardware input and must execute its original callback path.
+    const bool owned = native_draw_enabled_ && draw_memory && !presentation_ &&
+        !view_expanded() && !high_resolution_ &&
+        !foreign_presentation_internal::background() &&
+        !foreign_presentation_internal::obj_focus() &&
+        !foreign_presentation_internal::screen_overlay();
+    if (owned && (y == 0 || native_builder_.lines().size() == y) &&
+        native_builder_.capture(y, dispcnt, affine_io, {oam,1024}, {pal,1024},
+                                {vram,GbaDrawMemory::kVramBytes}, *draw_memory)) {
+        if (y == 0) native_work_base_ = native_latched_;
+        native_work_dirty_ = true;
+        ++native_draw_rows_;
+        return;
+    }
+    // A new observer/raw alias/mod may revoke admission midway through a
+    // frame. Reconstruct only the already-captured history before continuing
+    // the original compositor; never redraw those rows from current memory.
+    if (native_work_base_ || !native_builder_.lines().empty()) {
+        materialize_native_work();
+        native_builder_.reset();
+        native_work_base_.reset();
+    }
+#endif
     // The enhanced surface consumes only published raster inputs. Its tile
     // stack and history never replace native pixels or advance device time.
     GbaHighResolutionFrame* hd = high_resolution_.get();
@@ -2964,19 +3009,115 @@ void GbaPpu::latch_framebuffer(uint16_t dispcnt,
                                const uint8_t* vram,
                                const uint8_t* oam,
                                const uint8_t* pal) {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    invalidate_native_draw();
+#endif
     render(work_fb_.data(), dispcnt, io, vram, oam, pal);
     mark_framebuffer_latched();
 }
 
 void GbaPpu::mark_framebuffer_latched() {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    if (auto frame = native_builder_.finish()) {
+        native_latched_ = std::move(frame);
+        native_work_base_ = native_latched_;
+        native_latched_materialized_ = false;
+        native_work_dirty_ = true;
+        ++native_draw_frames_;
+    } else {
+        materialize_native_work();
+        native_builder_.reset();
+        native_work_base_.reset();
+        native_latched_.reset();
+#endif
     if (rasterization_enabled_)
         std::memcpy(latched_fb_.data(), work_fb_.data(), render_bytes());
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        native_latched_materialized_ = true;
+    }
+#endif
     has_latched_fb_ = true;
     if (high_resolution_) high_resolution_->latch();
     if (presentation_) presentation_->frame_ready();
 }
 
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+namespace {
+void replay_native_rows(std::span<const GbaNativeDrawFrame::Line> lines, uint8_t* rgb) {
+    if (lines.empty()) return;
+    if (!lines.front().memory.reset) throw std::invalid_argument("missing owned native base");
+    std::array<uint8_t,GbaDrawMemory::kVramBytes> vram{};
+    uint64_t sequence = 0;
+    for (unsigned y=0; y<lines.size(); ++y) {
+        const auto& line = lines[y];
+        if (!GbaDrawMemory::apply(line.memory,vram,sequence))
+            throw std::invalid_argument("invalid owned native memory transaction");
+        render_scanline_impl<false,true>(rgb,y,line.dispcnt,line.io.data(),
+            vram.data(),line.oam.data(),line.palette.data(),GbaPpu::kScreenWidth,GbaPpu::kScreenHeight);
+    }
+}
+}
+std::vector<uint8_t> GbaPpu::render_native_draw_frame(const GbaNativeDrawFrame& frame) {
+    if(frame.lines().size()!=kLinesVisible || !frame.lines().front().memory.reset)
+        throw std::invalid_argument("incomplete owned native frame");
+    std::vector<uint8_t> rgb(kFramebufferBytes);
+    replay_native_rows(frame.lines(),rgb.data());
+    return rgb;
+}
+void GbaPpu::materialize_native_latch() const {
+    if (!native_latched_ || native_latched_materialized_) return;
+    std::vector<uint8_t> pixels;
+    if (!native_pixel_reader_ || !native_pixel_reader_(native_latched_, pixels) ||
+        pixels.size() != kFramebufferBytes)
+        pixels = render_native_draw_frame(*native_latched_);
+    auto& self = const_cast<GbaPpu&>(*this); // Logical cache, no simulation mutation.
+    std::copy(pixels.begin(),pixels.end(),self.latched_fb_.begin());
+    native_latched_materialized_ = true;
+    ++native_pixel_reads_;
+}
+void GbaPpu::materialize_native_work() const {
+    if (!native_work_dirty_) return;
+    auto& self = const_cast<GbaPpu&>(*this);
+    if (native_work_base_) {
+        // The base is the current complete latch until the next VBlank.
+        if (native_work_base_ != native_latched_)
+            throw std::logic_error("native work base outlived its frame");
+        materialize_native_latch();
+        std::copy_n(latched_fb_.begin(),kFramebufferBytes,self.work_fb_.begin());
+    }
+    replay_native_rows(native_builder_.lines(),self.work_fb_.data());
+    native_work_dirty_ = false;
+}
+void GbaPpu::materialize_native_pixels() const {
+    materialize_native_latch();
+    materialize_native_work();
+}
+void GbaPpu::invalidate_native_draw() {
+    native_builder_.reset();
+    native_latched_.reset();
+    native_work_base_.reset();
+    native_latched_materialized_ = true;
+    native_work_dirty_ = false;
+}
+void GbaPpu::set_native_draw_enabled(bool enabled, NativePixelReader reader) {
+    materialize_native_pixels();
+    invalidate_native_draw();
+    native_draw_enabled_ = enabled;
+    native_pixel_reader_ = std::move(reader);
+}
+#endif
+
+const uint8_t* GbaPpu::latched_framebuffer() const {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    materialize_native_latch();
+#endif
+    return latched_fb_.data();
+}
+
 void GbaPpu::set_rasterization_enabled(bool enabled) {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    invalidate_native_draw();
+#endif
     rasterization_enabled_ = enabled;
     if (!enabled) {
         std::fill(work_fb_.begin(),work_fb_.end(),0);

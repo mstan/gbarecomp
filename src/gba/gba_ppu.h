@@ -24,11 +24,16 @@
 #include <cstddef>
 #include <vector>
 #include <memory>
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+#include "gba_native_draw_frame.h"
+#include <functional>
+#endif
 #include "gba_high_resolution.h"
 
 namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
 namespace gba {
+class GbaNativeDrawFrame;
 
 class GbaPpu {
 public:
@@ -186,7 +191,11 @@ public:
                          const uint8_t* io,
                          const uint8_t* vram,
                          const uint8_t* oam,
-                         const uint8_t* pal);
+                         const uint8_t* pal
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+                         , GbaDrawMemory* draw_memory = nullptr
+#endif
+                         );
 
     // The affine reference registers have an internal scanline accumulator.
     // Any write to BG2X/Y or BG3X/Y reloads that accumulator immediately;
@@ -203,7 +212,21 @@ public:
                            const uint8_t* oam,
                            const uint8_t* pal);
     void mark_framebuffer_latched();
-    const uint8_t* latched_framebuffer() const { return latched_fb_.data(); }
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    // Materialize captured hardware rows on a portable CPU, without consulting
+    // later memory, providers or device time. Used on demand/fallback.
+    static std::vector<uint8_t> render_native_draw_frame(const GbaNativeDrawFrame&);
+    using NativePixelReader = std::function<bool(
+        const std::shared_ptr<const GbaNativeDrawFrame>&, std::vector<uint8_t>&)>;
+    void set_native_draw_enabled(bool enabled, NativePixelReader reader = {});
+    std::shared_ptr<const GbaNativeDrawFrame> native_draw_frame() const { return native_latched_; }
+    void materialize_native_pixels() const;
+    void invalidate_native_draw();
+    uint64_t native_draw_rows() const { return native_draw_rows_; }
+    uint64_t native_draw_frames() const { return native_draw_frames_; }
+    uint64_t native_pixel_reads() const { return native_pixel_reads_; }
+#endif
+    const uint8_t* latched_framebuffer() const;
     bool has_latched_framebuffer() const { return has_latched_fb_; }
 
 private:
@@ -248,6 +271,17 @@ private:
     uint32_t extra_right_  = 0;
     uint32_t extra_top_    = 0;
     uint32_t extra_bottom_ = 0;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    bool native_draw_enabled_ = false;
+    GbaNativeDrawBuilder native_builder_;
+    std::shared_ptr<const GbaNativeDrawFrame> native_latched_, native_work_base_;
+    NativePixelReader native_pixel_reader_;
+    mutable bool native_latched_materialized_ = true, native_work_dirty_ = false;
+    uint64_t native_draw_rows_ = 0, native_draw_frames_ = 0;
+    mutable uint64_t native_pixel_reads_ = 0;
+    void materialize_native_latch() const;
+    void materialize_native_work() const;
+#endif
 };
 
 // Widescreen margin tilemap provider (Step C; see gba_ppu.cpp). Set by the

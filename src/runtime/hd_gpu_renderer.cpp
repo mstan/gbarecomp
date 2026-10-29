@@ -7,6 +7,10 @@
 #include <cstring>
 #include <unordered_map>
 #include <utility>
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+#include "gba_native_draw_frame.h"
+#include "native_gpu_shader.h"
+#endif
 
 #if defined(GBARECOMP_HAVE_SDL2) && !defined(__ANDROID__) && !defined(GBARECOMP_WEB_HOST)
 #include <SDL.h>
@@ -21,6 +25,18 @@
 namespace gbarecomp {
 namespace {
 using Hd = gba::GbaHighResolutionFrame;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+constexpr const char* native_grading_source = R"GLSL(#version 130
+uniform sampler2D source_plane;
+uniform sampler2D grading;
+out vec4 result;
+void main() {
+    ivec3 rgb=ivec3(floor(texelFetch(source_plane,ivec2(gl_FragCoord.xy),0).rgb*255.0+0.5));
+    int index=(rgb.x>>3)|((rgb.y>>3)<<5)|((rgb.z>>3)<<10);
+    result=vec4(texelFetch(grading,ivec2(index&255,index>>8),0).rgb,1.0);
+}
+)GLSL";
+#endif
 constexpr const char* vertex_source = R"GLSL(#version 130
 void main() {
     vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);
@@ -238,6 +254,16 @@ struct HdGpuRenderer::Impl {
     unsigned width{},height{},max_texture{};
     unsigned requested_w{},requested_h{};
     GLuint program{},vao{},textures[7]{};
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    GLuint native_program{};
+    GLuint native_grading_program{};
+    SDL_Texture* native_graded{};
+    SDL_Texture* last_output{};
+    bool native_output=false;
+    bool native_planes=false,native_failed=false;
+    uint64_t native_frames=0,native_uploaded_bytes=0,native_draw_calls=0;
+    std::vector<uint8_t> native_raster;
+#endif
     unsigned plane_w{},plane_h{};
     bool failed=false,lost=false;
     uint64_t frame_serial=0,frames=0,uploaded_surfaces=0;
@@ -255,10 +281,22 @@ struct HdGpuRenderer::Impl {
             gl.DeleteTextures(7,textures);
             if(vao)gl.DeleteVertexArrays(1,&vao);
             if(program)gl.DeleteProgram(program);
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+            if(native_program)gl.DeleteProgram(native_program);
+            if(native_grading_program)gl.DeleteProgram(native_grading_program);
+#endif
         }
         if(output)SDL_DestroyTexture(output);
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        if(native_graded)SDL_DestroyTexture(native_graded);
+#endif
         if(frames)std::fprintf(stderr,"hd_gpu: frames=%llu surface_uploads=%llu\n",
             (unsigned long long)frames,(unsigned long long)uploaded_surfaces);
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        if(native_frames)std::fprintf(stderr,"native_gpu: frames=%llu vram_uploaded_bytes=%llu draw_calls=%llu\n",
+            (unsigned long long)native_frames,(unsigned long long)native_uploaded_bytes,
+            (unsigned long long)native_draw_calls);
+#endif
     }
     GLuint shader(GLenum type,const char* source) {
         GLuint value=gl.CreateShader(type);gl.ShaderSource(value,1,&source,nullptr);gl.CompileShader(value);
@@ -393,6 +431,9 @@ bool HdGpuRenderer::initialize(SDL_Renderer* renderer,SDL_Texture* activation) {
     impl_=std::move(state);return true;
 }
 SDL_Texture* HdGpuRenderer::render(const Hd::DrawFrame& frame,const runtime::ColorLut* lut) {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    if(impl_) { impl_->native_output=false; impl_->last_output=nullptr; }
+#endif
     if(!impl_ || impl_->failed)return nullptr;
     auto& s=*impl_;
     if(!s.pack(frame))return nullptr;
@@ -423,6 +464,9 @@ SDL_Texture* HdGpuRenderer::render(const Hd::DrawFrame& frame,const runtime::Col
     bool good=true;
     {
         State restore(s.gl);++s.frame_serial;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        if(s.native_planes){s.plane_w=s.plane_h=0;s.native_planes=false;}
+#endif
         if(s.plane_w!=frame.width || s.plane_h!=frame.height) {
             s.image(0,GL_RGBA32I,frame.width,frame.height,GL_RGBA_INTEGER,GL_INT,s.top.data());
             s.image(1,GL_RGBA32I,frame.width,frame.height,GL_RGBA_INTEGER,GL_INT,s.second.data());
@@ -470,12 +514,166 @@ SDL_Texture* HdGpuRenderer::render(const Hd::DrawFrame& frame,const runtime::Col
     }
     if(SDL_SetRenderTarget(s.renderer,old_target)!=0)good=false;
     if(!good){s.failed=true;return nullptr;}
-    ++s.frames;return s.output;
+    ++s.frames;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    s.last_output=s.output;
+#endif
+    return s.output;
 }
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+SDL_Texture* HdGpuRenderer::render_native(const gba::GbaNativeDrawFrame& frame,
+                                         const runtime::ColorLut* lut) {
+    constexpr unsigned width=240,height=160,stride=0x60+2048;
+    if(!impl_ || impl_->failed || impl_->native_failed || frame.lines().size()!=height ||
+       !frame.lines().front().memory.reset || impl_->max_texture<stride)return nullptr;
+    auto& s=*impl_;
+    s.native_raster.resize(size_t(stride)*height);
+    for(unsigned y=0;y<height;++y) {
+        const auto& line=frame.lines()[y];auto* row=s.native_raster.data()+size_t(stride)*y;
+        std::memcpy(row,line.io.data(),line.io.size());
+        row[0]=uint8_t(line.dispcnt);row[1]=uint8_t(line.dispcnt>>8);
+        std::memcpy(row+0x60,line.oam.data(),1024);
+        std::memcpy(row+0x60+1024,line.palette.data(),1024);
+    }
+    if(!s.output || s.requested_w!=width || s.requested_h!=height) {
+        auto* replacement=SDL_CreateTexture(s.renderer,SDL_PIXELFORMAT_ARGB8888,
+            SDL_TEXTUREACCESS_TARGET,width,height);
+        if(!replacement)return nullptr;
+        SDL_SetTextureBlendMode(replacement,SDL_BLENDMODE_NONE);
+        if(s.output)SDL_DestroyTexture(s.output);
+        s.output=replacement;s.width=s.requested_w=width;s.height=s.requested_h=height;
+    }
+    auto* old=SDL_GetRenderTarget(s.renderer);
+    if(SDL_SetRenderTarget(s.renderer,s.output)!=0)return nullptr;
+    if(SDL_RenderFlush(s.renderer)!=0 || SDL_GL_GetCurrentContext()!=s.context) {
+        SDL_SetRenderTarget(s.renderer,old);return nullptr;
+    }
+    bool good=true;
+    {
+        State restore(s.gl);
+        if(!s.native_program) {
+            GLuint vertex=s.shader(GL_VERTEX_SHADER,vertex_source);
+            GLuint fragment=s.shader(GL_FRAGMENT_SHADER,gba_native_fragment_source);
+            if(vertex && fragment) {
+                s.native_program=s.gl.CreateProgram();s.gl.AttachShader(s.native_program,vertex);
+                s.gl.AttachShader(s.native_program,fragment);
+                s.gl.BindFragDataLocation(s.native_program,0,"result");s.gl.LinkProgram(s.native_program);
+                GLint linked=0;s.gl.GetProgramiv(s.native_program,GL_LINK_STATUS,&linked);
+                if(!linked){char log[4096]{};s.gl.GetProgramInfoLog(s.native_program,sizeof(log),nullptr,log);
+                    std::fprintf(stderr,"native_gpu: link unavailable: %s\n",log);good=false;}
+            } else good=false;
+            if(vertex)s.gl.DeleteShader(vertex);
+            if(fragment)s.gl.DeleteShader(fragment);
+            if(!good)s.native_failed=true;
+        }
+        if(good) {
+            if(!s.native_planes) {
+                s.image(0,GL_R8UI,256,384,GL_RED_INTEGER,GL_UNSIGNED_BYTE,nullptr);
+                s.image(1,GL_R8UI,stride,height,GL_RED_INTEGER,GL_UNSIGNED_BYTE,s.native_raster.data());
+                s.native_planes=true;
+                for(auto& entry:s.surfaces)s.gl.DeleteTextures(1,&entry.second.texture);
+                s.surfaces.clear();
+            } else s.upload(1,stride,height,GL_RED_INTEGER,GL_UNSIGNED_BYTE,s.native_raster.data());
+            s.gl.UseProgram(s.native_program);s.gl.BindVertexArray(s.vao);
+            s.gl.Uniform1i(s.gl.GetUniformLocation(s.native_program,"vram_plane"),0);
+            s.gl.Uniform1i(s.gl.GetUniformLocation(s.native_program,"raster_plane"),1);
+            s.gl.Uniform1i(s.gl.GetUniformLocation(s.native_program,"grading"),6);
+            s.gl.Uniform1i(s.gl.GetUniformLocation(s.native_program,"graded"),0);
+            s.gl.Viewport(0,0,width,height);s.gl.Enable(GL_SCISSOR_TEST);
+            for(unsigned y=0;y<height;) {
+                const auto& memory=frame.lines()[y].memory;s.bind(0,s.textures[0]);
+                for(const auto& range:memory.ranges) {
+                    unsigned offset=range.offset,left=range.size,payload=range.payload_offset;
+                    while(left) {
+                        const unsigned x=offset&255u;
+                        const unsigned bytes=x?std::min(left,256u-x):(left>=256?left/256*256:left);
+                        const unsigned w=bytes>=256?256:bytes,h=bytes>=256?bytes/256:1;
+                        s.gl.TexSubImage2D(GL_TEXTURE_2D,0,x,offset/256,w,h,GL_RED_INTEGER,
+                            GL_UNSIGNED_BYTE,memory.payload.data()+payload);
+                        offset+=bytes;payload+=bytes;left-=bytes;s.native_uploaded_bytes+=bytes;
+                    }
+                }
+                // Raster registers/OAM/palette already live in a row-indexed
+                // immutable plane. Only a VRAM write requires an ordering
+                // boundary; submit every intervening row in one operation.
+                unsigned end=y+1;
+                while(end<height && frame.lines()[end].memory.ranges.empty())++end;
+                s.gl.Scissor(0,y,width,end-y);s.gl.DrawArrays(GL_TRIANGLES,0,3);
+                ++s.native_draw_calls;y=end;
+            }
+            if(const auto error=s.gl.GetError();error!=GL_NO_ERROR) {
+                std::fprintf(stderr,"native_gpu: render GL error=0x%x; portable fallback\n",unsigned(error));good=false;
+            }
+        }
+    }
+    if(SDL_SetRenderTarget(s.renderer,old)!=0)good=false;
+    if(!good){s.native_failed=true;return nullptr;}
+    ++s.native_frames;s.native_output=true;s.last_output=s.output;
+    return native_display(lut);
+}
+SDL_Texture* HdGpuRenderer::native_display(const runtime::ColorLut* lut) {
+    if(!impl_ || impl_->failed || impl_->native_failed || !impl_->native_output)return nullptr;
+    auto& s=*impl_;
+    if(!lut || lut->is_passthrough() || !lut->native_rgb_table()) {
+        s.last_output=s.output;return s.output;
+    }
+    if(!s.native_graded) {
+        s.native_graded=SDL_CreateTexture(s.renderer,SDL_PIXELFORMAT_ARGB8888,
+            SDL_TEXTUREACCESS_TARGET,240,160);
+        if(!s.native_graded)return nullptr;
+        SDL_SetTextureBlendMode(s.native_graded,SDL_BLENDMODE_NONE);
+    }
+    auto* old=SDL_GetRenderTarget(s.renderer);
+    if(SDL_SetRenderTarget(s.renderer,s.native_graded)!=0)return nullptr;
+    bool good=SDL_RenderFlush(s.renderer)==0 && SDL_GL_GetCurrentContext()==s.context;
+    if(good) {
+        State restore(s.gl);
+        if(!s.native_grading_program) {
+            const auto vertex=s.shader(GL_VERTEX_SHADER,vertex_source);
+            const auto fragment=s.shader(GL_FRAGMENT_SHADER,native_grading_source);
+            if(vertex && fragment) {
+                s.native_grading_program=s.gl.CreateProgram();
+                s.gl.AttachShader(s.native_grading_program,vertex);s.gl.AttachShader(s.native_grading_program,fragment);
+                s.gl.LinkProgram(s.native_grading_program);
+                GLint linked=0;s.gl.GetProgramiv(s.native_grading_program,GL_LINK_STATUS,&linked);
+                good=linked!=0;
+            } else good=false;
+            if(vertex)s.gl.DeleteShader(vertex);
+            if(fragment)s.gl.DeleteShader(fragment);
+        }
+        s.gl.ActiveTexture(GL_TEXTURE0);
+        const bool bound=SDL_GL_BindTexture(s.output,nullptr,nullptr)==0;
+        good=good && bound;
+        if(good) {
+            s.upload(6,256,128,GL_RGB,GL_UNSIGNED_BYTE,lut->native_rgb_table()->data());
+            s.gl.UseProgram(s.native_grading_program);s.gl.BindVertexArray(s.vao);
+            s.gl.Uniform1i(s.gl.GetUniformLocation(s.native_grading_program,"source_plane"),0);
+            s.gl.Uniform1i(s.gl.GetUniformLocation(s.native_grading_program,"grading"),6);
+            s.gl.Viewport(0,0,240,160);s.gl.Enable(GL_SCISSOR_TEST);s.gl.Scissor(0,0,240,160);
+            s.gl.DrawArrays(GL_TRIANGLES,0,3);good=s.gl.GetError()==GL_NO_ERROR;
+        }
+        if(bound){s.gl.ActiveTexture(GL_TEXTURE0);SDL_GL_UnbindTexture(s.output);}
+    }
+    if(SDL_SetRenderTarget(s.renderer,old)!=0)good=false;
+    if(!good){s.native_failed=true;return nullptr;}
+    s.last_output=s.native_graded;return s.native_graded;
+}
+bool HdGpuRenderer::readback_native(std::vector<uint8_t>& rgb) {
+    if(!impl_ || !impl_->native_output)return false;
+    auto& s=*impl_;
+    auto* last=s.last_output;s.last_output=s.output;
+    unsigned w=0,h=0;const bool good=readback(rgb,w,h) && w==240 && h==160;
+    s.last_output=last;return good;
+}
+#endif
 bool HdGpuRenderer::readback(std::vector<uint8_t>& rgb,unsigned& width,unsigned& height) {
     if(!impl_ || impl_->failed || !impl_->output)return false;
     auto& s=*impl_;SDL_Texture* old=SDL_GetRenderTarget(s.renderer);
-    if(SDL_SetRenderTarget(s.renderer,s.output)!=0)return false;
+    SDL_Texture* target=s.output;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    if(s.last_output)target=s.last_output;
+#endif
+    if(SDL_SetRenderTarget(s.renderer,target)!=0)return false;
     rgb.resize(size_t(s.width)*s.height*3);
     bool good=SDL_RenderReadPixels(s.renderer,nullptr,SDL_PIXELFORMAT_RGB24,rgb.data(),int(s.width*3))==0;
     if(SDL_SetRenderTarget(s.renderer,old)!=0)good=false;
@@ -500,6 +698,11 @@ HdGpuRenderer::HdGpuRenderer()=default;HdGpuRenderer::~HdGpuRenderer()=default;
 bool HdGpuRenderer::initialize(SDL_Renderer*,SDL_Texture*){return false;}
 bool HdGpuRenderer::available()const{return false;}
 SDL_Texture* HdGpuRenderer::render(const gba::GbaHighResolutionFrame::DrawFrame&,const runtime::ColorLut*){return nullptr;}
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+SDL_Texture* HdGpuRenderer::render_native(const gba::GbaNativeDrawFrame&,const runtime::ColorLut*){return nullptr;}
+SDL_Texture* HdGpuRenderer::native_display(const runtime::ColorLut*){return nullptr;}
+bool HdGpuRenderer::readback_native(std::vector<uint8_t>&){return false;}
+#endif
 bool HdGpuRenderer::readback(std::vector<uint8_t>&,unsigned&,unsigned&){return false;}
 unsigned HdGpuRenderer::width()const{return 0;}unsigned HdGpuRenderer::height()const{return 0;}
 void HdGpuRenderer::reset(bool){impl_.reset();}

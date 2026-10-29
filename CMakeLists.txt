@@ -8,6 +8,7 @@ if(GBARECOMP_ORDERED_SCANLINE_EXPERIMENT)
 endif()
 option(GBARECOMP_NATIVE_REGIONS "Build bounded native CPU/RAM region experiment" OFF)
 option(GBARECOMP_NATIVE_RAM_CODE_VIEWS "Borrow live ordinary-RAM code views per generated activation" OFF)
+option(GBARECOMP_NATIVE_DRAW_JOBS "Build native draw-memory ownership experiment" OFF)
 option(GBARECOMP_DEFERRED_HD_EXPERIMENT "Exercise immutable HD jobs with portable readback" OFF)
 option(GBARECOMP_GPU_HD_EXPERIMENT "Render supported immutable HD jobs through resident GPU presentation" OFF)
 if(GBARECOMP_GPU_HD_EXPERIMENT)
@@ -371,6 +372,9 @@ add_library(gbarecomp_gba STATIC
     src/gba/crc32.cpp
 )
 target_include_directories(gbarecomp_gba PUBLIC src/gba)
+if(GBARECOMP_NATIVE_DRAW_JOBS)
+    target_compile_definitions(gbarecomp_gba PUBLIC GBARECOMP_NATIVE_DRAW_JOBS=1)
+endif()
 if(GBARECOMP_HD_SAMPLER_IMPLEMENTATION STREQUAL "HLE")
     set_property(SOURCE src/gba/gba_high_resolution.cpp APPEND PROPERTY COMPILE_DEFINITIONS GBARECOMP_HD_SAMPLER_HLE=1)
 endif()
@@ -1160,6 +1164,22 @@ target_link_libraries(thumb_tests PRIVATE gbarecomp_armv4t)
 add_test(NAME thumb_tests COMMAND thumb_tests)
 
 add_gbarecomp_runtime_stack_test(bus_tests tests/bus/test_main.cpp)
+
+add_executable(draw_memory_tests tests/ppu/draw_memory_test.cpp)
+target_include_directories(draw_memory_tests PRIVATE src/gba)
+add_test(NAME draw_memory_tests COMMAND draw_memory_tests)
+if(GBARECOMP_NATIVE_DRAW_JOBS)
+    add_gbarecomp_runtime_stack_test(draw_memory_bus_tests tests/ppu/draw_memory_bus_test.cpp)
+    if(GBARECOMP_SDL2_OK)
+        add_executable(native_gpu_jobs_tests EXCLUDE_FROM_ALL
+            tests/ppu/native_gpu_jobs_test.cpp src/runtime/hd_gpu_renderer.cpp src/runtime/color_lut.cpp)
+        target_include_directories(native_gpu_jobs_tests PRIVATE src/runtime ${SDL2_INCLUDE_DIRS})
+        target_compile_definitions(native_gpu_jobs_tests PRIVATE SDL_MAIN_HANDLED=1 GBARECOMP_HAVE_SDL2=1)
+        target_link_libraries(native_gpu_jobs_tests PRIVATE gbarecomp_gba ${SDL2_LIBRARIES})
+        # Deliberate hardware qualification under the shared capacity pool,
+        # never an automatic visible/default CTest launch.
+    endif()
+endif()
 
 # The SDK original-code differential gate takes an owner-provided cartridge;
 # the test embeds no cartridge/BIOS data and skips when no input is supplied.

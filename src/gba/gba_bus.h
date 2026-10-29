@@ -15,6 +15,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <span>
 
 #include "gba_audio.h"
 #include "gba_bios.h"
@@ -31,6 +33,8 @@
 namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
 namespace gba {
+
+class GbaDrawMemory;
 
 // Optional game-owned, read-only ROM halfword override. This mirrors the
 // 32-bit hook below for games whose immutable configuration tables are read
@@ -181,7 +185,25 @@ public:
     uint8_t* ewram_ptr() { return ewram_.data(); }
     uint8_t* iwram_ptr() { return iwram_.data(); }
     uint8_t* pal_ptr()   { return pal_.data();   }
-    uint8_t* vram_ptr()  { return vram_.data();  }
+    uint8_t* vram_ptr()  {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        // An escaped mutable pointer can be used after any later draw. Keep
+        // the compatible eager CPU route for this bus's remaining lifetime.
+        draw_vram_alias_exposed_ = true;
+#endif
+        return vram_.data();
+    }
+    std::span<const uint8_t> vram_read_view() const { return vram_; }
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    bool enable_draw_memory();
+    void disable_draw_memory();
+    bool draw_memory_supported() const;
+    GbaDrawMemory* draw_memory();
+    // Qualified native/DMA writers use one range transaction. Observed or
+    // invalid ranges decline before mutation; legacy pointer access remains.
+    bool try_write_draw_vram(std::size_t offset, std::span<const uint8_t> bytes);
+    void invalidate_draw_memory();
+#endif
     uint8_t* oam_ptr()   { return oam_.data();   }
 
     // Native ordinary-memory access. Uses the same backing bytes and mirrors
@@ -358,6 +380,10 @@ private:
     std::size_t unmapped_count_ = 0;
 
     BusWriteObserver* write_observer_ = nullptr;  // P6 gate hook; null in play
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    std::unique_ptr<GbaDrawMemory> draw_memory_;
+    bool draw_vram_alias_exposed_ = false;
+#endif
 };
 
 }  // namespace gba

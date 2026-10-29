@@ -636,9 +636,13 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
             ppu->render_scanline(ppu->vcount(),
                                  bus->io().read16(0x000),
                                  bus->io().raw(),
-                                 bus->vram_ptr(),
+                                 bus->vram_read_view().data(),
                                  bus->oam_ptr(),
-                                 bus->pal_ptr());
+                                 bus->pal_ptr()
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+                                 , bus->draw_memory_supported() ? bus->draw_memory() : nullptr
+#endif
+                                 );
             if (g_phase_prof) {
                 g_prof_scanline_ns += static_cast<unsigned long long>(
                     std::chrono::duration_cast<std::chrono::nanoseconds>(
