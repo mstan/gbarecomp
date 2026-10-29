@@ -62,6 +62,10 @@ public:
     // accumulator crosses the active SOUNDBIAS sample interval.
     void tick(uint32_t cycles);
     uint32_t cycles_until_next_sample() const;
+    // Hardware samples observe only audio-owned state. Timer/FIFO, MMIO and
+    // other device barriers can advance their entire elapsed window at once.
+    // The optional Shadow mixer reads guest RAM and retains sample barriers.
+    uint32_t cycles_until_next_shared_event() const;
 
     // Drain up to `max` samples from the ring into `out`. Returns
     // the number actually written. Used by the host audio backend

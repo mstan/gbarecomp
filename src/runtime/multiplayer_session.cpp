@@ -183,7 +183,7 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
                 for (const auto& machine : machines_) {
                     const auto& device_io=machine->bus.io();
                     auto distance=std::min({machine->ppu.cycles_until_next_event(),
-                        machine->bus.audio().cycles_until_next_sample(),
+                        machine->bus.audio().cycles_until_next_shared_event(),
                         device_io.cycles_until_next_timer_event(),device_io.cycles_until_next_sio_event()});
                     deadline=std::min(deadline,cycle_+distance);
                 }
@@ -207,7 +207,7 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
             auto& io = instance.bus.io();
             if (!io.halted()) next = std::min(next, instance.timing.cycles);
             const auto event = std::min({instance.ppu.cycles_until_next_event(),
-                instance.bus.audio().cycles_until_next_sample(),
+                instance.bus.audio().cycles_until_next_shared_event(),
                 io.cycles_until_next_timer_event(), io.cycles_until_next_sio_event()});
             next = std::min(next, cycle_ + event);
         }

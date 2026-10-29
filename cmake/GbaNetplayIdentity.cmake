@@ -23,6 +23,7 @@ function(gbarecomp_target_netplay_identity target game_root generated_root)
     endif()
     string(APPEND identity "native-services=${native_services}\n")
     string(APPEND identity "native-regions=${GBARECOMP_NATIVE_REGIONS}\n")
+    string(APPEND identity "device-audio-windows=${GBARECOMP_DEVICE_AUDIO_WINDOWS}\n")
     string(APPEND identity "presentation=${GBARECOMP_PRESENTATION_IMPLEMENTATION}\n")
     # Cache-selected code-generation optimization is not reflected in the
     # CMakeLists/source hashes below. Keep unqualified O1/O2 and IPO packages

@@ -611,7 +611,7 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
     uint32_t remaining = cycles;
     while (remaining != 0) {
         uint32_t chunk = remaining;
-        uint32_t until_sample = bus->audio().cycles_until_next_sample();
+        uint32_t until_sample = bus->audio().cycles_until_next_shared_event();
         uint32_t until_timer = bus->io().cycles_until_next_timer_event();
         uint32_t until_sio = bus->io().cycles_until_next_sio_event();
         uint32_t until_ppu = ppu->cycles_until_next_event();
@@ -715,7 +715,7 @@ static long long          g_event_budget   = 0;
 static inline void recompute_event_budget(gba::GbaBus* bus, gba::GbaPpu* ppu) {
     uint32_t h  = ppu->cycles_until_next_event();
     uint32_t ut = bus->io().cycles_until_next_timer_event();
-    uint32_t us = bus->audio().cycles_until_next_sample();
+    uint32_t us = bus->audio().cycles_until_next_shared_event();
     uint32_t usio = bus->io().cycles_until_next_sio_event();
     if (ut < h) h = ut;
     if (us < h) h = us;

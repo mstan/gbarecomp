@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.20)
 project(gbarecomp C CXX)
 
 option(GBARECOMP_DETAILED_PHASE_PROFILE "Build additional opt-in device phase timers" OFF)
+option(GBARECOMP_DEVICE_AUDIO_WINDOWS "Let hardware audio own internal sample-event windows" OFF)
+if(GBARECOMP_DEVICE_AUDIO_WINDOWS)
+    set_property(SOURCE src/gba/gba_audio.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS GBARECOMP_DEVICE_AUDIO_WINDOWS=1)
+endif()
 option(GBARECOMP_ORDERED_SCANLINE_EXPERIMENT "Render native jobs in visible front-to-back order" OFF)
 if(GBARECOMP_ORDERED_SCANLINE_EXPERIMENT)
     set_property(SOURCE src/gba/gba_ppu.cpp APPEND PROPERTY COMPILE_DEFINITIONS GBARECOMP_ORDERED_SCANLINE_EXPERIMENT=1)
@@ -1055,6 +1060,8 @@ if(NOT WIN32)
 endif()
 
 add_executable(audio_playback_tests tests/runtime/audio_playback_test.cpp)
+target_compile_definitions(audio_playback_tests PRIVATE
+    GBARECOMP_TEST_DEVICE_AUDIO_WINDOWS=$<BOOL:${GBARECOMP_DEVICE_AUDIO_WINDOWS}>)
 target_include_directories(audio_playback_tests PRIVATE src/debug)
 target_link_libraries(audio_playback_tests PRIVATE gbarecomp_gba)
 add_test(NAME audio_playback_tests COMMAND audio_playback_tests)
@@ -1263,6 +1270,9 @@ add_gbarecomp_runtime_stack_test(vertical_obj_tests tests/ppu/vertical_obj_test.
 add_gbarecomp_runtime_stack_test(dma_tests tests/dma/test_main.cpp)
 add_gbarecomp_runtime_stack_test(dma_bulk_tests tests/dma/bulk_test_main.cpp)
 add_gbarecomp_runtime_stack_test(timer_tests tests/timers/test_main.cpp)
+add_gbarecomp_runtime_stack_test(device_audio_window_tests tests/runtime/device_audio_window_test.cpp)
+target_compile_definitions(device_audio_window_tests PRIVATE
+    GBARECOMP_TEST_DEVICE_AUDIO_WINDOWS=$<BOOL:${GBARECOMP_DEVICE_AUDIO_WINDOWS}>)
 
 add_executable(gpio_tests tests/gpio/test_main.cpp)
 target_link_libraries(gpio_tests PRIVATE gbarecomp_gba)

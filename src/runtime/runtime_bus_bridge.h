@@ -13,6 +13,11 @@ namespace gba { class GbaPpu; }
 // interpreter and mGBA oracles. Defined in runtime_bus_bridge.cpp.
 extern "C" unsigned long long g_runtime_vblank_starts;
 
+// Host services changing device configuration settle the previous window,
+// then re-arm deadlines under the new policy, just like guest MMIO writes.
+extern "C" void runtime_mmio_catch_up(void);
+extern "C" void runtime_resync_horizon(void);
+
 namespace gbarecomp {
 
 // Install the active bus pointer. Subsequent bus_read_u*/bus_write_u*
