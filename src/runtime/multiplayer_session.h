@@ -24,6 +24,12 @@ struct GbaInstance {
     explicit GbaInstance(GbaMachineDescriptor descriptor);
 };
 
+// Host-owned ranges in one exact save_state() result. These are not wire or
+// simulation state: the serialized format and all digest domains stay intact.
+struct GbaSessionStateLayout {
+    std::size_t header_end = 0, first_machine_end = 0, machines_end = 0;
+};
+
 // Conservative local-link qualification backend. It uses recompiled dispatch
 // with per-instruction suspension; batching must pass this same scheduler's
 // traces before replacing it. No network/presentation/filesystem operations.
@@ -38,6 +44,7 @@ public:
     void run_frame(std::span<const std::uint16_t> buttons);
     void run_until(std::uint64_t cycle);
     std::vector<std::uint8_t> save_state() const;
+    std::vector<std::uint8_t> save_state(GbaSessionStateLayout* layout) const;
     // Successful load atomically replaces machines; reacquire machine(id)
     // afterwards. Failure leaves all live state and wiring untouched.
     bool load_state(std::span<const std::uint8_t>, std::string* error);
@@ -45,6 +52,8 @@ public:
     // state_hash() of already serialized save_state() bytes.
     static std::uint32_t state_digest(std::span<const std::uint8_t>);
     std::array<std::uint32_t,3> state_hash_parts() const;
+    static std::array<std::uint32_t,3> state_hash_parts(
+        std::span<const std::uint8_t>, const GbaSessionStateLayout&);
     void discard_audio_output();
     std::size_t input_count() const { return config_.input_machines.size(); }
     GbaInstance& input_machine(std::size_t seat) { return machine(config_.input_machines.at(seat)); }

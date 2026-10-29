@@ -67,11 +67,20 @@ GbaNetplayHost::GbaNetplayHost(GbaMultiplayerSession& simulation)
 const std::vector<std::uint8_t>& GbaNetplayHost::current_state() const {
     if (cached_generation_!=generation_ || cached_cycle_!=simulation_.cycle()) {
         cached_generation_=UINT64_MAX; // stays invalid if serialization throws
-        cached_state_=simulation_.save_state();
+        cached_parts_valid_=false;
+        cached_state_=simulation_.save_state(&cached_layout_);
         cached_hash_=GbaMultiplayerSession::state_digest(cached_state_);
         cached_generation_=generation_; cached_cycle_=simulation_.cycle();
     }
     return cached_state_;
+}
+const std::array<std::uint32_t,3>& GbaNetplayHost::current_state_parts() const {
+    const auto& state=current_state();
+    if (!cached_parts_valid_) {
+        cached_parts_=GbaMultiplayerSession::state_hash_parts(state,cached_layout_);
+        cached_parts_valid_=true;
+    }
+    return cached_parts_;
 }
 void GbaNetplayHost::pin_checkpoint(std::uint32_t tick) {
     pinned_tick_=tick; pinned_state_.clear();
@@ -281,7 +290,7 @@ RNetRbHost GbaNetplayHost::callbacks() {
     };
     result.digest_parts = [](void* c,RNetRbDigestParts* p) {
         *p = {};
-        try { auto& h=host(c); auto& s=h.simulation_; h.current_state(); p->master=h.with_control_digest(h.cached_hash_); auto parts=s.state_hash_parts();
+        try { auto& h=host(c); h.current_state(); p->master=h.with_control_digest(h.cached_hash_); const auto& parts=h.current_state_parts();
               for (unsigned i=0;i<3;++i) p->part[i]=parts[i];
               p->part[2]=h.with_control_digest(p->part[2]); }
         catch (const std::exception& e) { host(c).fail(e.what()); }

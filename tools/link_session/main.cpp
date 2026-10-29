@@ -53,6 +53,7 @@ int main(int argc, char** argv) {
             "GBA_LINK_PROBE_PLAYERS: consoles on the cable, 2 (default) to 4.\n"
             "GBA_LINK_PROBE_SLICES=1 enables experimental native batching.\n"
             "GBA_LINK_PROBE_COSTS=1: per-frame simulate/serialize/digest/restore cost.\n"
+            "GBA_LINK_PROBE_CHECKPOINT_PARTS=1: compare original and checkpoint-derived hash domains.\n"
             "GBA_LINK_PROBE_INPUTS: rows of relative frame, then one button word per console.\n"
             "GBA_LINK_PROBE_STATE_IN / STATE_OUT: paired session snapshots.\n"
             "GBA_LINK_PROBE_CAPTURE_PREFIX: write each console's final PPM.\n"
@@ -149,6 +150,10 @@ int main(int argc, char** argv) {
         Buttons buttons{};
         const auto keys=[&] { return std::span<const std::uint16_t>(buttons.data(),players); };
         const bool costs=std::getenv("GBA_LINK_PROBE_COSTS")!=nullptr;
+        const bool checkpoint_parts=std::getenv("GBA_LINK_PROBE_CHECKPOINT_PARTS")!=nullptr;
+        if (checkpoint_parts && std::getenv("GBA_LINK_PROBE_NET_SEAT"))
+            throw std::runtime_error("checkpoint partition comparison is a local probe option");
+        unsigned checkpoint_checks=0;
         std::ofstream audio_out;
         if (const auto* path=std::getenv("GBA_LINK_PROBE_AUDIO_OUT")) {
             audio_out.open(path,std::ios::binary);
@@ -199,6 +204,17 @@ int main(int argc, char** argv) {
             }
             session->discard_audio_output();
             frame_ms.push_back(elapsed(frame_start));
+            if (checkpoint_parts) {
+                GbaSessionStateLayout layout;
+                const auto state=session->save_state(&layout);
+                const auto original=session->state_hash_parts();
+                const auto derived=GbaMultiplayerSession::state_hash_parts(state,layout);
+                if (original!=derived || state!=session->save_state())
+                    throw std::runtime_error("checkpoint hash domains or live session changed");
+                ++checkpoint_checks;
+                std::printf("checkpoint_parts frame=%u master=%08x parts=%08x,%08x,%08x bytes=%zu\n",
+                    frame+1,GbaMultiplayerSession::state_digest(state),derived[0],derived[1],derived[2],state.size());
+            }
             if (costs) {
                 // What a rollback peer adds per forward tick: one boundary
                 // serialization (shared by the snapshot and the digest), its
@@ -228,6 +244,8 @@ int main(int argc, char** argv) {
                 players,frame_ms.size(),frame_ms.size()*1000.0/total,total/frame_ms.size(),
                 frame_ms[(frame_ms.size()-1)*95/100],frame_ms.back());
         }
+        if (checkpoint_parts)
+            std::printf("checkpoint hash domains matched (%u boundaries)\n",checkpoint_checks);
         if (costs && !save_ms.empty()) {
             const auto summary=[](const char* name,std::vector<double> ms) {
                 double total=0; for (auto v:ms) total+=v;

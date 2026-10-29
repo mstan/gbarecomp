@@ -254,10 +254,15 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
 }
 
 std::vector<std::uint8_t> GbaMultiplayerSession::save_state() const {
+    return save_state(nullptr);
+}
+std::vector<std::uint8_t> GbaMultiplayerSession::save_state(GbaSessionStateLayout* layout) const {
     if (runtime_has_resumable_context()) throw std::logic_error("snapshot inside native dispatch");
     gba::SimulationArchive<false> a;
+    GbaSessionStateLayout ranges;
     manifest(a, config_);
     a(cycle_);
+    ranges.header_end = a.bytes().size();
     for (const auto& ptr : machines_) {
         const auto& m = *ptr;
         execution_state(a,m.execution);
@@ -265,9 +270,12 @@ std::vector<std::uint8_t> GbaMultiplayerSession::save_state() const {
         a.write_section(4*1024*1024,[&](auto& section) {
             gba::append_device_state(section,m.bus,m.ppu);
         });
+        if (!ranges.first_machine_end) ranges.first_machine_end = a.bytes().size();
     }
+    ranges.machines_end = a.bytes().size();
     auto link = link_state();
     a.vector(link,1024*1024);
+    if (layout) *layout = ranges;
     return a.take();
 }
 bool GbaMultiplayerSession::load_state(std::span<const std::uint8_t> bytes, std::string* error) {
@@ -350,6 +358,24 @@ std::array<std::uint32_t,3> GbaMultiplayerSession::state_hash_parts() const {
     auto bytes = link_state(); link.vector(bytes,1024*1024);
     parts[0] = hash(first.bytes()); parts[1] = hash(rest.bytes()); parts[2] = hash(link.bytes());
     return parts;
+}
+std::array<std::uint32_t,3> GbaMultiplayerSession::state_hash_parts(
+    std::span<const std::uint8_t> state, const GbaSessionStateLayout& layout) {
+    if (!layout.header_end || layout.header_end >= layout.first_machine_end ||
+        layout.first_machine_end > layout.machines_end || layout.machines_end > state.size())
+        throw std::invalid_argument("invalid session digest ranges");
+    // Original domains: machine zero, all remaining machines, then manifest
+    // plus cycle plus cable/wireless. The final domain is a prefix and suffix
+    // of this same checkpoint; no archive or temporary concatenation is needed.
+    const auto extend=[](std::uint32_t h,std::span<const std::uint8_t> bytes) {
+        for (auto byte:bytes) h=(h^byte)*16777619u;
+        return h;
+    };
+    constexpr std::uint32_t seed=2166136261u;
+    const auto first=state.subspan(layout.header_end,layout.first_machine_end-layout.header_end);
+    const auto rest=state.subspan(layout.first_machine_end,layout.machines_end-layout.first_machine_end);
+    const auto header=state.first(layout.header_end), link=state.subspan(layout.machines_end);
+    return {extend(seed,first),extend(seed,rest),extend(extend(seed,header),link)};
 }
 void GbaMultiplayerSession::discard_audio_output() {
     for (auto& m : machines_) m->bus.audio().discard_output();
