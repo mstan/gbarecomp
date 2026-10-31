@@ -17,23 +17,33 @@
 // at dot 252 (cycle 1008 of the line), clears at start of next line.
 
 #pragma once
+#define GBARECOMP_PUBLISHED_TEXT_SPANS_API 1
 
 #include <array>
 #include <cstdint>
 #include <cstddef>
 #include <vector>
 #include <memory>
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+#include "gba_native_draw_frame.h"
+#include <functional>
+#endif
 #include "gba_high_resolution.h"
 
 namespace gbarecomp::debug { class SnapshotWriter; class SnapshotReader; }
 
 namespace gba {
+class GbaNativeDrawFrame;
 
 class GbaPpu {
 public:
     // Optional downstream sampling density. Source artwork stays native;
     // approved affine backgrounds receive fractional samples. Never serialized.
     void set_internal_resolution(unsigned scale, HighResolutionAffineProvider provider = nullptr);
+    void set_deferred_hd_rendering(bool enabled) {
+        deferred_hd_ = enabled;
+        if (high_resolution_) high_resolution_->set_deferred_rendering(enabled);
+    }
     unsigned internal_resolution() const { return high_resolution_ ? high_resolution_->scale() : 1; }
     const GbaHighResolutionFrame* high_resolution() const { return high_resolution_.get(); }
     const uint8_t* high_resolution_framebuffer() const {
@@ -181,7 +191,11 @@ public:
                          const uint8_t* io,
                          const uint8_t* vram,
                          const uint8_t* oam,
-                         const uint8_t* pal);
+                         const uint8_t* pal
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+                         , GbaDrawMemory* draw_memory = nullptr
+#endif
+                         );
 
     // The affine reference registers have an internal scanline accumulator.
     // Any write to BG2X/Y or BG3X/Y reloads that accumulator immediately;
@@ -198,12 +212,27 @@ public:
                            const uint8_t* oam,
                            const uint8_t* pal);
     void mark_framebuffer_latched();
-    const uint8_t* latched_framebuffer() const { return latched_fb_.data(); }
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    // Materialize captured hardware rows on a portable CPU, without consulting
+    // later memory, providers or device time. Used on demand/fallback.
+    static std::vector<uint8_t> render_native_draw_frame(const GbaNativeDrawFrame&);
+    using NativePixelReader = std::function<bool(
+        const std::shared_ptr<const GbaNativeDrawFrame>&, std::vector<uint8_t>&)>;
+    void set_native_draw_enabled(bool enabled, NativePixelReader reader = {});
+    std::shared_ptr<const GbaNativeDrawFrame> native_draw_frame() const { return native_latched_; }
+    void materialize_native_pixels() const;
+    void invalidate_native_draw();
+    uint64_t native_draw_rows() const { return native_draw_rows_; }
+    uint64_t native_draw_frames() const { return native_draw_frames_; }
+    uint64_t native_pixel_reads() const { return native_pixel_reads_; }
+#endif
+    const uint8_t* latched_framebuffer() const;
     bool has_latched_framebuffer() const { return has_latched_fb_; }
 
 private:
     friend class SimulationStateCodec;
     std::unique_ptr<GbaHighResolutionFrame> high_resolution_;
+    bool deferred_hd_ = false;
     HighResolutionAffineProvider high_resolution_provider_ = nullptr;
     PresentationObserver* presentation_ = nullptr; // borrowed; not serialized
     bool rasterization_enabled_ = true; // host configuration, not serialized
@@ -242,6 +271,17 @@ private:
     uint32_t extra_right_  = 0;
     uint32_t extra_top_    = 0;
     uint32_t extra_bottom_ = 0;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    bool native_draw_enabled_ = false;
+    GbaNativeDrawBuilder native_builder_;
+    std::shared_ptr<const GbaNativeDrawFrame> native_latched_, native_work_base_;
+    NativePixelReader native_pixel_reader_;
+    mutable bool native_latched_materialized_ = true, native_work_dirty_ = false;
+    uint64_t native_draw_rows_ = 0, native_draw_frames_ = 0;
+    mutable uint64_t native_pixel_reads_ = 0;
+    void materialize_native_latch() const;
+    void materialize_native_work() const;
+#endif
 };
 
 // Widescreen margin tilemap provider (Step C; see gba_ppu.cpp). Set by the
@@ -270,6 +310,30 @@ extern "C" unsigned g_ws_bg_x_provider_layers;
 // the source's window masks; the guest's tilemap and graphics stay untouched.
 extern "C" int (*g_ws_bg_xy_provider)(int bg, int x, int y, int* source_x, int* source_y);
 extern "C" unsigned g_ws_bg_xy_provider_layers;
+
+// A game can publish read-only BG samplers whose results depend only on the
+// row's immutable inputs. This allows candidate ordering/occlusion to omit
+// hidden samples. The exact three scalar bindings are captured here: replacing
+// any of them automatically keeps the original callback order instead.
+// No guest writes, callback-count effects or device advancement are permitted.
+// An optional complete X mapping partitions [0,out_width) into <=8 spans.
+// action is -1 (suppress), 0 (unchanged hardware X), or 1 (source_x + step*dx).
+// Invalid/incomplete span output falls back to the captured scalar callback.
+#define GBARECOMP_WIDE_BG_SAMPLER_API 1
+struct WsBgXSpan {
+    int begin = 0, end = 0;
+    int source_x = 0, step = 1, action = 0;
+};
+using WsBgXRowProvider = int (*)(int bg, int screen_y, int out_width,
+                                int native_left, WsBgXSpan* spans, int capacity);
+void publish_read_only_wide_bg_providers(WsBgXRowProvider x_rows = nullptr,
+                                         bool tilemap_tile_invariant = false);
+// Clear before changing a sampler's hidden delegate/behavior even when its
+// public function pointer remains the same.
+void clear_read_only_wide_bg_providers();
+// tilemap_tile_invariant promises the result is constant within an unwrapped
+// 8x8 text-map cell (including BG scroll), separately for each margin side.
+// Registration is host presentation state, not serialized guest state.
 // Optional already-composited, read-only UI pixels in expanded/native-origin
 // coordinates. Return nonzero to submit RGB555 above the scene. Native 240x160
 // rendering never calls this provider.

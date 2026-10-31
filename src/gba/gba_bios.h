@@ -41,6 +41,12 @@ public:
                         const std::string& expected_sha1,
                         std::string* err);
 
+    // Load an owned copy of an already-read image, retaining the same size
+    // and optional SHA-1 checks as the file loader. The caller may release
+    // or modify its source buffer after this call.
+    bool load_from_bytes(const uint8_t* bytes, std::size_t size,
+                         const std::string& expected_sha1, std::string* err);
+
     // True if a valid BIOS image is loaded.
     bool loaded() const { return loaded_; }
 
@@ -56,6 +62,7 @@ public:
     uint32_t read32(uint32_t off) const;
 
 private:
+    bool finish_load(const std::string& expected_sha1, std::string* err);
     bool loaded_ = false;
     std::array<uint8_t, kSize> bytes_{};
     std::string sha1_hex_;

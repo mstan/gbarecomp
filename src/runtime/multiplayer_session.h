@@ -22,6 +22,15 @@ struct GbaInstance {
     // Allows generated instruction batching with an observation callback.
     bool immediate_override_is_observer = false;
     explicit GbaInstance(GbaMachineDescriptor descriptor);
+private:
+    friend class GbaMultiplayerSession;
+    gba::GbaSerialDevice* session_endpoint_ = nullptr;
+};
+
+// Host-owned ranges in one exact save_state() result. These are not wire or
+// simulation state: the serialized format and all digest domains stay intact.
+struct GbaSessionStateLayout {
+    std::size_t header_end = 0, first_machine_end = 0, machines_end = 0;
 };
 
 // Conservative local-link qualification backend. It uses recompiled dispatch
@@ -38,6 +47,7 @@ public:
     void run_frame(std::span<const std::uint16_t> buttons);
     void run_until(std::uint64_t cycle);
     std::vector<std::uint8_t> save_state() const;
+    std::vector<std::uint8_t> save_state(GbaSessionStateLayout* layout) const;
     // Successful load atomically replaces machines; reacquire machine(id)
     // afterwards. Failure leaves all live state and wiring untouched.
     bool load_state(std::span<const std::uint8_t>, std::string* error);
@@ -45,6 +55,8 @@ public:
     // state_hash() of already serialized save_state() bytes.
     static std::uint32_t state_digest(std::span<const std::uint8_t>);
     std::array<std::uint32_t,3> state_hash_parts() const;
+    static std::array<std::uint32_t,3> state_hash_parts(
+        std::span<const std::uint8_t>, const GbaSessionStateLayout&);
     void discard_audio_output();
     std::size_t input_count() const { return config_.input_machines.size(); }
     GbaInstance& input_machine(std::size_t seat) { return machine(config_.input_machines.at(seat)); }
@@ -54,6 +66,9 @@ public:
     // Differential/performance reference: keep exception-based suspension
     // while retaining the same slice and device boundaries.
     void set_return_yields(bool enabled) { return_yields_ = enabled; }
+    // Differential reference for the host-only device ownership path. The
+    // interval, device order and serialized simulation state are unchanged.
+    void set_owned_device_intervals(bool enabled) { owned_device_intervals_ = enabled; }
     std::uint64_t cycle() const { return cycle_; }
     std::size_t machine_count() const { return machines_.size(); }
     gba::GbaLinkHub& cable();
@@ -68,5 +83,6 @@ private:
     std::uint64_t cycle_ = 0;
     bool native_slices_ = false;
     bool return_yields_ = true;
+    bool owned_device_intervals_ = true;
 };
 } // namespace gbarecomp

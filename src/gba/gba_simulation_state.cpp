@@ -105,9 +105,16 @@ std::vector<std::uint8_t> save_device_state(const GbaBus& bus, const GbaPpu& ppu
     return archive.take();
 }
 void append_device_state(SimulationArchive<false>& archive, const GbaBus& bus, const GbaPpu& ppu) {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    ppu.materialize_native_pixels();
+#endif
     SimulationStateCodec::visit(archive,bus,ppu);
 }
 bool load_device_state(GbaBus& bus, GbaPpu& ppu, std::span<const std::uint8_t> bytes) {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    bus.invalidate_draw_memory();
+    ppu.invalidate_native_draw();
+#endif
     try {
         SimulationArchive<true> archive(bytes);
         SimulationStateCodec::visit(archive,bus,ppu);

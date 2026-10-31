@@ -65,6 +65,7 @@ extern "C" RuntimeThumbAluImmediateOverride
 extern "C" RuntimeBusReadOverride g_runtime_bus_read_override = nullptr;
 extern "C" RuntimeRamDispatchHook g_runtime_ram_dispatch_hook = nullptr;
 extern "C" RuntimeRamCodeView g_runtime_ram_code_view = nullptr;
+extern "C" RuntimeNativeRamCodeSource g_runtime_native_ram_code_source = {};
 extern "C" RuntimeDispatchObserver g_runtime_dispatch_observer = nullptr;
 extern "C" uint32_t g_runtime_observed_pcs[RUNTIME_MAX_OBSERVED_PCS] = {};
 extern "C" unsigned g_runtime_observed_pc_count = 0;

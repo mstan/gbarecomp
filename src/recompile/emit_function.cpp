@@ -195,7 +195,7 @@ std::string emit_function_body_str(
     const std::unordered_set<uint32_t>*
         alu_immediate_override_pcs,
     const std::unordered_set<uint64_t>* mod_function_hook_keys,
-    bool runtime_ram_placement) {
+    bool runtime_ram_placement, bool native_regions) {
     std::string out;
 
     const uint32_t step = (fn.mode == CpuMode::Thumb) ? 2u : 4u;
@@ -207,6 +207,20 @@ std::string emit_function_body_str(
     if (runtime_ram_placement) {
         ctx.runtime_pc_base = "_ram_base";
         appendf(out, "    const uint32_t _ram_base = g_runtime_native_ram_base;\n");
+        // Own the ordinary-RAM view for this activation. The local interface
+        // keeps the maintained codegen and its exact byte/immediate semantics;
+        // every check still observes current memory and binding. Put this before
+        // resume-alias jumps so no goto crosses a local initialization.
+        appendf(out,
+            "#if defined(GBARECOMP_NATIVE_RAM_CODE_VIEWS) && defined(__cplusplus) && !defined(GBA_COSIM)\n"
+            "    const RuntimeNativeRamCodeView _ram_code;\n"
+            "    [[maybe_unused]] const auto runtime_native_ram_instruction_matches = [&_ram_code](uint32_t pc, uint32_t opcode, uint32_t size) {\n"
+            "        return _ram_code.matches(pc, opcode, size);\n    };\n"
+            "    [[maybe_unused]] const auto runtime_native_ram_instruction_matches_masked = [&_ram_code](uint32_t pc, uint32_t opcode, uint32_t size, uint32_t mask) {\n"
+            "        return _ram_code.matches(pc, opcode, size, mask);\n    };\n"
+            "    [[maybe_unused]] const auto runtime_native_arm_immediate = [&_ram_code](uint32_t pc) {\n"
+            "        return _ram_code.arm_immediate(pc);\n    };\n"
+            "#endif\n");
         // The same fragment may be placed at several guest PCs. Preserve only
         // exact reviewed mod sites in its live bus class, including a fresh
         // call whose instruction is an interior alias of this fragment.
@@ -588,6 +602,44 @@ std::string emit_function_body_str(
             ctx.runtime_pc_base = "(_ram_base + " +
                 std::to_string(span.start - fn.addr) + "u)";
         }
+        std::unordered_map<uint32_t,std::vector<armv4t::Instr>> native_blocks;
+        std::unordered_map<uint32_t,uint32_t> native_ends;
+        std::unordered_set<uint32_t> native_refs;
+        if(native_regions && !runtime_ram_placement && fn_source_addr==fn.addr &&
+           (span.start>>24)>=8 && (span.end>>24)<=13) {
+            uint32_t scan=span.start;
+            while(scan<span.end) {
+                std::vector<armv4t::Instr> block;
+                const uint32_t first=scan;
+                while(scan<span.end && block.size()<8) {
+                    // Resume aliases are side entries to the maintained body,
+                    // not barriers for a fresh straight-line native entry.
+                    // Actual loop headers retain their own fast entry.
+                    if(scan!=first && backward_targets.count(scan)) break;
+                    std::size_t offset=0;
+                    if(!source_offset_for(scan,step,&offset)) break;
+                    uint32_t opcode=0;
+                    for(unsigned b=0;b<step;++b) opcode|=uint32_t(rom[offset+b])<<(b*8);
+                    auto instruction=step==2 ? armv4t::ThumbDecoder::decode(uint16_t(opcode),scan)
+                                            : armv4t::ArmDecoder::decode(opcode,scan);
+                    if(!armv4t::ArmCodegen::supports_native_region(instruction) ||
+                       (alu_immediate_override_pcs && alu_immediate_override_pcs->count(scan))) break;
+                    block.push_back(instruction);scan+=step;
+                }
+                if(block.size()>=4) {
+                    for(const auto& instruction:block) switch(instruction.op) {
+                        case armv4t::IrOp::LDR: case armv4t::IrOp::LDRB:
+                        case armv4t::IrOp::LDRH: case armv4t::IrOp::LDRSB:
+                        case armv4t::IrOp::LDRSH: case armv4t::IrOp::STR:
+                        case armv4t::IrOp::STRB: case armv4t::IrOp::STRH:
+                            native_refs.insert(instruction.pc);break;
+                        default:break;
+                    }
+                    native_ends[scan]=first;native_blocks[first]=std::move(block);
+                }
+                if(scan==first) scan+=step;
+            }
+        }
         while (pc < span.end) {
             std::size_t off = 0;
             if (!source_offset_for(pc, step, &off)) break;
@@ -607,6 +659,24 @@ std::string emit_function_body_str(
             if (backward_targets.count(pc) != 0 || alias_set.count(pc) != 0) {
                 appendf(out, "L_%08X:\n", pc);
             }
+
+            if(const auto found=native_blocks.find(pc);found!=native_blocks.end()) {
+                appendf(out,"#if defined(GBARECOMP_NATIVE_REGIONS) && defined(__cplusplus) && !defined(GBA_COSIM)\n"
+                    "    {\n    g_cpu.R[15]=0x%08Xu;\n    RuntimeNativeRegion _region;\n"
+                    "    if(g_runtime_native_region_context && !g_runtime_shadow_tick && !g_force_interp &&\n"
+                    "       runtime_native_region_begin(&_region,%uu,0x%08Xu,%uu)) {\n"
+                    "        auto& g_cpu=_region.cpu;\n",pc,unsigned(found->second.size()),pc,step==2?1:0);
+                auto native_ctx=ctx;native_ctx.native_region=true;
+                for(const auto& instruction:found->second) {
+                    out+="        {\n";
+                    out+=armv4t::ArmCodegen::emit_instr(instruction,native_ctx,nullptr);
+                    out+="        }\n";
+                }
+                appendf(out,"        _region.commit(); goto NR_END_%x;\n"
+                    "    }\n    }\n#endif\n",pc);
+            }
+            if(native_refs.count(pc)) appendf(out,
+                "#if defined(GBARECOMP_NATIVE_REGIONS) && defined(__cplusplus) && !defined(GBA_COSIM)\nNR_REF_%x:\n#endif\n",pc);
 
             std::string line = armv4t::format_ir(ins);
             appendf(out, "    /* %08X  %s */\n", pc, line.c_str());
@@ -642,7 +712,7 @@ std::string emit_function_body_str(
                     pc - fn.addr, opcode, step, pc - fn.addr, pc - fn.addr);
                 emitted = guard + emitted;
             }
-            if (has_aliases) {
+            if (has_aliases || native_regions) {
                 // Block-scope each instruction so the resume prologue's forward
                 // goto crosses no in-scope local initialization (goto-legal C++).
                 out += "    {\n";
@@ -658,6 +728,8 @@ std::string emit_function_body_str(
             // to the next emitted block.
             (void)ni;  // tracked for diagnostics; abort path is in the emit.
             pc += step;
+            if(const auto end=native_ends.find(pc);end!=native_ends.end())
+                appendf(out,"#if defined(GBARECOMP_NATIVE_REGIONS) && defined(__cplusplus) && !defined(GBA_COSIM)\nNR_END_%x:;\n#endif\n",end->second);
         }
         // Fall-through tail-call dispatch.
         //
@@ -698,11 +770,12 @@ void emit_function_body(
     const std::unordered_map<uint64_t, std::string>& func_names_by_key,
     const std::unordered_set<uint32_t>*
         alu_immediate_override_pcs,
-    const std::unordered_set<uint64_t>* mod_function_hook_keys) {
+    const std::unordered_set<uint64_t>* mod_function_hook_keys,
+    bool native_regions) {
     std::string body = emit_function_body_str(fn, rom, rom_size, rom_base,
                                               func_names_by_key,
                                               alu_immediate_override_pcs,
-                                              mod_function_hook_keys);
+                                              mod_function_hook_keys,false,native_regions);
     std::fwrite(body.data(), 1, body.size(), f);
 }
 

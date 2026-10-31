@@ -10,6 +10,9 @@
 #include <fstream>
 #include <new>
 #include <string>
+#if defined(GBARECOMP_CHECKPOINT_BENCHMARK)
+#include "multiplayer_netplay.h"
+#endif
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -202,6 +205,45 @@ void raster(unsigned count) {
     }
     measure("audio_tick_1024",count*1000,[&] { m.bus.audio().tick(1024); });
 }
+#if defined(GBARECOMP_CHECKPOINT_BENCHMARK)
+void checkpoints(unsigned count, unsigned players, bool reference) {
+    auto session=link_fixture::create(true,false,players);
+    configure(*session);
+    gbarecomp::GbaNetplayHost host(*session);
+    const auto api=host.callbacks();
+    std::array<RNetRbFrame,4> rows{};
+    for (unsigned seat=0;seat<players;++seat) {
+        rows[seat].is_valid=1; rows[seat].buttons=1u<<seat;
+    }
+    unsigned tick=0;
+    // Explicit diagnostic-boundary workload: run the linked machines, retain
+    // a rollback snapshot, then request master and one partition bundle.
+    // Production requests that bundle at correction baselines; this tool does
+    // not assert that it runs every ordinary gameplay frame. Both arms use
+    // the same checkpoint/scheduler/renderer code.
+    measure(reference ? "checkpoint_reference" : "checkpoint_reuse",count,[&] {
+        api.publish(api.ctx,tick,rows.data(),players,0);
+        check(host.run_published_tick(),host.error().c_str());
+        ++tick;
+        check(api.snap_save(api.ctx,tick),host.error().c_str());
+        sink^=api.digest_master(api.ctx);
+        if (reference) {
+            const auto parts=session->state_hash_parts();
+            for (auto part:parts) sink^=part;
+        } else {
+            RNetRbDigestParts digests{}; api.digest_parts(api.ctx,&digests);
+            check(host.error().empty(),host.error().c_str());
+            for (auto part:digests.part) sink^=part;
+        }
+    });
+    const auto expected=session->state_hash_parts();
+    RNetRbDigestParts actual{}; api.digest_parts(api.ctx,&actual);
+    check(actual.master==session->state_hash(),"checkpoint master differs");
+    for (unsigned i=0;i<3;++i) check(actual.part[i]==expected[i],"checkpoint partition differs");
+    std::printf("{\"players\":%u,\"frames\":%u,\"final_master\":%u,\"parts\":[%u,%u,%u],\"sink\":%llu}\n",
+        players,tick,actual.master,actual.part[0],actual.part[1],actual.part[2],(unsigned long long)sink);
+}
+#endif
 }
 void* operator new(std::size_t size) {
     if (counting) { ++allocations; allocated_bytes += size; }
@@ -220,6 +262,13 @@ int main(int argc, char** argv) {
     if (argc > 2 && std::string(argv[1]) == "--qualify") { qualify(argv[2], players); return 0; }
     const unsigned count = argc > 2 ? std::stoul(argv[2]) : 128;
     check(count > 0 && count <= 10000, "iterations must be 1..10000");
+#if defined(GBARECOMP_CHECKPOINT_BENCHMARK)
+    if (argc>1 && std::string(argv[1])=="--checkpoints") {
+        check(argc>4 && (std::string(argv[4])=="reference" || std::string(argv[4])=="reuse"),
+            "--checkpoints ITERATIONS PLAYERS reference|reuse");
+        checkpoints(count,players,std::string(argv[4])=="reference"); return 0;
+    }
+#endif
     if (argc > 1 && std::string(argv[1]) == "--raster") { raster(count); return 0; }
     auto session = link_fixture::create(true, false, players);
     configure(*session);

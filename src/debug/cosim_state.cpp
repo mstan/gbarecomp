@@ -120,7 +120,7 @@ uint64_t state_hash(SubHashes* sub) {
     if (bus) {
         s.iwram = fnv(kFnvOff, bus->iwram_ptr(), 32u * 1024u);
         s.ewram = fnv(kFnvOff, bus->ewram_ptr(), 256u * 1024u);
-        s.vram  = fnv(kFnvOff, bus->vram_ptr(), 96u * 1024u);
+        s.vram  = fnv(kFnvOff, bus->vram_read_view().data(), 96u * 1024u);
         s.pal   = fnv(kFnvOff, bus->pal_ptr(), 1024u);
         s.oam   = fnv(kFnvOff, bus->oam_ptr(), 1024u);
         // io: architectural-only hash (excludes unmapped_count_/dma_runs_/dma_words_

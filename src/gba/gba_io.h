@@ -106,6 +106,7 @@ public:
     // to DMAxCNT_H silently store the register without copying any
     // bytes and the BIOS's VRAM/PAL/OAM uploads vanish.
     void set_bus(armv4t::Bus* b) { bus_ = b; }
+    armv4t::Bus* bus() const { return bus_; }
     void set_audio(GbaAudio* a) { audio_ = a; }
 
     // Bus-side entry points. `off` is the offset into the IO region
@@ -234,6 +235,7 @@ public:
     // DMA loops accumulate their GBATEK transfer cost here; the runtime drains
     // it (charging the master clock + advancing devices) at a safe point. Read
     // and reset in one call. (GBATEK § "GBA DMA Transfers" timing.)
+    uint32_t pending_dma_steal_cycles() const { return dma_steal_cycles_; }
     uint32_t take_dma_steal_cycles() {
         uint32_t c = dma_steal_cycles_;
         dma_steal_cycles_ = 0;

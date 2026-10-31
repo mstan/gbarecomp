@@ -6,6 +6,7 @@
 // before any recompiled cart code executes.
 
 #include "../armv4t/runtime_arm.h"
+#include "../armv4t/runtime_native_region.h"
 #include "../armv4t/runtime_context.h"
 #include "runtime_bus_bridge.h"
 #include "mobile_platform.h"
@@ -43,6 +44,7 @@
 // need to inspect (0x08004286) lives inside a single runtime_dispatch,
 // so ordinary step granularity can't enter it. 0 disables (no overhead).
 extern "C" uint32_t g_runtime_break_pc = 0;
+extern "C" unsigned g_runtime_native_region_context = 1;
 
 // Count of PPU VBlank-start events (scanline 159->160), incremented
 // unconditionally in runtime_tick regardless of DISPSTAT IRQ-enable.
@@ -122,6 +124,9 @@ template<class Work> static auto profile_device(unsigned phase, Work work) {
 #endif
 static unsigned long long g_runtime_yielded_vblank_start = 0;
 static bool g_session_execution = false;
+static const void* g_session_private_memory_owner = nullptr;
+static std::uint64_t g_session_private_memory_deadline = 0;
+static bool (*g_session_private_memory_owner_check)(const void*, const gba::GbaBus&) = nullptr;
 static bool g_session_instruction_started = false;
 static bool g_session_slice = false, g_session_slice_stopped = false;
 static std::uint64_t g_session_slice_deadline = 0;
@@ -296,6 +301,13 @@ void set_active_bus(gba::GbaBus* bus) {
     g_runtime_ram_code_view = [](uint32_t address, uint32_t size) -> const uint8_t* {
         return g_active_bus ? g_active_bus->native_code_view(address,size) : nullptr;
     };
+#if defined(GBARECOMP_NATIVE_RAM_CODE_VIEWS)
+    g_runtime_native_ram_code_source = {
+        g_runtime_ram_code_view,
+        bus ? bus->ewram_ptr() : nullptr,
+        bus ? bus->iwram_ptr() : nullptr
+    };
+#endif
     if (bus) {
         bus->bind_wait_table(&g_runtime_waits);
     } else if (gba::GbaBus* owner = gba::GbaBus::wait_table_owner()) {
@@ -602,7 +614,7 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
     uint32_t remaining = cycles;
     while (remaining != 0) {
         uint32_t chunk = remaining;
-        uint32_t until_sample = bus->audio().cycles_until_next_sample();
+        uint32_t until_sample = bus->audio().cycles_until_next_shared_event();
         uint32_t until_timer = bus->io().cycles_until_next_timer_event();
         uint32_t until_sio = bus->io().cycles_until_next_sio_event();
         uint32_t until_ppu = ppu->cycles_until_next_event();
@@ -627,9 +639,13 @@ static void tick_devices(gba::GbaBus* bus, gba::GbaPpu* ppu, uint32_t cycles) {
             ppu->render_scanline(ppu->vcount(),
                                  bus->io().read16(0x000),
                                  bus->io().raw(),
-                                 bus->vram_ptr(),
+                                 bus->vram_read_view().data(),
                                  bus->oam_ptr(),
-                                 bus->pal_ptr());
+                                 bus->pal_ptr()
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+                                 , bus->draw_memory_supported() ? bus->draw_memory() : nullptr
+#endif
+                                 );
             if (g_phase_prof) {
                 g_prof_scanline_ns += static_cast<unsigned long long>(
                     std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -702,7 +718,7 @@ static long long          g_event_budget   = 0;
 static inline void recompute_event_budget(gba::GbaBus* bus, gba::GbaPpu* ppu) {
     uint32_t h  = ppu->cycles_until_next_event();
     uint32_t ut = bus->io().cycles_until_next_timer_event();
-    uint32_t us = bus->audio().cycles_until_next_sample();
+    uint32_t us = bus->audio().cycles_until_next_shared_event();
     uint32_t usio = bus->io().cycles_until_next_sio_event();
     if (ut < h) h = ut;
     if (us < h) h = us;
@@ -775,6 +791,19 @@ extern "C" void runtime_resync_horizon(void) {
     recompute_event_budget(bus, ppu);
 }
 
+static uint32_t g_service_tick_divider = 0;
+static void account_host_service_instructions(uint32_t count) {
+    const uint32_t previous = g_service_tick_divider;
+    g_service_tick_divider += count;
+    if (!g_host_service_hook || (previous & 0x3fffu) + count < 0x4000u) return;
+    static auto last_service = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_service >= std::chrono::milliseconds(8)) {
+        g_host_service_hook();
+        last_service = now;
+    }
+}
+
 extern "C" void runtime_tick(uint32_t cycles) {
     if (g_session_execution) { g_runtime_cycles += cycles; return; }
     // P6 shadow-tick: a healed shard's validation re-run only accumulates its
@@ -790,17 +819,7 @@ extern "C" void runtime_tick(uint32_t cycles) {
     // reaching a GBA frame boundary. Downsample the wall-clock check so native
     // window messages keep flowing without putting a clock read on every guest
     // instruction.
-    if (g_host_service_hook) {
-        static uint32_t service_tick_divider = 0;
-        if ((++service_tick_divider & 0x3FFFu) == 0) {
-            static auto last_service = std::chrono::steady_clock::now();
-            const auto now = std::chrono::steady_clock::now();
-            if (now - last_service >= std::chrono::milliseconds(8)) {
-                g_host_service_hook();
-                last_service = now;
-            }
-        }
-    }
+    if (g_host_service_hook) account_host_service_instructions(1);
 
     cyc_probe("tick", cycles);
     g_runtime_cycles += cycles;
@@ -1301,6 +1320,9 @@ void runtime_capture_timing_context(RuntimeTimingContext& out) {
     out.pending_cycles = g_pending_cycles;
     out.event_budget = g_event_budget;
 }
+bool native_service_window_allowed() {
+    return !g_session_execution && !g_runtime_shadow_tick;
+}
 void runtime_restore_timing_values(const RuntimeTimingContext& in) {
     g_runtime_cycles = in.cycles;
     g_runtime_vblank_starts = in.vblank_starts;
@@ -1323,9 +1345,13 @@ void runtime_restore_timing_context(const RuntimeTimingContext& in) {
     ++g_runtime_state_epoch;
 }
 void runtime_session_execution(bool enabled) {
+    g_runtime_native_region_context=enabled?0u:1u;
     g_session_execution = enabled;
     g_session_instruction_started = false;
     g_session_slice = false;
+    g_session_private_memory_owner = nullptr;
+    g_session_private_memory_deadline = 0;
+    g_session_private_memory_owner_check = nullptr;
 }
 void runtime_session_begin_instruction() {
     g_session_instruction_started = false; g_session_slice = false;
@@ -1347,7 +1373,190 @@ void runtime_session_ram_dispatch_boundary(std::uint32_t pc) {
     // classifier. Its generated body runs through the reference safe points.
     g_session_slice=false;
 }
+void runtime_session_private_memory_owner(const void* owner, std::uint64_t deadline,
+    bool (*check)(const void*, const gba::GbaBus&)) {
+    g_session_private_memory_owner = owner;
+    g_session_private_memory_deadline = deadline;
+    g_session_private_memory_owner_check = check;
+}
+bool runtime_session_private_memory_begin(RuntimeNativeRegion& region, std::uint32_t cycles) {
+#if defined(GBA_COSIM)
+    return false;
+#else
+    auto* bus = active_bus();
+    auto* ppu = active_ppu();
+    if (!g_session_execution || !g_session_private_memory_owner_check ||
+        g_session_instruction_started || !bus || !ppu ||
+        !g_session_private_memory_owner_check(g_session_private_memory_owner, *bus) ||
+        !cycles || cycles > 65536 || !(g_cpu.cpsr & CPSR_I_BIT) ||
+        g_runtime_cycles > g_session_private_memory_deadline ||
+        cycles > g_session_private_memory_deadline - g_runtime_cycles ||
+        g_runtime_shadow_tick || g_force_interp || g_runtime_force_interp_step_active ||
+        g_runtime_force_interp_hook || g_runtime_fn_entry_hook || g_runtime_insn_trace ||
+        g_runtime_trace_enabled || g_runtime_break_pc || g_runtime_bus_read_override ||
+        g_runtime_thumb_alu_imm_override ||
+        gba::g_rom_read16_override || gba::g_rom_read32_override ||
+        bus->has_write_observer() || bus->matrix().active() || bus->io().halted() ||
+        bus->io().pending_dma_steal_cycles() ||
+        gbarecomp::g_sampling.load(std::memory_order_relaxed)) return false;
+    // Neither PPU DMA nor timer/FIFO DMA may observe an intermediate RAM
+    // publication. Audio's intervening sample events consume only its owned
+    // FIFO state. Serial completion changes device registers/IF, not RAM, and
+    // cannot enter a guest handler while CPSR.I remains set.
+    if (cycles >= ppu->cycles_until_next_event() ||
+        cycles >= bus->io().cycles_until_next_timer_event()) return false;
+    region.owner_bus = bus;
+    region.start_cycles = g_runtime_cycles;
+    region.bound = cycles;
+    return true;
+#endif
+}
+void runtime_session_private_memory_end(RuntimeNativeRegion& region) {
+    auto* bus = active_bus();
+    if (!g_session_execution || !bus || region.owner_bus != bus ||
+        region.start_cycles != g_runtime_cycles || region.cycles != region.bound ||
+        g_runtime_cycles > g_session_private_memory_deadline ||
+        region.cycles > g_session_private_memory_deadline - g_runtime_cycles ||
+        !(g_cpu.cpsr & CPSR_I_BIT) || !(region.cpu.cpsr & CPSR_I_BIT)) {
+        std::fprintf(stderr, "runtime: invalid private-memory settlement\n");
+        std::abort();
+    }
+    std::copy_n(region.cpu.R, 16, g_cpu.R);
+    g_cpu.cpsr = region.cpu.cpsr;
+    g_runtime_waits = region.waits;
+    g_idle_disturb_epoch += region.writes;
+    if (region.had_read) {
+        bus->set_bios_access_enabled(false);
+        bus->note_pc(region.last_read_pc, (g_cpu.cpsr & CPSR_T_BIT) != 0);
+    }
+    region.owner_bus = nullptr;
+    g_session_instruction_started = true;
+    g_session_slice_stopped = true;
+    runtime_tick(region.cycles);
+}
 void runtime_session_tick_devices(std::uint32_t cycles) {
     if (g_active_bus && g_active_ppu) tick_devices(g_active_bus, g_active_ppu, cycles);
 }
+bool runtime_session_tick_owned_devices(gba::GbaBus& bus, gba::GbaPpu& ppu,
+    RuntimeTimingContext& timing, std::uint32_t pc, std::uint32_t cycles) {
+#if defined(GBA_COSIM)
+    return false;
+#else
+    // All raster/provider callbacks retain their complete legacy execution
+    // window. DMA observers and cartridge hooks may also inspect guest CPU
+    // state; ordinary hardware audio/timers/SIO operate on their owned devices.
+    if (!g_session_execution || !cycles || cycles >= ppu.cycles_until_next_event() ||
+        bus.has_write_observer() || gba::g_rom_read16_override ||
+        gba::g_rom_read32_override || g_runtime_shadow_tick)
+        return false;
+    set_active_bus(&bus); set_active_ppu(&ppu);
+    runtime_restore_timing_context(timing);
+    // GbaIo records DMA/IRQ diagnostics through runtime_current_pc(). No
+    // instruction/continuation executes in this interval. Restore even when
+    // device advancement throws, leaving the last bound ARM window intact.
+    struct DiagnosticPcScope {
+        std::uint32_t previous = g_cpu.R[15];
+        explicit DiagnosticPcScope(std::uint32_t value) { g_cpu.R[15] = value; }
+        ~DiagnosticPcScope() { g_cpu.R[15] = previous; }
+    } diagnostic_pc(pc);
+    tick_devices(&bus, &ppu, cycles);
+    runtime_capture_timing_context(timing);
+    return true;
+#endif
+}
 } // namespace gbarecomp
+
+#if defined(GBARECOMP_NATIVE_REGIONS)
+namespace {
+uint64_t g_native_region_trials=0, g_native_region_accepted=0, g_native_region_instructions=0;
+struct NativeRegionReport {
+    ~NativeRegionReport() {
+        if(g_native_region_trials) std::fprintf(stderr,
+            "native_regions trials=%llu accepted=%llu instructions=%llu\n",
+            static_cast<unsigned long long>(g_native_region_trials),
+            static_cast<unsigned long long>(g_native_region_accepted),
+            static_cast<unsigned long long>(g_native_region_instructions));
+    }
+} g_native_region_report;
+}
+#endif
+
+extern "C" uint64_t runtime_native_region_instruction_count() {
+#if defined(GBARECOMP_NATIVE_REGIONS)
+    return g_native_region_instructions;
+#else
+    return 0;
+#endif
+}
+
+extern "C" bool runtime_native_region_begin(RuntimeNativeRegion* region,
+    uint32_t count, uint32_t pc, uint32_t thumb) {
+#if !defined(GBARECOMP_NATIVE_REGIONS) || defined(GBA_COSIM)
+    (void)region; (void)count; (void)pc; (void)thumb;
+    return false;
+#else
+    ++g_native_region_trials;
+    auto* bus=gbarecomp::active_bus();
+    auto* ppu=gbarecomp::active_ppu();
+    if(!region || !bus || !ppu || count==0 || count>64 ||
+       g_session_execution || g_runtime_shadow_tick || g_force_interp ||
+       g_runtime_force_interp_step_active || g_runtime_force_interp_hook ||
+       g_runtime_insn_trace || g_runtime_trace_enabled || g_runtime_break_pc ||
+       g_runtime_bus_read_override || gba::g_rom_read16_override || gba::g_rom_read32_override ||
+       bus->has_write_observer() || bus->io().halted() ||
+       bus->io().pending_dma_steal_cycles() || bus->matrix().active() ||
+       gbarecomp::g_sampling.load(std::memory_order_relaxed)) return false;
+    static const bool cycle_probe=std::getenv("GBARECOMP_CYC_HI")!=nullptr;
+    if(cycle_probe) return false;
+    const uint32_t code_region=pc>>24;
+    const uint32_t bytes=count*(thumb?2u:4u);
+    const uint32_t offset=pc&0x01ffffffu;
+    if(code_region<8 || code_region>13 || thumb>1 || (pc&(thumb?1u:3u)) || g_cpu.R[15]!=pc ||
+       bool(g_cpu.cpsr&CPSR_T_BIT)!=bool(thumb) ||
+       ((pc+bytes-1)>>24)!=code_region || offset>bus->rom_size() ||
+       bytes>bus->rom_size()-offset || (offset<0xccu && offset+bytes>0xc0u) ||
+       (!(g_cpu.cpsr&CPSR_I_BIT) && bus->io().irq_pending())) return false;
+    if(runtime_should_yield()) return false;
+    // Eligible instructions have no multiply, block transfer, branch or PC
+    // write. Eight cycles cover fixed/internal/shift costs; a positive
+    // prefetch adjustment cannot exceed the active sequential halfword wait.
+    const uint32_t bound=runtime_native_region_bound(g_runtime_waits,count,pc);
+    if(g_event_budget<=bound) return false;
+    region->cpu.cpsr=g_cpu.cpsr;
+    std::copy_n(g_cpu.R,16,region->cpu.R);
+    region->waits=g_runtime_waits;
+    region->ewram=bus->ewram_ptr();region->iwram=bus->iwram_ptr();
+    region->rom=bus->rom_ptr();region->rom_bytes=static_cast<uint32_t>(bus->rom_size());
+    region->cycles=region->writes=region->instructions=region->last_read_pc=0;
+    region->had_read=false;region->bound=bound;
+    region->owner_bus=bus;region->start_cycles=g_runtime_cycles;
+    ++g_native_region_accepted;
+    return true;
+#endif
+}
+
+extern "C" void runtime_native_region_end(RuntimeNativeRegion* region) {
+    auto* bus=gbarecomp::active_bus();
+    if(!region || region->owner_bus!=bus || !bus ||
+       region->start_cycles!=g_runtime_cycles || region->cycles>region->bound ||
+       g_event_budget<=region->cycles) {
+        std::fprintf(stderr,"runtime: invalid native-region settlement\n");
+        std::abort();
+    }
+    std::copy_n(region->cpu.R,16,g_cpu.R);
+    g_cpu.cpsr=region->cpu.cpsr;
+    g_runtime_waits=region->waits;
+    g_idle_disturb_epoch+=region->writes;
+    if(region->had_read) {
+        bus->set_bios_access_enabled(false);
+        bus->note_pc(region->last_read_pc,(g_cpu.cpsr&CPSR_T_BIT)!=0);
+    }
+    const uint32_t instructions=region->instructions;
+#if defined(GBARECOMP_NATIVE_REGIONS)
+    g_native_region_instructions+=instructions;
+#endif
+    region->owner_bus=nullptr;
+    runtime_tick(region->cycles);
+    if(g_host_service_hook && instructions>1)
+        account_host_service_instructions(instructions-1);
+}

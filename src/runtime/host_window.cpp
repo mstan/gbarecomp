@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "color_lut.h"
+#include "hd_gpu_renderer.h"
 #include "host_overlay.h"
 #include "presentation_layout.h"
 #include "touch_input.h"
@@ -344,6 +345,12 @@ struct Backend {
     SDL_Window*   window   = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_Texture*  texture  = nullptr;
+    std::unique_ptr<HdGpuRenderer> hd_gpu;
+    bool hd_gpu_checked = false;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    std::shared_ptr<const gba::GbaNativeDrawFrame> native_frame;
+#endif
+    SDL_Texture* resident_frame = nullptr;
     Uint32        texture_format = SDL_PIXELFORMAT_RGB24;
     std::vector<uint32_t> packed_upload;
     unsigned      presentation_source_w = 0, presentation_source_h = 0;
@@ -1797,8 +1804,15 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     // can opt in with GBARECOMP_VSYNC=1. GBARECOMP_NO_VSYNC remains the final
     // override for existing launch scripts and A/B diagnostics.
 #if defined(_WIN32)
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+    const bool renderer_default_owned =
+        SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER,"direct3d11",SDL_HINT_DEFAULT);
+#else
     SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER, "direct3d11",
                             SDL_HINT_DEFAULT);
+#endif
+#elif defined(GBARECOMP_GPU_HD_EXPERIMENT)
+    const bool renderer_default_owned = !SDL_GetHint(SDL_HINT_RENDER_DRIVER);
 #endif
     const char* vsync_env = std::getenv("GBARECOMP_VSYNC");
     const char* no_vsync_env = std::getenv("GBARECOMP_NO_VSYNC");
@@ -1811,7 +1825,23 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     const Uint32 renderer_flags = SDL_RENDERER_ACCELERATED |
         (want_vsync ? static_cast<Uint32>(SDL_RENDERER_PRESENTVSYNC)
                     : Uint32{0});
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+    int preferred_driver = -1;
+    if (prefer_gpu_hd_ && renderer_default_owned && !std::getenv("SDL_RENDER_DRIVER")) {
+        for (int i=0;i<SDL_GetNumRenderDrivers();++i) {
+            SDL_RendererInfo info{};
+            if (SDL_GetRenderDriverInfo(i,&info)==0 && info.name && !std::strcmp(info.name,"opengl"))
+                preferred_driver=i;
+        }
+    }
+    // Select this window's backend directly. Keep existing process hints and
+    // compatibility with SDL releases before SDL_ResetHint was introduced.
+    b->renderer = SDL_CreateRenderer(b->window, preferred_driver, renderer_flags);
+    if (!b->renderer && preferred_driver>=0)
+        b->renderer=SDL_CreateRenderer(b->window,-1,renderer_flags);
+#else
     b->renderer = SDL_CreateRenderer(b->window, -1, renderer_flags);
+#endif
     if (!b->renderer && want_vsync) {
         std::fprintf(stderr,
                      "host_window: synchronized renderer unavailable; "
@@ -2312,6 +2342,7 @@ void HostWindow::close() {
     runtime_imgui_shutdown(b);
 #endif
     destroy_sharp_texture(b);
+    b->hd_gpu.reset();
     if (b->texture)   SDL_DestroyTexture(b->texture);
     if (b->renderer)  SDL_DestroyRenderer(b->renderer);
     if (b->window)    SDL_DestroyWindow(b->window);
@@ -2401,79 +2432,148 @@ bool HostWindow::drawable_size(int* width, int* height) const {
            *width > 0 && *height > 0;
 }
 
+bool HostWindow::hd_jobs_available() {
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+    if (!open_ || !impl_) return false;
+    auto* b = static_cast<Backend*>(impl_);
+    if (!b->hd_gpu_checked) {
+        b->hd_gpu_checked = true;
+        b->hd_gpu = std::make_unique<HdGpuRenderer>();
+        if (!b->hd_gpu->initialize(b->renderer,b->texture)) b->hd_gpu.reset();
+    }
+    return b->hd_gpu && b->hd_gpu->available();
+#else
+    return false;
+#endif
+}
+bool HostWindow::present_hd(const gba::GbaHighResolutionFrame::DrawFrame& frame) {
+    if (!hd_jobs_available()) return false;
+    auto* b = static_cast<Backend*>(impl_);
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    b->native_frame.reset();
+#endif
+    SDL_Texture* texture = b->hd_gpu->render(frame,b->color_lut.get());
+    if (!texture) return false;
+#if SDL_VERSION_ATLEAST(2,0,12)
+    SDL_SetTextureScaleMode(texture,b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
+    b->resident_frame = texture;
+    present(nullptr,frame.width*frame.scale,frame.height*frame.scale);
+    return true;
+}
+bool HostWindow::readback_hd(std::vector<uint8_t>& rgb,unsigned& width,unsigned& height) {
+    if (!open_ || !impl_) return false;
+    auto* b = static_cast<Backend*>(impl_);
+    return b->hd_gpu && b->hd_gpu->readback(rgb,width,height);
+}
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+bool HostWindow::readback_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>& frame,
+                                std::vector<uint8_t>& rgb) {
+    if(!frame || !hd_jobs_available())return false;
+    auto* b=static_cast<Backend*>(impl_);
+    if(b->native_frame!=frame) {
+        if(!b->hd_gpu->render_native(*frame,nullptr))return false;
+        b->native_frame=frame;
+    }
+    return b->hd_gpu->readback_native(rgb);
+}
+bool HostWindow::present_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>& frame) {
+    if(!frame || !hd_jobs_available())return false;
+    auto* b=static_cast<Backend*>(impl_);
+    if(b->native_frame!=frame) {
+        if(!b->hd_gpu->render_native(*frame,nullptr))return false;
+        b->native_frame=frame;
+    }
+    auto* texture=b->hd_gpu->native_display(b->color_lut.get());
+    if(!texture)return false;
+#if SDL_VERSION_ATLEAST(2,0,12)
+    SDL_SetTextureScaleMode(texture,b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
+    b->resident_frame=texture;
+    present(nullptr,240,160);
+    return true;
+}
+#endif
+
 void HostWindow::present(const uint8_t* rgb888) { present(rgb888, 0, 0); }
 
 void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sampled_h) {
-    if (!open_ || !impl_ || !rgb888) return;
+    if (!open_ || !impl_) return;
     auto* b = static_cast<Backend*>(impl_);
+    SDL_Texture* frame_texture = b->resident_frame;
+    b->resident_frame = nullptr;
+    if (!rgb888 && !frame_texture) return;
     if (!sampled_w) sampled_w = unsigned(b->base_w);
     if (!sampled_h) sampled_h = unsigned(b->base_h);
-    int texture_w = 0, texture_h = 0;
-    SDL_QueryTexture(b->texture, nullptr, nullptr, &texture_w, &texture_h);
-    if (b->presentation_source_w != sampled_w || b->presentation_source_h != sampled_h) {
-        unsigned upload_w = sampled_w, upload_h = sampled_h;
-        SDL_RendererInfo info{};
-        SDL_GetRendererInfo(b->renderer, &info);
-        const auto shrink = [&] {
-            upload_w = std::max(1u, upload_w / 2);
-            upload_h = std::max(1u, upload_h / 2);
-        };
-        while ((info.max_texture_width > 0 && upload_w > unsigned(info.max_texture_width)) ||
-               (info.max_texture_height > 0 && upload_h > unsigned(info.max_texture_height))) shrink();
-        SDL_Texture* replacement = nullptr;
-        while (upload_w != unsigned(texture_w) || upload_h != unsigned(texture_h)) {
-            replacement = SDL_CreateTexture(b->renderer, b->texture_format,
-                SDL_TEXTUREACCESS_STREAMING, int(upload_w), int(upload_h));
-            if (replacement) break;
-            if (upload_w == 1 && upload_h == 1)
-                throw std::runtime_error("cannot allocate presentation texture");
-            shrink();
-        }
-        if (replacement) {
-            SDL_SetTextureBlendMode(replacement, SDL_BLENDMODE_NONE);
+    if (!frame_texture) {
+        int texture_w = 0, texture_h = 0;
+        SDL_QueryTexture(b->texture, nullptr, nullptr, &texture_w, &texture_h);
+        if (b->presentation_source_w != sampled_w || b->presentation_source_h != sampled_h) {
+            unsigned upload_w = sampled_w, upload_h = sampled_h;
+            SDL_RendererInfo info{};
+            SDL_GetRendererInfo(b->renderer, &info);
+            const auto shrink = [&] {
+                upload_w = std::max(1u, upload_w / 2);
+                upload_h = std::max(1u, upload_h / 2);
+            };
+            while ((info.max_texture_width > 0 && upload_w > unsigned(info.max_texture_width)) ||
+                   (info.max_texture_height > 0 && upload_h > unsigned(info.max_texture_height))) shrink();
+            SDL_Texture* replacement = nullptr;
+            while (upload_w != unsigned(texture_w) || upload_h != unsigned(texture_h)) {
+                replacement = SDL_CreateTexture(b->renderer, b->texture_format,
+                    SDL_TEXTUREACCESS_STREAMING, int(upload_w), int(upload_h));
+                if (replacement) break;
+                if (upload_w == 1 && upload_h == 1)
+                    throw std::runtime_error("cannot allocate presentation texture");
+                shrink();
+            }
+            if (replacement) {
+                SDL_SetTextureBlendMode(replacement, SDL_BLENDMODE_NONE);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
-            SDL_SetTextureScaleMode(replacement, b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+                SDL_SetTextureScaleMode(replacement, b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
-            SDL_DestroyTexture(b->texture); destroy_sharp_texture(b);
-            b->texture = replacement;
+                SDL_DestroyTexture(b->texture); destroy_sharp_texture(b);
+                b->texture = replacement;
+            }
+            texture_w = int(upload_w); texture_h = int(upload_h);
+            b->presentation_source_w = sampled_w; b->presentation_source_h = sampled_h;
+            std::fprintf(stderr, "host_window: render surface logical=%dx%d internal=%ux%u upload=%dx%d\n",
+                         b->base_w, b->base_h, sampled_w, sampled_h, texture_w, texture_h);
         }
-        texture_w = int(upload_w); texture_h = int(upload_h);
-        b->presentation_source_w = sampled_w; b->presentation_source_h = sampled_h;
-        std::fprintf(stderr, "host_window: render surface logical=%dx%d internal=%ux%u upload=%dx%d\n",
-                     b->base_w, b->base_h, sampled_w, sampled_h, texture_w, texture_h);
-    }
-    // Large elective scales can exceed an older GPU's texture limit. Keep the
-    // complete CPU raster and reduce only the upload, preserving logical view
-    // and guest state. Remember the successful size instead of retrying a
-    // failed allocation every frame.
-    if (unsigned(texture_w) != sampled_w || unsigned(texture_h) != sampled_h) {
-        b->presentation_upload.resize(size_t(texture_w) * texture_h * 3);
-        for (int y = 0; y < texture_h; ++y) {
-            const size_t row = size_t(uint64_t(y) * sampled_h / texture_h) * sampled_w;
-            for (int x = 0; x < texture_w; ++x)
-                std::memcpy(b->presentation_upload.data() + (size_t(y) * texture_w + x) * 3,
-                    rgb888 + (row + uint64_t(x) * sampled_w / texture_w) * 3, 3);
+        // Large elective scales can exceed an older GPU's texture limit. Keep the
+        // complete CPU raster and reduce only the upload, preserving logical view
+        // and guest state. Remember the successful size instead of retrying a
+        // failed allocation every frame.
+        if (unsigned(texture_w) != sampled_w || unsigned(texture_h) != sampled_h) {
+            b->presentation_upload.resize(size_t(texture_w) * texture_h * 3);
+            for (int y = 0; y < texture_h; ++y) {
+                const size_t row = size_t(uint64_t(y) * sampled_h / texture_h) * sampled_w;
+                for (int x = 0; x < texture_w; ++x)
+                    std::memcpy(b->presentation_upload.data() + (size_t(y) * texture_w + x) * 3,
+                        rgb888 + (row + uint64_t(x) * sampled_w / texture_w) * 3, 3);
+            }
+            rgb888 = b->presentation_upload.data();
         }
-        rgb888 = b->presentation_upload.data();
-    }
-    note_present_for_health(b);
-    // Present-time color grading (opt-in). Raw is passthrough: the raw
-    // PPU frame is uploaded untouched, so verify/frame-hash are unaffected.
-    if (b->texture_format != SDL_PIXELFORMAT_RGB24) {
-        b->packed_upload.resize(size_t(texture_w) * texture_h);
-        static const runtime::ColorLut raw_lut(runtime::ColorSettings{});
-        const auto& lut = b->color_lut ? *b->color_lut : raw_lut;
-        lut.map_packed8888(rgb888, b->packed_upload.data(), texture_w, texture_h,
-            b->texture_format == SDL_PIXELFORMAT_ABGR8888);
-        SDL_UpdateTexture(b->texture, nullptr, b->packed_upload.data(), texture_w * 4);
-    } else {
-        if (b->color_lut && !b->color_lut->is_passthrough()) {
-            b->graded_fb.resize(size_t(texture_w) * texture_h * 3);
-            b->color_lut->map_rgb888(rgb888, b->graded_fb.data(), texture_w, texture_h);
-            rgb888 = b->graded_fb.data();
+        note_present_for_health(b);
+        // Present-time color grading (opt-in). Raw is passthrough: the raw
+        // PPU frame is uploaded untouched, so verify/frame-hash are unaffected.
+        if (b->texture_format != SDL_PIXELFORMAT_RGB24) {
+            b->packed_upload.resize(size_t(texture_w) * texture_h);
+            static const runtime::ColorLut raw_lut(runtime::ColorSettings{});
+            const auto& lut = b->color_lut ? *b->color_lut : raw_lut;
+            lut.map_packed8888(rgb888, b->packed_upload.data(), texture_w, texture_h,
+                b->texture_format == SDL_PIXELFORMAT_ABGR8888);
+            SDL_UpdateTexture(b->texture, nullptr, b->packed_upload.data(), texture_w * 4);
+        } else {
+            if (b->color_lut && !b->color_lut->is_passthrough()) {
+                b->graded_fb.resize(size_t(texture_w) * texture_h * 3);
+                b->color_lut->map_rgb888(rgb888, b->graded_fb.data(), texture_w, texture_h);
+                rgb888 = b->graded_fb.data();
+            }
+            SDL_UpdateTexture(b->texture, nullptr, rgb888, texture_w * 3);
         }
-        SDL_UpdateTexture(b->texture, nullptr, rgb888, texture_w * 3);
-    }
+        frame_texture = b->texture;
+    } else note_present_for_health(b);
 #if defined(__ANDROID__)
     // Pure black around the game: on OLED panels (common on Android phones
     // and handhelds such as the RG556) those pixels are then off, not a dim
@@ -2549,10 +2649,10 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
     if (touch_input_enabled(b)) publish_touch_presentation(b);
 #if defined(__ANDROID__)
     const SDL_Rect destination{layout.x, layout.y, layout.width, layout.height};
-    SDL_RenderCopy(b->renderer, b->texture, nullptr, &destination);
+    SDL_RenderCopy(b->renderer, frame_texture, nullptr, &destination);
 #else
     if (!b->expanded_view && !b->resize_driven_view) {
-        SDL_RenderCopy(b->renderer, b->texture, nullptr, nullptr);
+        SDL_RenderCopy(b->renderer, frame_texture, nullptr, nullptr);
     } else {
         if (layout.width > 0 && layout.height > 0) {
             const SDL_Rect destination = {
@@ -2567,7 +2667,7 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
                 SDL_SetRenderTarget(b->renderer, b->sharp_texture) == 0) {
                 const bool prescaled =
                     SDL_RenderCopy(
-                        b->renderer, b->texture, nullptr, nullptr) == 0;
+                        b->renderer, frame_texture, nullptr, nullptr) == 0;
                 const bool restored =
                     SDL_SetRenderTarget(b->renderer, nullptr) == 0;
                 if (prescaled && restored) {
@@ -2582,7 +2682,7 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
                 // retain the crisp nearest path.
                 SDL_SetRenderTarget(b->renderer, nullptr);
                 SDL_RenderCopy(
-                    b->renderer, b->texture, nullptr, &destination);
+                    b->renderer, frame_texture, nullptr, &destination);
             }
         }
     }
@@ -3021,6 +3121,15 @@ HostWindow::Events HostWindow::pump() {
 
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
+#if SDL_VERSION_ATLEAST(2,0,4)
+        if (e.type == SDL_RENDER_DEVICE_RESET || e.type == SDL_RENDER_TARGETS_RESET) {
+            if (b->hd_gpu) b->hd_gpu->reset(e.type == SDL_RENDER_DEVICE_RESET);
+            b->hd_gpu.reset(); b->hd_gpu_checked = false; b->resident_frame = nullptr;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+            b->native_frame.reset();
+#endif
+        }
+#endif
 #if defined(GBARECOMP_RUNTIME_UI)
         const bool finger_event =
             e.type == SDL_FINGERDOWN || e.type == SDL_FINGERMOTION ||
@@ -3408,6 +3517,13 @@ bool HostWindow::drawable_size(int* /*width*/, int* /*height*/) const {
     return false;
 }
 
+bool HostWindow::hd_jobs_available() { return false; }
+bool HostWindow::present_hd(const gba::GbaHighResolutionFrame::DrawFrame&) { return false; }
+bool HostWindow::readback_hd(std::vector<uint8_t>&,unsigned&,unsigned&) { return false; }
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+bool HostWindow::present_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>&) { return false; }
+bool HostWindow::readback_native(const std::shared_ptr<const gba::GbaNativeDrawFrame>&,std::vector<uint8_t>&) { return false; }
+#endif
 void HostWindow::present(const uint8_t* /*rgb888*/) {}
 void HostWindow::present(const uint8_t*, unsigned, unsigned) {}
 

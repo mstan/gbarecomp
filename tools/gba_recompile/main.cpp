@@ -100,6 +100,7 @@ struct Cli {
     bool ok = true;
     bool bios_mode = false;     // set when --bios is parsed
     bool emit_symbol_map = true; // --no-symbol-map opts out (debug aid)
+    bool native_regions = false; // --native-regions: experimental static regions
 };
 
 void print_usage() {
@@ -109,6 +110,7 @@ void print_usage() {
         "              [--out DIR] [--rom-base HEX]\n"
         "              [--max-functions N] [--codegen-shards N]\n"
         "              [--output-prefix IDENTIFIER_PREFIX]\n"
+        "              [--native-regions]\n"
         "\n"
         "  Cart-recompile mode. Discovers functions reachable from\n"
         "  --entry + --symbols seeds and writes two or more deterministic\n"
@@ -177,6 +179,7 @@ Cli parse_cli(int argc, char** argv) {
             c.output_prefix = next() ? argv[i] : "";
         else if (a == "--rom-base")     parse_hex(next(), c.rom_base);
         else if (a == "--no-symbol-map") c.emit_symbol_map = false;
+        else if (a == "--native-regions") c.native_regions = true;
         else if (a == "--symbol-map")    c.emit_symbol_map = true;
         else if (a == "--codegen-shards") {
             const char* v = next();
@@ -841,7 +844,8 @@ void write_body(const std::string& dir,
                 uint32_t shard_count,
                 const std::unordered_set<uint32_t>*
                     alu_immediate_override_pcs,
-                const std::unordered_set<uint64_t>* mod_function_hook_keys) {
+                const std::unordered_set<uint64_t>* mod_function_hook_keys,
+                bool native_regions) {
     std::unordered_map<uint64_t, std::string> name_by_key;
     const bool mutable_cartridge=std::any_of(ram_templates.begin(),ram_templates.end(),
         [](const auto& t) { return !t.cart_function.name.empty(); });
@@ -896,6 +900,9 @@ void write_body(const std::string& dir,
         "#include \"runtime_arm.h\"\n"
         "#include \"%s\"\n\n",
         shard, shard_count, names.header.c_str());
+        if(native_regions) std::fprintf(f,
+            "#if defined(GBARECOMP_NATIVE_REGIONS) && defined(__cplusplus)\n"
+            "#include \"runtime_native_region.h\"\n#endif\n\n");
         for (const auto& fn : funcs) {
             if (shard_count > 1 &&
                 stable_shard_hash(fn) % shard_count != shard) {
@@ -912,7 +919,7 @@ void write_body(const std::string& dir,
             fn.name.c_str());
         emit_function_body(f, fn, rom, rom_size, rom_base, name_by_key,
                            alu_immediate_override_pcs,
-                           mod_function_hook_keys);
+                           mod_function_hook_keys,native_regions);
         std::fprintf(f, "}\n\n");
         }
         const std::unordered_map<uint64_t, std::string> no_direct_names;
@@ -1590,7 +1597,7 @@ int main(int argc, char** argv) {
                alu_immediate_override_pcs.empty()
                    ? nullptr : &alu_immediate_override_pcs,
                mod_function_hook_keys.empty()
-                   ? nullptr : &mod_function_hook_keys);
+                   ? nullptr : &mod_function_hook_keys,cli.native_regions);
     write_dispatch_table(cli.out_dir, emit_funcs, ram_templates, names);
     std::printf("==> wrote %s/{%s, %s%s, %s}\n",
                 cli.out_dir.c_str(),

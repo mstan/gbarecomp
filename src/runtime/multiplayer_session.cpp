@@ -95,9 +95,11 @@ GbaMultiplayerSession::GbaMultiplayerSession(GbaSessionConfig config) : config_(
     if (config_.links[0].medium==GbaLinkMedium::Wireless)
         wireless_=std::make_unique<gba::GbaWirelessDomain>(config_.links[0].machines.size());
     else cable_ = std::make_unique<gba::GbaLinkHub>(config_.links[0].machines.size());
-    for (std::size_t port = 0; port < config_.links[0].machines.size(); ++port)
-        machine(config_.links[0].machines[port]).bus.io().set_serial_device(
-            wireless_ ? &wireless_->endpoint(port) : &cable_->endpoint(port));
+    for (std::size_t port = 0; port < config_.links[0].machines.size(); ++port) {
+        auto& instance = machine(config_.links[0].machines[port]);
+        instance.session_endpoint_ = wireless_ ? &wireless_->endpoint(port) : &cable_->endpoint(port);
+        instance.bus.io().set_serial_device(instance.session_endpoint_);
+    }
 }
 GbaMultiplayerSession::~GbaMultiplayerSession() = default;
 gba::GbaLinkHub& GbaMultiplayerSession::cable() {
@@ -140,6 +142,16 @@ void GbaMultiplayerSession::run_frame(std::span<const std::uint16_t> buttons) {
 void GbaMultiplayerSession::run_until(std::uint64_t target) {
     if (target < cycle_) throw std::invalid_argument("session clock cannot run backwards");
     ExecutionScope scope;
+    // One owner registration per run, checked only by a requesting service.
+    // Ordinary CPU binding/dispatch keeps its existing hot path.
+    runtime_session_private_memory_owner(this, target, [](const void* owner, const gba::GbaBus& bus) {
+        const auto& session = *static_cast<const GbaMultiplayerSession*>(owner);
+        for (const auto& ptr : session.machines_)
+            if (&ptr->bus == &bus)
+                return active_ppu() == &ptr->ppu && ptr->bus.io().bus() == &ptr->bus &&
+                    ptr->bus.io().serial_device() == ptr->session_endpoint_;
+        return false;
+    });
     // Sample one in 60 session frames when profiling is requested. Ordinary
     // sessions take no clock reads inside the scheduler loop.
     using ProfileClock = std::chrono::steady_clock;
@@ -183,7 +195,7 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
                 for (const auto& machine : machines_) {
                     const auto& device_io=machine->bus.io();
                     auto distance=std::min({machine->ppu.cycles_until_next_event(),
-                        machine->bus.audio().cycles_until_next_sample(),
+                        machine->bus.audio().cycles_until_next_shared_event(),
                         device_io.cycles_until_next_timer_event(),device_io.cycles_until_next_sio_event()});
                     deadline=std::min(deadline,cycle_+distance);
                 }
@@ -207,7 +219,7 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
             auto& io = instance.bus.io();
             if (!io.halted()) next = std::min(next, instance.timing.cycles);
             const auto event = std::min({instance.ppu.cycles_until_next_event(),
-                instance.bus.audio().cycles_until_next_sample(),
+                instance.bus.audio().cycles_until_next_shared_event(),
                 io.cycles_until_next_timer_event(), io.cycles_until_next_sio_event()});
             next = std::min(next, cycle_ + event);
         }
@@ -227,13 +239,24 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
         for (auto& ptr : machines_) {
             auto& instance = *ptr;
             auto bind_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
-            bind(instance);
-            if (profile) binding_time += ProfileClock::now() - bind_start;
-            runtime_session_tick_devices(delta);
+            // Serial endpoints and DMA buses are publicly replaceable. Only
+            // the session-owned implementations have a callback-free contract.
+            const bool owned = owned_device_intervals_ &&
+                instance.bus.io().serial_device() == instance.session_endpoint_ &&
+                instance.bus.io().bus() == &instance.bus && !instance.execution.read_override &&
+                runtime_session_tick_owned_devices(instance.bus, instance.ppu,
+                    instance.timing, instance.execution.cpu.R[15], delta);
+            if (!owned) {
+                bind(instance);
+                if (profile) binding_time += ProfileClock::now() - bind_start;
+                runtime_session_tick_devices(delta);
+            }
             instance.bus.rtc().advance_emulated_clock(delta);
-            bind_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
-            capture(instance);
-            if (profile) binding_time += ProfileClock::now() - bind_start;
+            if (!owned) {
+                bind_start = profile ? ProfileClock::now() : ProfileClock::time_point{};
+                capture(instance);
+                if (profile) binding_time += ProfileClock::now() - bind_start;
+            }
             instance.timing.cycles += instance.bus.io().take_dma_steal_cycles();
         }
         if (profile) {
@@ -254,10 +277,15 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
 }
 
 std::vector<std::uint8_t> GbaMultiplayerSession::save_state() const {
+    return save_state(nullptr);
+}
+std::vector<std::uint8_t> GbaMultiplayerSession::save_state(GbaSessionStateLayout* layout) const {
     if (runtime_has_resumable_context()) throw std::logic_error("snapshot inside native dispatch");
     gba::SimulationArchive<false> a;
+    GbaSessionStateLayout ranges;
     manifest(a, config_);
     a(cycle_);
+    ranges.header_end = a.bytes().size();
     for (const auto& ptr : machines_) {
         const auto& m = *ptr;
         execution_state(a,m.execution);
@@ -265,9 +293,12 @@ std::vector<std::uint8_t> GbaMultiplayerSession::save_state() const {
         a.write_section(4*1024*1024,[&](auto& section) {
             gba::append_device_state(section,m.bus,m.ppu);
         });
+        if (!ranges.first_machine_end) ranges.first_machine_end = a.bytes().size();
     }
+    ranges.machines_end = a.bytes().size();
     auto link = link_state();
     a.vector(link,1024*1024);
+    if (layout) *layout = ranges;
     return a.take();
 }
 bool GbaMultiplayerSession::load_state(std::span<const std::uint8_t> bytes, std::string* error) {
@@ -350,6 +381,24 @@ std::array<std::uint32_t,3> GbaMultiplayerSession::state_hash_parts() const {
     auto bytes = link_state(); link.vector(bytes,1024*1024);
     parts[0] = hash(first.bytes()); parts[1] = hash(rest.bytes()); parts[2] = hash(link.bytes());
     return parts;
+}
+std::array<std::uint32_t,3> GbaMultiplayerSession::state_hash_parts(
+    std::span<const std::uint8_t> state, const GbaSessionStateLayout& layout) {
+    if (!layout.header_end || layout.header_end >= layout.first_machine_end ||
+        layout.first_machine_end > layout.machines_end || layout.machines_end > state.size())
+        throw std::invalid_argument("invalid session digest ranges");
+    // Original domains: machine zero, all remaining machines, then manifest
+    // plus cycle plus cable/wireless. The final domain is a prefix and suffix
+    // of this same checkpoint; no archive or temporary concatenation is needed.
+    const auto extend=[](std::uint32_t h,std::span<const std::uint8_t> bytes) {
+        for (auto byte:bytes) h=(h^byte)*16777619u;
+        return h;
+    };
+    constexpr std::uint32_t seed=2166136261u;
+    const auto first=state.subspan(layout.header_end,layout.first_machine_end-layout.header_end);
+    const auto rest=state.subspan(layout.first_machine_end,layout.machines_end-layout.first_machine_end);
+    const auto header=state.first(layout.header_end), link=state.subspan(layout.machines_end);
+    return {extend(seed,first),extend(seed,rest),extend(extend(seed,header),link)};
 }
 void GbaMultiplayerSession::discard_audio_output() {
     for (auto& m : machines_) m->bus.audio().discard_output();

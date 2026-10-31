@@ -4,6 +4,8 @@
 #pragma once
 #include <cstdint>
 
+struct RuntimeNativeRegion;
+
 namespace gba { class GbaBus; }
 namespace gba { class GbaPpu; }
 
@@ -12,6 +14,11 @@ namespace gba { class GbaPpu; }
 // so the recomp's TCP `step` parks at VBlank-start, matching the
 // interpreter and mGBA oracles. Defined in runtime_bus_bridge.cpp.
 extern "C" unsigned long long g_runtime_vblank_starts;
+
+// Host services changing device configuration settle the previous window,
+// then re-arm deadlines under the new policy, just like guest MMIO writes.
+extern "C" void runtime_mmio_catch_up(void);
+extern "C" void runtime_resync_horizon(void);
 
 namespace gbarecomp {
 
@@ -24,6 +31,10 @@ void set_active_ppu(gba::GbaPpu* ppu);
 // Retrieve the currently-bound bus / ppu, or nullptr if none.
 gba::GbaBus* active_bus();
 gba::GbaPpu* active_ppu();
+
+// A whole native service may settle ordinary memory atomically only when a
+// session owner or shadow validation is not executing instruction-sized slices.
+bool native_service_window_allowed();
 
 struct RuntimeTimingContext {
     std::uint64_t cycles = 0;
@@ -45,6 +56,27 @@ void runtime_session_execution(bool enabled);
 void runtime_session_begin_instruction();
 void runtime_session_begin_slice(std::uint64_t deadline);
 void runtime_session_ram_dispatch_boundary(std::uint32_t pc);
+// Reviewed IRQ services may publish private RAM as one native operation. The
+// caller first rendezvous through runtime_session_ram_dispatch_boundary(),
+// proves every memory range/alias and supplies the complete emulated cost.
+// No MMIO, guest callback, unmasked IRQ or CPU-observing provider is permitted.
+// PPU/timer boundaries still end the window; serial events can only set a
+// pending IRQ until this masked service returns. Other CPUs keep running.
+bool runtime_session_private_memory_begin(RuntimeNativeRegion&, std::uint32_t cycles);
+void runtime_session_private_memory_end(RuntimeNativeRegion&);
+// Trusted session wiring and the actual run_until target, independent of the
+// internal 63-cycle slice. A complete service must fit that caller deadline.
+// The DMA bus, PPU and serial endpoint must remain instance-owned. Reset when
+// session execution ends; no per-machine binding or serialized state is added.
+void runtime_session_private_memory_owner(const void* owner, std::uint64_t deadline,
+    bool (*check)(const void*, const gba::GbaBus&));
 void runtime_session_tick_devices(std::uint32_t cycles);
+// Advance a callback-free interval with explicit device/timing ownership.
+// The session must first verify its owned DMA bus and serial endpoint and
+// exclude per-program read observers. Returns false without side effects at
+// render/event boundaries or other observation surfaces requiring full ARM
+// binding. Diagnostic PC/cycle stamps remain those of this device's CPU.
+bool runtime_session_tick_owned_devices(gba::GbaBus&, gba::GbaPpu&,
+    RuntimeTimingContext&, std::uint32_t pc, std::uint32_t cycles);
 
 }  // namespace gbarecomp

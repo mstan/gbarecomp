@@ -339,7 +339,9 @@ int runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int value) {
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FPS) == 0)
         c->window->set_fps_readout(value != 0);
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_AUDIO_ENHANCED) == 0 && c->audio) {
+        runtime_mmio_catch_up();
         c->audio->set_shadow_enabled(value != 0);
+        runtime_resync_horizon();
         c->window->save_audio_enhanced(value != 0);
     }
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_ASSIST_ENABLED) == 0) {
@@ -807,7 +809,7 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
         } else if (section == "video" && key == "internal_resolution") {
             int scale = 0;
             if (!parse_int(val.c_str(), &scale) || scale < 1 || scale > int(gba::GbaHighResolutionFrame::kMaxScale)) {
-                if (err) *err = "video.internal_resolution must be from 1 through 16";
+                if (err) *err = "video.internal_resolution must be from 1 through 64";
                 return false;
             }
             args->internal_resolution = scale;
@@ -1147,7 +1149,7 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             if (!value) return false;
             if (!parse_int(value, &args->internal_resolution) ||
                 args->internal_resolution < 1 || args->internal_resolution > int(gba::GbaHighResolutionFrame::kMaxScale)) {
-                if (err) *err = "--internal-resolution must be from 1 through 16";
+                if (err) *err = "--internal-resolution must be from 1 through 64";
                 return false;
             }
             args->internal_resolution_set = true;
@@ -1466,6 +1468,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     }
 #endif
 
+    // Keep each validated byte snapshot through machine construction. Reopening
+    // the path would repeat I/O and hashing, and could load different bytes.
+    gba::GbaBios bios;
+    std::vector<uint8_t> resolved_rom_bytes;
+    std::string resolved_rom_sha1;
+
     // Resolve BIOS via the picker chain (argv path -> sidecar cache ->
     // Win32 file dialog). Released binaries don't ship a default path
     // that exists, so the picker is what makes a fresh install work
@@ -1492,6 +1500,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             return 1;
         }
         args.bios = r.path;
+        // Preserve the picker policy for noncanonical BIOS dumps: load the
+        // exact validated snapshot without imposing another hash gate.
+        if (!bios.load_from_bytes(r.bytes.data(), r.bytes.size(), std::string{}, &err)) {
+            std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
+            return 1;
+        }
     }
 
     // Resolve ROM the same way. The per-game TOML supplies the
@@ -1523,6 +1537,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             return 1;
         }
         args.rom = r.path;
+        resolved_rom_bytes = std::move(r.bytes);
+        resolved_rom_sha1 = std::move(r.sha1_hex);
     }
 
     if (!netplay && !args.steps_set && !args.frames_set && args.tcp_port <= 0) {
@@ -1540,27 +1556,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             args.frames_set = true;
         }
     }
-    // The picker has already validated SHA-1 (warn-and-try). Pass an
-    // empty expected hash here so a non-canonical-but-warned dump
-    // doesn't trip a hard fail in the loader.
-    gba::GbaBios bios;
-    if (!bios.load_from_file(args.bios, std::string{}, &err)) {
-        std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
-        return 1;
-    }
-
-    std::vector<uint8_t> rom;
-    if (!read_file(args.rom, &rom, &err)) {
-        std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
-        return 1;
-    }
+    std::vector<uint8_t> rom = std::move(resolved_rom_bytes);
     if (rom.size() < 0xC0 || rom.size() > kMaxRomSize) {
         std::fprintf(stderr,
                      "[gbarecomp:runtime] invalid ROM size: %zu bytes\n",
                      rom.size());
         return 1;
     }
-    std::string rom_sha1 = lower_ascii(gba::sha1(rom.data(), rom.size()).hex());
+    std::string rom_sha1 = lower_ascii(resolved_rom_sha1);
     if (rom_sha1 != lower_ascii(args.rom_sha1)) {
         std::fprintf(stderr,
                      "[gbarecomp:runtime] ROM SHA-1 mismatch: got %s expected %s\n",
@@ -1650,6 +1653,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     gba::GbaBus bus;
     gba::GbaPpu ppu;
+#if defined(GBARECOMP_DEFERRED_HD_EXPERIMENT) && !defined(GBARECOMP_GPU_HD_EXPERIMENT)
+    ppu.set_deferred_hd_rendering(true);
+#endif
     if (args.internal_resolution > 1 && !opts.high_resolution_affine_provider) {
         std::fprintf(stderr, "This game has not enabled higher internal resolution.\n");
         return 1;
@@ -1661,7 +1667,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // BIOS backend select: LLE (recompiled BIOS, the default + oracle) vs HLE
     // (SWIs serviced in-runtime, unimplemented ones falling back to LLE).
     // Config default from [bios].hle / --bios-hle; GBARECOMP_BIOS_HLE overrides
-    // (0 forces LLE, any other value forces HLE). Installs the runtime_swi hook.
+    // (0 disables the legacy catalog, any other value enables it). A separately
+    // build-selected native math family remains fixed. Installs the SWI hook.
     // The boot-skip decision (below, after reset_recomp_cpu) reads args.bios_hle
     // + args.bios_hle_keep_intro, so resolve the env overrides into args here.
     if (const char* e = std::getenv("GBARECOMP_BIOS_HLE"))
@@ -1693,6 +1700,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     if (!args.quiet)
         std::printf("bios_backend=%s\n",
                     gba::bios_hle_mode_name(gba::bios_hle_mode()));
+    if (!args.quiet)
+        std::printf("bios_math_backend=%s\n", gba::bios_native_math_enabled()
+            ? "HLE (Div/DivArm/ArcTan2)" : "LLE");
 #if defined(GBARECOMP_SCANLINE_HLE)
     std::printf("scanline_backend=HLE (tile-span native-color composition)\n");
 #else
@@ -2260,7 +2270,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     auto pump_idle = [&](uint32_t max_cycles) -> uint32_t {
         uint32_t chunk = ppu.cycles_until_next_event();
         uint32_t until_timer = bus.io().cycles_until_next_timer_event();
-        uint32_t until_sample = bus.audio().cycles_until_next_sample();
+        uint32_t until_sample = bus.audio().cycles_until_next_shared_event();
         if (until_timer < chunk) chunk = until_timer;
         if (until_sample < chunk) chunk = until_sample;
         if (chunk == 0 || chunk == 0xFFFFFFFFu) chunk = 1;
@@ -2473,7 +2483,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         reg(0x03000000u, bus.iwram_ptr(),    32 * 1024);
         reg(0x04000000u, bus.io().raw(),     gba::GbaIo::kIoSize);
         reg(0x05000000u, bus.pal_ptr(),       1 * 1024);
-        reg(0x06000000u, bus.vram_ptr(),     96 * 1024);
+        reg(0x06000000u, bus.vram_read_view().data(), 96 * 1024);
         reg(0x07000000u, bus.oam_ptr(),       1 * 1024);
     }
     auto wram_trace_tick = [&]() {
@@ -2891,6 +2901,26 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     }
 
     HostWindow win;
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    const char* native_draw_setting=std::getenv("GBARECOMP_NATIVE_DRAW");
+    const bool native_draw_requested=!native_draw_setting || native_draw_setting[0]!='0';
+    bool native_draw_active=false,native_draw_failed=false;
+    auto sync_native_draw = [&]() {
+        const bool wanted=native_draw_requested && !native_draw_failed &&
+            args.internal_resolution==1 && !ppu.view_expanded() && win.hd_jobs_available();
+        if(wanted==native_draw_active)return;
+        if(wanted) {
+            if(!bus.enable_draw_memory())return;
+            ppu.set_native_draw_enabled(true,[&](const auto& frame,auto& rgb) {
+                return win.readback_native(frame,rgb);
+            });
+        } else {
+            ppu.set_native_draw_enabled(false);
+            bus.disable_draw_memory();
+        }
+        native_draw_active=wanted;
+    };
+#endif
     // Single battery-flush entry point for the windowed/headless session. On the
     // web it also tells the page to sync /saves to IndexedDB (only when
     // something was written or the write failed).
@@ -3000,12 +3030,47 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     FramePhaseRing frame_phase;
     uint64_t high_resolution_presented = 0;
     auto present_live_frame = [&]() {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        const bool had_native_frame=bool(ppu.native_draw_frame());
+#endif
         ppu.set_internal_resolution(args.internal_resolution, opts.high_resolution_affine_provider);
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        sync_native_draw();
+        if(had_native_frame && !ppu.native_draw_frame())
+            std::memcpy(live_fb.data(),ppu.latched_framebuffer(),ppu.render_bytes());
+        if (auto frame=ppu.native_draw_frame()) {
+            const bool presented=win.present_native(frame);
+            if (!presented || framedump_dir)
+                std::memcpy(live_fb.data(),ppu.latched_framebuffer(),ppu.render_bytes());
+            if (presented)return;
+            // A terminal native GPU failure retires capture and its bus write
+            // bookkeeping for the rest of this process. The portable image
+            // above still supplies this frame; subsequent rows use CPU directly.
+            native_draw_failed=true;
+            sync_native_draw();
+        }
+#endif
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+        const auto* current_hd = ppu.high_resolution();
+        if (current_hd && !current_hd->deferred_rendering() && win.hd_jobs_available())
+            ppu.set_deferred_hd_rendering(true);
+        current_hd = ppu.high_resolution();
+        if (current_hd) {
+            if (const auto frame = current_hd->draw_frame(); frame && win.present_hd(*frame)) {
+                ++high_resolution_presented;
+                return;
+            }
+        }
+#endif
         if (const auto* pixels = ppu.high_resolution_framebuffer()) {
             const auto* hd = ppu.high_resolution();
             win.present(pixels, hd->width(), hd->height());
             ++high_resolution_presented;
         } else win.present(live_fb.data());
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+        if (current_hd && current_hd->deferred_rendering() && !win.hd_jobs_available())
+            ppu.set_deferred_hd_rendering(false);
+#endif
     };
     auto apply_runtime_view_geometry = [&](ViewGeometry geometry) -> bool {
         if (opts.view_geometry) opts.view_geometry(&geometry, 0, 0);
@@ -3017,6 +3082,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                               static_cast<int>(geometry.height))) return false;
         ppu.set_view_margins(geometry.extra_left, geometry.extra_right,
                              geometry.extra_top, geometry.extra_bottom);
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        sync_native_draw();
+#endif
         if (windowed)
             win.set_view_margins(ppu.view_extra_left(), ppu.view_extra_right(),
                                  ppu.view_extra_top(), ppu.view_extra_bottom());
@@ -3165,6 +3233,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             opts.builtin_game_name && *opts.builtin_game_name
                 ? opts.builtin_game_name : GBARECOMP_WINDOW_TITLE;
         win.set_orientation_policy(static_cast<int>(opts.orientation));
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+        win.prefer_gpu_hd(args.internal_resolution > 1
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+            || (native_draw_requested && !ppu.view_expanded())
+#endif
+        );
+#endif
         if (!win.open(args.scale, ppu.render_width(), ppu.render_height(),
                       runtime_title,
                       args.screen.empty() ? nullptr : args.screen.c_str(),
@@ -3174,6 +3249,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             runtime_shutdown();
             return 1;
         }
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+        if (args.internal_resolution > 1)
+            ppu.set_deferred_hd_rendering(win.hd_jobs_available());
+#endif
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+        sync_native_draw();
+#endif
         // Rebindable input: keybinds.ini (player buttons, recomp-ui generic
         // format) + config.ini [KeyMap] (system hotkeys), both next to the
         // exe. Missing files leave the built-in defaults.
@@ -3194,8 +3276,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             // GBARECOMP_AUDIO_SHADOW still overrides both.
             bool enhanced = false;
             if (win.saved_audio_enhanced(enhanced) &&
-                !std::getenv("GBARECOMP_AUDIO_SHADOW"))
+                  !std::getenv("GBARECOMP_AUDIO_SHADOW")) {
+                runtime_mmio_catch_up();
                 bus.audio().set_shadow_enabled(enhanced);
+                runtime_resync_horizon();
+              }
         }
         win.set_host_overlay(opts.host_overlay);
         win.set_view_margins(ppu.view_extra_left(), ppu.view_extra_right(),
@@ -3292,16 +3377,21 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 "5x (experimental)", "6x (experimental)", "7x (experimental)",
                 "8x (experimental)", "9x (experimental)", "10x (experimental)",
                 "11x (experimental)", "12x (experimental)", "13x (experimental)",
-                "14x (experimental)", "15x (experimental)", "16x (experimental)"
+                "14x (experimental)", "15x (experimental)", "16x (experimental)",
+                "32x (experimental)", "64x (experimental)"
+            };
+            static constexpr int resolution_values[] = {
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 32, 64
             };
             static_assert(sizeof(resolution_choices) / sizeof(*resolution_choices) ==
-                          gba::GbaHighResolutionFrame::kMaxScale);
+                          sizeof(resolution_values) / sizeof(*resolution_values));
+            static_assert(resolution_values[17] == gba::GbaHighResolutionFrame::kMaxScale);
             static const RecompRuntimeUiItem resolution_item{
                 RECOMP_RUNTIME_UI_KEY_RESOLUTION_SCALE,
                 "Display", "Resolution scale",
                 "Up to 4x is recommended. Higher scales are experimental and may run very slowly.",
                 RECOMP_RUNTIME_UI_CHOICE, 1, gba::GbaHighResolutionFrame::kMaxScale, 1,
-                resolution_choices, sizeof(resolution_choices) / sizeof(*resolution_choices), nullptr
+                resolution_choices, sizeof(resolution_choices) / sizeof(*resolution_choices), resolution_values
             };
             runtime_ui_extras.push_back(resolution_item);
         }
@@ -4316,7 +4406,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         out.push_back({"IO", bus.io().raw(), gba::GbaIo::kIoSize});
         out.push_back({"call-stack", runtime_call_stack_data(),
                        runtime_call_stack_depth() * sizeof(uint32_t), true});
-        out.push_back({"VRAM", bus.vram_ptr(), 96u * 1024u});
+        out.push_back({"VRAM", bus.vram_read_view().data(), 96u * 1024u});
         out.push_back({"palette", bus.pal_ptr(), 1024u});
         out.push_back({"OAM", bus.oam_ptr(), 1024u});
     };
@@ -4461,11 +4551,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (present_frame) {
                     const bool view_changed = sync_resize_driven_view();
                     if (ppu.has_latched_framebuffer() && !view_changed) {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+                        if (!ppu.native_draw_frame())
+#endif
                         std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
                                     ppu.render_bytes());
                     } else {
                         ppu.render(live_fb.data(), bus.io().read16(0x000),
-                                   bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
+                                   bus.io().raw(), bus.vram_read_view().data(), bus.oam_ptr(),
                                    bus.pal_ptr());
                     }
                 }
@@ -4899,11 +4992,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 if (present_frame) {
                     const bool view_changed = sync_resize_driven_view();
                     if (ppu.has_latched_framebuffer() && !view_changed) {
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+                        if (!ppu.native_draw_frame())
+#endif
                         std::memcpy(live_fb.data(), ppu.latched_framebuffer(),
                                     ppu.render_bytes());
                     } else {
                         ppu.render(live_fb.data(), bus.io().read16(0x000),
-                                   bus.io().raw(), bus.vram_ptr(), bus.oam_ptr(),
+                                   bus.io().raw(), bus.vram_read_view().data(), bus.oam_ptr(),
                                    bus.pal_ptr());
                     }
                 }
@@ -5010,7 +5106,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             }
         }
     }
+    bool gpu_dump_ok = true;
     if (args.window) {
+#if defined(GBARECOMP_GPU_HD_EXPERIMENT)
+        if (const char* path = std::getenv("GBARECOMP_GPU_FRAME_DUMP"); path && *path) {
+            std::vector<uint8_t> pixels; unsigned width = 0, height = 0;
+            gpu_dump_ok = win.readback_hd(pixels,width,height) && write_png(path,pixels.data(),width,height);
+            std::fprintf(stderr,"hd_gpu_readback: success=%u width=%u height=%u\n",
+                         unsigned(gpu_dump_ok),width,height);
+        }
+#endif
 #if defined(GBARECOMP_RUNTIME_UI)
         win.set_runtime_ui(nullptr);
         recomp_runtime_ui_destroy(runtime_ui_context.ui);
@@ -5074,7 +5179,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             std::memcpy(fb.data(), ppu.latched_framebuffer(), fb.size());
         } else {
             ppu.render(fb.data(), bus.io().read16(0x000), bus.io().raw(),
-                       bus.vram_ptr(), bus.oam_ptr(), bus.pal_ptr());
+                       bus.vram_read_view().data(), bus.oam_ptr(), bus.pal_ptr());
         }
         const uint8_t* dump_pixels = fb.data();
         unsigned dump_width = ppu.render_width(), dump_height = ppu.render_height();
@@ -5096,12 +5201,23 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     }
 
+#if defined(GBARECOMP_NATIVE_DRAW_JOBS)
+    std::printf("native_draw rows=%llu frames=%llu pixel_reads=%llu\n",
+        (unsigned long long)ppu.native_draw_rows(),
+        (unsigned long long)ppu.native_draw_frames(),
+        (unsigned long long)ppu.native_pixel_reads());
+#endif
     if (const auto* hd = ppu.high_resolution())
         std::printf("presentation scale=%u effective=%ux%u complete_frames=%llu affine_lines=%llu samples=%llu hd_presented=%llu\n",
-            hd->scale(), ppu.high_resolution_framebuffer() ? hd->width() : ppu.render_width(),
-            ppu.high_resolution_framebuffer() ? hd->height() : ppu.render_height(),
+            hd->scale(), hd->complete() ? hd->width() : ppu.render_width(),
+            hd->complete() ? hd->height() : ppu.render_height(),
             (unsigned long long)hd->frames(), (unsigned long long)hd->affine_lines(), (unsigned long long)hd->samples(),
             (unsigned long long)high_resolution_presented);
+    if (const auto* hd = ppu.high_resolution())
+        std::printf("presentation_jobs deferred=%u captured_lines=%llu cpu_materializations=%llu canonical_shared_lines=%llu\n",
+            unsigned(hd->deferred_rendering()), (unsigned long long)hd->captured_lines(),
+            (unsigned long long)hd->cpu_materializations(),
+            (unsigned long long)hd->canonical_shared_lines());
     std::printf("\nfinal_pc=0x%08x unmapped=%zu io_unhandled=%zu "
                 "steps=%llu cycles=%llu ppu_vcount=%u ppu_frames=%llu "
                 "frames_presented=%d\n",
@@ -5115,7 +5231,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     std::printf("pal_nonzero=%zu/1024 vram_nonzero=%zu/98304 "
                 "oam_nonzero=%zu/1024\n",
                 count_nonzero(bus.pal_ptr(), 1024),
-                count_nonzero(bus.vram_ptr(), 96 * 1024),
+                count_nonzero(bus.vram_read_view().data(), 96 * 1024),
                 count_nonzero(bus.oam_ptr(), 1024));
     if (bus.matrix().active()) {
         std::printf("matrix_maps=%u matrix_highest_physical_end=0x%08x\n",
@@ -5142,7 +5258,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gbarecomp::overlay_loader_shutdown();
     runtime_shutdown();
     if (diag_exit) return diag_exit;
-    return save_ok ? 0 : 1;
+    return save_ok && gpu_dump_ok ? 0 : 1;
 }
 
 }  // namespace gbarecomp

@@ -93,7 +93,7 @@ uint16_t rd16(gba::GbaBus* bus, uint32_t addr) {
     } else if (addr >= 0x03000000u && addr < 0x03008000u) {
         p = bus->iwram_ptr(); off = addr - 0x03000000u; size = 0x8000u;
     } else if (addr >= 0x06000000u && addr < 0x06018000u) {
-        p = bus->vram_ptr(); off = addr - 0x06000000u; size = 0x18000u;
+        p = bus->vram_read_view().data(); off = addr - 0x06000000u; size = 0x18000u;
     }
     if (!p || off + 1u >= size) return 0;
     return static_cast<uint16_t>(p[off] | (p[off + 1] << 8));
@@ -116,7 +116,7 @@ void wr32_iwram(gba::GbaBus* bus, uint32_t addr, uint32_t v) {
 // count the scratch, and the guest could read the region).
 void vram_save(gba::GbaBus* bus, uint32_t addr, uint8_t* buf, uint32_t n) {
     if (addr < 0x06000000u || addr - 0x06000000u + n > 0x18000u) return;
-    std::memcpy(buf, bus->vram_ptr() + (addr - 0x06000000u), n);
+    std::memcpy(buf, bus->vram_read_view().data() + (addr - 0x06000000u), n);
 }
 void vram_restore(gba::GbaBus* bus, uint32_t addr, const uint8_t* buf, uint32_t n) {
     if (addr < 0x06000000u || addr - 0x06000000u + n > 0x18000u) return;

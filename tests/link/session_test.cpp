@@ -1,12 +1,30 @@
 #include "multiplayer_session.h"
 #include "multiplayer_slice.h"
 #include "simulation_archive.h"
+#include "runtime_native_region.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 
 #define CHECK(expr) do { if (!(expr)) { std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr); std::exit(1); } } while (0)
 namespace {
+void checkpoint_parts(const gbarecomp::GbaMultiplayerSession& session) {
+    gbarecomp::GbaSessionStateLayout layout;
+    const auto bytes=session.save_state(&layout);
+    CHECK(bytes==session.save_state());
+    // The retained reference captures independent machine/link archives.
+    CHECK(gbarecomp::GbaMultiplayerSession::state_hash_parts(bytes,layout)==session.state_hash_parts());
+    for (const auto bad:std::array<gbarecomp::GbaSessionStateLayout,4>{{
+            {}, {layout.first_machine_end,layout.header_end,layout.machines_end},
+            {layout.header_end,layout.machines_end+1,layout.machines_end},
+            {layout.header_end,layout.first_machine_end,bytes.size()+1}}}) {
+        bool rejected=false;
+        try { (void)gbarecomp::GbaMultiplayerSession::state_hash_parts(bytes,bad); }
+        catch (const std::invalid_argument&) { rejected=true; }
+        CHECK(rejected);
+    }
+}
 void bounded_sections() {
     using gba::SimulationArchive;
     const std::uint16_t marker=0x7351;
@@ -158,6 +176,150 @@ gbarecomp::GbaSessionConfig config() {
     c.links = {{GbaLinkMedium::Cable,{10,30}}};
     return c;
 }
+bool private_window = false;
+int private_packet(std::uint32_t pc, int) {
+    using namespace gbarecomp;
+    if (pc == 0x08000000) {
+        auto* bus = active_bus();
+        // Both paths leave identical timer configuration behind the probe.
+        bus->io().write16(0x100, 0xffce); bus->io().write16(0x102, 0x80);
+        if (private_window) {
+            RuntimeNativeRegion rejected{};
+            CHECK(!runtime_session_private_memory_begin(rejected, 100));
+        }
+        bus->io().write16(0x102, 0);
+        if (private_window) {
+            RuntimeNativeRegion region{};
+            std::copy_n(g_cpu.R, 16, region.cpu.R);
+            region.cpu.cpsr = g_cpu.cpsr;
+            region.waits = g_runtime_waits;
+            region.ewram = bus->ewram_ptr(); region.iwram = bus->iwram_ptr();
+            // Disabled/foreign owners and real DMA/event boundaries decline
+            // without changing CPU, RAM or the simulated timestamp.
+            CHECK(!runtime_session_private_memory_begin(region, 0));
+            CHECK(!runtime_session_private_memory_begin(region,
+                active_ppu()->cycles_until_next_event()));
+            g_cpu.cpsr &= ~CPSR_I_BIT;
+            CHECK(!runtime_session_private_memory_begin(region, 100));
+            g_cpu.cpsr |= CPSR_I_BIT;
+            CHECK(runtime_session_private_memory_begin(region, 100));
+            region.bus_write_u32(0x03000100, 0x6b617274);
+            region.cpu.R[15] = pc + 4; region.cycles = 100;
+            runtime_session_private_memory_end(region);
+        } else {
+            // A private compute interval with no externally observable access.
+            bus_write_u32(0x03000100, 0x6b617274);
+            g_cpu.R[15] = pc + 4; runtime_tick(100);
+        }
+        return 1;
+    }
+    if (pc == 0x08000004) {
+        CHECK(g_runtime_cycles == 100);
+        CHECK(active_bus()->io().if_reg() & 0x80);
+        if (runtime_should_yield()) return 1;
+        g_cpu.R[15] = pc + 4;
+        bus_write_u8(0x04000301, 0); runtime_tick(1);
+        return 1;
+    }
+    return 0;
+}
+void private_packet_interval() {
+    using namespace gbarecomp;
+    std::vector<std::uint8_t> expected;
+    for (const bool native : {false, true}) {
+        private_window = native;
+        auto session = std::make_unique<GbaMultiplayerSession>(config());
+        for (auto id : {10, 30}) {
+            auto& machine = session->machine(id);
+            machine.execution.cpu.R[15] = 0x08000000;
+            machine.execution.program_dispatch = private_packet;
+            machine.bus.io().write16(0x134, 0);
+        }
+        // This real 64-cycle serial completion occurs inside the private
+        // 100-cycle CPU interval. Hardware still advances, raising pending IF
+        // while the masked guest cannot enter another IRQ handler.
+        session->machine(30).bus.io().write16(0x128, 0x4080);
+        session->machine(10).bus.io().write16(0x128, 0x4083);
+        session->run_until(200);
+        for (auto id : {10, 30}) {
+            const auto& machine = session->machine(id);
+            CHECK(machine.timing.cycles == 101);
+            CHECK(machine.bus.io().if_reg() & 0x80);
+            CHECK(machine.bus.iwram_ptr()[0x100] == 0x74);
+        }
+        const auto checkpoint = session->save_state();
+        session->run_until(400);
+        const auto final = session->save_state();
+        std::string error;
+        CHECK(session->load_state(checkpoint, &error));
+        session->run_until(400);
+        CHECK(session->save_state() == final);
+        if (native) CHECK(final == expected);
+        else expected = final;
+    }
+    private_window = false;
+}
+int private_packet_steps(std::uint32_t pc, int) {
+    using namespace gbarecomp;
+    constexpr std::uint32_t start = 0x08000100;
+    if (pc < start || pc > start + 20 || ((pc - start) & 3u)) return 0;
+    if (pc == start && private_window) {
+        RuntimeNativeRegion region{};
+        std::copy_n(g_cpu.R, 16, region.cpu.R);
+        region.cpu.cpsr = g_cpu.cpsr; region.waits = g_runtime_waits;
+        auto* bus = active_bus();
+        region.ewram = bus->ewram_ptr(); region.iwram = bus->iwram_ptr();
+        if (runtime_session_private_memory_begin(region, 100)) {
+            region.bus_write_u32(0x03000104, 0x7061636b);
+            region.cpu.R[15] = start + 20; region.cycles = 100;
+            runtime_session_private_memory_end(region);
+            return 1;
+        }
+    }
+    if (runtime_should_yield()) return 1;
+    if (pc == start + 20) {
+        CHECK(active_bus()->io().if_reg() & 0x80);
+        g_cpu.R[15] = pc + 4;
+        bus_write_u8(0x04000301, 0); runtime_tick(1);
+        return 1;
+    }
+    // Reference's five instruction-sized phases only publish in the last
+    // phase. A short caller boundary must retain this partial execution.
+    if (pc == start + 16) bus_write_u32(0x03000104, 0x7061636b);
+    g_cpu.R[15] = pc + 4; runtime_tick(20);
+    return 1;
+}
+void private_packet_caller_deadline() {
+    using namespace gbarecomp;
+    std::vector<std::uint8_t> expected_mid, expected_final;
+    for (const bool native : {false, true}) {
+        private_window = native;
+        auto session = std::make_unique<GbaMultiplayerSession>(config());
+        for (auto id : {10, 30}) {
+            auto& machine = session->machine(id);
+            machine.execution.cpu.R[15] = 0x08000100;
+            machine.execution.program_dispatch = private_packet_steps;
+            machine.bus.io().write16(0x134, 0);
+        }
+        session->machine(30).bus.io().write16(0x128, 0x4080);
+        session->machine(10).bus.io().write16(0x128, 0x4083);
+        session->run_until(32);
+        for (auto id : {10, 30}) {
+            auto& machine = session->machine(id);
+            CHECK(machine.timing.cycles == 40);
+            CHECK(machine.execution.cpu.R[15] == 0x08000108);
+            CHECK(machine.bus.read32(0x03000104) == 0);
+        }
+        const auto mid = session->save_state();
+        session->run_until(200);
+        const auto final = session->save_state();
+        std::string error; CHECK(session->load_state(mid, &error));
+        session->run_until(200); CHECK(session->save_state() == final);
+        if (native) { CHECK(mid == expected_mid); CHECK(final == expected_final); }
+        else { expected_mid = mid; expected_final = final; }
+    }
+    private_window = false;
+}
 void ram_dispatch_rendezvous() {
     using namespace gbarecomp;
     auto session=std::make_unique<GbaMultiplayerSession>(config());
@@ -193,6 +355,7 @@ void wireless_session_restore() {
     }
     session->run_until(1024);
     CHECK(session->machine(10).bus.io().read16(0x128)&0x80);
+    checkpoint_parts(*session);
     const auto mid=session->save_state();
     session->run_until(2048);
     for (auto id:{10,30}) {
@@ -202,8 +365,10 @@ void wireless_session_restore() {
         CHECK(io.read32(0x120)==0);
     }
     const auto expected=session->save_state();
+    checkpoint_parts(*session);
     std::string error;
     CHECK(session->load_state(mid,&error));
+    checkpoint_parts(*session);
     session->run_until(2048);
     CHECK(session->save_state()==expected);
     auto cable=std::make_unique<GbaMultiplayerSession>(config());
@@ -229,6 +394,7 @@ void native_exchange() {
     b.bus.write32(0x02000100, 0xaaaaaaaa);
     session->run_until(100);
     CHECK(session->cable().transfer_active());
+    checkpoint_parts(*session);
     CHECK(a.bus.read32(0x02000000) == 0);
     const auto baseline = session->save_state();
     const auto baseline_hash = session->state_hash();
@@ -255,6 +421,7 @@ void native_exchange() {
     const auto expected = session->save_state();
     CHECK(session->load_state(baseline,&error));
     CHECK(session->state_hash() == baseline_hash);
+    checkpoint_parts(*session);
     session->run_until(6000);
     CHECK(session->save_state() == expected);
     const std::uint16_t inputs[] = {1, 2};
@@ -415,6 +582,8 @@ int main() {
     bounded_sections();
     slice_classification_cache();
     return_yield_continuation();
+    private_packet_interval();
+    private_packet_caller_deadline();
     exception_continuations(false); exception_continuations(true);
     native_exchange(); native_exchange_n(3); native_exchange_n(4); ram_dispatch_rendezvous();
     wireless_session_restore();

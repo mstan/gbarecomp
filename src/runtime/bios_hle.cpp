@@ -28,7 +28,9 @@
 #include "bios_hle.h"
 
 #include "runtime_arm.h"  // g_cpu, runtime_tick, bus_read_u*/bus_write_u*
+#include "runtime_bus_bridge.h"
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -49,7 +51,7 @@ inline void      wr32(uint32_t a, uint32_t v){ bus_write_u32(a, v); }
 inline void      wr16(uint32_t a, uint16_t v){ bus_write_u16(a, v); }
 inline void      wr8 (uint32_t a, uint8_t  v){ bus_write_u8 (a, v); }
 
-inline int clz32(uint32_t x) { return x ? __builtin_clz(x) : 32; }
+inline int clz32(uint32_t x) { return std::countl_zero(x); }
 
 constexpr float kPi = 3.14159265358979323846f;
 
@@ -111,48 +113,67 @@ uint32_t do_div(int32_t num, int32_t denom) {
         div_t res = div(num, denom);
         setR(0, static_cast<uint32_t>(res.quot));
         setR(1, static_cast<uint32_t>(res.rem));
-        setR(3, static_cast<uint32_t>(res.quot < 0 ? -res.quot : res.quot));
+        const uint32_t quotient = static_cast<uint32_t>(res.quot);
+        setR(3, res.quot < 0 ? 0u - quotient : quotient);
     }
     int loops = clz32(static_cast<uint32_t>(denom)) - clz32(static_cast<uint32_t>(num));
     if (loops < 1) loops = 1;
     return 4u + 13u * static_cast<uint32_t>(loops) + 7u;
 }
 
+// The BIOS polynomial uses ARM register-sized products/shifts. Express the
+// wrapping bits explicitly, including negative coordinates, rather than
+// relying on signed overflow or left-shifting a negative C++ value.
+int32_t mul32(int32_t a, int32_t b) {
+    return std::bit_cast<int32_t>(uint32_t(a) * uint32_t(b));
+}
+int32_t neg32(int32_t value) {
+    return std::bit_cast<int32_t>(0u - uint32_t(value));
+}
+int32_t ratio14(int32_t numerator, int32_t denominator) {
+    const int32_t scaled = std::bit_cast<int32_t>(uint32_t(numerator) << 14);
+    if (scaled == INT32_MIN && denominator == -1) return INT32_MIN;
+    return scaled / denominator;
+}
+
 int16_t _ArcTan(int32_t i, int32_t* r1, int32_t* r3, uint32_t* cycles) {
     uint32_t c = 37;
-    c += _mulWait(i * i);
-    int32_t a = -((i * i) >> 14);
-    c += _mulWait(0xA9 * a);
-    int32_t b = ((0xA9 * a) >> 14) + 0x390;
-    c += _mulWait(b * a); b = ((b * a) >> 14) + 0x91C;
-    c += _mulWait(b * a); b = ((b * a) >> 14) + 0xFB6;
-    c += _mulWait(b * a); b = ((b * a) >> 14) + 0x16AA;
-    c += _mulWait(b * a); b = ((b * a) >> 14) + 0x2081;
-    c += _mulWait(b * a); b = ((b * a) >> 14) + 0x3651;
-    c += _mulWait(b * a); b = ((b * a) >> 14) + 0xA2F9;
+    const int32_t square = mul32(i, i);
+    c += _mulWait(square);
+    int32_t a = -(square >> 14);
+    c += _mulWait(mul32(0xA9, a));
+    int32_t b = (mul32(0xA9, a) >> 14) + 0x390;
+    c += _mulWait(mul32(b, a)); b = (mul32(b, a) >> 14) + 0x91C;
+    c += _mulWait(mul32(b, a)); b = (mul32(b, a) >> 14) + 0xFB6;
+    c += _mulWait(mul32(b, a)); b = (mul32(b, a) >> 14) + 0x16AA;
+    c += _mulWait(mul32(b, a)); b = (mul32(b, a) >> 14) + 0x2081;
+    c += _mulWait(mul32(b, a)); b = (mul32(b, a) >> 14) + 0x3651;
+    c += _mulWait(mul32(b, a)); b = (mul32(b, a) >> 14) + 0xA2F9;
     if (r1) *r1 = a;
     if (r3) *r3 = b;
     *cycles = c;
-    return static_cast<int16_t>((i * b) >> 16);
+    return static_cast<int16_t>(mul32(i, b) >> 16);
 }
 
-int16_t _ArcTan2(int32_t x, int32_t y, int32_t* r1, uint32_t* cycles) {
-    if (!y) { *cycles = 11; return x >= 0 ? 0 : static_cast<int16_t>(0x8000); }
-    if (!x) { *cycles = 11; return y >= 0 ? 0x4000 : static_cast<int16_t>(0xC000); }
+int32_t _ArcTan2(int32_t x, int32_t y, int32_t* r1, uint32_t* cycles) {
+    // BIOS returns the entire register, including 0x10000 when a small
+    // negative angle rounds to zero before the final quadrant addition.
+    if (!y) { *cycles = 11; return x >= 0 ? 0 : 0x8000; }
+    if (!x) { *cycles = 11; return y >= 0 ? 0x4000 : 0xC000; }
     if (y >= 0) {
         if (x >= 0) {
-            if (x >= y) return _ArcTan((y << 14) / x, r1, nullptr, cycles);
-        } else if (-x >= y) {
-            return static_cast<int16_t>(_ArcTan((y << 14) / x, r1, nullptr, cycles) + 0x8000);
+            if (x >= y) return _ArcTan(ratio14(y, x), r1, nullptr, cycles);
+        } else if (neg32(x) >= y) {
+            return _ArcTan(ratio14(y, x), r1, nullptr, cycles) + 0x8000;
         }
-        return static_cast<int16_t>(0x4000 - _ArcTan((x << 14) / y, r1, nullptr, cycles));
+        return 0x4000 - _ArcTan(ratio14(x, y), r1, nullptr, cycles);
     } else {
         if (x <= 0) {
-            if (-x > -y) return static_cast<int16_t>(_ArcTan((y << 14) / x, r1, nullptr, cycles) + 0x8000);
-        } else if (x >= -y) {
-            return static_cast<int16_t>(_ArcTan((y << 14) / x, r1, nullptr, cycles) + 0x10000);
+            if (neg32(x) > neg32(y)) return _ArcTan(ratio14(y, x), r1, nullptr, cycles) + 0x8000;
+        } else if (x >= neg32(y)) {
+            return _ArcTan(ratio14(y, x), r1, nullptr, cycles) + 0x10000;
         }
-        return static_cast<int16_t>(0xC000 - _ArcTan((x << 14) / y, r1, nullptr, cycles));
+        return 0xC000 - _ArcTan(ratio14(x, y), r1, nullptr, cycles);
     }
 }
 
@@ -208,14 +229,34 @@ void do_cpu_set() {
     }
 }
 
-void do_cpu_fast_set() {
+bool do_cpu_fast_set() {
     uint32_t src = R(0), dst = R(1), ctrl = R(2);
-    uint32_t count = ctrl & 0x1FFFFFu;      // word count (games pass multiples of 8)
-    bool fixed = (ctrl >> 24) & 1u;
-    for (uint32_t i = 0; i < count; ++i) {
-        wr32(dst, rd32(src));
-        dst += 4; if (!fixed) src += 4;
+    // LDM/STM alignment and writeback are part of the BIOS caller contract.
+    // Keep unaligned requests on the maintained BIOS route before any effect.
+    if ((src | dst) & 3u) return false;
+    const uint32_t count = ctrl & 0x1FFFFFu;
+    if (!count) return true;
+    const bool fixed = (ctrl >> 24) & 1u;
+    uint32_t words[8];
+    if (fixed) {
+        const uint32_t value = rd32(src);
+        for (auto& word : words) word = value;
     }
+    // The BIOS rounds a final partial request up to a complete eight-word
+    // group. Load the whole group before storing it: a word-at-a-time copy
+    // incorrectly propagates forward overlap within the group.
+    for (uint32_t i = 0; i < count; i += 8) {
+        if (!fixed) {
+            for (unsigned j = 0; j < 8; ++j) words[j] = rd32(src + j * 4u);
+            src += 32;
+        }
+        for (unsigned j = 0; j < 8; ++j) wr32(dst + j * 4u, words[j]);
+        dst += 32;
+    }
+    // The original-BIOS caller exposes the second word of the final block
+    // in r3, while r2 and the other saved registers retain their input values.
+    setR(0, src); setR(1, dst); setR(3, words[1]);
+    return true;
 }
 
 // ── affine SWIs (float, matches mGBA) ───────────────────────────────────────
@@ -464,11 +505,28 @@ void do_midi_key_2_freq() {
 // driver SWIs, MultiBoot, …) — those need the halt/IRQ/reset machinery the
 // recompiled BIOS already implements exactly, and mGBA's own HLE likewise
 // delegates them.
-int dispatch(uint32_t swi) {
-    uint32_t cost = 45;  // nominal SWI overhead for the non-stall cases
+int dispatch_math(uint32_t swi) {
+    uint32_t cost = 0;
     switch (swi) {
     case SWI_DIV:              cost = do_div(static_cast<int32_t>(R(0)), static_cast<int32_t>(R(1))); break;
     case SWI_DIV_ARM:          cost = do_div(static_cast<int32_t>(R(1)), static_cast<int32_t>(R(0))); break;
+    case SWI_ARCTAN2: {
+        uint32_t c; int32_t r1 = static_cast<int32_t>(R(1));
+        int32_t v = _ArcTan2(static_cast<int32_t>(R(0)), static_cast<int32_t>(R(1)), &r1, &c);
+        setR(0, static_cast<uint32_t>(v)); setR(1, static_cast<uint32_t>(r1));
+        setR(3, 0x170u); cost = c; break;
+    }
+    default:
+        return 0;
+    }
+    runtime_tick(cost);
+    return 1;
+}
+
+int dispatch(uint32_t swi) {
+    if (dispatch_math(swi)) return 1;
+    uint32_t cost = 45;  // nominal SWI overhead for the non-stall cases
+    switch (swi) {
     case SWI_SQRT: {
         uint32_t c; setR(0, static_cast<uint32_t>(_Sqrt(R(0), &c))); cost = c; break;
     }
@@ -478,16 +536,13 @@ int dispatch(uint32_t swi) {
         setR(0, static_cast<uint32_t>(static_cast<int32_t>(v)));
         setR(1, static_cast<uint32_t>(r1)); setR(3, static_cast<uint32_t>(r3)); cost = c; break;
     }
-    case SWI_ARCTAN2: {
-        uint32_t c; int32_t r1 = static_cast<int32_t>(R(1));
-        int16_t v = _ArcTan2(static_cast<int32_t>(R(0)), static_cast<int32_t>(R(1)), &r1, &c);
-        setR(0, static_cast<uint16_t>(v)); setR(1, static_cast<uint32_t>(r1));
-        setR(3, 0x170u); cost = c; break;
-    }
     case SWI_GET_BIOS_CHECKSUM:
         setR(0, GBA_BIOS_CHECKSUM); setR(1, 1u); setR(3, SIZE_BIOS); break;
     case SWI_CPU_SET:          do_cpu_set(); cost = 10 + (R(2) & 0x1FFFFF) * 2; break;
-    case SWI_CPU_FAST_SET:     do_cpu_fast_set(); cost = 10 + (R(2) & 0x1FFFFF) * 2; break;
+    case SWI_CPU_FAST_SET:
+        if (!do_cpu_fast_set()) return 0;
+        cost = 10 + (((R(2) & 0x1FFFFF) + 7u) & ~7u) * 2;
+        break;
     case SWI_BG_AFFINE_SET:    do_bg_affine_set(); cost = 10 + R(2) * 60; break;
     case SWI_OBJ_AFFINE_SET:   do_obj_affine_set(); cost = 10 + R(2) * 40; break;
     case SWI_BIT_UNPACK:       do_unBitPack(); break;
@@ -508,11 +563,32 @@ int dispatch(uint32_t swi) {
     return 1;
 }
 
+int dispatch_selected_math(uint32_t swi) {
+#if defined(GBARECOMP_BIOS_MATH_HLE)
+    // A sliced link/shadow owner advances devices at instruction boundaries.
+    // It has not granted this whole operation an atomic timing window.
+    if (!gbarecomp::native_service_window_allowed()) return 0;
+#endif
+    // Division by zero is outside this selected arithmetic contract. Preserve
+    // the real BIOS path without any native effects for those requests.
+    if ((swi == SWI_DIV && R(1) == 0) || (swi == SWI_DIV_ARM && R(0) == 0)) return 0;
+    return dispatch_math(swi);
+}
+
 }  // namespace
 
 void bios_hle_set_mode(BiosHleMode mode) {
     g_mode = mode;
-    g_bios_hle_hook = (mode == BiosHleMode::On) ? &dispatch : nullptr;
+    g_bios_hle_hook = (mode == BiosHleMode::On) ? &dispatch :
+        (bios_native_math_enabled() ? &dispatch_selected_math : nullptr);
+}
+
+bool bios_native_math_enabled() {
+#if defined(GBARECOMP_BIOS_MATH_HLE)
+    return true;
+#else
+    return false;
+#endif
 }
 
 void bios_hle_boot_skip(uint32_t cart_entry) {
@@ -543,7 +619,8 @@ BiosHleMode bios_hle_mode() { return g_mode; }
 
 const char* bios_hle_mode_name(BiosHleMode mode) {
     switch (mode) {
-    case BiosHleMode::Off: return "LLE (recompiled BIOS)";
+    case BiosHleMode::Off: return bios_native_math_enabled()
+        ? "LLE (build-selected native math)" : "LLE (recompiled BIOS)";
     case BiosHleMode::On:  return "HLE (with LLE fallback)";
     }
     return "unknown";

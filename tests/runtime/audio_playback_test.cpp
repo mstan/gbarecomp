@@ -148,6 +148,106 @@ void test_wave_and_noise_restore_continuation() {
     }
     check(wave && noise,"restore comparison exercised audible wave and noise channels");
 }
+// Compare complete audio state and audible PCM after real IO/timer barriers.
+// The reference visits every sample deadline; the window arm receives the
+// same elapsed time in one call, including intervals crossing several events.
+void test_hardware_owned_windows() {
+    constexpr std::array<uint32_t,12> gaps{
+        1,63,127,511,512,513,1006,1023,1024,1025,2077,6173};
+    bool audible=false;
+    unsigned cases=0;
+    for (unsigned rate=0;rate<4;++rate) for (unsigned phase : {0u,1u,511u,1023u}) {
+        auto reference=fresh_audio(), window=fresh_audio();
+        for (auto* a : {reference.get(),window.get()}) {
+            a->write_io16(0x084,0x0080);
+            a->write_io16(0x080,0xff77);
+            a->write_io16(0x082,0x330e);
+            a->write_io16(0x088,0x0200|(rate<<14));
+            a->write_io16(0x062,0xf280);
+            a->write_io16(0x064,0x84c0);
+            a->write_io16(0x068,0xb140);
+            a->write_io16(0x06c,0x86a0);
+            a->write_io16(0x070,0x00a0);
+            for (unsigned i=0;i<16;++i)
+                a->write_io8(0x090+i,static_cast<uint8_t>(i*13+7));
+            a->write_io16(0x072,0x2000);
+            a->write_io16(0x074,0x87b1);
+            a->write_io16(0x078,0xf200);
+            a->write_io16(0x07c,0x802b);
+            for (unsigned i=0;i<8;++i) {
+                a->write_io32(0x0a0,0x817f0bf1u+i*0x01010101u);
+                a->write_io32(0x0a4,0x3f01c780u+i*0x03030303u);
+            }
+            a->tick(phase);
+        }
+        for (unsigned event=0;event<96;++event) {
+            const auto gap=gaps[(event+phase)%gaps.size()];
+            auto remaining=gap;
+            while (remaining) {
+                const auto step=std::min(remaining,reference->cycles_until_next_sample());
+                reference->tick(step);remaining-=step;
+            }
+            window->tick(gap);
+            for (auto* a : {reference.get(),window.get()}) {
+                a->timer_overflow(event&1);
+                if (event%3==0) a->write_io32(0x0a0,0x815c27f0u+event);
+                if (event%5==0) a->write_io32(0x0a4,0xd9317f02u-event);
+                if (event%11==0) a->write_io16(0x088,0x0200|(((rate+event/11)&3)<<14));
+                if (event%17==0) a->write_io16(0x064,0x8400|(event*7));
+                if (event%19==0) a->write_io16(0x07c,0x8000|(event&0x7f));
+            }
+            gbarecomp::debug::SnapshotWriter a,b;
+            reference->serialize(a);window->serialize(b);
+            check(a.buffer()==b.buffer(),"complete audio state matches across owned windows and IO/FIFO changes");
+            std::array<int16_t,256> x{},y{};
+            const auto n=reference->drain_samples(x.data(),x.size());
+            const auto m=window->drain_samples(y.data(),y.size());
+            check(n==m && x==y,"owned windows preserve all audible PCM");
+            audible|=std::any_of(x.begin(),x.end(),[](int16_t value){return value!=0;});
+            if (event==47) {
+                // Restore both at a nonzero clock/FIFO/oscillator phase, then
+                // continue with the two different scheduling cadences.
+                auto restored=fresh_audio();
+                gbarecomp::debug::SnapshotReader reader(b.buffer().data(),b.size());
+                restored->deserialize(reader);
+                check(reader.ok() && reader.remaining()==0,"owned window state restores completely");
+                std::array<int16_t,256> discard{};
+                restored->drain_samples(discard.data(),discard.size());
+                window=std::move(restored);
+            }
+            ++cases;
+        }
+    }
+    check(audible,"owned-window comparison exercised audible PSG and FIFO samples");
+    std::printf("audio owned windows: %u complete-state/PCM barriers\n",cases);
+}
+
+void test_shared_event_observability() {
+    auto audio=fresh_audio();
+#if GBARECOMP_TEST_DEVICE_AUDIO_WINDOWS
+    check(audio->cycles_until_next_shared_event()==UINT32_MAX,
+          "hardware-only samples stay inside their owned window");
+#else
+    check(audio->cycles_until_next_shared_event()==audio->cycles_until_next_sample(),
+          "portable reference retains original shared sample deadlines");
+#endif
+    // An armed but not yet live Shadow still observes guest RAM. It must
+    // retain its sample barrier even before its first successful driver hook.
+    audio->configure_shadow({gba::Mp2kSig{0,0x03002601}},
+        nullptr,0,nullptr,0,nullptr,0,true);
+    check(audio->shadow_enabled(),"RAM-observing mixer actually armed");
+    audio->tick(137);
+    check(audio->cycles_until_next_shared_event()==audio->cycles_until_next_sample(),
+          "armed RAM-observing mixer keeps its exact current-phase deadline");
+    audio->set_shadow_enabled(false);
+#if GBARECOMP_TEST_DEVICE_AUDIO_WINDOWS
+    check(audio->cycles_until_next_shared_event()==UINT32_MAX,
+          "hardware window ownership resumes after disabling Shadow");
+#else
+    check(audio->cycles_until_next_shared_event()==audio->cycles_until_next_sample(),
+          "reference sample boundary is unchanged after disabling Shadow");
+#endif
+}
 }  // namespace
 
 int main() {
@@ -155,6 +255,8 @@ int main() {
     test_restore_and_discard();
     test_pcm_and_ring_wrap();
     test_wave_and_noise_restore_continuation();
+    test_hardware_owned_windows();
+    test_shared_event_observability();
     if (failures) return 1;
     std::puts("audio playback: rate boundaries, restore and discard passed");
     return 0;

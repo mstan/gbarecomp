@@ -42,6 +42,27 @@ bool GbaBios::load_from_file(const std::string& path,
         return false;
     }
 
+    return finish_load(expected_sha1, err);
+}
+
+bool GbaBios::load_from_bytes(const uint8_t* bytes, std::size_t size,
+                              const std::string& expected_sha1, std::string* err) {
+    loaded_ = false;
+    sha1_hex_.clear();
+    if (size != kSize) {
+        if (err) *err = "BIOS size mismatch: expected " + std::to_string(kSize) +
+                        " bytes, got " + std::to_string(size);
+        return false;
+    }
+    if (!bytes) {
+        if (err) *err = "null BIOS image";
+        return false;
+    }
+    std::memcpy(bytes_.data(), bytes, kSize);
+    return finish_load(expected_sha1, err);
+}
+
+bool GbaBios::finish_load(const std::string& expected_sha1, std::string* err) {
     auto digest = sha1(bytes_.data(), kSize);
     sha1_hex_ = digest.hex();
     if (!expected_sha1.empty() && sha1_hex_ != expected_sha1) {

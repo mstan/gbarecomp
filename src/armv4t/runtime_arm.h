@@ -14,6 +14,9 @@
 #pragma once
 
 #include <stdint.h>
+#ifndef __cplusplus
+#include <stdbool.h>
+#endif
 
 // Shared POD types + bit/constant macros (ArmCpuState, CPSR_*_BIT,
 // RUNTIME_TRACE_*, RuntimeTraceEntry, RuntimeFpEntry). Split out so the
@@ -224,6 +227,16 @@ extern GBARECOMP_TAIL_ARG_TLS uint32_t g_runtime_tail_arg;
 // The byte view is observational: no bus read, open-bus update or cycle charge.
 typedef const uint8_t* (*RuntimeRamCodeView)(uint32_t address, uint32_t size);
 extern RuntimeRamCodeView g_runtime_ram_code_view;
+// A runtime owner may publish stable ordinary-RAM backing under its exact
+// observational callback. A generated activation borrows these pointers, but
+// checks the current binding and live instruction bytes on every use. Custom
+// views and cartridge mappings continue through RuntimeRamCodeView.
+typedef struct RuntimeNativeRamCodeSource {
+    RuntimeRamCodeView view;
+    const uint8_t* ewram;
+    const uint8_t* iwram;
+} RuntimeNativeRamCodeSource;
+extern RuntimeNativeRamCodeSource g_runtime_native_ram_code_source;
 typedef struct RuntimeNativeRamTemplate {
     const uint8_t* bytes;
     uint32_t size;
@@ -567,4 +580,54 @@ void runtime_shutdown(void);
 
 #ifdef __cplusplus
 }  // extern "C"
+
+// This is an execution view, not a code cache. Keeping the bytes live retains
+// self-modifying stores, DMA, debugger writes and restored memory without write
+// tracking or a shadow execution. No pointer from a different binding is read.
+class RuntimeNativeRamCodeView {
+public:
+    RuntimeNativeRamCodeView() : source_(g_runtime_native_ram_code_source) {}
+
+    int matches(uint32_t pc, uint32_t opcode, uint32_t size,
+                uint32_t mask = 0xFFFFFFFFu) const {
+        const uint8_t* bytes = current_bytes(pc, size);
+        if (!bytes)
+            return runtime_native_ram_instruction_matches_masked(pc, opcode, size, mask);
+        return ((load(bytes, size) ^ opcode) & mask) == 0;
+    }
+
+    uint32_t arm_immediate(uint32_t pc) const {
+        const uint8_t* bytes = current_bytes(pc, 4u);
+        if (!bytes) return runtime_native_arm_immediate(pc);
+        const uint32_t encoded = uint32_t(bytes[0]) | (uint32_t(bytes[1]) << 8);
+        const uint32_t value = encoded & 0xFFu, rotate = ((encoded >> 8) & 15u) * 2u;
+        return rotate ? (value >> rotate) | (value << (32u - rotate)) : value;
+    }
+
+private:
+    const uint8_t* current_bytes(uint32_t pc, uint32_t size) const {
+        if ((size != 2u && size != 4u) || !source_.view ||
+            g_runtime_ram_code_view != source_.view ||
+            g_runtime_native_ram_code_source.view != source_.view) return nullptr;
+        const uint32_t region = pc >> 24;
+        const uint8_t* bytes;
+        uint32_t mask;
+        if (region == 2u) {
+            bytes = source_.ewram; mask = 0x3FFFFu;
+            if (bytes != g_runtime_native_ram_code_source.ewram) return nullptr;
+        } else if (region == 3u) {
+            bytes = source_.iwram; mask = 0x7FFFu;
+            if (bytes != g_runtime_native_ram_code_source.iwram) return nullptr;
+        } else return nullptr;
+        const uint32_t offset = pc & mask;
+        if (!bytes || offset > mask + 1u - size) return nullptr;
+        return bytes + offset;
+    }
+    static uint32_t load(const uint8_t* bytes, uint32_t size) {
+        uint32_t value = uint32_t(bytes[0]) | (uint32_t(bytes[1]) << 8);
+        if (size == 4u) value |= (uint32_t(bytes[2]) << 16) | (uint32_t(bytes[3]) << 24);
+        return value;
+    }
+    RuntimeNativeRamCodeSource source_;
+};
 #endif

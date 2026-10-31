@@ -593,7 +593,7 @@ void cmd_state_hash(const TcpDebugServer::Context& ctx, std::string& out) {
     };
     uint64_t iw = fnv(ctx.bus->iwram_ptr(), 32 * 1024);
     uint64_t ew = fnv(ctx.bus->ewram_ptr(), 256 * 1024);
-    uint64_t vr = fnv(ctx.bus->vram_ptr(), 96 * 1024);
+    uint64_t vr = fnv(ctx.bus->vram_read_view().data(), 96 * 1024);
     uint64_t pa = fnv(ctx.bus->pal_ptr(), 1024);
     uint64_t oa = fnv(ctx.bus->oam_ptr(), 1024);
     unsigned long long cyc = g_runtime_cycles;
@@ -791,7 +791,7 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
     }
     if (contains("\"read_vram\"")) {
         if (!ctx.bus) { emit_error(out, "bus unavailable"); return; }
-        cmd_read_region(ctx.bus->vram_ptr(), 96 * 1024, req, out, 0x06000000u);
+        cmd_read_region(ctx.bus->vram_read_view().data(), 96 * 1024, req, out, 0x06000000u);
         return;
     }
     if (contains("\"read_iwram\"")) {
@@ -1026,7 +1026,7 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
             ctx.ppu->render(live.data(),
                             ctx.bus->io().read16(0x000),
                             ctx.bus->io().raw(),
-                            ctx.bus->vram_ptr(),
+                            ctx.bus->vram_read_view().data(),
                             ctx.bus->oam_ptr(),
                             ctx.bus->pal_ptr());
             rgb = live.data();
