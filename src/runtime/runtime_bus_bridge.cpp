@@ -124,6 +124,8 @@ template<class Work> static auto profile_device(unsigned phase, Work work) {
 #endif
 static unsigned long long g_runtime_yielded_vblank_start = 0;
 static bool g_session_execution = false;
+static const void* g_session_private_memory_owner = nullptr;
+static bool (*g_session_private_memory_owner_check)(const void*, const gba::GbaBus&) = nullptr;
 static bool g_session_instruction_started = false;
 static bool g_session_slice = false, g_session_slice_stopped = false;
 static std::uint64_t g_session_slice_deadline = 0;
@@ -1346,6 +1348,8 @@ void runtime_session_execution(bool enabled) {
     g_session_execution = enabled;
     g_session_instruction_started = false;
     g_session_slice = false;
+    g_session_private_memory_owner = nullptr;
+    g_session_private_memory_owner_check = nullptr;
 }
 void runtime_session_begin_instruction() {
     g_session_instruction_started = false; g_session_slice = false;
@@ -1366,6 +1370,61 @@ void runtime_session_ram_dispatch_boundary(std::uint32_t pc) {
     // A callback is trusted native coverage, but not decoded by the batching
     // classifier. Its generated body runs through the reference safe points.
     g_session_slice=false;
+}
+void runtime_session_private_memory_owner(const void* owner,
+    bool (*check)(const void*, const gba::GbaBus&)) {
+    g_session_private_memory_owner = owner;
+    g_session_private_memory_owner_check = check;
+}
+bool runtime_session_private_memory_begin(RuntimeNativeRegion& region, std::uint32_t cycles) {
+#if defined(GBA_COSIM)
+    return false;
+#else
+    auto* bus = active_bus();
+    auto* ppu = active_ppu();
+    if (!g_session_execution || !g_session_private_memory_owner_check ||
+        g_session_instruction_started || !bus || !ppu ||
+        !g_session_private_memory_owner_check(g_session_private_memory_owner, *bus) ||
+        !cycles || cycles > 65536 || !(g_cpu.cpsr & CPSR_I_BIT) ||
+        g_runtime_shadow_tick || g_force_interp || g_runtime_force_interp_step_active ||
+        g_runtime_force_interp_hook || g_runtime_fn_entry_hook || g_runtime_insn_trace ||
+        g_runtime_trace_enabled || g_runtime_break_pc || g_runtime_bus_read_override ||
+        gba::g_rom_read16_override || gba::g_rom_read32_override ||
+        bus->has_write_observer() || bus->matrix().active() || bus->io().halted() ||
+        bus->io().pending_dma_steal_cycles() ||
+        gbarecomp::g_sampling.load(std::memory_order_relaxed)) return false;
+    // Neither PPU DMA nor timer/FIFO DMA may observe an intermediate RAM
+    // publication. Audio's intervening sample events consume only its owned
+    // FIFO state. Serial completion changes device registers/IF, not RAM, and
+    // cannot enter a guest handler while CPSR.I remains set.
+    if (cycles >= ppu->cycles_until_next_event() ||
+        cycles >= bus->io().cycles_until_next_timer_event()) return false;
+    region.owner_bus = bus;
+    region.start_cycles = g_runtime_cycles;
+    region.bound = cycles;
+    return true;
+#endif
+}
+void runtime_session_private_memory_end(RuntimeNativeRegion& region) {
+    auto* bus = active_bus();
+    if (!g_session_execution || !bus || region.owner_bus != bus ||
+        region.start_cycles != g_runtime_cycles || region.cycles != region.bound ||
+        !(g_cpu.cpsr & CPSR_I_BIT) || !(region.cpu.cpsr & CPSR_I_BIT)) {
+        std::fprintf(stderr, "runtime: invalid private-memory settlement\n");
+        std::abort();
+    }
+    std::copy_n(region.cpu.R, 16, g_cpu.R);
+    g_cpu.cpsr = region.cpu.cpsr;
+    g_runtime_waits = region.waits;
+    g_idle_disturb_epoch += region.writes;
+    if (region.had_read) {
+        bus->set_bios_access_enabled(false);
+        bus->note_pc(region.last_read_pc, (g_cpu.cpsr & CPSR_T_BIT) != 0);
+    }
+    region.owner_bus = nullptr;
+    g_session_instruction_started = true;
+    g_session_slice_stopped = true;
+    runtime_tick(region.cycles);
 }
 void runtime_session_tick_devices(std::uint32_t cycles) {
     if (g_active_bus && g_active_ppu) tick_devices(g_active_bus, g_active_ppu, cycles);

@@ -1,6 +1,8 @@
 #include "multiplayer_session.h"
 #include "multiplayer_slice.h"
 #include "simulation_archive.h"
+#include "runtime_native_region.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -173,6 +175,89 @@ gbarecomp::GbaSessionConfig config() {
     c.input_machines = {30,10}; // seats and cable ports are independent
     c.links = {{GbaLinkMedium::Cable,{10,30}}};
     return c;
+}
+bool private_window = false;
+int private_packet(std::uint32_t pc, int) {
+    using namespace gbarecomp;
+    if (pc == 0x08000000) {
+        auto* bus = active_bus();
+        // Both paths leave identical timer configuration behind the probe.
+        bus->io().write16(0x100, 0xffce); bus->io().write16(0x102, 0x80);
+        if (private_window) {
+            RuntimeNativeRegion rejected{};
+            CHECK(!runtime_session_private_memory_begin(rejected, 100));
+        }
+        bus->io().write16(0x102, 0);
+        if (private_window) {
+            RuntimeNativeRegion region{};
+            std::copy_n(g_cpu.R, 16, region.cpu.R);
+            region.cpu.cpsr = g_cpu.cpsr;
+            region.waits = g_runtime_waits;
+            region.ewram = bus->ewram_ptr(); region.iwram = bus->iwram_ptr();
+            // Disabled/foreign owners and real DMA/event boundaries decline
+            // without changing CPU, RAM or the simulated timestamp.
+            CHECK(!runtime_session_private_memory_begin(region, 0));
+            CHECK(!runtime_session_private_memory_begin(region,
+                active_ppu()->cycles_until_next_event()));
+            g_cpu.cpsr &= ~CPSR_I_BIT;
+            CHECK(!runtime_session_private_memory_begin(region, 100));
+            g_cpu.cpsr |= CPSR_I_BIT;
+            CHECK(runtime_session_private_memory_begin(region, 100));
+            region.bus_write_u32(0x03000100, 0x6b617274);
+            region.cpu.R[15] = pc + 4; region.cycles = 100;
+            runtime_session_private_memory_end(region);
+        } else {
+            // A private compute interval with no externally observable access.
+            bus_write_u32(0x03000100, 0x6b617274);
+            g_cpu.R[15] = pc + 4; runtime_tick(100);
+        }
+        return 1;
+    }
+    if (pc == 0x08000004) {
+        CHECK(g_runtime_cycles == 100);
+        CHECK(active_bus()->io().if_reg() & 0x80);
+        if (runtime_should_yield()) return 1;
+        g_cpu.R[15] = pc + 4;
+        bus_write_u8(0x04000301, 0); runtime_tick(1);
+        return 1;
+    }
+    return 0;
+}
+void private_packet_interval() {
+    using namespace gbarecomp;
+    std::vector<std::uint8_t> expected;
+    for (const bool native : {false, true}) {
+        private_window = native;
+        auto session = std::make_unique<GbaMultiplayerSession>(config());
+        for (auto id : {10, 30}) {
+            auto& machine = session->machine(id);
+            machine.execution.cpu.R[15] = 0x08000000;
+            machine.execution.program_dispatch = private_packet;
+            machine.bus.io().write16(0x134, 0);
+        }
+        // This real 64-cycle serial completion occurs inside the private
+        // 100-cycle CPU interval. Hardware still advances, raising pending IF
+        // while the masked guest cannot enter another IRQ handler.
+        session->machine(30).bus.io().write16(0x128, 0x4080);
+        session->machine(10).bus.io().write16(0x128, 0x4083);
+        session->run_until(70);
+        for (auto id : {10, 30}) {
+            const auto& machine = session->machine(id);
+            CHECK(machine.timing.cycles == 100);
+            CHECK(machine.bus.io().if_reg() & 0x80);
+            CHECK(machine.bus.iwram_ptr()[0x100] == 0x74);
+        }
+        const auto checkpoint = session->save_state();
+        session->run_until(200);
+        const auto final = session->save_state();
+        std::string error;
+        CHECK(session->load_state(checkpoint, &error));
+        session->run_until(200);
+        CHECK(session->save_state() == final);
+        if (native) CHECK(final == expected);
+        else expected = final;
+    }
+    private_window = false;
 }
 void ram_dispatch_rendezvous() {
     using namespace gbarecomp;
@@ -436,6 +521,7 @@ int main() {
     bounded_sections();
     slice_classification_cache();
     return_yield_continuation();
+    private_packet_interval();
     exception_continuations(false); exception_continuations(true);
     native_exchange(); native_exchange_n(3); native_exchange_n(4); ram_dispatch_rendezvous();
     wireless_session_restore();

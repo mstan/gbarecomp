@@ -142,6 +142,16 @@ void GbaMultiplayerSession::run_frame(std::span<const std::uint16_t> buttons) {
 void GbaMultiplayerSession::run_until(std::uint64_t target) {
     if (target < cycle_) throw std::invalid_argument("session clock cannot run backwards");
     ExecutionScope scope;
+    // One owner registration per run, checked only by a requesting service.
+    // Ordinary CPU binding/dispatch keeps its existing hot path.
+    runtime_session_private_memory_owner(this, [](const void* owner, const gba::GbaBus& bus) {
+        const auto& session = *static_cast<const GbaMultiplayerSession*>(owner);
+        for (const auto& ptr : session.machines_)
+            if (&ptr->bus == &bus)
+                return ptr->bus.io().bus() == &ptr->bus &&
+                    ptr->bus.io().serial_device() == ptr->session_endpoint_;
+        return false;
+    });
     // Sample one in 60 session frames when profiling is requested. Ordinary
     // sessions take no clock reads inside the scheduler loop.
     using ProfileClock = std::chrono::steady_clock;

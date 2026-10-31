@@ -4,6 +4,8 @@
 #pragma once
 #include <cstdint>
 
+struct RuntimeNativeRegion;
+
 namespace gba { class GbaBus; }
 namespace gba { class GbaPpu; }
 
@@ -54,6 +56,18 @@ void runtime_session_execution(bool enabled);
 void runtime_session_begin_instruction();
 void runtime_session_begin_slice(std::uint64_t deadline);
 void runtime_session_ram_dispatch_boundary(std::uint32_t pc);
+// Reviewed IRQ services may publish private RAM as one native operation. The
+// caller first rendezvous through runtime_session_ram_dispatch_boundary(),
+// proves every memory range/alias and supplies the complete emulated cost.
+// No MMIO, guest callback, unmasked IRQ or CPU-observing provider is permitted.
+// PPU/timer boundaries still end the window; serial events can only set a
+// pending IRQ until this masked service returns. Other CPUs keep running.
+bool runtime_session_private_memory_begin(RuntimeNativeRegion&, std::uint32_t cycles);
+void runtime_session_private_memory_end(RuntimeNativeRegion&);
+// Trusted session wiring: both the DMA bus and serial endpoint must still be
+// the instance-owned implementations. Reset when session execution ends.
+void runtime_session_private_memory_owner(const void* owner,
+    bool (*check)(const void*, const gba::GbaBus&));
 void runtime_session_tick_devices(std::uint32_t cycles);
 // Advance a callback-free interval with explicit device/timing ownership.
 // The session must first verify its owned DMA bus and serial endpoint and
