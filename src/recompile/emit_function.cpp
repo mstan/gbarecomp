@@ -207,6 +207,20 @@ std::string emit_function_body_str(
     if (runtime_ram_placement) {
         ctx.runtime_pc_base = "_ram_base";
         appendf(out, "    const uint32_t _ram_base = g_runtime_native_ram_base;\n");
+        // Own the ordinary-RAM view for this activation. The local interface
+        // keeps the maintained codegen and its exact byte/immediate semantics;
+        // every check still observes current memory and binding. Put this before
+        // resume-alias jumps so no goto crosses a local initialization.
+        appendf(out,
+            "#if defined(GBARECOMP_NATIVE_RAM_CODE_VIEWS) && defined(__cplusplus) && !defined(GBA_COSIM)\n"
+            "    const RuntimeNativeRamCodeView _ram_code;\n"
+            "    [[maybe_unused]] const auto runtime_native_ram_instruction_matches = [&_ram_code](uint32_t pc, uint32_t opcode, uint32_t size) {\n"
+            "        return _ram_code.matches(pc, opcode, size);\n    };\n"
+            "    [[maybe_unused]] const auto runtime_native_ram_instruction_matches_masked = [&_ram_code](uint32_t pc, uint32_t opcode, uint32_t size, uint32_t mask) {\n"
+            "        return _ram_code.matches(pc, opcode, size, mask);\n    };\n"
+            "    [[maybe_unused]] const auto runtime_native_arm_immediate = [&_ram_code](uint32_t pc) {\n"
+            "        return _ram_code.arm_immediate(pc);\n    };\n"
+            "#endif\n");
         // The same fragment may be placed at several guest PCs. Preserve only
         // exact reviewed mod sites in its live bus class, including a fresh
         // call whose instruction is an interior alias of this fragment.

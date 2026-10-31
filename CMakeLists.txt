@@ -7,6 +7,7 @@ if(GBARECOMP_ORDERED_SCANLINE_EXPERIMENT)
     set_property(SOURCE src/gba/gba_ppu.cpp APPEND PROPERTY COMPILE_DEFINITIONS GBARECOMP_ORDERED_SCANLINE_EXPERIMENT=1)
 endif()
 option(GBARECOMP_NATIVE_REGIONS "Build bounded native CPU/RAM region experiment" OFF)
+option(GBARECOMP_NATIVE_RAM_CODE_VIEWS "Borrow live ordinary-RAM code views per generated activation" OFF)
 option(GBARECOMP_DEFERRED_HD_EXPERIMENT "Exercise immutable HD jobs with portable readback" OFF)
 option(GBARECOMP_GPU_HD_EXPERIMENT "Render supported immutable HD jobs through resident GPU presentation" OFF)
 if(GBARECOMP_GPU_HD_EXPERIMENT)
@@ -308,6 +309,9 @@ target_include_directories(gbarecomp_armv4t PUBLIC
 set_property(TARGET gbarecomp_armv4t PROPERTY POSITION_INDEPENDENT_CODE ON)
 if(GBARECOMP_NATIVE_REGIONS)
     target_compile_definitions(gbarecomp_armv4t PUBLIC GBARECOMP_NATIVE_REGIONS=1)
+endif()
+if(GBARECOMP_NATIVE_RAM_CODE_VIEWS)
+    target_compile_definitions(gbarecomp_armv4t PUBLIC GBARECOMP_NATIVE_RAM_CODE_VIEWS=1)
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1188,6 +1192,16 @@ if(GBARECOMP_NATIVE_REGIONS)
 endif()
 add_gbarecomp_runtime_stack_test(high_resolution_tests tests/ppu/high_resolution_test.cpp)
 add_gbarecomp_runtime_stack_test(native_draw_reuse_tests tests/ppu/native_draw_reuse_test.cpp)
+add_gbarecomp_runtime_stack_test(native_ram_code_view_tests tests/runtime/native_ram_code_view_test.cpp)
+add_executable(emit_ram_code_view_fixture EXCLUDE_FROM_ALL tests/codegen/emit_ram_code_view_fixture.cpp)
+target_link_libraries(emit_ram_code_view_fixture PRIVATE gbarecomp_recompile_core)
+set(RAM_CODE_VIEW_FIXTURE "${CMAKE_CURRENT_BINARY_DIR}/native_ram_code_view_fixture.cpp")
+add_custom_command(OUTPUT "${RAM_CODE_VIEW_FIXTURE}"
+    COMMAND $<TARGET_FILE:emit_ram_code_view_fixture> "${RAM_CODE_VIEW_FIXTURE}"
+    DEPENDS emit_ram_code_view_fixture
+    VERBATIM)
+add_gbarecomp_runtime_stack_test(native_ram_code_view_function_tests "${RAM_CODE_VIEW_FIXTURE}")
+set_tests_properties(native_ram_code_view_function_tests PROPERTIES SKIP_RETURN_CODE 77)
 # Deliberate separate-build oracle: stdout is a binary canonical-state corpus
 # (about0.8GB), not routine CTest text. Build/run reference and candidate
 # explicitly and compare the complete streams under a shared QA reservation.
