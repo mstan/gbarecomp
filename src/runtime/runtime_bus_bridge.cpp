@@ -125,6 +125,7 @@ template<class Work> static auto profile_device(unsigned phase, Work work) {
 static unsigned long long g_runtime_yielded_vblank_start = 0;
 static bool g_session_execution = false;
 static const void* g_session_private_memory_owner = nullptr;
+static std::uint64_t g_session_private_memory_deadline = 0;
 static bool (*g_session_private_memory_owner_check)(const void*, const gba::GbaBus&) = nullptr;
 static bool g_session_instruction_started = false;
 static bool g_session_slice = false, g_session_slice_stopped = false;
@@ -1349,6 +1350,7 @@ void runtime_session_execution(bool enabled) {
     g_session_instruction_started = false;
     g_session_slice = false;
     g_session_private_memory_owner = nullptr;
+    g_session_private_memory_deadline = 0;
     g_session_private_memory_owner_check = nullptr;
 }
 void runtime_session_begin_instruction() {
@@ -1371,9 +1373,10 @@ void runtime_session_ram_dispatch_boundary(std::uint32_t pc) {
     // classifier. Its generated body runs through the reference safe points.
     g_session_slice=false;
 }
-void runtime_session_private_memory_owner(const void* owner,
+void runtime_session_private_memory_owner(const void* owner, std::uint64_t deadline,
     bool (*check)(const void*, const gba::GbaBus&)) {
     g_session_private_memory_owner = owner;
+    g_session_private_memory_deadline = deadline;
     g_session_private_memory_owner_check = check;
 }
 bool runtime_session_private_memory_begin(RuntimeNativeRegion& region, std::uint32_t cycles) {
@@ -1386,6 +1389,8 @@ bool runtime_session_private_memory_begin(RuntimeNativeRegion& region, std::uint
         g_session_instruction_started || !bus || !ppu ||
         !g_session_private_memory_owner_check(g_session_private_memory_owner, *bus) ||
         !cycles || cycles > 65536 || !(g_cpu.cpsr & CPSR_I_BIT) ||
+        g_runtime_cycles > g_session_private_memory_deadline ||
+        cycles > g_session_private_memory_deadline - g_runtime_cycles ||
         g_runtime_shadow_tick || g_force_interp || g_runtime_force_interp_step_active ||
         g_runtime_force_interp_hook || g_runtime_fn_entry_hook || g_runtime_insn_trace ||
         g_runtime_trace_enabled || g_runtime_break_pc || g_runtime_bus_read_override ||
@@ -1410,6 +1415,8 @@ void runtime_session_private_memory_end(RuntimeNativeRegion& region) {
     auto* bus = active_bus();
     if (!g_session_execution || !bus || region.owner_bus != bus ||
         region.start_cycles != g_runtime_cycles || region.cycles != region.bound ||
+        g_runtime_cycles > g_session_private_memory_deadline ||
+        region.cycles > g_session_private_memory_deadline - g_runtime_cycles ||
         !(g_cpu.cpsr & CPSR_I_BIT) || !(region.cpu.cpsr & CPSR_I_BIT)) {
         std::fprintf(stderr, "runtime: invalid private-memory settlement\n");
         std::abort();

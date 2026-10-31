@@ -64,9 +64,11 @@ void runtime_session_ram_dispatch_boundary(std::uint32_t pc);
 // pending IRQ until this masked service returns. Other CPUs keep running.
 bool runtime_session_private_memory_begin(RuntimeNativeRegion&, std::uint32_t cycles);
 void runtime_session_private_memory_end(RuntimeNativeRegion&);
-// Trusted session wiring: both the DMA bus and serial endpoint must still be
-// the instance-owned implementations. Reset when session execution ends.
-void runtime_session_private_memory_owner(const void* owner,
+// Trusted session wiring and the actual run_until target, independent of the
+// internal 63-cycle slice. A complete service must fit that caller deadline.
+// The DMA bus, PPU and serial endpoint must remain instance-owned. Reset when
+// session execution ends; no per-machine binding or serialized state is added.
+void runtime_session_private_memory_owner(const void* owner, std::uint64_t deadline,
     bool (*check)(const void*, const gba::GbaBus&));
 void runtime_session_tick_devices(std::uint32_t cycles);
 // Advance a callback-free interval with explicit device/timing ownership.

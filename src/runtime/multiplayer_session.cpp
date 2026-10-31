@@ -144,7 +144,7 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
     ExecutionScope scope;
     // One owner registration per run, checked only by a requesting service.
     // Ordinary CPU binding/dispatch keeps its existing hot path.
-    runtime_session_private_memory_owner(this, [](const void* owner, const gba::GbaBus& bus) {
+    runtime_session_private_memory_owner(this, target, [](const void* owner, const gba::GbaBus& bus) {
         const auto& session = *static_cast<const GbaMultiplayerSession*>(owner);
         for (const auto& ptr : session.machines_)
             if (&ptr->bus == &bus)

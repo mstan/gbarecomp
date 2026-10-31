@@ -240,22 +240,83 @@ void private_packet_interval() {
         // while the masked guest cannot enter another IRQ handler.
         session->machine(30).bus.io().write16(0x128, 0x4080);
         session->machine(10).bus.io().write16(0x128, 0x4083);
-        session->run_until(70);
+        session->run_until(200);
         for (auto id : {10, 30}) {
             const auto& machine = session->machine(id);
-            CHECK(machine.timing.cycles == 100);
+            CHECK(machine.timing.cycles == 101);
             CHECK(machine.bus.io().if_reg() & 0x80);
             CHECK(machine.bus.iwram_ptr()[0x100] == 0x74);
         }
         const auto checkpoint = session->save_state();
-        session->run_until(200);
+        session->run_until(400);
         const auto final = session->save_state();
         std::string error;
         CHECK(session->load_state(checkpoint, &error));
-        session->run_until(200);
+        session->run_until(400);
         CHECK(session->save_state() == final);
         if (native) CHECK(final == expected);
         else expected = final;
+    }
+    private_window = false;
+}
+int private_packet_steps(std::uint32_t pc, int) {
+    using namespace gbarecomp;
+    constexpr std::uint32_t start = 0x08000100;
+    if (pc < start || pc > start + 20 || ((pc - start) & 3u)) return 0;
+    if (pc == start && private_window) {
+        RuntimeNativeRegion region{};
+        std::copy_n(g_cpu.R, 16, region.cpu.R);
+        region.cpu.cpsr = g_cpu.cpsr; region.waits = g_runtime_waits;
+        auto* bus = active_bus();
+        region.ewram = bus->ewram_ptr(); region.iwram = bus->iwram_ptr();
+        if (runtime_session_private_memory_begin(region, 100)) {
+            region.bus_write_u32(0x03000104, 0x7061636b);
+            region.cpu.R[15] = start + 20; region.cycles = 100;
+            runtime_session_private_memory_end(region);
+            return 1;
+        }
+    }
+    if (runtime_should_yield()) return 1;
+    if (pc == start + 20) {
+        CHECK(active_bus()->io().if_reg() & 0x80);
+        g_cpu.R[15] = pc + 4;
+        bus_write_u8(0x04000301, 0); runtime_tick(1);
+        return 1;
+    }
+    // Reference's five instruction-sized phases only publish in the last
+    // phase. A short caller boundary must retain this partial execution.
+    if (pc == start + 16) bus_write_u32(0x03000104, 0x7061636b);
+    g_cpu.R[15] = pc + 4; runtime_tick(20);
+    return 1;
+}
+void private_packet_caller_deadline() {
+    using namespace gbarecomp;
+    std::vector<std::uint8_t> expected_mid, expected_final;
+    for (const bool native : {false, true}) {
+        private_window = native;
+        auto session = std::make_unique<GbaMultiplayerSession>(config());
+        for (auto id : {10, 30}) {
+            auto& machine = session->machine(id);
+            machine.execution.cpu.R[15] = 0x08000100;
+            machine.execution.program_dispatch = private_packet_steps;
+            machine.bus.io().write16(0x134, 0);
+        }
+        session->machine(30).bus.io().write16(0x128, 0x4080);
+        session->machine(10).bus.io().write16(0x128, 0x4083);
+        session->run_until(32);
+        for (auto id : {10, 30}) {
+            auto& machine = session->machine(id);
+            CHECK(machine.timing.cycles == 40);
+            CHECK(machine.execution.cpu.R[15] == 0x08000108);
+            CHECK(machine.bus.read32(0x03000104) == 0);
+        }
+        const auto mid = session->save_state();
+        session->run_until(200);
+        const auto final = session->save_state();
+        std::string error; CHECK(session->load_state(mid, &error));
+        session->run_until(200); CHECK(session->save_state() == final);
+        if (native) { CHECK(mid == expected_mid); CHECK(final == expected_final); }
+        else { expected_mid = mid; expected_final = final; }
     }
     private_window = false;
 }
@@ -522,6 +583,7 @@ int main() {
     slice_classification_cache();
     return_yield_continuation();
     private_packet_interval();
+    private_packet_caller_deadline();
     exception_continuations(false); exception_continuations(true);
     native_exchange(); native_exchange_n(3); native_exchange_n(4); ram_dispatch_rendezvous();
     wireless_session_restore();
