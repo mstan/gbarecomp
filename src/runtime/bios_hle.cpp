@@ -154,23 +154,25 @@ int16_t _ArcTan(int32_t i, int32_t* r1, int32_t* r3, uint32_t* cycles) {
     return static_cast<int16_t>(mul32(i, b) >> 16);
 }
 
-int16_t _ArcTan2(int32_t x, int32_t y, int32_t* r1, uint32_t* cycles) {
-    if (!y) { *cycles = 11; return x >= 0 ? 0 : static_cast<int16_t>(0x8000); }
-    if (!x) { *cycles = 11; return y >= 0 ? 0x4000 : static_cast<int16_t>(0xC000); }
+int32_t _ArcTan2(int32_t x, int32_t y, int32_t* r1, uint32_t* cycles) {
+    // BIOS returns the entire register, including 0x10000 when a small
+    // negative angle rounds to zero before the final quadrant addition.
+    if (!y) { *cycles = 11; return x >= 0 ? 0 : 0x8000; }
+    if (!x) { *cycles = 11; return y >= 0 ? 0x4000 : 0xC000; }
     if (y >= 0) {
         if (x >= 0) {
             if (x >= y) return _ArcTan(ratio14(y, x), r1, nullptr, cycles);
         } else if (neg32(x) >= y) {
-            return static_cast<int16_t>(_ArcTan(ratio14(y, x), r1, nullptr, cycles) + 0x8000);
+            return _ArcTan(ratio14(y, x), r1, nullptr, cycles) + 0x8000;
         }
-        return static_cast<int16_t>(0x4000 - _ArcTan(ratio14(x, y), r1, nullptr, cycles));
+        return 0x4000 - _ArcTan(ratio14(x, y), r1, nullptr, cycles);
     } else {
         if (x <= 0) {
-            if (neg32(x) > neg32(y)) return static_cast<int16_t>(_ArcTan(ratio14(y, x), r1, nullptr, cycles) + 0x8000);
+            if (neg32(x) > neg32(y)) return _ArcTan(ratio14(y, x), r1, nullptr, cycles) + 0x8000;
         } else if (x >= neg32(y)) {
-            return static_cast<int16_t>(_ArcTan(ratio14(y, x), r1, nullptr, cycles) + 0x10000);
+            return _ArcTan(ratio14(y, x), r1, nullptr, cycles) + 0x10000;
         }
-        return static_cast<int16_t>(0xC000 - _ArcTan(ratio14(x, y), r1, nullptr, cycles));
+        return 0xC000 - _ArcTan(ratio14(x, y), r1, nullptr, cycles);
     }
 }
 
@@ -509,8 +511,8 @@ int dispatch_math(uint32_t swi) {
     case SWI_DIV_ARM:          cost = do_div(static_cast<int32_t>(R(1)), static_cast<int32_t>(R(0))); break;
     case SWI_ARCTAN2: {
         uint32_t c; int32_t r1 = static_cast<int32_t>(R(1));
-        int16_t v = _ArcTan2(static_cast<int32_t>(R(0)), static_cast<int32_t>(R(1)), &r1, &c);
-        setR(0, static_cast<uint16_t>(v)); setR(1, static_cast<uint32_t>(r1));
+        int32_t v = _ArcTan2(static_cast<int32_t>(R(0)), static_cast<int32_t>(R(1)), &r1, &c);
+        setR(0, static_cast<uint32_t>(v)); setR(1, static_cast<uint32_t>(r1));
         setR(3, 0x170u); cost = c; break;
     }
     default:
