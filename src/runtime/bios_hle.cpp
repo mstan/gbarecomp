@@ -111,7 +111,8 @@ uint32_t do_div(int32_t num, int32_t denom) {
         div_t res = div(num, denom);
         setR(0, static_cast<uint32_t>(res.quot));
         setR(1, static_cast<uint32_t>(res.rem));
-        setR(3, static_cast<uint32_t>(res.quot < 0 ? -res.quot : res.quot));
+        const uint32_t quotient = static_cast<uint32_t>(res.quot);
+        setR(3, res.quot < 0 ? 0u - quotient : quotient);
     }
     int loops = clz32(static_cast<uint32_t>(denom)) - clz32(static_cast<uint32_t>(num));
     if (loops < 1) loops = 1;
