@@ -1389,6 +1389,7 @@ bool runtime_session_private_memory_begin(RuntimeNativeRegion& region, std::uint
         g_runtime_shadow_tick || g_force_interp || g_runtime_force_interp_step_active ||
         g_runtime_force_interp_hook || g_runtime_fn_entry_hook || g_runtime_insn_trace ||
         g_runtime_trace_enabled || g_runtime_break_pc || g_runtime_bus_read_override ||
+        g_runtime_thumb_alu_imm_override ||
         gba::g_rom_read16_override || gba::g_rom_read32_override ||
         bus->has_write_observer() || bus->matrix().active() || bus->io().halted() ||
         bus->io().pending_dma_steal_cycles() ||
