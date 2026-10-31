@@ -871,6 +871,18 @@ endif()
 # tests — per-subsystem. Run with ctest.
 # ─────────────────────────────────────────────────────────────────────────────
 enable_testing()
+
+# The loader consumes the exact asset snapshot validated by the picker.
+add_executable(boot_asset_tests
+    tests/runtime/boot_asset_test.cpp src/runtime/asset_picker.cpp
+    src/runtime/host_platform.cpp
+    src/gba/gba_bios.cpp src/gba/sha1.cpp src/gba/crc32.cpp)
+target_include_directories(boot_asset_tests PRIVATE src)
+if(WIN32)
+    target_link_libraries(boot_asset_tests PRIVATE comdlg32 user32 winmm)
+endif()
+add_test(NAME boot_asset_tests COMMAND boot_asset_tests)
+
 add_executable(link_tests tests/link/test_main.cpp
     tests/heal_gate/runtime_stubs.cpp src/runtime/multiplayer_config.cpp)
 target_include_directories(link_tests PRIVATE src/runtime)

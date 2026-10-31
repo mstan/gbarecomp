@@ -1468,6 +1468,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     }
 #endif
 
+    // Keep each validated byte snapshot through machine construction. Reopening
+    // the path would repeat I/O and hashing, and could load different bytes.
+    gba::GbaBios bios;
+    std::vector<uint8_t> resolved_rom_bytes;
+    std::string resolved_rom_sha1;
+
     // Resolve BIOS via the picker chain (argv path -> sidecar cache ->
     // Win32 file dialog). Released binaries don't ship a default path
     // that exists, so the picker is what makes a fresh install work
@@ -1494,6 +1500,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             return 1;
         }
         args.bios = r.path;
+        // Preserve the picker policy for noncanonical BIOS dumps: load the
+        // exact validated snapshot without imposing another hash gate.
+        if (!bios.load_from_bytes(r.bytes.data(), r.bytes.size(), std::string{}, &err)) {
+            std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
+            return 1;
+        }
     }
 
     // Resolve ROM the same way. The per-game TOML supplies the
@@ -1525,6 +1537,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             return 1;
         }
         args.rom = r.path;
+        resolved_rom_bytes = std::move(r.bytes);
+        resolved_rom_sha1 = std::move(r.sha1_hex);
     }
 
     if (!netplay && !args.steps_set && !args.frames_set && args.tcp_port <= 0) {
@@ -1542,27 +1556,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             args.frames_set = true;
         }
     }
-    // The picker has already validated SHA-1 (warn-and-try). Pass an
-    // empty expected hash here so a non-canonical-but-warned dump
-    // doesn't trip a hard fail in the loader.
-    gba::GbaBios bios;
-    if (!bios.load_from_file(args.bios, std::string{}, &err)) {
-        std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
-        return 1;
-    }
-
-    std::vector<uint8_t> rom;
-    if (!read_file(args.rom, &rom, &err)) {
-        std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
-        return 1;
-    }
+    std::vector<uint8_t> rom = std::move(resolved_rom_bytes);
     if (rom.size() < 0xC0 || rom.size() > kMaxRomSize) {
         std::fprintf(stderr,
                      "[gbarecomp:runtime] invalid ROM size: %zu bytes\n",
                      rom.size());
         return 1;
     }
-    std::string rom_sha1 = lower_ascii(gba::sha1(rom.data(), rom.size()).hex());
+    std::string rom_sha1 = lower_ascii(resolved_rom_sha1);
     if (rom_sha1 != lower_ascii(args.rom_sha1)) {
         std::fprintf(stderr,
                      "[gbarecomp:runtime] ROM SHA-1 mismatch: got %s expected %s\n",
