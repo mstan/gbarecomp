@@ -208,14 +208,34 @@ void do_cpu_set() {
     }
 }
 
-void do_cpu_fast_set() {
+bool do_cpu_fast_set() {
     uint32_t src = R(0), dst = R(1), ctrl = R(2);
-    uint32_t count = ctrl & 0x1FFFFFu;      // word count (games pass multiples of 8)
-    bool fixed = (ctrl >> 24) & 1u;
-    for (uint32_t i = 0; i < count; ++i) {
-        wr32(dst, rd32(src));
-        dst += 4; if (!fixed) src += 4;
+    // LDM/STM alignment and writeback are part of the BIOS caller contract.
+    // Keep unaligned requests on the maintained BIOS route before any effect.
+    if ((src | dst) & 3u) return false;
+    const uint32_t count = ctrl & 0x1FFFFFu;
+    if (!count) return true;
+    const bool fixed = (ctrl >> 24) & 1u;
+    uint32_t words[8];
+    if (fixed) {
+        const uint32_t value = rd32(src);
+        for (auto& word : words) word = value;
     }
+    // The BIOS rounds a final partial request up to a complete eight-word
+    // group. Load the whole group before storing it: a word-at-a-time copy
+    // incorrectly propagates forward overlap within the group.
+    for (uint32_t i = 0; i < count; i += 8) {
+        if (!fixed) {
+            for (unsigned j = 0; j < 8; ++j) words[j] = rd32(src + j * 4u);
+            src += 32;
+        }
+        for (unsigned j = 0; j < 8; ++j) wr32(dst + j * 4u, words[j]);
+        dst += 32;
+    }
+    // The original-BIOS caller exposes the second word of the final block
+    // in r3, while r2 and the other saved registers retain their input values.
+    setR(0, src); setR(1, dst); setR(3, words[1]);
+    return true;
 }
 
 // ── affine SWIs (float, matches mGBA) ───────────────────────────────────────
@@ -487,7 +507,10 @@ int dispatch(uint32_t swi) {
     case SWI_GET_BIOS_CHECKSUM:
         setR(0, GBA_BIOS_CHECKSUM); setR(1, 1u); setR(3, SIZE_BIOS); break;
     case SWI_CPU_SET:          do_cpu_set(); cost = 10 + (R(2) & 0x1FFFFF) * 2; break;
-    case SWI_CPU_FAST_SET:     do_cpu_fast_set(); cost = 10 + (R(2) & 0x1FFFFF) * 2; break;
+    case SWI_CPU_FAST_SET:
+        if (!do_cpu_fast_set()) return 0;
+        cost = 10 + (((R(2) & 0x1FFFFF) + 7u) & ~7u) * 2;
+        break;
     case SWI_BG_AFFINE_SET:    do_bg_affine_set(); cost = 10 + R(2) * 60; break;
     case SWI_OBJ_AFFINE_SET:   do_obj_affine_set(); cost = 10 + R(2) * 40; break;
     case SWI_BIT_UNPACK:       do_unBitPack(); break;

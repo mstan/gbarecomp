@@ -1192,6 +1192,21 @@ endif()
 # the test embeds no cartridge/BIOS data and skips when no input is supplied.
 add_executable(mp2k_native_tests tests/gba/mp2k_native_test.cpp)
 target_link_libraries(mp2k_native_tests PRIVATE gbarecomp_gba gbarecomp_armv4t)
+
+# Independent original firmware oracle; the private BIOS is supplied locally,
+# never embedded in the executable or repository. The fixture owns a minimal
+# memory bridge so it tests the actual HLE service without scheduler timing.
+add_executable(bios_fast_set_tests
+    tests/runtime/bios_fast_set_test.cpp src/runtime/bios_hle.cpp)
+target_include_directories(bios_fast_set_tests PRIVATE src/runtime src/armv4t)
+target_link_libraries(bios_fast_set_tests PRIVATE gbarecomp_armv4t)
+set(GBARECOMP_BIOS_COPY_TEST_BIOS "" CACHE FILEPATH "Local canonical BIOS for native CpuFastSet contract")
+if(GBARECOMP_BIOS_COPY_TEST_BIOS)
+    add_test(NAME bios_fast_set_contract COMMAND bios_fast_set_tests "${GBARECOMP_BIOS_COPY_TEST_BIOS}")
+else()
+    add_test(NAME bios_fast_set_contract COMMAND bios_fast_set_tests)
+endif()
+set_tests_properties(bios_fast_set_contract PROPERTIES SKIP_RETURN_CODE 77)
 set(GBARECOMP_MP2K_TEST_ROM "" CACHE FILEPATH "Owner-provided MKSC USA ROM for native mixer contract checks")
 if(GBARECOMP_MP2K_TEST_ROM)
     add_test(NAME mp2k_native_contract COMMAND mp2k_native_tests "${GBARECOMP_MP2K_TEST_ROM}")
