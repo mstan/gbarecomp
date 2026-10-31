@@ -33,6 +33,13 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+set(GBARECOMP_BIOS_MATH_IMPLEMENTATION "LLE" CACHE STRING
+    "Build-selected BIOS Div/DivArm/ArcTan2 services: LLE or native HLE (qualification)")
+set_property(CACHE GBARECOMP_BIOS_MATH_IMPLEMENTATION PROPERTY STRINGS LLE HLE)
+if(NOT GBARECOMP_BIOS_MATH_IMPLEMENTATION MATCHES "^(LLE|HLE)$")
+    message(FATAL_ERROR "GBARECOMP_BIOS_MATH_IMPLEMENTATION must be LLE or HLE")
+endif()
+
 set(GBARECOMP_MP2K_IMPLEMENTATION "LLE" CACHE STRING
     "Reviewed MP2K mono mixer service: LLE or native HLE (qualification build)")
 set_property(CACHE GBARECOMP_MP2K_IMPLEMENTATION PROPERTY STRINGS LLE HLE)
@@ -483,6 +490,9 @@ add_library(gbarecomp_runtime STATIC
     # tracked empty stub; locally generated BIOS output is selected as a unit.
 )
 gbarecomp_target_link_host_stack(gbarecomp_runtime INTERFACE)
+if(GBARECOMP_BIOS_MATH_IMPLEMENTATION STREQUAL "HLE")
+    target_compile_definitions(gbarecomp_runtime PRIVATE GBARECOMP_BIOS_MATH_HLE=1)
+endif()
 if(GBARECOMP_ENABLE_MODS)
     target_sources(gbarecomp_runtime PRIVATE src/runtime/mod_runtime.cpp)
     target_compile_definitions(gbarecomp_runtime PUBLIC
@@ -1211,6 +1221,18 @@ add_executable(bios_math_tests
     tests/runtime/bios_math_test.cpp src/runtime/bios_hle.cpp)
 target_include_directories(bios_math_tests PRIVATE src/runtime src/armv4t)
 add_test(NAME bios_math_tests COMMAND bios_math_tests)
+add_executable(bios_native_math_tests
+    tests/runtime/bios_native_math_test.cpp src/runtime/bios_hle.cpp)
+target_include_directories(bios_native_math_tests PRIVATE src/runtime src/armv4t)
+target_compile_definitions(bios_native_math_tests PRIVATE GBARECOMP_BIOS_MATH_HLE=1)
+target_link_libraries(bios_native_math_tests PRIVATE gbarecomp_armv4t)
+set(GBARECOMP_BIOS_MATH_TEST_BIOS "" CACHE FILEPATH "Local canonical BIOS for build-selected native math contract")
+if(GBARECOMP_BIOS_MATH_TEST_BIOS)
+    add_test(NAME bios_native_math_contract COMMAND bios_native_math_tests "${GBARECOMP_BIOS_MATH_TEST_BIOS}")
+else()
+    add_test(NAME bios_native_math_contract COMMAND bios_native_math_tests)
+endif()
+set_tests_properties(bios_native_math_contract PROPERTIES SKIP_RETURN_CODE 77)
 set(GBARECOMP_MP2K_TEST_ROM "" CACHE FILEPATH "Owner-provided MKSC USA ROM for native mixer contract checks")
 if(GBARECOMP_MP2K_TEST_ROM)
     add_test(NAME mp2k_native_contract COMMAND mp2k_native_tests "${GBARECOMP_MP2K_TEST_ROM}")

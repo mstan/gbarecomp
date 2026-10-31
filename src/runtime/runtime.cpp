@@ -1666,7 +1666,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // BIOS backend select: LLE (recompiled BIOS, the default + oracle) vs HLE
     // (SWIs serviced in-runtime, unimplemented ones falling back to LLE).
     // Config default from [bios].hle / --bios-hle; GBARECOMP_BIOS_HLE overrides
-    // (0 forces LLE, any other value forces HLE). Installs the runtime_swi hook.
+    // (0 disables the legacy catalog, any other value enables it). A separately
+    // build-selected native math family remains fixed. Installs the SWI hook.
     // The boot-skip decision (below, after reset_recomp_cpu) reads args.bios_hle
     // + args.bios_hle_keep_intro, so resolve the env overrides into args here.
     if (const char* e = std::getenv("GBARECOMP_BIOS_HLE"))
@@ -1698,6 +1699,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     if (!args.quiet)
         std::printf("bios_backend=%s\n",
                     gba::bios_hle_mode_name(gba::bios_hle_mode()));
+    if (!args.quiet)
+        std::printf("bios_math_backend=%s\n", gba::bios_native_math_enabled()
+            ? "HLE (Div/DivArm/ArcTan2)" : "LLE");
 #if defined(GBARECOMP_SCANLINE_HLE)
     std::printf("scanline_backend=HLE (tile-span native-color composition)\n");
 #else
