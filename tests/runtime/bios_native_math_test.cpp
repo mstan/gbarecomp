@@ -4,6 +4,11 @@
 #include <bit>
 #include <limits>
 
+namespace { bool allow_native_window=true; }
+namespace gbarecomp {
+bool native_service_window_allowed() { return allow_native_window; }
+}
+
 int main(int argc,char** argv) try {
     if(argc!=2){std::fprintf(stderr,"Supply canonical BIOS for native math contract\n");return 77;}
     std::ifstream input(argv[1],std::ios::binary);
@@ -78,6 +83,14 @@ int main(int argc,char** argv) try {
             throw std::runtime_error("zero denominator did not decline untouched");
         ++declines;
     }
+    allow_native_window=false;
+    for(unsigned swi:{6u,7u,10u}) {
+        g_cpu=caller;charged_cycles=0;
+        if(g_bios_hle_hook(swi) || charged_cycles || std::memcmp(&g_cpu,&caller,sizeof(g_cpu)))
+            throw std::runtime_error("unowned sliced/shadow window did not decline untouched");
+        ++declines;
+    }
+    allow_native_window=true;
     active=nullptr;
     std::printf("Native math original-BIOS oracle: cases=%u instructions=%llu untouched-declines=%u failures=%u; catalog Off\n",
         cases,(unsigned long long)instructions,declines,failures);

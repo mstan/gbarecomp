@@ -28,6 +28,7 @@
 #include "bios_hle.h"
 
 #include "runtime_arm.h"  // g_cpu, runtime_tick, bus_read_u*/bus_write_u*
+#include "runtime_bus_bridge.h"
 
 #include <bit>
 #include <cmath>
@@ -563,6 +564,11 @@ int dispatch(uint32_t swi) {
 }
 
 int dispatch_selected_math(uint32_t swi) {
+#if defined(GBARECOMP_BIOS_MATH_HLE)
+    // A sliced link/shadow owner advances devices at instruction boundaries.
+    // It has not granted this whole operation an atomic timing window.
+    if (!gbarecomp::native_service_window_allowed()) return 0;
+#endif
     // Division by zero is outside this selected arithmetic contract. Preserve
     // the real BIOS path without any native effects for those requests.
     if ((swi == SWI_DIV && R(1) == 0) || (swi == SWI_DIV_ARM && R(0) == 0)) return 0;

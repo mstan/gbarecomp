@@ -55,6 +55,8 @@ build uses the existing native algorithms directly before BIOS exception entry,
 independently of the full legacy catalog and boot-intro policy. Zero-denominator
 division declines untouched to the real BIOS; other services, including affine,
 retain the original route unless the separate grandfathered catalog is enabled.
+Sliced link and shadow owners retain BIOS execution until they grant a complete
+native-service window; no native-math link speedup is claimed.
 There is no new runtime math selector or reference execution beneath a handled
 math call. The selection enters source compatibility identity; mixed builds
 are not qualified peers. The inherited nominal timing model remains approximate.
