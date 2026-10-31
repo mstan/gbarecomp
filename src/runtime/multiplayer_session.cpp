@@ -148,7 +148,7 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
         const auto& session = *static_cast<const GbaMultiplayerSession*>(owner);
         for (const auto& ptr : session.machines_)
             if (&ptr->bus == &bus)
-                return ptr->bus.io().bus() == &ptr->bus &&
+                return active_ppu() == &ptr->ppu && ptr->bus.io().bus() == &ptr->bus &&
                     ptr->bus.io().serial_device() == ptr->session_endpoint_;
         return false;
     });
