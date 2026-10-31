@@ -26,6 +26,8 @@ for name, value in (("BIOS-A", 0), ("BIOS-repeat", 0), ("BIOS-changed", 1)):
     configurations.append((name, "O2", "OFF", bios))
 configurations.extend([("AUDIO-windows", "O2", "OFF", None),
                        ("AUDIO-repeat", "O2", "OFF", None)])
+configurations.extend([("MATH-native", "O2", "OFF", None),
+                       ("MATH-repeat", "O2", "OFF", None)])
 for name, level, ipo, bios in configurations:
     build = output / name
     with (output / (name + ".log")).open("w") as log:
@@ -34,7 +36,8 @@ for name, level, ipo, bios in configurations:
             "-DCMAKE_MAKE_PROGRAM=" + args.make_program, "-DCMAKE_BUILD_TYPE=Release",
             "-DIDENTITY_MODULE=" + str(module), "-DGENERATED_OPT=" + level,
             "-DUSE_IPO=" + ipo,
-            "-DGBARECOMP_DEVICE_AUDIO_WINDOWS=" + ("ON" if name.startswith("AUDIO-") else "OFF")]
+            "-DGBARECOMP_DEVICE_AUDIO_WINDOWS=" + ("ON" if name.startswith("AUDIO-") else "OFF"),
+            "-DGBARECOMP_BIOS_MATH_IMPLEMENTATION=" + ("HLE" if name.startswith("MATH-") else "LLE")]
         if bios is not None:
             command.append("-DGBARECOMP_GENERATED_BIOS_DIR=" + str(bios))
         subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
@@ -48,5 +51,7 @@ assert rows[4]["identity"] != rows[6]["identity"], "Selected BIOS body is missin
 assert rows[1]["identity"] != rows[4]["identity"], "BIOS availability is missing from identity"
 assert rows[1]["identity"] != rows[7]["identity"], "Device/audio ownership profile is missing"
 assert rows[7]["identity"] == rows[8]["identity"], "Device/audio profile depends on build directory"
+assert rows[1]["identity"] != rows[9]["identity"], "Native BIOS math profile is missing"
+assert rows[9]["identity"] == rows[10]["identity"], "Native BIOS math profile depends on build directory"
 (output / "results.json").write_text(json.dumps(rows, indent=2))
 print("Optimization/IPO and selected BIOS identities differ; equivalent inputs are directory-independent")

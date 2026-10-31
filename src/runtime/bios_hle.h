@@ -9,7 +9,10 @@
 // correctness oracle (PRINCIPLES.md "BIOS is sacred — recompiled and
 // dispatched"). HLE is an *alternative*, selected per-game via the config
 // (`[bios].hle = true`), the `--bios-hle` CLI flag, or the GBARECOMP_BIOS_HLE
-// env var. These are existing legacy selectors, not the build-time architecture
+// env var. GBARECOMP_BIOS_MATH_IMPLEMENTATION independently selects the complete
+// Div/DivArm/ArcTan2 operation family at build time; it does not enable this
+// full legacy catalog, alter boot presentation, or add a live math switch.
+// These are existing legacy selectors, not the build-time architecture
 // required for new HLE services in HLE.md. Implemented SWIs replace BIOS work;
 // unimplemented SWIs follow the original route. This mechanism alone supplies
 // no blanket compatibility, timing or netplay qualification guarantee.
@@ -17,8 +20,9 @@
 // Mechanism: bios_hle_set_mode() installs (or clears) the runtime_swi hook
 // g_bios_hle_hook (declared in runtime_arm.h). With HLE on, runtime_swi calls
 // bios_hle_dispatch() BEFORE the SVC-mode exception entry; a handled SWI resumes
-// the caller at LR with no BIOS dispatch. Default = Off = pure LLE, byte for
-// byte identical to a build compiled without any HLE.
+// the caller at LR with no BIOS dispatch. With the default LLE math build,
+// catalog Off clears the hook. A native math build keeps only its selected
+// math operations active when the legacy catalog is Off.
 //
 // The SWI semantics here are ported from mGBA's src/gba/bios.c (MPL-2.0,
 // © Jeffrey Pfau) and GBATEK; see THIRD_PARTY_ATTRIBUTION.md.
@@ -30,13 +34,16 @@
 namespace gba {
 
 enum class BiosHleMode {
-    Off,   // pure LLE — recompiled BIOS services every SWI (default)
+    Off,   // legacy catalog off; independently built native families remain
     On,    // HLE where implemented, LLE fallback otherwise
 };
 
-// Install or clear the runtime_swi HLE hook. Off clears g_bios_hle_hook back to
-// nullptr (pure LLE). Safe to call once at runtime bring-up.
+// Install the catalog or the fixed build-selected family. Safe to call once at
+// runtime bring-up. There is no player-facing native-math runtime selector.
 void bios_hle_set_mode(BiosHleMode mode);
+
+// Fixed build identity, independent of the grandfathered catalog mode.
+bool bios_native_math_enabled();
 
 // Current mode (for the startup banner / diagnostics).
 BiosHleMode bios_hle_mode();

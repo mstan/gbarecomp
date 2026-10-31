@@ -48,3 +48,15 @@ Do not assume HLE/LLE cross-play or expose unqualified replacements online.
 Use focused tests, meaningful boundary comparisons and bounded game samples.
 Measure actual emulation/presentation work per useful frame. Record limitations
 and failed experiments; a smaller instruction count alone is not a speedup.
+
+`GBARECOMP_BIOS_MATH_IMPLEMENTATION=LLE|HLE` selects a qualification package for
+the complete Div, DivArm and ArcTan2 operations. It defaults to LLE. The HLE
+build uses the existing native algorithms directly before BIOS exception entry,
+independently of the full legacy catalog and boot-intro policy. Zero-denominator
+division declines untouched to the real BIOS; other services, including affine,
+retain the original route unless the separate grandfathered catalog is enabled.
+There is no new runtime math selector or reference execution beneath a handled
+math call. The selection enters source compatibility identity; mixed builds
+are not qualified peers. The inherited nominal timing model remains approximate.
+Original-BIOS caller tests and actual matched game behavior/cost qualification
+are required before adopting this package; merely compiling it is not a gain.
