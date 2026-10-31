@@ -1041,6 +1041,15 @@ add_executable(audio_drc_tests tests/runtime/audio_drc_test.cpp)
 target_include_directories(audio_drc_tests PRIVATE src/runtime)
 add_test(NAME audio_drc_tests COMMAND audio_drc_tests)
 
+# Independent whole-bridge oracle producer. Build explicitly and use --emit
+# against a separately built reference to compare PCM and pointer-free state.
+add_executable(audio_drc_window_corpus EXCLUDE_FROM_ALL
+    tests/runtime/audio_drc_window_corpus.c)
+target_include_directories(audio_drc_window_corpus PRIVATE src/runtime)
+if(NOT WIN32)
+    target_link_libraries(audio_drc_window_corpus PRIVATE m)
+endif()
+
 add_executable(audio_playback_tests tests/runtime/audio_playback_test.cpp)
 target_include_directories(audio_playback_tests PRIVATE src/debug)
 target_link_libraries(audio_playback_tests PRIVATE gbarecomp_gba)
