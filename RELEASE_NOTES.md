@@ -1,3 +1,11 @@
+# gbarecomp v0.4.0
+
+This release integrates the reviewed GBA native-operation campaign and its seven-title validation batch. It includes published text/RAM views, owned rendering and audio-filter windows, startup asset snapshot reuse, BIOS caller/copy/math correctness fixes, and guarded native session service intervals. Optional experimental backends retain their reviewed defaults and portable original paths.
+
+Mario Kart: Super Circuit, Mega Man Zero, Emerald, FireRed, LeafGreen, Ruby and Sapphire pass representative native/wide gameplay and current-build save/load checks. Their final matched timing comparisons are neutral/inconclusive, with no qualified per-game regression. The earlier released MKSC HD improvement remains a separate result.
+
+The standalone compiler reports version0.4.0 and bundles this engine source. Game releases pin the same integrated engine revision. Private ROMs, BIOS images, saves and validation fixtures are excluded.
+
 # gbarecomp v0.1.0
 
 First tagged cut of the static GBA recompiler. Phase 2.8.D milestone:
