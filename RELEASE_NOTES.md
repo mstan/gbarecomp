@@ -1,3 +1,10 @@
+## 0.4.1
+
+- Merge the reviewed controller-menu contribution and documentation update.
+- Keep held controller navigation out of text entry; permit menu toggles while editing.
+- Include the pinned public runtime type header in bundled overlay toolchains.
+- Preserve the previously qualified runtime/gameplay profiles; no new performance claim.
+
 # gbarecomp v0.4.0
 
 This release integrates the reviewed GBA native-operation campaign and its seven-title validation batch. It includes published text/RAM views, owned rendering and audio-filter windows, startup asset snapshot reuse, BIOS caller/copy/math correctness fixes, and guarded native session service intervals. Optional experimental backends retain their reviewed defaults and portable original paths.

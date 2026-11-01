@@ -72,3 +72,13 @@ foreach ($hh in $headers) {
     Copy-Item $hh $Inc -Force
 }
 Write-Host "Staged overlay shim headers ($($headers.Count)) -> $Inc"
+
+# runtime_arm_types.h forwards two levels up from overlay_toolchain/include.
+# Include that exact pinned public dependency beside the toolchain.
+$CoreRelative = "external/arm-recomp-core/profiles/armv4t_gba/runtime_arm_types.h"
+$CoreSource = Join-Path $EngineRoot $CoreRelative
+if (-not (Test-Path -LiteralPath $CoreSource)) { throw "Core runtime header missing: $CoreSource" }
+$StageRoot = Split-Path -Parent ([IO.Path]::GetFullPath($Toolchain))
+$CoreDestination = Join-Path $StageRoot $CoreRelative
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $CoreDestination) | Out-Null
+Copy-Item -LiteralPath $CoreSource -Destination $CoreDestination
