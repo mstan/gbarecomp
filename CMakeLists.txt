@@ -1166,6 +1166,10 @@ target_include_directories(selfheal_persistence_test PRIVATE src/runtime)
 target_link_gbarecomp_runtime_stack(selfheal_persistence_test)
 add_test(NAME selfheal_persistence_test COMMAND selfheal_persistence_test)
 
+add_executable(selfheal_overlay_symbols_test tests/selfheal/overlay_symbols_test.cpp)
+target_include_directories(selfheal_overlay_symbols_test PRIVATE src/runtime src/armv4t)
+add_test(NAME selfheal_overlay_symbols_test COMMAND selfheal_overlay_symbols_test)
+
 add_executable(interpreter_smoke tests/armv4t/interpreter_smoke.cpp)
 target_link_libraries(interpreter_smoke PRIVATE gbarecomp_armv4t)
 add_test(NAME interpreter_smoke COMMAND interpreter_smoke)
