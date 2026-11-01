@@ -470,6 +470,14 @@ struct Backend {
     // whichever menu row appeared under the finger.
     int runtime_ui_suppressed_touch_releases = 0;
     Uint32 runtime_ui_suppress_touch_until = 0;
+    // The menu from a controller: the held direction (a RecompRuntimeUiInput,
+    // or -1) repeats like a held key; the left stick reads as the D-pad; and
+    // the Select+Start chord that opened it stays hidden from the game until
+    // both are released.
+    int runtime_ui_dir = -1;
+    Uint32 runtime_ui_dir_since = 0, runtime_ui_dir_last = 0;
+    int runtime_ui_stick_x = 0, runtime_ui_stick_y = 0;
+    bool runtime_ui_chord_held = false;
 #endif
     int base_w = 240;   // logical surface width  (240 faithful, wider if expanded)
     int base_h = 160;   // logical surface height (160; vertical expansion deferred)
@@ -1581,8 +1589,75 @@ void open_runtime_menu_from_touch(Backend* b) {
 
 #if defined(GBARECOMP_RUNTIME_UI)
 
-bool runtime_ui_event(RecompRuntimeUi* ui, const SDL_Event& e) {
+// A direction from the D-pad or the left stick: forwarded, and remembered so
+// runtime_ui_repeat() repeats it while held.
+void runtime_ui_direction(Backend* b, RecompRuntimeUiInput input, bool pressed) {
+    recomp_runtime_ui_handle_input(b->runtime_ui, input, pressed ? 1 : 0, 0);
+    if (pressed) {
+        b->runtime_ui_dir = static_cast<int>(input);
+        b->runtime_ui_dir_since = b->runtime_ui_dir_last = SDL_GetTicks();
+    } else if (b->runtime_ui_dir == static_cast<int>(input)) {
+        b->runtime_ui_dir = -1;
+    }
+}
+
+// Controller buttons and the stick send no repeats of their own: a direction
+// held for 380 ms then steps every 90 ms, as a held arrow key does.
+void runtime_ui_repeat(Backend* b) {
+    RecompRuntimeUi* ui = b->runtime_ui;
+    if (!ui || !recomp_runtime_ui_is_open(ui)) {
+        b->runtime_ui_dir = -1;
+        b->runtime_ui_stick_x = b->runtime_ui_stick_y = 0;
+        return;
+    }
+#if defined(RECOMP_RUNTIME_UI_HAS_TEXT)
+    if (recomp_runtime_ui_wants_text_input(ui)) {
+        b->runtime_ui_dir = -1;
+        b->runtime_ui_stick_x = b->runtime_ui_stick_y = 0;
+        return;
+    }
+#endif
+    if (b->runtime_ui_dir < 0) return;
+    const Uint32 now = SDL_GetTicks();
+    if (now - b->runtime_ui_dir_since < 380 || now - b->runtime_ui_dir_last < 90) return;
+    b->runtime_ui_dir_last = now;
+    recomp_runtime_ui_handle_input(ui, static_cast<RecompRuntimeUiInput>(b->runtime_ui_dir), 1, 1);
+}
+
+void runtime_ui_toggle(RecompRuntimeUi* ui) {
+    if (recomp_runtime_ui_is_open(ui)) recomp_runtime_ui_close(ui);
+    else recomp_runtime_ui_open(ui);
+}
+
+bool runtime_ui_event(Backend* b, const SDL_Event& e) {
+    RecompRuntimeUi* ui = b->runtime_ui;
     if (!ui) return false;
+    // From a controller the menu opens and closes with a stick click (L3/R3,
+    // which GBA games have no use for) or the Select+Start chord, for
+    // handhelds whose Guide/Home button belongs to the system. Start also
+    // closes an open menu.
+    if (e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONUP) {
+        const Uint8 button = e.cbutton.button;
+        const bool down = e.type == SDL_CONTROLLERBUTTONDOWN;
+        SDL_GameController* pad = SDL_GameControllerFromInstanceID(e.cbutton.which);
+        if (button == SDL_CONTROLLER_BUTTON_LEFTSTICK || button == SDL_CONTROLLER_BUTTON_RIGHTSTICK) {
+            if (down) runtime_ui_toggle(ui);
+            return true;
+        }
+        if (down && pad &&
+            ((button == SDL_CONTROLLER_BUTTON_START &&
+              SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK)) ||
+             (button == SDL_CONTROLLER_BUTTON_BACK &&
+              SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START)))) {
+            b->runtime_ui_chord_held = true;
+            runtime_ui_toggle(ui);
+            return true;
+        }
+        if (button == SDL_CONTROLLER_BUTTON_START && recomp_runtime_ui_is_open(ui)) {
+            if (down && !b->runtime_ui_chord_held) recomp_runtime_ui_close(ui);
+            return true;
+        }
+    }
     if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE &&
         !recomp_runtime_ui_is_open(ui)) {
         recomp_runtime_ui_open(ui);
@@ -1600,6 +1675,23 @@ bool runtime_ui_event(RecompRuntimeUi* ui, const SDL_Event& e) {
 #if defined(RECOMP_RUNTIME_UI_HAS_TEXT)
     if (recomp_runtime_ui_wants_text_input(ui)) return true;
 #endif
+    // The left stick moves through an open menu like the D-pad.
+    if (e.type == SDL_CONTROLLERAXISMOTION) {
+        if (!recomp_runtime_ui_is_open(ui)) return false;
+        const bool x_axis = e.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX;
+        if (!x_axis && e.caxis.axis != SDL_CONTROLLER_AXIS_LEFTY) return true;
+        const int dir = e.caxis.value > 16000 ? 1 : e.caxis.value < -16000 ? -1 : 0;
+        int& held = x_axis ? b->runtime_ui_stick_x : b->runtime_ui_stick_y;
+        if (dir == held) return true;
+        auto input = [x_axis](int d) {
+            return x_axis ? (d < 0 ? RECOMP_RUNTIME_UI_INPUT_LEFT : RECOMP_RUNTIME_UI_INPUT_RIGHT)
+                          : (d < 0 ? RECOMP_RUNTIME_UI_INPUT_UP : RECOMP_RUNTIME_UI_INPUT_DOWN);
+        };
+        if (held) runtime_ui_direction(b, input(held), false);
+        held = dir;
+        if (dir) runtime_ui_direction(b, input(dir), true);
+        return true;
+    }
     if (e.type != SDL_KEYDOWN && e.type != SDL_KEYUP &&
         e.type != SDL_CONTROLLERBUTTONDOWN && e.type != SDL_CONTROLLERBUTTONUP)
         return false;
@@ -1633,10 +1725,22 @@ bool runtime_ui_event(RecompRuntimeUi* ui, const SDL_Event& e) {
                     else recomp_runtime_ui_open(ui);
                 }
                 return true;
-            case SDL_CONTROLLER_BUTTON_DPAD_UP: input = RECOMP_RUNTIME_UI_INPUT_UP; break;
-            case SDL_CONTROLLER_BUTTON_DPAD_DOWN: input = RECOMP_RUNTIME_UI_INPUT_DOWN; break;
-            case SDL_CONTROLLER_BUTTON_DPAD_LEFT: input = RECOMP_RUNTIME_UI_INPUT_LEFT; break;
-            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: input = RECOMP_RUNTIME_UI_INPUT_RIGHT; break;
+            case SDL_CONTROLLER_BUTTON_DPAD_UP:
+            case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+            case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+            case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+                if (recomp_runtime_ui_is_open(ui)) {
+                    const Uint8 button = e.cbutton.button;
+                    runtime_ui_direction(
+                        b,
+                        button == SDL_CONTROLLER_BUTTON_DPAD_UP ? RECOMP_RUNTIME_UI_INPUT_UP
+                        : button == SDL_CONTROLLER_BUTTON_DPAD_DOWN ? RECOMP_RUNTIME_UI_INPUT_DOWN
+                        : button == SDL_CONTROLLER_BUTTON_DPAD_LEFT ? RECOMP_RUNTIME_UI_INPUT_LEFT
+                                                                    : RECOMP_RUNTIME_UI_INPUT_RIGHT,
+                        pressed != 0);
+                    return true;
+                }
+                return false;
             case SDL_CONTROLLER_BUTTON_A: input = RECOMP_RUNTIME_UI_INPUT_ACCEPT; break;
             case SDL_CONTROLLER_BUTTON_B: input = RECOMP_RUNTIME_UI_INPUT_BACK; break;
             default: mapped = false; break;
@@ -3161,7 +3265,7 @@ HostWindow::Events HostWindow::pump() {
             ImGui::SetCurrentContext(b->runtime_imgui_context);
             ImGui_ImplSDL2_ProcessEvent(&e);
         }
-        if (runtime_ui_event(b->runtime_ui, e)) continue;
+        if (runtime_ui_event(b, e)) continue;
 #endif
         if (e.type == SDL_QUIT) {
             ev.quit = true;
@@ -3360,6 +3464,9 @@ HostWindow::Events HostWindow::pump() {
         open_runtime_menu_from_touch(b);
 #endif
     }
+#if defined(GBARECOMP_RUNTIME_UI)
+    runtime_ui_repeat(b);
+#endif
 
     // Build the GBA KEYINPUT value from current keyboard state via the
     // rebindable table (keybinds.ini; defaults in kDefaultBinds).
@@ -3403,6 +3510,15 @@ HostWindow::Events HostWindow::pump() {
 #if defined(GBARECOMP_RUNTIME_UI)
     if (b->runtime_ui && recomp_runtime_ui_is_open(b->runtime_ui))
         ev.keyinput = 0x03FFu;
+    // The Select+Start chord was for the menu: keep both from the game until
+    // they are released, so closing the menu doesn't hand it a held Start.
+    if (b->runtime_ui_chord_held) {
+        const bool held = b->controller &&
+            (SDL_GameControllerGetButton(b->controller, SDL_CONTROLLER_BUTTON_START) ||
+             SDL_GameControllerGetButton(b->controller, SDL_CONTROLLER_BUTTON_BACK));
+        if (held) ev.keyinput |= (1u << 2) | (1u << 3);
+        else b->runtime_ui_chord_held = false;
+    }
 #endif
 
     int mouse_x = 0;
