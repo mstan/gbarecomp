@@ -3539,7 +3539,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         fps_item.key         = GBARECOMP_UI_KEY_FPS;
         fps_item.section     = "Display";
         fps_item.label       = "Show FPS";
-        fps_item.description = "Presents-per-second in the window title bar.";
+        fps_item.description = "Frames shown per second, in a corner of the screen.";
         fps_item.type        = RECOMP_RUNTIME_UI_BOOL;
         runtime_ui_extras.push_back(fps_item);
 
