@@ -1603,6 +1603,13 @@ void runtime_ui_repeat(Backend* b) {
         b->runtime_ui_stick_x = b->runtime_ui_stick_y = 0;
         return;
     }
+#if defined(RECOMP_RUNTIME_UI_HAS_TEXT)
+    if (recomp_runtime_ui_wants_text_input(ui)) {
+        b->runtime_ui_dir = -1;
+        b->runtime_ui_stick_x = b->runtime_ui_stick_y = 0;
+        return;
+    }
+#endif
     if (b->runtime_ui_dir < 0) return;
     const Uint32 now = SDL_GetTicks();
     if (now - b->runtime_ui_dir_since < 380 || now - b->runtime_ui_dir_last < 90) return;
@@ -1618,6 +1625,32 @@ void runtime_ui_toggle(RecompRuntimeUi* ui) {
 bool runtime_ui_event(Backend* b, const SDL_Event& e) {
     RecompRuntimeUi* ui = b->runtime_ui;
     if (!ui) return false;
+    // From a controller the menu opens and closes with a stick click (L3/R3,
+    // which GBA games have no use for) or the Select+Start chord, for
+    // handhelds whose Guide/Home button belongs to the system. Start also
+    // closes an open menu.
+    if (e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONUP) {
+        const Uint8 button = e.cbutton.button;
+        const bool down = e.type == SDL_CONTROLLERBUTTONDOWN;
+        SDL_GameController* pad = SDL_GameControllerFromInstanceID(e.cbutton.which);
+        if (button == SDL_CONTROLLER_BUTTON_LEFTSTICK || button == SDL_CONTROLLER_BUTTON_RIGHTSTICK) {
+            if (down) runtime_ui_toggle(ui);
+            return true;
+        }
+        if (down && pad &&
+            ((button == SDL_CONTROLLER_BUTTON_START &&
+              SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK)) ||
+             (button == SDL_CONTROLLER_BUTTON_BACK &&
+              SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START)))) {
+            b->runtime_ui_chord_held = true;
+            runtime_ui_toggle(ui);
+            return true;
+        }
+        if (button == SDL_CONTROLLER_BUTTON_START && recomp_runtime_ui_is_open(ui)) {
+            if (down && !b->runtime_ui_chord_held) recomp_runtime_ui_close(ui);
+            return true;
+        }
+    }
     if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE &&
         !recomp_runtime_ui_is_open(ui)) {
         recomp_runtime_ui_open(ui);
@@ -1655,32 +1688,6 @@ bool runtime_ui_event(Backend* b, const SDL_Event& e) {
     if (e.type != SDL_KEYDOWN && e.type != SDL_KEYUP &&
         e.type != SDL_CONTROLLERBUTTONDOWN && e.type != SDL_CONTROLLERBUTTONUP)
         return false;
-    // From a controller the menu opens and closes with a stick click (L3/R3,
-    // which GBA games have no use for) or the Select+Start chord, for
-    // handhelds whose Guide/Home button belongs to the system. Start also
-    // closes an open menu.
-    if (e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONUP) {
-        const Uint8 button = e.cbutton.button;
-        const bool down = e.type == SDL_CONTROLLERBUTTONDOWN;
-        SDL_GameController* pad = SDL_GameControllerFromInstanceID(e.cbutton.which);
-        if (button == SDL_CONTROLLER_BUTTON_LEFTSTICK || button == SDL_CONTROLLER_BUTTON_RIGHTSTICK) {
-            if (down) runtime_ui_toggle(ui);
-            return true;
-        }
-        if (down && pad &&
-            ((button == SDL_CONTROLLER_BUTTON_START &&
-              SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK)) ||
-             (button == SDL_CONTROLLER_BUTTON_BACK &&
-              SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START)))) {
-            b->runtime_ui_chord_held = true;
-            runtime_ui_toggle(ui);
-            return true;
-        }
-        if (button == SDL_CONTROLLER_BUTTON_START && recomp_runtime_ui_is_open(ui)) {
-            if (down && !b->runtime_ui_chord_held) recomp_runtime_ui_close(ui);
-            return true;
-        }
-    }
     // Platform Back closes an open menu; while the menu is closed it belongs
     // to the touch layer (a Back gesture for the game, or opening the menu).
     if ((e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) &&
