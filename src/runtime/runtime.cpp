@@ -809,7 +809,7 @@ bool apply_toml_file(const std::filesystem::path& path, Args* args,
         } else if (section == "video" && key == "internal_resolution") {
             int scale = 0;
             if (!parse_int(val.c_str(), &scale) || scale < 1 || scale > int(gba::GbaHighResolutionFrame::kMaxScale)) {
-                if (err) *err = "video.internal_resolution must be from 1 through 64";
+                if (err) *err = "video.internal_resolution must be from 1 through 128";
                 return false;
             }
             args->internal_resolution = scale;
@@ -1149,7 +1149,7 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             if (!value) return false;
             if (!parse_int(value, &args->internal_resolution) ||
                 args->internal_resolution < 1 || args->internal_resolution > int(gba::GbaHighResolutionFrame::kMaxScale)) {
-                if (err) *err = "--internal-resolution must be from 1 through 64";
+                if (err) *err = "--internal-resolution must be from 1 through 128";
                 return false;
             }
             args->internal_resolution_set = true;
@@ -3378,18 +3378,18 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 "8x (experimental)", "9x (experimental)", "10x (experimental)",
                 "11x (experimental)", "12x (experimental)", "13x (experimental)",
                 "14x (experimental)", "15x (experimental)", "16x (experimental)",
-                "32x (experimental)", "64x (experimental)"
+                "32x (experimental)", "64x (experimental)", "128x (experimental)"
             };
             static constexpr int resolution_values[] = {
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 32, 64
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 32, 64, 128
             };
             static_assert(sizeof(resolution_choices) / sizeof(*resolution_choices) ==
                           sizeof(resolution_values) / sizeof(*resolution_values));
-            static_assert(resolution_values[17] == gba::GbaHighResolutionFrame::kMaxScale);
+            static_assert(resolution_values[18] == gba::GbaHighResolutionFrame::kMaxScale);
             static const RecompRuntimeUiItem resolution_item{
                 RECOMP_RUNTIME_UI_KEY_RESOLUTION_SCALE,
                 "Display", "Resolution scale",
-                "Up to 4x is recommended. Higher scales are experimental and may run very slowly.",
+                "Up to 4x is recommended. Higher scales are experimental and may run very slowly. 128x needs substantial memory; GPU limits may reduce the output.",
                 RECOMP_RUNTIME_UI_CHOICE, 1, gba::GbaHighResolutionFrame::kMaxScale, 1,
                 resolution_choices, sizeof(resolution_choices) / sizeof(*resolution_choices), resolution_values
             };

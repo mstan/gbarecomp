@@ -17,7 +17,7 @@ using HighResolutionAffineProvider = bool (*)(int bg, int screen_y);
 // exact unfiltered native samples from a qualified shared preparation.
 class GbaHighResolutionFrame {
 public:
-    static constexpr unsigned kMaxScale = 64;
+    static constexpr unsigned kMaxScale = 128;
     static const char* sampler_implementation();
     explicit GbaHighResolutionFrame(unsigned scale);
     unsigned scale() const { return scale_; }

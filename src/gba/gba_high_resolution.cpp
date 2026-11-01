@@ -8,6 +8,15 @@
 
 namespace gba {
 namespace {
+// Callers validate the logical dimensions and scale before requesting pixels.
+// Form the product before narrowing so 32-bit hosts reject an oversized
+// optional surface instead of wrapping its allocation size.
+size_t rgb888_size(unsigned width, unsigned height, unsigned scale) {
+    const uint64_t bytes = uint64_t(width) * height * scale * scale * 3;
+    if (bytes > std::vector<uint8_t>().max_size())
+        throw std::length_error("high-resolution RGB surface exceeds host allocation limits");
+    return size_t(bytes);
+}
 uint16_t u16(const uint8_t* p) { return uint16_t(p[0] | (unsigned(p[1]) << 8)); }
 int64_t ref28(const uint8_t* p) {
     uint32_t n = uint32_t(u16(p)) | (uint32_t(u16(p + 2)) << 16);
@@ -87,7 +96,7 @@ GbaHighResolutionFrame::Surface::publish() {
 }
 GbaHighResolutionFrame::GbaHighResolutionFrame(unsigned scale) : scale_(scale) {
     if (scale < 2 || scale > kMaxScale)
-        throw std::invalid_argument("internal resolution must be from 1 through 64");
+        throw std::invalid_argument("high-resolution frame scale must be from 2 through 128");
 }
 void GbaHighResolutionFrame::configure(unsigned width, unsigned height) {
     if (width == width_ && height == height_) return;
@@ -97,7 +106,7 @@ void GbaHighResolutionFrame::configure(unsigned width, unsigned height) {
     top_.resize(width); second_.resize(width); windows_.resize(width); black_.resize(width);
     written_.resize(height);
     if (!deferred_) {
-        work_.resize(size_t(width) * height * scale_ * scale_ * 3);
+        work_.resize(rgb888_size(width, height, scale_));
         latched_.resize(work_.size());
     }
     scratch_.resize(size_t(width) * height * 3);
@@ -281,9 +290,9 @@ void GbaHighResolutionFrame::resolve_prepared() {
     for (unsigned sy = 0; sy < scale_; ++sy) {
         struct Row {
             int64_t u = 0, v = 0, pa = 0, pc = 0;
-            std::array<int64_t, kMaxScale> du{}, dv{};
+            std::array<int64_t, kMaxScale> du, dv;
         };
-        std::array<Row, 2> rows{};
+        std::array<Row, 2> rows; // Active rows initialize every consumed subpixel offset.
         for (unsigned i = 0; i < 2; ++i) {
             const auto& a = affine_[i];
             if (!a.active) continue;
@@ -419,7 +428,7 @@ void GbaHighResolutionFrame::set_deferred_rendering(bool enabled) {
         std::vector<uint8_t>().swap(work_);
         std::vector<uint8_t>().swap(latched_);
     } else {
-        work_.resize(size_t(width_) * height_ * scale_ * scale_ * 3);
+        work_.resize(rgb888_size(width_, height_, scale_));
         latched_.resize(work_.size());
     }
     invalidate();
@@ -440,7 +449,7 @@ std::vector<uint8_t> GbaHighResolutionFrame::render_jobs(const DrawFrame& frame)
         throw std::invalid_argument("invalid HD draw frame");
     GbaHighResolutionFrame renderer(frame.scale);
     renderer.width_ = frame.width; renderer.height_ = frame.height;
-    renderer.work_.resize(size_t(frame.width) * frame.height * frame.scale * frame.scale * 3);
+    renderer.work_.resize(rgb888_size(frame.width, frame.height, frame.scale));
     renderer.written_.resize(frame.height);
     for (unsigned y = 0; y < frame.height; ++y) {
         const auto& job = frame.lines[y];
