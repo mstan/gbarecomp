@@ -1308,6 +1308,10 @@ target_link_gbarecomp_runtime_stack(ordered_wide_scanline_corpus)
 add_executable(high_resolution_jobs_tests tests/ppu/high_resolution_jobs_test.cpp src/gba/gba_high_resolution.cpp)
 target_include_directories(high_resolution_jobs_tests PRIVATE src/gba)
 add_test(NAME high_resolution_jobs_tests COMMAND high_resolution_jobs_tests)
+add_executable(high_resolution_limits_tests tests/ppu/high_resolution_limits_test.cpp)
+target_link_libraries(high_resolution_limits_tests PRIVATE gbarecomp_gba)
+add_test(NAME high_resolution_limits_tests COMMAND high_resolution_limits_tests)
+
 add_executable(high_resolution_gpu_tests EXCLUDE_FROM_ALL tests/ppu/high_resolution_gpu_test.cpp
     src/runtime/hd_gpu_renderer.cpp src/runtime/color_lut.cpp src/gba/gba_high_resolution.cpp)
 target_include_directories(high_resolution_gpu_tests PRIVATE src/gba src/runtime)

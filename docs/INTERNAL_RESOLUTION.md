@@ -5,8 +5,8 @@ Games can authorize finer affine-background sampling with
 Super Circuit's mode-1 BG2, including the pre-HUD course fly-in. This is a local presentation enhancement, disabled
 at 1x by default. It does not add detail to original sprites or HUD artwork.
 
-Use the game's optional mod or `--internal-resolution 2|3|4|8|16`. The engine
-accepts integer scales from 1 through 16. A capable game
+Use the game's optional mod or `--internal-resolution 2|3|4|8|16|32|64|128`. The engine
+accepts integer scales from 1 through 128. A capable game
 also exposes resolution scale in its in-game display settings. The CLI overrides
 the initial mod selection. `[video] internal_resolution = 1` sets the ordinary
 configuration default. Unsupported games reject an enhancement request.
@@ -125,3 +125,19 @@ surface. Neither query changes simulation state.
 
 See the title's `docs/INTERNAL_RESOLUTION.md` for the measured pilot, fixture
 identity, reproducible command and remaining limits.
+
+## Extreme experimental scales
+
+128x is opt-in and unqualified for full-size performance or visual quality.
+At native aspect it requests 30720x20480 pixels (629 million pixels). RGBA8
+pixel storage alone is about 2.34 GiB per GPU target, before other resources;
+widescreen increases that cost. A CPU RGB buffer is about 1.76 GiB, and the
+portable renderer may need more than one buffer.
+
+The selected value is the requested sampling scale. Existing GPU texture and
+allocation limits can reduce the actual output, which is recorded in the
+renderer log. The portable fallback remains available but can be extremely
+slow and memory intensive. Choose a lower scale if resources are insufficient.
+The 128x validation covers admission, metadata-only capture, allocation-size
+arithmetic and shader overflow rejection without allocating a full-size frame;
+it does not establish a successful full-resolution 128x game session.

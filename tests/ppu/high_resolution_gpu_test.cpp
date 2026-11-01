@@ -120,7 +120,7 @@ int main() {
     // Higher scales can overflow a shader's delta*subpixel intermediate even
     // when the divided result is representable. Reject before changing the
     // existing GPU output or SDL target; the caller retains its CPU fallback.
-    for(unsigned scale:{32u,64u})for(int sign:{-1,1})for(bool vertical:{false,true}) {
+    for(unsigned scale:{32u,64u,128u})for(int sign:{-1,1})for(bool vertical:{false,true}) {
         auto frame=fixture(scale,0);
         const int64_t outside=int64_t(INT_MAX/(scale-1))+1;
         auto& affine=frame.lines[1].affine[0];
