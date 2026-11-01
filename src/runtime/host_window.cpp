@@ -507,8 +507,9 @@ struct Backend {
     int          fullscreen = 0;        // 0 windowed, 1 borderless, 2 exclusive
     int          volume = 100;          // 0..100 gain on pushed samples
     std::vector<int16_t> volume_buf;    // scratch for gain != 100
-    // FPS readout (DisplayPerf hotkey): presents/sec in the title bar.
+    // FPS readout (DisplayPerf hotkey): presents/sec in the title bar and on screen.
     bool         fps_readout = false;
+    double       fps_value = 0.0;   // last readout, also drawn on screen
     std::string  title;                 // base window title (readout restores it)
     Uint32       fps_window_start = 0;
     int          fps_presents = 0;
@@ -1395,12 +1396,31 @@ bool runtime_menu_open(const Backend* b) {
 }
 #endif
 
+// Show FPS: the readout in a corner of the screen, for full-screen and
+// handheld play where there is no title bar to carry it.
+void draw_fps(Backend* b, HostOverlay& ov) {
+    if (!b->fps_readout || b->fps_value <= 0.0 || !ov.text_supported()) return;
+    char text[32];
+    std::snprintf(text, sizeof(text), "%.1f fps", b->fps_value);
+    const float mm = ov.drawable_px_per_mm();
+    const float size = 3.0f * mm, pad = 1.0f * mm;
+    const float w = ov.text_width(text, size, OverlaySpace::Drawable) + pad * 2.0f;
+    const float h = size + pad * 2.0f;
+    const HostOverlay::Insets in = ov.safe_insets();
+    const float x = static_cast<float>(in.left) + pad * 2.0f;
+    const float y = static_cast<float>(in.top) + pad * 2.0f;
+    ov.fill_rect(x, y, w, h, pad, {0, 0, 0, 170}, OverlaySpace::Drawable);
+    ov.text(x + pad, y + pad, size, {255, 255, 255, 235}, text, OverlayAlign::Left,
+            OverlaySpace::Drawable);
+}
+
 // Host chrome drawn over the game image, in order: the game's host overlay,
 // the virtual pad and its toggle, the engine long-press cue, then (runtime UI
 // builds) the settings menu on top. Nothing here reads or writes guest state
 // except through the game's own overlay callback.
 void draw_host_chrome(Backend* b, HostOverlay& ov, bool menu_open) {
     if (menu_open) return;
+    draw_fps(b, ov);
     if (b->host_overlay) b->host_overlay(&ov);
     draw_touch_pad(b, ov);
     draw_pad_toggle(b, ov);
@@ -1414,7 +1434,7 @@ void render_host_layers(Backend* b) {
     const bool menu_open = false;
 #endif
     const bool chrome = !menu_open &&
-        (b->host_overlay || (b->pad_visible && b->touch_controls) ||
+        (b->host_overlay || b->fps_readout || (b->pad_visible && b->touch_controls) ||
          pad_toggle_available(b) || touch_input_enabled(b));
     if (!chrome && !menu_open) return;
 
@@ -2810,9 +2830,9 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
         if (b->fps_window_start == 0) b->fps_window_start = now;
         const Uint32 span = now - b->fps_window_start;
         if (span >= 500) {
+            b->fps_value = b->fps_presents * 1000.0 / span;
             char buf[192];
-            std::snprintf(buf, sizeof(buf), "%s — %.1f fps", b->title.c_str(),
-                          b->fps_presents * 1000.0 / span);
+            std::snprintf(buf, sizeof(buf), "%s — %.1f fps", b->title.c_str(), b->fps_value);
             SDL_SetWindowTitle(b->window, buf);
             b->fps_window_start = now;
             b->fps_presents = 0;
@@ -3205,6 +3225,7 @@ void HostWindow::set_fps_readout(bool on) {
     b->fps_readout = on;
     b->fps_window_start = 0;
     b->fps_presents = 0;
+    b->fps_value = 0.0;
     if (!on) SDL_SetWindowTitle(b->window, b->title.c_str());
 }
 
