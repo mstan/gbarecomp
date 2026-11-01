@@ -27,6 +27,8 @@ extern const GbaOverlayCallbacks* g_ovl;
 #define g_runtime_insn_trace (*g_ovl->runtime_insn_trace)
 #define g_runtime_cycles (*g_ovl->runtime_cycles)
 #define g_runtime_break_pc (*g_ovl->runtime_break_pc)
+#define g_runtime_resume_pc (*g_ovl->runtime_resume_pc)
+#define g_runtime_native_ram_base (*g_ovl->runtime_native_ram_base)
 #define g_runtime_fn_entry_hook (*g_ovl->runtime_fn_entry_hook)
 #define g_runtime_trace_enabled (*g_ovl->runtime_trace_enabled)
 #define g_runtime_waits (*g_ovl->runtime_waits)

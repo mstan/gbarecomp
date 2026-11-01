@@ -24,7 +24,7 @@
 extern "C" {
 #endif
 
-#define GBA_OVERLAY_ABI_VERSION 6u
+#define GBA_OVERLAY_ABI_VERSION 7u
 
 typedef struct GbaOverlayCallbacks {
     uint32_t abi_version;  // must equal GBA_OVERLAY_ABI_VERSION
@@ -110,6 +110,12 @@ typedef struct GbaOverlayCallbacks {
     uint32_t (*runtime_exception_return_refill)(uint32_t target_pc);
     uint32_t (*runtime_prefetch_stall_delta)(uint32_t wait, uint32_t pc,
                                              uint32_t thumb);
+
+    // ABI v7: values generated bodies already read. The resume PC lets a
+    // mid-function entry continue where the interrupt left it, and the RAM
+    // base anchors the native RAM-copy guards. Both are shared in place.
+    uint32_t* runtime_resume_pc;
+    uint32_t* runtime_native_ram_base;
 } GbaOverlayCallbacks;
 
 // Exported by every overlay DLL:
