@@ -125,7 +125,7 @@ void main() {
     ivec2 p=ivec2(gl_FragCoord.xy);
     if(any(notEqual(source_size,output_size))) {
         // Exact integer rescaling without the full coordinate*source product.
-        // At the supported maximum source dimension (1280*64), each remaining
+        // At the supported maximum source dimension (1280*128), each remaining
         // product fits signed 32 bits, including a texture-limited fallback.
         p=p*(source_size/output_size)+p*(source_size%output_size)/output_size;
     }
