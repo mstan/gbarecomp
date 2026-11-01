@@ -27,6 +27,7 @@ int main() {
     for (int i=0;i<5;++i) { items[i].key=names[i];items[i].label=names[i];items[i].section=names[i];items[i].type=RECOMP_RUNTIME_UI_ACTION; }
     RecompRuntimeUiConfig config{}; config.title="Menu contract"; config.items=items;config.item_count=5;
     auto* ui=recomp_runtime_ui_create(&config); check(ui!=nullptr,"menu model created");
+    if (!ui || !pad || device < 0) return 1;
     {
         gbarecomp::HostWindow window;
         check(window.open(1),"dummy host window open"); window.set_runtime_ui(ui);
