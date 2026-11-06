@@ -107,6 +107,7 @@ def main() -> int:
     if not (package / "gbarecomp.exe").is_file():
         raise SystemExit("PyInstaller did not produce gbarecomp.exe.")
     shutil.copy2(root / "LICENSE", package / "LICENSE")
+    shutil.copy2(root / "PERMISSIONS.md", package / "PERMISSIONS.md")
     shutil.copy2(
         root / "THIRD_PARTY_ATTRIBUTION.md",
         package / "THIRD_PARTY_ATTRIBUTION.md",
