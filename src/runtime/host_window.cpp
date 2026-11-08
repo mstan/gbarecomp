@@ -1443,7 +1443,13 @@ void render_host_layers(Backend* b) {
     int logical_w = 0;
     int logical_h = 0;
     SDL_Rect viewport{};
+    float scale_x = 1.0f, scale_y = 1.0f;
     SDL_RenderGetLogicalSize(b->renderer, &logical_w, &logical_h);
+    SDL_RenderGetScale(b->renderer, &scale_x, &scale_y);
+    // Query the viewport in drawable pixels. At fractional logical scales,
+    // SDL rounds a logical-coordinate viewport down to whole guest pixels.
+    // Restoring that rounded rectangle would shrink/shift subsequent frames.
+    SDL_RenderSetScale(b->renderer, 1.0f, 1.0f);
     SDL_RenderGetViewport(b->renderer, &viewport);
     SDL_RenderSetLogicalSize(b->renderer, 0, 0);
     SDL_RenderSetViewport(b->renderer, nullptr);
@@ -1470,7 +1476,9 @@ void render_host_layers(Backend* b) {
     }
 
     SDL_RenderSetLogicalSize(b->renderer, logical_w, logical_h);
+    SDL_RenderSetScale(b->renderer, 1.0f, 1.0f);
     SDL_RenderSetViewport(b->renderer, &viewport);
+    SDL_RenderSetScale(b->renderer, scale_x, scale_y);
     SDL_SetRenderDrawBlendMode(b->renderer, SDL_BLENDMODE_NONE);
 }
 
