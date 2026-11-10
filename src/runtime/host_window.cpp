@@ -398,6 +398,7 @@ struct Backend {
     PresentationLayout last_layout{};
     void (*host_overlay)(HostOverlay*) = nullptr;
     bool anchor_top = false;         // portrait: image at the top edge
+    bool black_bars = false;
     bool insets_from_env = false;    // GBARECOMP_SAFE_INSETS overrides platform
     // Mobile lifecycle / haptics.
     bool backgrounded = false;
@@ -2261,7 +2262,10 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
         rgb888 = b->graded_fb.data();
     }
     SDL_UpdateTexture(b->texture, nullptr, rgb888, texture_w * 3);
-    SDL_SetRenderDrawColor(b->renderer, 7, 11, 20, 255);
+    if (b->black_bars)
+        SDL_SetRenderDrawColor(b->renderer, 0, 0, 0, 255);
+    else
+        SDL_SetRenderDrawColor(b->renderer, 7, 11, 20, 255);
     SDL_RenderClear(b->renderer);
 #if defined(__ANDROID__)
     if (!b->insets_from_env && g_android_insets_known.load()) {
@@ -2682,9 +2686,10 @@ float HostWindow::px_per_mm() const {
     return static_cast<const Backend*>(impl_)->px_per_mm;
 }
 
-void HostWindow::set_presentation_anchor_top(bool anchor_top) {
+void HostWindow::set_scene_presentation(bool anchor_top, bool black_bars) {
     if (!open_ || !impl_) return;
     static_cast<Backend*>(impl_)->anchor_top = anchor_top;
+    static_cast<Backend*>(impl_)->black_bars = black_bars;
 }
 
 bool HostWindow::wait_for_foreground() {
@@ -3193,7 +3198,7 @@ void HostWindow::set_view_margins(std::uint32_t, std::uint32_t, std::uint32_t,
                                   std::uint32_t) {}
 void HostWindow::set_host_overlay(void (*)(HostOverlay*)) {}
 float HostWindow::px_per_mm() const { return 96.0f / 25.4f; }
-void HostWindow::set_presentation_anchor_top(bool) {}
+void HostWindow::set_scene_presentation(bool, bool) {}
 bool HostWindow::wait_for_foreground() { return false; }
 void HostWindow::haptic_pulse(int, float) {}
 void host_haptic_pulse(int, float) {}

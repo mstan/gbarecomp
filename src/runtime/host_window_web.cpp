@@ -462,7 +462,8 @@ void HostWindow::set_view_margins(std::uint32_t l,std::uint32_t r,std::uint32_t 
 }
 void HostWindow::set_host_overlay(void (*overlay)(HostOverlay*)) { if(impl_) backend(impl_)->host_overlay=overlay; }
 float HostWindow::px_per_mm() const { return impl_ ? geometry(*backend(impl_)).px_per_mm : 96.0f/25.4f; }
-void HostWindow::set_presentation_anchor_top(bool anchor_top) { if(impl_) backend(impl_)->shared.control.anchorTop=anchor_top?1:0; }
+// The WebGL presentation already clears the canvas to black.
+void HostWindow::set_scene_presentation(bool anchor_top, bool /*black_bars*/) { if(impl_) backend(impl_)->shared.control.anchorTop=anchor_top?1:0; }
 bool HostWindow::wait_for_foreground() {
     if(!impl_)return false;
     auto& b=*backend(impl_); auto& c=b.shared.control;

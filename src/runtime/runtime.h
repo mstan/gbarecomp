@@ -98,6 +98,7 @@ struct RunOptions {
     struct PresentationRequest {
         bool native_view = false;
         bool anchor_top = false;
+        bool black_bars = false;
     };
     void (*presentation_request)(PresentationRequest* request) = nullptr;
 

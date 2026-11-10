@@ -2940,7 +2940,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         // in portrait). Evaluated every present so it follows scene changes.
         RunOptions::PresentationRequest request;
         if (opts.presentation_request) opts.presentation_request(&request);
-        win.set_presentation_anchor_top(request.anchor_top);
+        win.set_scene_presentation(request.anchor_top, request.black_bars);
         if (!resize_view_enabled) return false;
         int drawable_w = 0;
         int drawable_h = 0;

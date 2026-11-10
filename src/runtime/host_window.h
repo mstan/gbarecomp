@@ -129,7 +129,7 @@ public:
     float px_per_mm() const;
     // Portrait presentations may anchor the image to the top edge so host
     // chrome below it gets the remaining space (per-present game request).
-    void set_presentation_anchor_top(bool anchor_top);
+    void set_scene_presentation(bool anchor_top, bool black_bars);
     // Orientation policy for rotating platforms: 0 landscape, 1 portrait,
     // 2 any. Must be set BEFORE open(); ignored on desktop.
     void set_orientation_policy(int policy) { orientation_policy_ = policy; }
