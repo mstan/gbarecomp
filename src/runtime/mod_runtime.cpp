@@ -1014,8 +1014,12 @@ bool save_state(Runtime& runtime, std::string* error) {
         for (const auto& [feature_id, feature] : selection.features) {
             file << "\n[[feature]]\npackage_id = " << quote_toml(package_id)
                  << "\nid = " << quote_toml(feature_id)
-                 << "\nenabled = " << (feature.enabled ? "true" : "false")
                  << "\n";
+            // Reading a default inserts a selection without an explicit
+            // toggle. Preserve that distinction across launches; otherwise
+            // its zero-initialized enabled field silently disables it.
+            if (feature.has_enabled)
+                file << "enabled = " << (feature.enabled ? "true" : "false") << "\n";
             if (!feature.values.empty()) {
                 file << "\n[feature.values]\n";
                 for (const auto& [key, value] : feature.values)

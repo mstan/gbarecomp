@@ -722,6 +722,37 @@ int main() {
         !rejects_bad_manifest(unknown_feature_asset))
         return fail("malformed, duplicate, or unknown-owner asset manifest was accepted");
 
+    // Merely reading/committing a default must not persist an implicit false
+    // toggle and turn an enabled feature off on the next launch.
+    const fs::path defaults = sandbox / "defaults";
+    const fs::path defaults_package = defaults / "packages/test.defaults/1.0.0";
+    fs::create_directories(defaults_package, ec);
+    const std::string default_manifest =
+        "format_version = 1\nid = \"test.defaults\"\nversion = \"1.0.0\"\n"
+        "name = \"Default test\"\nresolver = \"declarative\"\n"
+        "[[target]]\ngame_id = \"test-game\"\nrom_sha1 = \"" + sha1 + "\"\n"
+        "[[feature]]\nid = \"adaptive-view\"\nname = \"View\"\ndefault_enabled = true\n"
+        "[[plugin]]\nfeature = \"adaptive-view\"\nid = \"test.adaptive-view\"\n";
+    if (!write_text(defaults_package / "manifest.toml", default_manifest))
+        return fail("could not write default feature fixture");
+    for (int launch = 0; launch < 2; ++launch) {
+        if (!gbarecomp::mod_runtime_initialize(defaults, "test-game", sha1, &error) ||
+            !gbarecomp::mod_runtime_commit(rom_path, &error))
+            return fail("default feature commit failed: " + error);
+        gbarecomp::mod_runtime_activate_plugins();
+        if (!g_active) return fail("default-enabled feature disabled after commit/reload");
+    }
+    if (!write_text(defaults / "state.toml",
+        "format_version = 1\n[[package]]\nid = \"test.defaults\"\nversion = \"1.0.0\"\n"
+        "[[feature]]\npackage_id = \"test.defaults\"\nid = \"adaptive-view\"\nenabled = false\n"))
+        return fail("could not write explicit off fixture");
+    for (int launch = 0; launch < 2; ++launch) {
+        if (!gbarecomp::mod_runtime_initialize(defaults, "test-game", sha1, &error) ||
+            !gbarecomp::mod_runtime_commit(rom_path, &error))
+            return fail("explicit off commit failed: " + error);
+        gbarecomp::mod_runtime_activate_plugins();
+        if (g_active) return fail("default replaced an explicit saved off choice");
+    }
     fs::remove_all(sandbox, ec);
     std::cout << "GBA mod runtime: target gate, strict external asset, "
                  "persisted feature toggle, trusted activation, and reset passed\n";
