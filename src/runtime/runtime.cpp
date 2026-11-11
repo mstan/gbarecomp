@@ -195,6 +195,9 @@ struct Args {
     int fullscreen = 0;
     int  volume = 100;            // --volume 0..100: pushed-sample gain
     bool linear_filter = false;   // --linear-filter 1: linear texture scaling
+    bool integer_scale = false;
+    bool scanlines = false;
+    int scanline_strength = 35;
     bool sharp_filter = false;    // --sharp-filter 1: integer prescale + linear finish
     int internal_resolution = 1;
     bool internal_resolution_set = false;
@@ -259,6 +262,8 @@ struct Args {
 #define GBARECOMP_UI_KEY_REWIND          "assist.rewind"
 #define GBARECOMP_UI_KEY_QUIT            "system.quit"
 #define GBARECOMP_UI_KEY_AUDIO_ENHANCED  "audio.enhanced"
+#define GBARECOMP_UI_KEY_SCANLINES "graphics.scanlines"
+#define GBARECOMP_UI_KEY_SCANLINE_STRENGTH "graphics.scanline_strength"
 
 struct RuntimeUiContext {
     HostWindow* window = nullptr;
@@ -294,6 +299,9 @@ int runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int* out) {
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_RESOLUTION_SCALE) == 0 && c->internal_resolution)
         *out = *c->internal_resolution;
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER) == 0) *out = c->window->linear_filter();
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_INTEGER_SCALE) == 0) *out = c->window->integer_scale();
+    else if (std::strcmp(item->key, GBARECOMP_UI_KEY_SCANLINES) == 0) *out = c->window->scanlines();
+    else if (std::strcmp(item->key, GBARECOMP_UI_KEY_SCANLINE_STRENGTH) == 0) *out = c->window->scanline_strength();
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0) *out = c->window->audio_enabled();
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) *out = c->window->volume();
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_STATE_SLOT) == 0) *out = c->state_slot;
@@ -330,6 +338,12 @@ int runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int value) {
         *c->internal_resolution = std::clamp(value, 1, int(gba::GbaHighResolutionFrame::kMaxScale));
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_LINEAR_FILTER) == 0)
         c->window->set_linear_filter(value != 0);
+    else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_INTEGER_SCALE) == 0)
+        c->window->set_integer_scale(value != 0);
+    else if (std::strcmp(item->key, GBARECOMP_UI_KEY_SCANLINES) == 0)
+        c->window->set_scanlines(value != 0, c->window->scanline_strength());
+    else if (std::strcmp(item->key, GBARECOMP_UI_KEY_SCANLINE_STRENGTH) == 0)
+        c->window->set_scanlines(c->window->scanlines(), value);
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_AUDIO) == 0)
         c->window->set_audio_enabled(value != 0);
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0)
@@ -847,6 +861,7 @@ constexpr std::string_view kCliValueFlags[] = {
     "--dump-png",    "--load-state",    "--dump-state",    "--view-width",    "--widescreen",
     "--save",        "--save-path",     "--gyro-sensitivity",
     "--sharp-filter", "--linear-filter", "--affine-filter", "--internal-resolution", "--screen",
+    "--integer-scale", "--scanlines", "--scanline-strength",
     "--volume",      "--replay-diagnostic", "--state-dir",
 };
 
@@ -1120,6 +1135,20 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
                 if (err) *err = "invalid --volume value (expected 0..100)";
                 return false;
             }
+            continue;
+        }
+        if (s == "--integer-scale" || s == "--scanlines" || s == "--scanline-strength") {
+            const char* v = need_value(s.c_str());
+            if (!v) return false;
+            int value = 0;
+            const int maximum = s == "--scanline-strength" ? 100 : 1;
+            if (!parse_int(v, &value) || value < 0 || value > maximum) {
+                if (err) *err = "invalid " + s + " value (expected 0.." + std::to_string(maximum) + ")";
+                return false;
+            }
+            if (s == "--integer-scale") args->integer_scale = value != 0;
+            else if (s == "--scanlines") args->scanlines = value != 0;
+            else args->scanline_strength = value;
             continue;
         }
         if (s == "--linear-filter") {
@@ -3249,6 +3278,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             runtime_shutdown();
             return 1;
         }
+        win.set_integer_scale(args.integer_scale);
+        win.set_scanlines(args.scanlines, args.scanline_strength);
 #if defined(GBARECOMP_GPU_HD_EXPERIMENT)
         if (args.internal_resolution > 1)
             ppu.set_deferred_hd_rendering(win.hd_jobs_available());
@@ -3407,10 +3438,23 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 RECOMP_RUNTIME_UI_STANDARD_SAVE_STATE |
                 RECOMP_RUNTIME_UI_STANDARD_LOAD_STATE;
         }
-        // INTEGER_SCALE is deliberately absent: HostWindow::adjust_scale only
-        // ever produces integer scales (clamped 1..8), so there is no
-        // fractional mode for a toggle to switch off. Offering one would
-        // advertise a choice the presentation path cannot make.
+        runtime_ui_config.features |= RECOMP_RUNTIME_UI_STANDARD_INTEGER_SCALE;
+        RecompRuntimeUiItem scanlines_item{};
+        scanlines_item.key = GBARECOMP_UI_KEY_SCANLINES;
+        scanlines_item.section = "Graphics";
+        scanlines_item.label = "Scanlines";
+        scanlines_item.description = "Darken half of each scanline when the image is at least 2x its logical height.";
+        scanlines_item.type = RECOMP_RUNTIME_UI_BOOL;
+        runtime_ui_extras.push_back(scanlines_item);
+        RecompRuntimeUiItem strength_item{};
+        strength_item.key = GBARECOMP_UI_KEY_SCANLINE_STRENGTH;
+        strength_item.section = "Graphics";
+        strength_item.label = "Scanline strength";
+        strength_item.type = RECOMP_RUNTIME_UI_INT;
+        strength_item.minimum = 0;
+        strength_item.maximum = 100;
+        strength_item.step = 5;
+        runtime_ui_extras.push_back(strength_item);
 #if !defined(__ANDROID__)
         runtime_ui_config.features |=
             RECOMP_RUNTIME_UI_STANDARD_FULLSCREEN |

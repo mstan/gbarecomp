@@ -102,6 +102,11 @@ public:
     int  window_scale() const;
     void set_linear_filter(bool enabled);
     bool linear_filter() const;
+    void set_integer_scale(bool enabled);
+    bool integer_scale() const;
+    void set_scanlines(bool enabled, int strength_pct = 35);
+    bool scanlines() const;
+    int scanline_strength() const;
     // The player's enhanced-audio (MP2K shadow) choice, remembered in
     // config.ini [Audio] next to [Touch]. saved_audio_enhanced() returns
     // false until the player has chosen.

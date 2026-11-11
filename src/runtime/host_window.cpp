@@ -25,6 +25,7 @@
 #include "hd_gpu_renderer.h"
 #include "host_overlay.h"
 #include "presentation_layout.h"
+#include "presentation_settings.h"
 #include "touch_input.h"
 #if defined(GBARECOMP_RUNTIME_UI)
 #include "recomp_runtime_ui.h"
@@ -489,6 +490,10 @@ struct Backend {
     bool resize_driven_view = false;
     bool freely_resizable_window = false;
     bool linear_filter = false;
+    bool integer_scale = false;
+    bool scanlines = false;
+    int scanline_strength = 35;
+    std::string launcher_config_path;
     bool sharp_filter = false;
 
     // ---- rebindable input (see HostWindow::load_input_config) --------------
@@ -1605,6 +1610,8 @@ PresentationLayout current_presentation_layout(Backend* b, int* out_w, int* out_
             : compute_presentation_layout(drawable_w, drawable_h, b->base_w, b->base_h);
     }
 #endif
+    if (b->integer_scale)
+        layout = compute_integer_presentation_layout(drawable_w, drawable_h, b->base_w, b->base_h);
     // Portrait top anchoring (per-present game request): the image hugs the
     // top safe edge so host-drawn controls get all of the space below it.
 #if defined(__ANDROID__)
@@ -1612,7 +1619,7 @@ PresentationLayout current_presentation_layout(Backend* b, int* out_w, int* out_
 #else
     // The fixed native desktop path presents through SDL's logical size,
     // which always centres; only explicit-destination paths can anchor.
-    const bool explicit_destination = b->expanded_view || b->resize_driven_view;
+    const bool explicit_destination = b->expanded_view || b->resize_driven_view || b->integer_scale;
 #endif
     if (explicit_destination && b->anchor_top && drawable_h > drawable_w &&
         layout.height > 0 && layout.height < drawable_h) {
@@ -2114,7 +2121,7 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     SDL_SetTextureScaleMode(
         b->texture,
-        b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+        b->linear_filter && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
 
 #if defined(GBARECOMP_RUNTIME_UI)
@@ -2555,7 +2562,7 @@ bool HostWindow::set_surface_size(int base_w, int base_h) {
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     SDL_SetTextureScaleMode(
         replacement,
-        b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+        b->linear_filter && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
     SDL_DestroyTexture(b->texture);
     destroy_sharp_texture(b);
@@ -2568,7 +2575,7 @@ bool HostWindow::set_surface_size(int base_w, int base_h) {
     // A live Display choice can cross between SDL's native logical viewport
     // and the explicit wide destination. Reset both coordinate systems, or
     // Native -> 16:9 draws drawable coordinates through the old 240x160 scale.
-    const bool explicit_view = b->expanded_view || b->resize_driven_view;
+    const bool explicit_view = b->expanded_view || b->resize_driven_view || b->integer_scale;
     SDL_RenderSetLogicalSize(b->renderer, explicit_view ? 0 : base_w, explicit_view ? 0 : base_h);
     if (explicit_view) SDL_RenderSetViewport(b->renderer, nullptr);
     SDL_SetWindowResizable(b->window,
@@ -2632,7 +2639,7 @@ bool HostWindow::present_hd(const gba::GbaHighResolutionFrame::DrawFrame& frame)
     SDL_Texture* texture = b->hd_gpu->render(frame,b->color_lut.get());
     if (!texture) return false;
 #if SDL_VERSION_ATLEAST(2,0,12)
-    SDL_SetTextureScaleMode(texture,b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+    SDL_SetTextureScaleMode(texture,b->linear_filter && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
     b->resident_frame = texture;
     present(nullptr,frame.width*frame.scale,frame.height*frame.scale);
@@ -2664,7 +2671,7 @@ bool HostWindow::present_native(const std::shared_ptr<const gba::GbaNativeDrawFr
     auto* texture=b->hd_gpu->native_display(b->color_lut.get());
     if(!texture)return false;
 #if SDL_VERSION_ATLEAST(2,0,12)
-    SDL_SetTextureScaleMode(texture,b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+    SDL_SetTextureScaleMode(texture,b->linear_filter && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
     b->resident_frame=texture;
     present(nullptr,240,160);
@@ -2707,7 +2714,7 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
             if (replacement) {
                 SDL_SetTextureBlendMode(replacement, SDL_BLENDMODE_NONE);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
-                SDL_SetTextureScaleMode(replacement, b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+                SDL_SetTextureScaleMode(replacement, b->linear_filter && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
                 SDL_DestroyTexture(b->texture); destroy_sharp_texture(b);
                 b->texture = replacement;
@@ -2828,7 +2835,7 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
     const SDL_Rect destination{layout.x, layout.y, layout.width, layout.height};
     SDL_RenderCopy(b->renderer, frame_texture, nullptr, &destination);
 #else
-    if (!b->expanded_view && !b->resize_driven_view) {
+    if (!b->expanded_view && !b->resize_driven_view && !b->integer_scale) {
         SDL_RenderCopy(b->renderer, frame_texture, nullptr, nullptr);
     } else {
         if (layout.width > 0 && layout.height > 0) {
@@ -2864,6 +2871,25 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
         }
     }
 #endif
+    // Present-time CRT-style bands never alter the guest framebuffer or HD
+    // readback. At less than 2x there is no room for a dark half-scanline.
+    if (b->scanlines && b->scanline_strength > 0 && layout.height >= b->base_h * 2) {
+        int logical_w = 0, logical_h = 0;
+        SDL_RenderGetLogicalSize(b->renderer, &logical_w, &logical_h);
+        SDL_RenderSetLogicalSize(b->renderer, 0, 0);
+        SDL_RenderSetViewport(b->renderer, nullptr);
+        SDL_SetRenderDrawBlendMode(b->renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(b->renderer, 0, 0, 0,
+            static_cast<Uint8>(b->scanline_strength * 255 / 100));
+        for (int y = 0; y < b->base_h; ++y) {
+            const int top = layout.y + (2 * y + 1) * layout.height / (2 * b->base_h);
+            const int bottom = layout.y + (y + 1) * layout.height / b->base_h;
+            const SDL_Rect band{layout.x, top, layout.width, bottom - top};
+            SDL_RenderFillRect(b->renderer, &band);
+        }
+        SDL_SetRenderDrawBlendMode(b->renderer, SDL_BLENDMODE_NONE);
+        SDL_RenderSetLogicalSize(b->renderer, logical_w, logical_h);
+    }
     render_host_layers(b);
     // MC-WS-002: time the present itself (vsync blocks here — or doesn't)
     // and stamp the DWM refresh counter into the cadence ring.
@@ -2904,6 +2930,7 @@ void HostWindow::load_input_config(const char* dir,
     b->assist_fast_forward_multiplier = std::clamp(
         fast_forward_multiplier_default, 2, 10);
     const std::string config_path=(std::filesystem::path(dir)/(config_filename&&config_filename[0]?config_filename:"config.ini")).string();
+    b->launcher_config_path = config_path;
     const std::string keybinds_path=(std::filesystem::path(dir)/(keybinds_filename&&keybinds_filename[0]?keybinds_filename:"keybinds.ini")).string();
 #if defined(GBARECOMP_GBA_PAD_BINDS)
     b->input_config_dir=dir;load_controller_bindings(b);
@@ -3051,12 +3078,47 @@ void HostWindow::set_linear_filter(bool enabled) {
     b->linear_filter = enabled;
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     SDL_SetTextureScaleMode(b->texture,
-        enabled ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+        enabled && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
 }
 
 bool HostWindow::linear_filter() const {
     return open_ && impl_ && static_cast<const Backend*>(impl_)->linear_filter;
+}
+
+void HostWindow::set_integer_scale(bool enabled) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    b->integer_scale = enabled;
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_SetTextureScaleMode(b->texture, b->linear_filter && !enabled ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
+    save_presentation_settings(b->launcher_config_path, b->integer_scale, b->scanlines, b->scanline_strength);
+#if !defined(__ANDROID__)
+    const bool explicit_view = b->expanded_view || b->resize_driven_view || enabled;
+    SDL_RenderSetLogicalSize(b->renderer, explicit_view ? 0 : b->base_w, explicit_view ? 0 : b->base_h);
+    SDL_RenderSetViewport(b->renderer, nullptr);
+#endif
+}
+
+bool HostWindow::integer_scale() const {
+    return open_ && impl_ && static_cast<const Backend*>(impl_)->integer_scale;
+}
+
+void HostWindow::set_scanlines(bool enabled, int strength_pct) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    b->scanlines = enabled;
+    b->scanline_strength = std::clamp(strength_pct, 0, 100);
+    save_presentation_settings(b->launcher_config_path, b->integer_scale, b->scanlines, b->scanline_strength);
+}
+
+bool HostWindow::scanlines() const {
+    return open_ && impl_ && static_cast<const Backend*>(impl_)->scanlines;
+}
+
+int HostWindow::scanline_strength() const {
+    return open_ && impl_ ? static_cast<const Backend*>(impl_)->scanline_strength : 35;
 }
 
 void HostWindow::set_audio_enabled(bool enabled) {
@@ -3076,7 +3138,7 @@ void HostWindow::set_resize_driven_view(bool enabled) {
     auto* b = static_cast<Backend*>(impl_);
     b->resize_driven_view = enabled;
 #if !defined(__ANDROID__)
-    const bool explicit_view = b->expanded_view || enabled;
+    const bool explicit_view = b->expanded_view || enabled || b->integer_scale;
     SDL_RenderSetLogicalSize(b->renderer, explicit_view ? 0 : b->base_w, explicit_view ? 0 : b->base_h);
     if (explicit_view) SDL_RenderSetViewport(b->renderer, nullptr);
 #endif
@@ -3760,6 +3822,11 @@ int  HostWindow::volume() const { return 100; }
 int  HostWindow::window_scale() const { return 1; }
 void HostWindow::set_linear_filter(bool /*enabled*/) {}
 bool HostWindow::linear_filter() const { return false; }
+void HostWindow::set_integer_scale(bool) {}
+bool HostWindow::integer_scale() const { return false; }
+void HostWindow::set_scanlines(bool, int) {}
+bool HostWindow::scanlines() const { return false; }
+int HostWindow::scanline_strength() const { return 35; }
 bool HostWindow::saved_audio_enhanced(bool& /*enabled*/) const { return false; }
 void HostWindow::save_audio_enhanced(bool /*enabled*/) {}
 void HostWindow::set_audio_enabled(bool /*enabled*/) {}

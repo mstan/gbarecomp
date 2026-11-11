@@ -68,6 +68,21 @@ inline PresentationLayout compute_adaptive_presentation_layout(int drawable_widt
     return {(drawable_width - width) / 2, (drawable_height - height) / 2, width, height, scale};
 }
 
+// Integer fit never crops the game. Small windows retain a proportional
+// downscale because no whole logical pixel multiple fits there.
+inline PresentationLayout compute_integer_presentation_layout(int drawable_width,
+                                                               int drawable_height,
+                                                               int logical_width,
+                                                               int logical_height) {
+    if (drawable_width <= 0 || drawable_height <= 0 || logical_width <= 0 || logical_height <= 0)
+        return {};
+    const int scale = std::min(drawable_width / logical_width, drawable_height / logical_height);
+    if (scale < 1)
+        return compute_adaptive_presentation_layout(drawable_width, drawable_height, logical_width, logical_height);
+    const int width = logical_width * scale, height = logical_height * scale;
+    return {(drawable_width - width) / 2, (drawable_height - height) / 2, width, height, scale};
+}
+
 // Map a drawable-space point (physical pixels, origin at the drawable's top
 // left) into the logical framebuffer shown by `layout`. Coordinates are
 // continuous: logical pixel (3, 5) spans [3,4) x [5,6). Returns true when the

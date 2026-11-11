@@ -1545,4 +1545,13 @@ if(GBARECOMP_SDL2_OK AND EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/consoles/gba/g
     add_test(NAME gba_controller_menu_contract COMMAND gba_controller_menu_contract_tests
         "${CMAKE_CURRENT_BINARY_DIR}/controller-contract-fixture")
     set_tests_properties(gba_controller_menu_contract PROPERTIES SKIP_RETURN_CODE 77)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
+        add_executable(gba_display_contract_tests tests/host_input/display_contract.cpp
+            tools/bios_smoke/dispatch_stub.cpp)
+        target_link_gbarecomp_runtime_stack(gba_display_contract_tests)
+        recomp_target_launcher_ui(gba_display_contract_tests CONSOLE gba)
+        target_link_options(gba_display_contract_tests PRIVATE "-Wl,--wrap=SDL_RenderPresent")
+        add_test(NAME gba_display_contract COMMAND gba_display_contract_tests
+            "${CMAKE_CURRENT_BINARY_DIR}/display-contract-fixture")
+    endif()
 endif()
