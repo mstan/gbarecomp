@@ -68,6 +68,7 @@ struct SaveSignature {
 // match logic returns the first signature seen.
 constexpr SaveSignature kSaveSignatures[] = {
     { "EEPROM_V",   SaveType::EEPROM   },
+    { "SRAM_F_V",   SaveType::SRAM     },
     { "SRAM_V",     SaveType::SRAM     },
     { "FLASH1M_V",  SaveType::Flash1M  },
     { "FLASH512_V", SaveType::Flash512 },

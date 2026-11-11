@@ -16,7 +16,7 @@
 //   0x0BE..0x0BF  Reserved (zero)
 //
 // The save chip is detected by scanning the cartridge ROM for one of
-// the documented Nintendo SDK signatures: "EEPROM_V", "SRAM_V",
+// the documented Nintendo SDK signatures: "EEPROM_V", "SRAM_V", "SRAM_F_V",
 // "FLASH_V", "FLASH512_V", "FLASH1M_V".
 
 #pragma once
