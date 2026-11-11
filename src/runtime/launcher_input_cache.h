@@ -21,24 +21,29 @@ inline std::string read_single_line(const std::string& path) {
 inline void write_single_line(const std::string& path, const std::string& value) {
     if (value.empty()) return;
     std::string stored = value;
-    // The launcher receives an absolute seed even when the player deliberately
-    // saved a relative input path. Keep that spelling on an unchanged commit,
-    // so the next launch can still relocate with the package.
+    // Inputs inside the package travel with it, including a first Browse
+    // selection. External inputs keep their absolute location. Retain an
+    // explicit relative spelling when it still names the same selected file.
     try {
         const std::string previous = read_single_line(path);
         const std::filesystem::path old(previous);
+        const auto base = std::filesystem::weakly_canonical(
+            std::filesystem::absolute(std::filesystem::path(path).parent_path()));
+        auto selected = std::filesystem::path(value);
+        if (selected.is_relative()) selected = base / selected;
+        std::error_code ec;
+        bool preserved = false;
         if (!previous.empty() && old.is_relative()) {
-            const auto base = std::filesystem::path(path).parent_path();
-            auto selected = std::filesystem::path(value);
-            if (selected.is_relative()) selected = base / selected;
-            std::error_code ec;
-            if (std::filesystem::exists(base / old, ec) && !ec) {
-                const auto before = std::filesystem::weakly_canonical(base / old, ec);
-                if (!ec) {
-                    const auto after = std::filesystem::weakly_canonical(selected, ec);
-                    if (!ec && before == after) stored = previous;
-                }
-            }
+            preserved = std::filesystem::equivalent(base / old, selected, ec) && !ec;
+            if (preserved) stored = previous;
+        }
+        if (!preserved) {
+            ec.clear();
+            const auto canonical = std::filesystem::weakly_canonical(selected, ec);
+            const auto relative = ec ? std::filesystem::path{} : canonical.lexically_relative(base);
+            const bool contained = !relative.empty() && relative.is_relative() &&
+                *relative.begin() != "..";
+            stored = contained ? relative.generic_string() : selected.lexically_normal().string();
         }
     } catch (const std::filesystem::filesystem_error&) {
         // A path the host cannot inspect retains the original write behavior.

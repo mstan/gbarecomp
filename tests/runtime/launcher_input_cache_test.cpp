@@ -33,10 +33,12 @@ int main(int argc, char** argv) {
         for (const char* name : {"rom.cfg", "bios.cfg"}) {
             const auto cache = root / name;
             put(root / "inputs" / name, "synthetic input");
-            put(cache, std::string("inputs/") + name + "\r\n");
             write_single_line(cache.string(), fs::canonical(root / "inputs" / name).string());
             require(read_single_line(cache.string()) == std::string("inputs/") + name,
-                    "unchanged launcher selection made relative cache absolute");
+                    "first internal selection was not portable");
+            write_single_line(cache.string(), fs::canonical(root / "inputs" / name).string());
+            require(read_single_line(cache.string()) == std::string("inputs/") + name,
+                    "unchanged relative input became absolute");
         }
         // Move the complete package to another parent (G: -> C: in Windows QA).
         const auto moved = target.path / "package";
@@ -52,14 +54,23 @@ int main(int argc, char** argv) {
         const auto cache = root / "rom.cfg";
         const auto other = root / "other.bin"; put(other, "new input");
         write_single_line(cache.string(), other.string());
-        require(read_single_line(cache.string()) == other.string(), "new selection was discarded");
+        require(read_single_line(cache.string()) == "other.bin", "new internal selection was not portable");
         write_single_line(cache.string(), other.string());
-        require(read_single_line(cache.string()) == other.string(), "absolute choice was rewritten");
+        require(read_single_line(cache.string()) == "other.bin", "unchanged internal choice was discarded");
         write_single_line(cache.string(), "");
-        require(read_single_line(cache.string()) == other.string(), "empty choice erased cache");
+        require(read_single_line(cache.string()) == "other.bin", "empty choice erased cache");
         put(cache, "missing.bin\n");
         write_single_line(cache.string(), other.string());
-        require(read_single_line(cache.string()) == other.string(), "stale relative selection won");
+        require(read_single_line(cache.string()) == "other.bin", "stale relative selection won");
+        const auto external = source.path / "external.bin"; put(external, "outside package");
+        write_single_line(cache.string(), external.string());
+        require(fs::path(read_single_line(cache.string())).is_absolute() &&
+                fs::equivalent(read_single_line(cache.string()), external), "external input lost its selected location");
+#if defined(_WIN32)
+        put(cache, "INPUTS/ROM.CFG\n");
+        write_single_line(cache.string(), (root / "inputs" / "rom.cfg").string());
+        require(read_single_line(cache.string()) == "INPUTS/ROM.CFG", "case-insensitive equivalent selection lost spelling");
+#endif
         std::puts("input caches preserve relative selections across relocation");
         return 0;
     } catch (const std::exception& error) {
