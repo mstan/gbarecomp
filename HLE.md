@@ -62,3 +62,12 @@ math call. The selection enters source compatibility identity; mixed builds
 are not qualified peers. The inherited nominal timing model remains approximate.
 Original-BIOS caller tests and actual matched game behavior/cost qualification
 are required before adopting this package; merely compiling it is not a gain.
+
+`GBARECOMP_GEN3_UI_IMPLEMENTATION=HLE|LLE` selects the Gen III relocated-menu
+snapshot compositor when configuring a consuming title. HLE prepares the two
+required layer variants together, sharing native tile/OBJ/window samples and
+writing only their affected source rectangles. LLE keeps the original private
+PPU and full UI/world rasters. Both consume the same frame-start snapshot;
+neither path advances guest time or modifies native saves. Unsupported layouts
+and foreign presentation keep the original operation. This implementation
+selection does not enable the optional view feature or add a player setting.

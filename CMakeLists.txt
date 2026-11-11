@@ -587,6 +587,11 @@ if(GBARECOMP_RUNTIME_UI_ROOT AND
             GBARECOMP_MOD_UI=1)
     endif()
     if(GBARECOMP_SDL2_OK)
+        if(EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/consoles/gba/gba_pad_binds.h")
+            target_sources(gbarecomp_runtime PRIVATE
+                "${GBARECOMP_RUNTIME_UI_ROOT}/src/common/pad_binds.c")
+            target_compile_definitions(gbarecomp_runtime PRIVATE GBARECOMP_GBA_PAD_BINDS=1)
+        endif()
         # The runtime owns the SDL_Renderer2 adapter; the game's existing
         # game_launcher_ui target supplies the one shared ImGui core and SDL2
         # platform backend. The central helper is idempotent, preventing
@@ -1352,6 +1357,11 @@ target_include_directories(ppu_smoke_tests PRIVATE src/runtime src/debug)
 target_link_libraries(ppu_smoke_tests PRIVATE gbarecomp_gba)
 gbarecomp_target_link_host_stack(ppu_smoke_tests PRIVATE)
 add_test(NAME ppu_smoke_tests COMMAND ppu_smoke_tests)
+add_executable(ui_layer_tests tests/ppu/ui_layers_test.cpp)
+target_include_directories(ui_layer_tests PRIVATE src/runtime src/debug)
+target_link_libraries(ui_layer_tests PRIVATE gbarecomp_gba)
+gbarecomp_target_link_host_stack(ui_layer_tests PRIVATE)
+add_test(NAME ui_layer_tests COMMAND ui_layer_tests)
 
 add_executable(ppu_text_span_tests tests/ppu/text_span_contract.cpp)
 target_link_libraries(ppu_text_span_tests PRIVATE gbarecomp_gba)
@@ -1521,3 +1531,13 @@ configure_file(
     ${CMAKE_CURRENT_BINARY_DIR}/runtime.cmake
     @ONLY
 )
+
+if(GBARECOMP_SDL2_OK AND EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/consoles/gba/gba_pad_binds.h")
+    add_executable(gba_controller_menu_contract_tests tests/host_input/controller_menu_contract.cpp
+        tools/bios_smoke/dispatch_stub.cpp)
+    target_link_gbarecomp_runtime_stack(gba_controller_menu_contract_tests)
+    recomp_target_launcher_ui(gba_controller_menu_contract_tests CONSOLE gba)
+    add_test(NAME gba_controller_menu_contract COMMAND gba_controller_menu_contract_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/controller-contract-fixture")
+    set_tests_properties(gba_controller_menu_contract PROPERTIES SKIP_RETURN_CODE 77)
+endif()

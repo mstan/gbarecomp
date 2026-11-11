@@ -1,6 +1,7 @@
 #include "ui_view.h"
 #include <algorithm>
 #include "gba_ppu.h"
+#include "gba_ui_layers.h"
 #include <memory>
 #include <cstring>
 
@@ -124,6 +125,41 @@ int UiView::sample(int bg, int x, int y, int* sx, int* sy) const {
 }
 
 void UiView::compose(const ViewMemory& m, unsigned cnt) {
+#if defined(GBARECOMP_GEN3_UI_HLE)
+    {
+    // Both results observe this same frame-start input. No PPU is constructed
+    // and no full original image is rendered underneath an admitted job.
+    std::array<gba::GbaUiLayerJob::Rect, 32> regions;
+    for (int i = 0; i < count_; ++i) {
+        const auto& r = windows_[i];
+        regions[i] = {r.x, r.y, r.w, r.h};
+    }
+    gba::GbaUiLayerJob job{
+        {m.io, 0x400}, {m.vram, 0x18000}, {m.oam, 0x400}, {m.pal, 0x400},
+        {regions.data(), static_cast<std::size_t>(count_)}};
+    job.world_hidden_layers = 1; // BG0 belongs to the relocated UI.
+    job.world_obj_window = false;
+    const auto* ids = m.bytes(m.profile->cursor_sprites, 2);
+    if (ids) for (int i = 0; i < 2; ++i) {
+        if (ids[i] >= 64) continue;
+        const auto address = m.profile->sprites + ids[i] * 68;
+        const auto* sprite = m.bytes(address, 68);
+        if (!sprite || !(sprite[62] & 1)) continue;
+        const auto tag = m.u16(m.u32(address + 20));
+        if (tag != 0xFFF0 && tag != 0xFFF1) continue;
+        const unsigned base = m.u16(address + 64), palette = u16(sprite + 4) >> 12;
+        for (unsigned n = 0; n < job.world_disable.size(); ++n) {
+            const auto a2 = u16(m.oam + n * 8 + 4);
+            if ((a2 >> 12) == palette && (a2 & 1023) >= base && (a2 & 1023) < base + 14)
+                job.world_disable[n] = true;
+        }
+    }
+    if (gba::render_ui_layers(job, {native_ui_, native_world_, opaque_})) {
+        composed_ = true;
+        return;
+    }
+    }
+#endif
     // R/S uses normal and OBJ-window sprites for the outline cursor. Sample
     // the faithful native compositor so both sprites and their stencil move
     // with the live window, including in portrait. Only host buffers change.

@@ -25,16 +25,19 @@ def main():
     p.add_argument("--toolchain", type=Path)
     p.add_argument("--portrait-only", action="store_true", help="Run the three narrow-window cases")
     p.add_argument("--ui-center",type=int,help="Native Start-window center Y; verify relocated live text and cursor")
+    p.add_argument("--fresh-default",action="store_true",help="Use the catalog defaults for the first Fit case")
     args=p.parse_args()
     root=args.output; root.mkdir(parents=True,exist_ok=True)
     exe=root/args.exe.name
     shutil.copy2(args.exe,exe)
     for dll in args.exe.parent.glob("*.dll"):shutil.copy2(dll,root/dll.name)
+    if (args.exe.parent/"assets").is_dir():
+        shutil.copytree(args.exe.parent/"assets",root/"assets",dirs_exist_ok=True)
     shutil.copytree(args.catalog,root/"mods",dirs_exist_ok=True)
     env=os.environ.copy()
     for key in list(env):
         if key.startswith("GBARECOMP_"):del env[key]
-    env.update(GBARECOMP_STRICT_STATIC="1", RECOMP_RTC_EPOCH="1789261200", SDL_RENDER_DRIVER="software", SDL_AUDIODRIVER="dummy", GBARECOMP_DIAGNOSTICS="0", TEMP=str(root), TMP=str(root))
+    env.update(GBARECOMP_STRICT_STATIC="1", RECOMP_RTC_EPOCH="1789261200", SDL_RENDER_DRIVER="software", SDL_AUDIODRIVER="dummy", GBARECOMP_DIAGNOSTICS="0", GBARECOMP_WINDOW_HIDDEN="1", TEMP=str(root), TMP=str(root))
     if args.toolchain:env["PATH"]=str(args.toolchain)+os.pathsep+env["PATH"]
     user=C.WinDLL("user32",use_last_error=True)
     user.SetProcessDPIAware()
@@ -83,6 +86,8 @@ enabled = true
 [feature.values]
 aspect = "{aspect}"
 ''')
+        if args.fresh_default and index == 0:
+            (root/"mods"/"state.toml").unlink()
         shot=root/f"resize-{index}.png"
         with (root/f"resize-{index}.log").open("w") as log:
             process=subprocess.Popen([str(exe),"--bios",str(args.bios),"--rom",str(args.rom),
@@ -118,6 +123,7 @@ aspect = "{aspect}"
                 if process.poll() is None:process.terminate();process.wait(timeout=10)
         actual=struct.unpack(">II",shot.read_bytes()[16:24])
         result=dict(aspect=aspect,requested=[width,height],client=[client.right,client.bottom],scanout=list(actual),expected=expected)
+        if args.fresh_default and index == 0:result["fresh_defaults"]=True
         results.append(result)
         if actual!=(expected,expected_height):raise AssertionError(result)
         from PIL import Image
