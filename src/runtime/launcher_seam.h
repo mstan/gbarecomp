@@ -308,6 +308,9 @@ struct SeamConfig {
     int  scale = 3;
     int  fullscreen = 0;
     int  linear_filter = 0;
+    int  integer_scale = 0;
+    int  scanlines = 0;
+    int  scanline_strength = 35;
     int  sharp_filter = -1;
     int  affine_filter = -1;
     int  screen_kind = 0;      // kScreenTokens index
@@ -360,6 +363,9 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
         if (key == "scale")         c->scale = std::atoi(val.c_str());
         else if (key == "fullscreen")    c->fullscreen = std::atoi(val.c_str());
         else if (key == "linear_filter") c->linear_filter = std::atoi(val.c_str());
+        else if (key == "integer_scale") c->integer_scale = std::atoi(val.c_str()) != 0;
+        else if (key == "scanlines") c->scanlines = std::atoi(val.c_str()) != 0;
+        else if (key == "scanline_strength") c->scanline_strength = std::clamp(std::atoi(val.c_str()), 0, 100);
         else if (key == "sharp_filter") c->sharp_filter = std::atoi(val.c_str());
         else if (key == "affine_filter") c->affine_filter = std::atoi(val.c_str());
         else if (key == "screen")        c->screen_kind = screen_token_to_index(val);
@@ -433,6 +439,9 @@ inline void seam_config_save(const std::string& path, const SeamConfig& c) {
     f << "scale = " << c.scale << "\n";
     f << "fullscreen = " << c.fullscreen << "\n";
     f << "linear_filter = " << c.linear_filter << "\n";
+    f << "integer_scale = " << c.integer_scale << "\n";
+    f << "scanlines = " << c.scanlines << "\n";
+    f << "scanline_strength = " << c.scanline_strength << "\n";
     f << "sharp_filter = " << c.sharp_filter << "\n";
     f << "affine_filter = " << c.affine_filter << "\n";
     f << "screen = " << kScreenTokens[c.screen_kind] << "\n";
@@ -565,6 +574,9 @@ inline void seam_append_setting_args(std::vector<std::string>& args,
     args.push_back(std::to_string(c.volume));
     args.push_back("--linear-filter");
     args.push_back(c.linear_filter ? "1" : "0");
+    args.insert(args.end(), {"--integer-scale", c.integer_scale ? "1" : "0",
+                            "--scanlines", c.scanlines ? "1" : "0",
+                            "--scanline-strength", std::to_string(c.scanline_strength)});
     if (opts.launcher_expose_sharp_filter) {
         args.push_back("--sharp-filter");
         args.push_back(c.sharp_filter ? "1" : "0");
@@ -632,16 +644,34 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     using namespace gbarecomp_seam;
 
     // ---- skip decisions -----------------------------------------------------
+    int launcher_mode = 0; // default/show/skip, matching recomp-ui's ABI
     bool force_launcher = false;
     bool skip_once = false;
     bool headless = false;
+#if defined(RECOMP_LAUNCHER_HAS_LAUNCH_OPTIONS)
+    {
+        std::vector<char*> argv;
+        for (auto& arg : args) argv.push_back(arg.data());
+        argv.push_back(nullptr);
+        int argc = static_cast<int>(args.size());
+        launcher_mode = recomp_launcher_parse_cli_args(&argc, argv.data());
+        std::vector<std::string> filtered;
+        for (int i = 0; i < argc; ++i) filtered.emplace_back(argv[i]);
+        args.swap(filtered);
+    }
+    recomp_launcher_set_game_version(opts.launcher_game_version);
+#endif
     {
         std::vector<std::string> filtered;
         filtered.reserve(args.size());
         for (size_t i = 0; i < args.size(); ++i) {
             const std::string& s = args[i];
-            if (i > 0 && s == "--launcher")    { force_launcher = true; continue; }
-            if (i > 0 && s == "--no-launcher") { skip_once = true; continue; }
+            if (i > 0 && s == "--") {
+                filtered.insert(filtered.end(), args.begin() + i, args.end());
+                break;
+            }
+            if (i > 0 && s == "--launcher")    { launcher_mode = 1; continue; }
+            if (i > 0 && s == "--no-launcher") { launcher_mode = 2; continue; }
             if (i > 0 && (s == "--tcp" || s == "--steps" || s == "--frames" ||
                           s == "--no-window" || s == "--dump-bmp" ||
                           s == "--dump-png" || s == "--load-state" ||
@@ -652,12 +682,14 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         }
         args.swap(filtered);
     }
+    force_launcher = launcher_mode == 1;
+    skip_once = launcher_mode == 2;
     if (const char* env = std::getenv("GBARECOMP_NO_LAUNCHER"))
         if (env[0] && env[0] != '0') skip_once = true;
     // An explicit --launcher forces the UI even for scripted-looking runs
     // (wrappers that always pass --rom read as headless below); without
     // it, any headless flag skips the launcher silently.
-    if ((headless && !force_launcher) || (skip_once && !force_launcher) || (opts.netplay && opts.netplay->enabled)) return 0;
+    if ((headless && !force_launcher) || (opts.netplay && opts.netplay->enabled)) return 0;
 
     const std::string dir = exe_dir(args);
     const auto state_path = [&](const char* filename,
@@ -702,7 +734,14 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
             opts.assist_fast_forward_multiplier_default, 2, 10);
     SeamSolar solar;
     if (opts.has_solar_sensor) seam_solar_load(config_path, &solar);
-    if (cfg.skip_launcher && !force_launcher &&
+    const bool saved_or_cli_skip =
+#if defined(RECOMP_LAUNCHER_HAS_LAUNCH_OPTIONS)
+        recomp_launcher_cli_should_skip(launcher_mode, cfg.skip_launcher) ||
+        (skip_once && !force_launcher);
+#else
+        (skip_once || cfg.skip_launcher) && !force_launcher;
+#endif
+    if (saved_or_cli_skip &&
         !(opts.launcher_enable_rom_patches && cfg.rom_patch_enabled)) {
         // Boot straight in, but still honor the persisted settings.
         seam_append_setting_args(args, cfg, opts);
@@ -770,6 +809,11 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     ls.window_scale  = cfg.scale;
     ls.fullscreen    = cfg.fullscreen;
     ls.linear_filter = cfg.linear_filter;
+    ls.integer_scale = cfg.integer_scale;
+#if defined(RECOMP_LAUNCHER_HAS_SCANLINES)
+    ls.scanlines = cfg.scanlines;
+    ls.scanline_strength_pct = cfg.scanline_strength;
+#endif
     ls.widescreen    = cfg.widescreen;
     ls.adaptive_view = cfg.adaptive_view;
 #if defined(RECOMP_LAUNCHER_HAS_NETPLAY_VIEW) && defined(RECOMP_UI_HAS_NETPLAY_HOST)
@@ -931,6 +975,11 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     // on every subsequent launch.
     cfg.fullscreen    = (ls.fullscreen >= 0 && ls.fullscreen <= 2) ? ls.fullscreen : 0;
     cfg.linear_filter = ls.linear_filter ? 1 : 0;
+    cfg.integer_scale = ls.integer_scale ? 1 : 0;
+#if defined(RECOMP_LAUNCHER_HAS_SCANLINES)
+    cfg.scanlines = ls.scanlines ? 1 : 0;
+    cfg.scanline_strength = std::clamp(ls.scanline_strength_pct, 0, 100);
+#endif
     cfg.sharp_filter =
         gbarecomp_seam::get_sharp_filter(ls, cfg.sharp_filter != 0) ? 1 : 0;
     cfg.affine_filter =

@@ -434,6 +434,13 @@ CONTROL_SETGET(set_audio_enabled,audio_enabled,audioEnabled,bool,false,v)
 CONTROL_SETGET(set_fps_readout,fps_readout,fps,bool,false,v)
 void HostWindow::set_linear_filter(bool v){if(impl_)backend(impl_)->shared.control.filter=v?1:0;}
 bool HostWindow::linear_filter()const{return impl_&&backend(impl_)->shared.control.filter.load()==1;}
+// Browser presentation uses the page's own controls rather than the desktop
+// launcher/runtime menu. These optional desktop effects are unavailable there.
+void HostWindow::set_integer_scale(bool) {}
+bool HostWindow::integer_scale() const { return false; }
+void HostWindow::set_scanlines(bool, int) {}
+bool HostWindow::scanlines() const { return false; }
+int HostWindow::scanline_strength() const { return 35; }
 void HostWindow::set_resize_driven_view(bool v){if(impl_)backend(impl_)->resize=v;}
 bool HostWindow::assist_tools_enabled()const{return impl_&&backend(impl_)->assist;}
 int HostWindow::fast_forward_multiplier()const{return impl_?backend(impl_)->turbo:4;}
