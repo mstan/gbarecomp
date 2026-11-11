@@ -16,7 +16,7 @@ private:
     bool active_ = false;
     bool composed_ = false;
     std::array<std::uint8_t, 240*160*3> native_ui_{}, native_world_{};
-    std::array<bool, 240*160> opaque_{};
+    std::array<std::uint8_t, 240*160> opaque_{};
     void compose(const ViewMemory& memory, unsigned cnt);
 };
 }

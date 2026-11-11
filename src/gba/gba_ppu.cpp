@@ -2,6 +2,7 @@
 
 #include "gba_ppu.h"
 #include "gba_color.h"
+#include "gba_ui_layers.h"
 #include "gba_render_profile.h"
 #include "foreign_presentation_internal.h"
 #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
@@ -721,7 +722,7 @@ void mark_obj_window_scanline(bool* mask,
     }
 }
 
-template<bool Ordered, bool HardwareOnly = false>
+template<bool Ordered, bool HardwareOnly = false, bool UiDual = false>
 void render_scanline_impl(uint8_t* rgb,
                               uint32_t y,
                               uint16_t dispcnt,
@@ -730,7 +731,10 @@ void render_scanline_impl(uint8_t* rgb,
                               const uint8_t* oam,
                               const uint8_t* pal,
                               uint32_t kScreenWidth,
-                              uint32_t kScreenHeight) {
+                              uint32_t kScreenHeight,
+                              const GbaUiLayerJob* ui_job = nullptr,
+                              const GbaUiLayerOutput* ui_output = nullptr,
+                              const std::array<bool, 240>* ui_needed = nullptr) {
     GBA_RENDER_PHASE_BEGIN(profile, NativePrepare);
     if (y >= kScreenHeight) return;
 
@@ -804,12 +808,37 @@ void render_scanline_impl(uint8_t* rgb,
     for (uint32_t x = 0; x < kScreenWidth; ++x)
         row_control[x] = static_cast<uint8_t>(window_control(x));
 #endif
+    std::array<uint8_t, UiDual ? GbaPpu::kScreenWidth : 1> ui_control{}, world_control{};
+    unsigned ui_variants = 3;
+    bool ui_object_alpha = false;
+    if constexpr (UiDual) {
+        for (unsigned x = 0; x < kScreenWidth; ++x) if ((*ui_needed)[x]) {
+            ui_control[x] = static_cast<uint8_t>(window_control(x));
+            // The world variant has OBJ windows disabled, but preserves the
+            // coordinate-window priority and outside control of the snapshot.
+            world_control[x] = ui_job->world_obj_window ? ui_control[x] :
+                !(win0_en || win1_en) ? 0x3f :
+                win0_row && win_h_in(0x40, x) ? uint8_t(winin & 0x3f) :
+                win1_row && win_h_in(0x42, x) ? uint8_t((winin >> 8) & 0x3f) :
+                uint8_t(winout & 0x3f);
+        }
+    }
     // 0: no opaque candidate; 1: top needs the immediately following layer;
     // 2: final output is known. Jobs are globally ordered before sampling, so
     // completed pixels need no further tile, palette or candidate work.
     uint8_t coverage[GbaPpu::kScreenWidth] = {};
     uint32_t unresolved = kScreenWidth;
     auto layer_enabled = [&](uint32_t x, uint32_t layer_bit) -> bool {
+        if constexpr (UiDual) {
+            if (!(*ui_needed)[x]) return false;
+            // Authored BG0 opacity is needed even when a window or DISPCNT
+            // suppresses its color. Other regular-layer texels outside the
+            // requested regions are skipped.
+            if (layer_bit == 0) return true;
+            return ((ui_variants & 1) && (ui_control[x] & (1u << layer_bit))) ||
+                   ((ui_variants & 2) && !(ui_job->world_hidden_layers & (1u << layer_bit)) &&
+                    (world_control[x] & (1u << layer_bit)));
+        }
         if constexpr (Ordered) if (coverage[x] == 2) return false;
         return (
 #if defined(GBARECOMP_SCANLINE_HLE)
@@ -820,6 +849,7 @@ void render_scanline_impl(uint8_t* rgb,
                 & (1u << layer_bit)) != 0;
     };
     auto blend_enabled = [&](uint32_t x) -> bool {
+        if constexpr (UiDual) return (ui_control[x] & 0x20) != 0;
         return (
 #if defined(GBARECOMP_SCANLINE_HLE)
                 row_control[x]
@@ -837,6 +867,8 @@ void render_scanline_impl(uint8_t* rgb,
 
     PixelCandidate top[GbaPpu::kScreenWidth];
     PixelCandidate second[GbaPpu::kScreenWidth];
+    PixelCandidate world_top[UiDual ? GbaPpu::kScreenWidth : 1];
+    PixelCandidate world_second[UiDual ? GbaPpu::kScreenWidth : 1];
     // This is deliberately a per-layer candidate, not a copy of `top`: a
     // room BG with higher priority may cover the HUD's BG0 cells. Capturing
     // only the explicitly declared source map cells keeps that room terrain
@@ -861,6 +893,11 @@ void render_scanline_impl(uint8_t* rgb,
         top[x].target1 = blend_enabled(x) && ((first_targets & (1u << 5)) != 0);
         top[x].target2 = (second_targets & (1u << 5)) != 0;
         top[x].valid = true;
+        if constexpr (UiDual) {
+            world_top[x] = top[x];
+            world_top[x].target1 = (world_control[x] & 0x20) && (first_targets & 0x20);
+            if ((*ui_needed)[x]) ui_output->bg0_opaque[y * kScreenWidth + x] = 0;
+        }
     }
     auto submit = [&](uint32_t x,
                       uint16_t color,
@@ -878,6 +915,24 @@ void render_scanline_impl(uint8_t* rgb,
         cand.target1 = target1;
         cand.target2 = target2;
         cand.valid = true;
+        if constexpr (UiDual) {
+            auto insert = [](PixelCandidate& first, PixelCandidate& next,
+                             const PixelCandidate& value) {
+                if (value.key < first.key) { next = first; first = value; }
+                else if (value.key < next.key) next = value;
+            };
+            if ((ui_variants & 1) && (ui_control[x] & (1u << layer)) &&
+                (layer >= 4 || (dispcnt & (0x100u << layer))))
+                insert(top[x], second[x], cand);
+            if ((ui_variants & 2) && !(ui_job->world_hidden_layers & (1u << layer)) &&
+                (world_control[x] & (1u << layer)) &&
+                (layer >= 4 || (dispcnt & (0x100u << layer)))) {
+                cand.target1 = (world_control[x] & 0x20) &&
+                    (layer == 4 ? ui_object_alpha : (first_targets & (1u << layer)) != 0);
+                insert(world_top[x], world_second[x], cand);
+            }
+            return;
+        }
         if constexpr (Ordered) {
             if (coverage[x] == 2) return;
             if (coverage[x] == 0) {
@@ -910,7 +965,7 @@ void render_scanline_impl(uint8_t* rgb,
     auto render_regular_bg = [&](uint32_t layer,
                                  uint32_t cnt_off,
                                  uint32_t scroll_off) {
-        if ((dispcnt & (0x0100u << layer)) == 0) return;
+        if ((dispcnt & (0x0100u << layer)) == 0 && !(UiDual && layer == 0)) return;
 
         uint16_t bgcnt = static_cast<uint16_t>(
             io[cnt_off] | (io[cnt_off + 1] << 8));
@@ -959,6 +1014,8 @@ void render_scanline_impl(uint8_t* rgb,
                 if (addr >= 96u * 1024u) continue;
                 const uint8_t packed = vram[addr];
                 uint32_t index = color256 ? packed : ((px & 1u) ? packed >> 4 : packed & 15u);
+                if constexpr (UiDual) if (layer == 0)
+                    ui_output->bg0_opaque[y * kScreenWidth + screen_x] = addr < 0x10000u && index != 0;
                 if (!index) continue;
                 if (!color256) index |= palette_bank << 4;
                 const uint16_t color = load_u16_le(&pal[index * 2]);
@@ -1009,6 +1066,11 @@ void render_scanline_impl(uint8_t* rgb,
                 pal_idx = (px & 1u) ? (packed >> 4) : (packed & 0x0Fu);
                 pal_idx = static_cast<uint8_t>(
                     pal_idx | static_cast<uint8_t>(palette_bank << 4));
+            }
+            if constexpr (UiDual) if (layer == 0) {
+                const unsigned py_mask = (entry & 0x0800u) ? 7u - (tex_y & 7u) : tex_y & 7u;
+                const unsigned offset = char_base + (entry & 1023u) * 32u + py_mask * 4u + px / 2u;
+                ui_output->bg0_opaque[y * kScreenWidth + x] = offset < 0x10000u && (pal_idx & 15u) != 0;
             }
             if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
 
@@ -1267,15 +1329,18 @@ void render_scanline_impl(uint8_t* rgb,
     constexpr uint32_t obj_tile_base = 0x10000u;
     const bool obj_1d_mapping = (dispcnt & 0x0040u) != 0;
     const uint8_t* obj_pal = pal + 0x200;
-    auto render_obj = [&](int idx) {
+    auto render_obj = [&](int idx, unsigned variants = 3, bool double_bounds = false) {
+        if constexpr (UiDual) ui_variants = variants;
         const uint8_t* entry = oam + idx * 8;
         uint16_t attr0 = load_u16_le(&entry[0]);
+        if constexpr (UiDual) if (double_bounds) attr0 |= 0x200u;
         uint16_t attr1 = load_u16_le(&entry[2]);
         uint16_t attr2 = load_u16_le(&entry[4]);
         bool rot_scale = (attr0 & 0x0100u) != 0;
         bool disable_or_double = (attr0 & 0x0200u) != 0;
         if (!rot_scale && disable_or_double) return;
         uint32_t obj_mode = (attr0 >> 10) & 0x3u;
+        if constexpr (UiDual) ui_object_alpha = obj_mode == 1;
         if (obj_mode == 2 || obj_mode == 3) return;
         uint32_t shape = (attr0 >> 14) & 0x3u;
         if (shape >= 3) return;
@@ -1396,7 +1461,16 @@ void render_scanline_impl(uint8_t* rgb,
     };
     if constexpr (!Ordered) {
         if (dispcnt & 0x1000u)
-            for (int idx = 127; idx >= 0; --idx) render_obj(idx);
+            for (int idx = 127; idx >= 0; --idx) {
+                if constexpr (UiDual) {
+                    const auto attr0 = load_u16_le(oam + idx * 8);
+                    const bool changed = ui_job->world_disable[idx] && !(attr0 & 0x200);
+                    render_obj(idx, changed ? 1 : 3);
+                    // Preserve bit-9 semantics even for unusual affine cursor
+                    // pieces; only that changed object needs another sample.
+                    if (changed && (attr0 & 0x100)) render_obj(idx, 2, true);
+                } else render_obj(idx);
+            }
     } else {
         GBA_RENDER_PHASE_MARK(profile, NativeJobs);
         struct DrawJob { int key; int object; unsigned layer; };
@@ -1456,37 +1530,44 @@ void render_scanline_impl(uint8_t* rgb,
     // BLDY brightness coefficient (clamped to 16/16 = full).
     uint32_t bldy = static_cast<uint32_t>(io[0x54] | (io[0x55] << 8)) & 0x1Fu;
     if (bldy > 16u) bldy = 16u;
-    for (uint32_t x = 0; x < kScreenWidth; ++x) {
-        uint8_t* dst = row + x * 3;
+    auto write_pixel = [&](uint8_t* dst, const PixelCandidate& first, const PixelCandidate& next) {
         // Alpha blend top (1st target) with the layer below (2nd target). Per
         // GBATEK this occurs when effect==1 OR top is a semi-transparent OBJ
         // (mode 1 forces alpha regardless of BLDCNT). NOT gated on EVA!=0:
         // EVA=0/EVB=16 is a valid blend (1st target fully fades into the 2nd) â€”
         // the Oak-intro character fade endpoint that previously snapped back to
         // opaque, leaving body/feet (BG2 + semi-transparent OBJ) out of sync.
-        if ((effect == 1 || top[x].layer == 4) &&
-            top[x].target1 && second[x].valid && second[x].target2 &&
-            !(top[x].layer == 4 && second[x].layer == 4)) {
+        if ((effect == 1 || first.layer == 4) &&
+            first.target1 && next.valid && next.target2 &&
+            !(first.layer == 4 && next.layer == 4)) {
             const uint16_t blended = blend_alpha_gba555(
-                top[x].color, second[x].color,
+                first.color, next.color,
                 bldalpha & 0x1Fu, (bldalpha >> 8) & 0x1Fu);
             to_rgb888(blended, dst);
-        } else if ((effect == 2u || effect == 3u) && bldy != 0u && top[x].target1) {
+        } else if ((effect == 2u || effect == 3u) && bldy != 0u && first.target1) {
             // Brightness, like alpha, operates on native GBA channels before
             // RGB888 expansion and observes palette bit 15 as green precision.
             const uint16_t adjusted = effect == 2u
-                ? brighten_gba555(top[x].color, bldy)
-                : darken_gba555(top[x].color, bldy);
+                ? brighten_gba555(first.color, bldy)
+                : darken_gba555(first.color, bldy);
             to_rgb888(adjusted, dst);
         } else {
 #if defined(GBARECOMP_SCANLINE_HLE)
-            to_rgb888(top[x].color, dst);
+            to_rgb888(first.color, dst);
 #else
-            dst[0] = top[x].rgb[0];
-            dst[1] = top[x].rgb[1];
-            dst[2] = top[x].rgb[2];
+            dst[0] = first.rgb[0];
+            dst[1] = first.rgb[1];
+            dst[2] = first.rgb[2];
 #endif
         }
+    };
+    for (uint32_t x = 0; x < kScreenWidth; ++x) {
+        if constexpr (UiDual) {
+            if (!(*ui_needed)[x]) continue;
+            write_pixel(ui_output->world_rgb.data() + (y * kScreenWidth + x) * 3,
+                        world_top[x], world_second[x]);
+        }
+        write_pixel(row + x * 3, top[x], second[x]);
     }
     return;
 }
@@ -2589,6 +2670,47 @@ void render_scanline_wide(uint8_t* rgb, int y, uint16_t dispcnt,
 
 
 }  // namespace
+
+bool render_ui_layers(const GbaUiLayerJob& job, const GbaUiLayerOutput& output) {
+    constexpr unsigned width = 240, height = 160, pixels = width * height;
+    if (job.io.size() < 0x60 || job.vram.size() != 0x18000 ||
+        job.oam.size() != 1024 || job.palette.size() != 1024 ||
+        !job.io.data() || !job.vram.data() || !job.oam.data() || !job.palette.data() ||
+        job.regions.size() > 32 || output.ui_rgb.size() < pixels * 3 ||
+        output.world_rgb.size() < pixels * 3 || output.bg0_opaque.size() < pixels ||
+        (job.world_hidden_layers & ~0x1fu) ||
+        (load_u16_le(job.io.data()) & 0x87u) ||
+        (load_u16_le(job.io.data() + 8) & 0xc080u) ||
+        foreign_presentation_internal::background() ||
+        foreign_presentation_internal::obj_focus() ||
+        foreign_presentation_internal::screen_overlay()) return false;
+    if (job.world_obj_window) for (unsigned object = 0; object < 128; ++object) {
+        const auto attr0 = load_u16_le(job.oam.data() + object * 8);
+        if (job.world_disable[object] && !(attr0 & 0x200) && ((attr0 >> 10) & 3) == 2)
+            return false;
+    }
+    for (const auto& r : job.regions)
+        if (r.width < 0 || r.height < 0 || r.width > int(width) || r.height > int(height)) return false;
+    // No live pointers or partial output survive a publication. Each row's
+    // candidate stacks are prepared once from this immutable input and shared
+    // by both consumers. Rows outside the region union are skipped; window
+    // and object preparation retain the original snapshot semantics.
+    for (unsigned y = 0; y < height; ++y) {
+        std::array<bool, width> needed{};
+        bool active = false;
+        for (const auto& r : job.regions) {
+            if (int64_t(y) < r.y || int64_t(y) >= int64_t(r.y) + r.height) continue;
+            const int begin = int(std::clamp<int64_t>(r.x, 0, width));
+            const int end = int(std::clamp<int64_t>(int64_t(r.x) + r.width, 0, width));
+            for (int x = begin; x < end; ++x) { needed[x] = true; active = true; }
+        }
+        if (!active) continue;
+        render_scanline_impl<false, true, true>(output.ui_rgb.data(), y,
+            load_u16_le(job.io.data()), job.io.data(), job.vram.data(),
+            job.oam.data(), job.palette.data(), width, height, &job, &output, &needed);
+    }
+    return true;
+}
 
 void GbaPpu::render(uint8_t* rgb,
                     uint16_t dispcnt,
