@@ -883,6 +883,8 @@ add_executable(boot_asset_tests
     src/runtime/host_platform.cpp
     src/gba/gba_bios.cpp src/gba/sha1.cpp src/gba/crc32.cpp)
 target_include_directories(boot_asset_tests PRIVATE src)
+# A broken cache regression must fail rather than open a native picker in CI.
+target_compile_definitions(boot_asset_tests PRIVATE GBARECOMP_TEST_NO_ASSET_DIALOGS=1)
 if(WIN32)
     target_link_libraries(boot_asset_tests PRIVATE comdlg32 user32 winmm)
 endif()
