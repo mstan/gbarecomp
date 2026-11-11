@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <cstring>
 static rab_bridge banks[4], initial[4];
-static int16_t input[2048], output[2048];
+static int16_t input[2048 * 2], output[2048 * 2];
 static int active=1;
 static double segment_frames=0, rendered_frames=0;
 static uint64_t under=0, over=0, conceal=0;
@@ -18,7 +18,7 @@ extern "C" {
 EXPORT void dsp_free(){for(auto& b:banks)rab_free(&b);}
 EXPORT int dsp_init(int host){
     dsp_free();
-    for(int i=0;i<4;++i){rab_config c;rab_config_defaults(&c);c.channels=1;c.source_rate=32768u<<i;c.host_rate=host;c.target_ms=60;c.preroll_ms=250;
+    for(int i=0;i<4;++i){rab_config c;rab_config_defaults(&c);c.channels=2;c.source_rate=32768u<<i;c.host_rate=host;c.target_ms=60;c.preroll_ms=250;
         if(rab_init(&banks[i],&c)){dsp_free();return 1;}initial[i]=banks[i];}
     return 0;
 }
@@ -26,7 +26,7 @@ EXPORT void dsp_reset(int index){
     if(index<0||index>3)return;
     auto& old=banks[active];under+=old.stats.underrun_events;over+=old.stats.overflow_drops;conceal+=old.stats.stretch_frames;
     active=index; banks[active]=initial[active];
-    std::memset(banks[active].ring,0,banks[active].cap*sizeof(float));
+    std::memset(banks[active].ring,0,banks[active].cap*2*sizeof(float));
     segment_frames=rendered_frames=0;
 }
 EXPORT int16_t* dsp_input(){return input;}

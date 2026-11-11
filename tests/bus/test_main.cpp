@@ -204,12 +204,24 @@ void test_no_save_signature() {
 }
 
 void test_sram_signature() {
-    auto rom = build_synthetic_rom("GAME", "XXXX", "00", 0x00,
-                                   "SRAM_V112", 64 * 1024);
-    auto h = gba::parse_rom(rom.data(), rom.size());
-    check_eq  ("sram_signature", "save_type",
-               static_cast<int>(h.save_type),
-               static_cast<int>(gba::SaveType::SRAM));
+    struct Case { const char* sdk; const char* matched; gba::SaveType type; };
+    const Case cases[] = {
+        {"SRAM_F_V103", "SRAM_F_V", gba::SaveType::SRAM},
+        {"SRAM_V112", "SRAM_V", gba::SaveType::SRAM},
+        {"EEPROM_V124", "EEPROM_V", gba::SaveType::EEPROM},
+        {"FLASH_V123", "FLASH_V", gba::SaveType::Flash512},
+        {"FLASH512_V130", "FLASH512_V", gba::SaveType::Flash512},
+        {"FLASH1M_V103", "FLASH1M_V", gba::SaveType::Flash1M},
+    };
+    for (const auto& c : cases) {
+        auto rom = build_synthetic_rom("GAME", "XXXX", "00", 0x00,
+                                       c.sdk, 64 * 1024);
+        auto h = gba::parse_rom(rom.data(), rom.size());
+        check_eq(c.sdk, "save_type", static_cast<int>(h.save_type),
+                 static_cast<int>(c.type));
+        check_str(c.sdk, "matched_signature", h.save_signature, c.matched);
+        check_eq(c.sdk, "signature_offset", h.save_signature_offset, 0x1000u);
+    }
 }
 
 void test_sram_controller_and_snapshot() {

@@ -12,8 +12,9 @@
 #include "../gba/crc32.h"
 #include "../gba/sha1.h"
 #include "host_platform.h"
+#include "launcher_input_cache.h"
 
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(GBARECOMP_TEST_NO_ASSET_DIALOGS)
 #include <windows.h>
 #include <commdlg.h>
 #endif
@@ -52,8 +53,7 @@ std::string read_cache(const std::string& path) {
 }
 
 void write_cache(const std::string& path, const std::string& asset_path) {
-    std::ofstream f(path, std::ios::trunc);
-    if (f) f << asset_path << "\n";
+    gbarecomp_seam::write_single_line(path, fs::absolute(asset_path).string());
 }
 
 bool sha1_eq_lower(const std::string& got_hex, const char* expected) {
@@ -76,7 +76,7 @@ std::string hex32(std::uint32_t v) {
     return std::string(buf);
 }
 
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(GBARECOMP_TEST_NO_ASSET_DIALOGS)
 
 // Win32 OPENFILENAMEA wants a buffer it can mutate; copy spec.dialog_filter
 // (which is already double-null-terminated) into a stable vector.
@@ -123,8 +123,8 @@ void show_dialog(const char* title, const std::string& body, UINT flags) {
 
 #else
 
-std::string pick_with_dialog(const AssetSpec&) { return {}; }
-void show_dialog(const char*, const std::string&, unsigned) {}
+[[maybe_unused]] std::string pick_with_dialog(const AssetSpec&) { return {}; }
+[[maybe_unused]] void show_dialog(const char*, const std::string&, unsigned) {}
 
 #endif
 
@@ -200,7 +200,7 @@ AssetResult resolve_asset(const std::string& argv_path,
             // Wrong size or unreadable. Don't bother the user with a
             // dialog if there isn't one available (non-Windows); they
             // need the diagnostic. On Windows, fall through to dialog.
-#if !defined(_WIN32)
+#if !defined(_WIN32) || defined(GBARECOMP_TEST_NO_ASSET_DIALOGS)
             return r;
 #endif
         }
@@ -208,17 +208,18 @@ AssetResult resolve_asset(const std::string& argv_path,
 
     // 2. Cached path from a prior successful pick.
     if (spec.persist_cache) {
-        const std::string cached = read_cache(cache);
+        fs::path cached = read_cache(cache);
         if (!cached.empty()) {
+            if (cached.is_relative()) cached = fs::path(exe_dir) / cached;
             std::error_code ec;
             if (fs::exists(cached, ec) && !ec) {
-                auto r = load_and_validate(cached, spec);
+                auto r = load_and_validate(cached.string(), spec);
                 if (r.ok) return r;
             }
         }
     }
 
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(GBARECOMP_TEST_NO_ASSET_DIALOGS)
     while (true) {
         std::string picked = pick_with_dialog(spec);
         if (picked.empty()) {

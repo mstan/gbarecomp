@@ -101,6 +101,14 @@ void gba_mod_audio_mix(int16_t* dst, size_t frame_count);
 void gba_mod_audio_mix_at_rate(int16_t* dst, size_t frame_count,
                                uint32_t producer_rate);
 
+// Runtime stereo output: interleaved L,R with frame_count stereo frames.
+// Existing clips/streams remain mono and are centered into both outputs;
+// their source clock advances once per frame, not once per output channel.
+// Native gain/clipping are independent per channel. Legacy mono APIs above
+// retain their existing ABI and behavior.
+void gba_mod_audio_mix_stereo_at_rate(int16_t* dst, size_t frame_count,
+                                      uint32_t producer_rate);
+
 #ifdef __cplusplus
 }
 #endif

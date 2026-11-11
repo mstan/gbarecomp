@@ -34,7 +34,9 @@ class SimulationStateCodec {
         fifo(a,s.fifo_a_); fifo(a,s.fifo_b_);
         a(s.direct_a_left_,s.direct_a_right_,s.direct_a_timer1_,s.direct_a_full_volume_,
           s.direct_b_left_,s.direct_b_right_,s.direct_b_timer1_,s.direct_b_full_volume_,
-          s.soundbias_,s.cycles_per_sample_,s.cycle_accumulator_,s.current_samples_,s.sample_index_);
+          s.soundbias_,s.cycles_per_sample_,s.cycle_accumulator_);
+        for (auto& frame:s.current_samples_) a(frame.left,frame.right);
+        a(s.sample_index_);
         if (w.bank > 1 || w.wave_pos > 63 || w.frequency > 2047 ||
             n.divisor_code > 7 || n.shift > 15 || s.ch1_.duty > 3 || s.ch2_.duty > 3 ||
             s.ch1_.frequency > 2047 || s.ch2_.frequency > 2047 || s.ch1_.waveform_phase > 7 ||

@@ -17,6 +17,7 @@
 #include "snapshot.h"
 #include "mod_state.h"
 #include "file_replace.h"
+#include <memory>
 
 #include <filesystem>
 #include <fstream>
@@ -344,6 +345,17 @@ bool load_state_bytes(const uint8_t* data, std::size_t size,
         SnapshotReader r = reader_for(TAG_CPU);
         if (!deserialize_cpu(r, false)) {
             if (err) *err = "snapshot: invalid CPU continuation";
+            return false;
+        }
+    }
+    {
+        // Stereo PCM changes the audio payload. Validate its bounded ring and
+        // cursors before touching any live CPU, memory, or persistent progress.
+        auto staged = std::make_unique<gba::GbaAudio>();
+        auto r = reader_for(TAG_AUDIO);
+        staged->deserialize(r);
+        if (!r.ok() || r.remaining() != 0) {
+            if (err) *err = "snapshot: invalid audio payload";
             return false;
         }
     }

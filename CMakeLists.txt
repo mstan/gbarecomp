@@ -883,6 +883,8 @@ add_executable(boot_asset_tests
     src/runtime/host_platform.cpp
     src/gba/gba_bios.cpp src/gba/sha1.cpp src/gba/crc32.cpp)
 target_include_directories(boot_asset_tests PRIVATE src)
+# A broken cache regression must fail rather than open a native picker in CI.
+target_compile_definitions(boot_asset_tests PRIVATE GBARECOMP_TEST_NO_ASSET_DIALOGS=1)
 if(WIN32)
     target_link_libraries(boot_asset_tests PRIVATE comdlg32 user32 winmm)
 endif()
@@ -1113,6 +1115,19 @@ if(Python3_Interpreter_FOUND AND NOT CMAKE_CROSSCOMPILING)
             --output "${CMAKE_CURRENT_BINARY_DIR}/optimization-identity-test")
 endif()
 if(GBARECOMP_SDL2_OK)
+    add_executable(stereo_audio_stream_tests tests/runtime/stereo_audio_stream_test.cpp)
+    target_include_directories(stereo_audio_stream_tests PRIVATE src/runtime ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(stereo_audio_stream_tests PRIVATE ${SDL2_LIBRARIES})
+    add_test(NAME stereo_audio_stream_tests COMMAND stereo_audio_stream_tests)
+    # A standalone SDK fixture: title-supplied ImGui/launcher libraries are
+    # intentionally unnecessary for exercising the host audio implementation.
+    if(NOT GBARECOMP_RUNTIME_UI_ROOT)
+        add_executable(host_stereo_tests tests/runtime/host_stereo_test.cpp tools/bios_smoke/dispatch_stub.cpp)
+        target_include_directories(host_stereo_tests PRIVATE src/debug ${SDL2_INCLUDE_DIRS})
+        target_link_gbarecomp_runtime_stack(host_stereo_tests)
+        add_test(NAME host_stereo_tests COMMAND host_stereo_tests "${CMAKE_CURRENT_BINARY_DIR}/host-stereo-test")
+        set_tests_properties(host_stereo_tests PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
     add_executable(presentation_upload_tests
         tests/runtime/presentation_upload_test.cpp src/runtime/color_lut.cpp)
     target_include_directories(presentation_upload_tests PRIVATE src/runtime ${SDL2_INCLUDE_DIRS})
@@ -1375,6 +1390,11 @@ target_include_directories(save_config_tests PRIVATE src/runtime)
 target_link_libraries(save_config_tests PRIVATE gbarecomp_gba)
 add_test(NAME save_config_tests COMMAND save_config_tests)
 
+add_executable(launcher_input_cache_tests tests/runtime/launcher_input_cache_test.cpp)
+target_include_directories(launcher_input_cache_tests PRIVATE src/runtime)
+add_test(NAME launcher_input_cache_tests COMMAND launcher_input_cache_tests
+    "${CMAKE_CURRENT_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+
 add_executable(presentation_layout_tests tests/presentation_layout/test_main.cpp)
 target_include_directories(presentation_layout_tests PRIVATE src/runtime)
 add_test(NAME presentation_layout_tests COMMAND presentation_layout_tests)
@@ -1540,4 +1560,13 @@ if(GBARECOMP_SDL2_OK AND EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/consoles/gba/g
     add_test(NAME gba_controller_menu_contract COMMAND gba_controller_menu_contract_tests
         "${CMAKE_CURRENT_BINARY_DIR}/controller-contract-fixture")
     set_tests_properties(gba_controller_menu_contract PROPERTIES SKIP_RETURN_CODE 77)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
+        add_executable(gba_display_contract_tests tests/host_input/display_contract.cpp
+            tools/bios_smoke/dispatch_stub.cpp)
+        target_link_gbarecomp_runtime_stack(gba_display_contract_tests)
+        recomp_target_launcher_ui(gba_display_contract_tests CONSOLE gba)
+        target_link_options(gba_display_contract_tests PRIVATE "-Wl,--wrap=SDL_RenderPresent")
+        add_test(NAME gba_display_contract COMMAND gba_display_contract_tests
+            "${CMAKE_CURRENT_BINARY_DIR}/display-contract-fixture")
+    endif()
 endif()

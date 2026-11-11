@@ -102,6 +102,11 @@ public:
     int  window_scale() const;
     void set_linear_filter(bool enabled);
     bool linear_filter() const;
+    void set_integer_scale(bool enabled);
+    bool integer_scale() const;
+    void set_scanlines(bool enabled, int strength_pct = 35);
+    bool scanlines() const;
+    int scanline_strength() const;
     // The player's enhanced-audio (MP2K shadow) choice, remembered in
     // config.ini [Audio] next to [Touch]. saved_audio_enhanced() returns
     // false until the player has chosen.
@@ -186,10 +191,13 @@ public:
     // web backend forwards it to the AudioWorklet. Never blocks the guest.
     void push_audio_block(const int16_t* samples, std::size_t count, uint32_t rate);
 
-#if defined(GBARECOMP_WEB_HOST)
-    // Starts a new playback epoch (pause, state load, overflow). Samples are
-    // not accepted until the AudioWorklet acknowledges the reset.
+    // Interleaved L/R S16. Count and rate are frames, never scalar samples.
+    void push_audio_stereo_block(const int16_t* samples, std::size_t count, uint32_t rate);
+    // Drop pending host PCM after a restore/rewind or other playback epoch.
+    // Web publication waits until the AudioWorklet acknowledges the new epoch.
     void reset_audio();
+
+#if defined(GBARECOMP_WEB_HOST)
     // True while the page is hidden; the runner holds the guest at the frame
     // boundary, distinct from the user's own pause toggle.
     bool auto_paused() const;

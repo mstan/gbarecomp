@@ -248,6 +248,76 @@ void test_shared_event_observability() {
           "reference sample boundary is unchanged after disabling Shadow");
 #endif
 }
+
+void test_stereo_routes() {
+    // Exercise every guest source independently, using the same source state
+    // for off/left/right/both. A post-mix duplicate of mono cannot pass this.
+    for (unsigned source=0; source<6; ++source) {
+        std::array<std::array<int16_t,512>,4> pcm{};
+        for (unsigned route=0; route<4; ++route) {
+            auto a=fresh_audio();
+            a->write_io16(0x084,0x80);
+            if (source<4) {
+                const auto mask=(route&1 ? 1u<<(12+source):0u) |
+                                (route&2 ? 1u<<(8+source):0u);
+                a->write_io16(0x080,0x77|mask);
+                a->write_io16(0x082,2);
+            } else {
+                const unsigned shift=source==4 ? 8:12;
+                const auto mask=(route&1 ? 2u<<shift:0u) |
+                                (route&2 ? 1u<<shift:0u);
+                a->write_io16(0x082,mask|0x0c);
+            }
+            switch(source) {
+                case 0:a->write_io16(0x062,0xf080);a->write_io16(0x064,0x87c0);break;
+                case 1:a->write_io16(0x068,0xf080);a->write_io16(0x06c,0x87c0);break;
+                case 2:
+                    a->write_io16(0x070,0x00a0);
+                    for(unsigned i=0;i<16;++i)a->write_io8(0x090+i,uint8_t(i*13+7));
+                    a->write_io16(0x072,0x2000);a->write_io16(0x074,0x87b1);break;
+                case 3:a->write_io16(0x078,0xf200);a->write_io16(0x07c,0x802b);break;
+                default:
+                    for(unsigned i=0;i<8;++i)a->write_io32(source==4?0x0a0:0x0a4,0x40404040);
+                    a->timer_overflow(0);break;
+            }
+            a->tick(128*1024);
+            check(a->drain_stereo_samples(pcm[route].data(),256)==256,"stereo capacity is frames");
+        }
+        bool audible=false;
+        for(unsigned i=0;i<256;++i) {
+            check(pcm[0][i*2]==0 && pcm[0][i*2+1]==0,"disabled routes are silent");
+            check(pcm[1][i*2+1]==0 && pcm[2][i*2]==0,"hard panning has no opposite-channel leakage");
+            check(pcm[1][i*2]==pcm[3][i*2] && pcm[2][i*2+1]==pcm[3][i*2+1],"routing one side preserves the other side gain");
+            check(pcm[3][i*2]==pcm[3][i*2+1],"equal routes have equal gain");
+            audible|=pcm[3][i*2]!=0;
+        }
+        check(audible,"each routed source is audible");
+    }
+    auto a=fresh_audio();
+    a->write_io16(0x084,0x80);a->write_io16(0x080,0x2270);
+    a->write_io16(0x082,2);a->write_io16(0x068,0xf080);a->write_io16(0x06c,0x87c0);
+    a->tick(1024*200);
+    std::array<int16_t,256> pcm{};
+    const auto n=a->drain_stereo_samples(pcm.data(),128);
+    bool audible=false;
+    for(size_t i=0;i<n;++i){audible|=pcm[i*2]!=0;check(pcm[i*2+1]==0,"PSG master volume is independent per speaker");}
+    check(audible,"master-volume test has audible left");
+
+    // A current-build restore must reproduce unequal pending stereo frames and
+    // the subsequent synthesis, not merely a silent or centered fixture.
+    gbarecomp::debug::SnapshotWriter snapshot; a->serialize(snapshot);
+    auto restored=fresh_audio();
+    gbarecomp::debug::SnapshotReader reader(snapshot.buffer().data(),snapshot.size());
+    restored->deserialize(reader);
+    std::array<int16_t,512> x{},y{};
+    auto count=a->drain_stereo_samples(x.data(),256);
+    check(restored->drain_stereo_samples(y.data(),256)==count&&x==y,"pending stereo PCM survives current-build restore");
+    a->tick(1200);restored->tick(1200);x.fill(0);y.fill(0);
+    count=a->drain_stereo_samples(x.data(),256);
+    check(restored->drain_stereo_samples(y.data(),256)==count&&x==y,"unequal stereo synthesis continues after restore");
+    restored->reset();
+    check(restored->drain_stereo_samples(y.data(),256)==0,"reset removes both channels");
+}
 }  // namespace
 
 int main() {
@@ -257,6 +327,7 @@ int main() {
     test_wave_and_noise_restore_continuation();
     test_hardware_owned_windows();
     test_shared_event_observability();
+    test_stereo_routes();
     if (failures) return 1;
     std::puts("audio playback: rate boundaries, restore and discard passed");
     return 0;

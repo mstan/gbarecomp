@@ -348,16 +348,18 @@ int32_t next_overlay_frame(size_t frames_still_needed) {
     return c.overlay[c.position++];
 }
 
-void mix_legacy(int16_t* dst, size_t frame_count) {
+void mix_legacy(int16_t* dst, size_t frame_count, unsigned channels) {
     State& s = state();
     std::array<int32_t, kMixChunk> overlay{};
     for (size_t offset = 0; offset < frame_count;) {
         const size_t count = std::min(frame_count - offset, kMixChunk);
         render_overlay(overlay.data(), count);
         for (size_t i = 0; i < count; ++i) {
-            const int32_t native = (static_cast<int32_t>(dst[offset + i]) *
-                                    s.native_gain_percent) / 100;
-            dst[offset + i] = clamp_s16(native + overlay[i]);
+            for(unsigned channel=0;channel<channels;++channel) {
+                const size_t at=(offset+i)*channels+channel;
+                const int32_t native=(static_cast<int32_t>(dst[at])*s.native_gain_percent)/100;
+                dst[at]=clamp_s16(native+overlay[i]);
+            }
         }
         offset += count;
     }
@@ -365,15 +367,15 @@ void mix_legacy(int16_t* dst, size_t frame_count) {
 
 }  // namespace
 
-extern "C" void gba_mod_audio_mix_at_rate(int16_t* dst, size_t frame_count,
-                                          uint32_t producer_rate) {
+static void mix_at_rate(int16_t* dst, size_t frame_count,
+                         uint32_t producer_rate,unsigned channels) {
     if (!dst || frame_count == 0) return;
     Converter& c = converter();
     const bool converter_idle = c.position == c.length && c.hold_left == 0;
     const bool supported = producer_rate == 32768u || producer_rate == 65536u ||
                            producer_rate == 131072u || producer_rate == 262144u;
     if (!supported || (producer_rate == GBA_MOD_AUDIO_SAMPLE_RATE && converter_idle)) {
-        mix_legacy(dst, frame_count);
+        mix_legacy(dst, frame_count,channels);
         return;
     }
     State& s = state();
@@ -400,14 +402,23 @@ extern "C" void gba_mod_audio_mix_at_rate(int16_t* dst, size_t frame_count,
                 sum += next_overlay_frame(left * down - k);
             overlay = sum / static_cast<int32_t>(down);
         }
-        const int32_t native = (static_cast<int32_t>(dst[i]) *
-                                s.native_gain_percent) / 100;
-        dst[i] = clamp_s16(native + overlay);
+        for(unsigned channel=0;channel<channels;++channel) {
+            const size_t at=i*channels+channel;
+            const int32_t native=(static_cast<int32_t>(dst[at])*s.native_gain_percent)/100;
+            dst[at]=clamp_s16(native+overlay);
+        }
     }
 }
 
 extern "C" void gba_mod_audio_mix(int16_t* dst, size_t frame_count) {
     gba_mod_audio_mix_at_rate(dst, frame_count, GBA_MOD_AUDIO_SAMPLE_RATE);
+}
+
+extern "C" void gba_mod_audio_mix_at_rate(int16_t* dst,size_t frames,uint32_t rate) {
+    mix_at_rate(dst,frames,rate,1);
+}
+extern "C" void gba_mod_audio_mix_stereo_at_rate(int16_t* dst,size_t frames,uint32_t rate) {
+    mix_at_rate(dst,frames,rate,2);
 }
 
 // Stopping delivery also discards overlay frames rendered ahead for a

@@ -1,6 +1,7 @@
 #include "save_config.h"
 
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <optional>
 #include <string>
@@ -29,6 +30,14 @@ gbarecomp::SaveConfiguration resolve(
 }  // namespace
 
 int main() {
+    for (const char* signature : {"SRAM_V112", "SRAM_F_V103"}) {
+        uint8_t rom[256]{};
+        std::memcpy(rom + 64, signature, std::strlen(signature));
+        auto selected = resolve(gba::detect_save_type(rom, sizeof(rom)));
+        check(selected.type == gba::SaveType::SRAM && selected.size == 32768 &&
+                  selected.source == gbarecomp::SaveTypeSource::Detected,
+              "SDK SRAM signature did not select the automatic 32KB device");
+    }
     gba::SaveType parsed = gba::SaveType::Unknown;
     check(gbarecomp::parse_save_type("sram", &parsed) &&
               parsed == gba::SaveType::SRAM,

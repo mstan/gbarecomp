@@ -30,7 +30,7 @@ void test_segments(int host) {
         check(dsp_fill() == 0, "invalid pushes leave queue empty");
         check(dsp_pull(0, 0) == 0 && dsp_pull(2049, 0) == 0,
               "invalid pulls rejected");
-        std::fill_n(dsp_input(), 1024, int16_t{12000});
+        for(int i=0;i<1024;++i){dsp_input()[i*2]=12000;dsp_input()[i*2+1]=-6000;}
         dsp_push(1024);
         // Short segments are below preroll, but ending must drain them in
         // exactly their duration, without waiting for more source samples.
@@ -40,8 +40,11 @@ void test_segments(int host) {
             const int n = dsp_pull(128, 1);
             check(n >= 0 && n <= 128, "pull stays within output capacity");
             if (n <= 0 || n > 128) break;
-            for (int i = 0; i < n; ++i)
-                peak = std::max(peak, std::abs(int(dsp_output()[i])));
+            for (int i = 0; i < n; ++i) {
+                peak = std::max(peak, std::abs(int(dsp_output()[i*2])));
+                check(std::abs(int(dsp_output()[i*2])+2*int(dsp_output()[i*2+1]))<=2,
+                      "resampler preserves independent left/right gain and polarity");
+            }
             frames += n;
         }
         check(frames == expected, "segment duration follows source and host rates");
@@ -50,9 +53,9 @@ void test_segments(int host) {
         dsp_reset(index);
         check(dsp_fill() == 0 && dsp_pull(128, 1) == 0,
               "reset removes previous segment duration and PCM");
-        std::fill_n(dsp_output(), 128, int16_t{1234});
+        std::fill_n(dsp_output(), 256, int16_t{1234});
         check(dsp_pull(128, 0) == 128, "empty running segment returns a full quantum");
-        check(std::all_of(dsp_output(), dsp_output() + 128,
+        check(std::all_of(dsp_output(), dsp_output() + 256,
                           [](int16_t sample) { return sample == 0; }),
               "unprimed bank emits silence");
     }

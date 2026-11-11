@@ -25,6 +25,7 @@
 #include "hd_gpu_renderer.h"
 #include "host_overlay.h"
 #include "presentation_layout.h"
+#include "presentation_settings.h"
 #include "touch_input.h"
 #if defined(GBARECOMP_RUNTIME_UI)
 #include "recomp_runtime_ui.h"
@@ -33,6 +34,7 @@
 #if defined(GBARECOMP_HAVE_SDL2)
 
 #include <SDL.h>
+#include "stereo_audio_stream.h"
 
 #if defined(GBARECOMP_RUNTIME_UI)
 #include "imgui.h"
@@ -423,13 +425,16 @@ struct Backend {
     rab_bridge    bridge{};
     bool          bridge_ready = false;
     SDL_mutex*    audio_mtx = nullptr;
-    // Diagnostic/direct path: let SDL own format conversion and queue the
-    // engine's verified 65536 Hz mono stream without passing it through RAB.
+    // Diagnostic queued path: persistent SDL conversion at each true source rate.
     bool          audio_direct = false;
     bool          audio_direct_started = false;
     int           audio_direct_rate = 65536;
+    StereoAudioStream audio_direct_stream;
+    std::vector<int16_t> audio_direct_pcm;
+    std::vector<int16_t> mono_stereo_pcm;
     uint64_t      audio_direct_pushes = 0;
     uint64_t      audio_direct_samples = 0;
+    double        audio_direct_seconds = 0;
     uint64_t      audio_direct_underruns = 0;
     // Session health: one clock read per present, summarised in the log when
     // the app goes to the background (it may be killed there) and on close.
@@ -489,6 +494,10 @@ struct Backend {
     bool resize_driven_view = false;
     bool freely_resizable_window = false;
     bool linear_filter = false;
+    bool integer_scale = false;
+    bool scanlines = false;
+    int scanline_strength = 35;
+    std::string launcher_config_path;
     bool sharp_filter = false;
 
     // ---- rebindable input (see HostWindow::load_input_config) --------------
@@ -1377,15 +1386,17 @@ runtime::ColorSettings resolve_color_settings(const char* toml_screen) {
     return s;
 }
 
-// SDL audio pull callback: render exactly `len` bytes of device-rate mono S16
+// SDL audio pull callback: render exactly `len` bytes of device-rate stereo S16
 // from the bridge ring. The bridge emits faded silence (not raw zeros) before
 // prime / on underrun, so a momentarily-starved producer no longer clicks.
 void gba_audio_callback(void* userdata, Uint8* stream, int len) {
     auto* b = static_cast<Backend*>(userdata);
-    int frames = len / static_cast<int>(sizeof(int16_t)); // mono
-    if (b && b->bridge_ready) {
+    SDL_memset(stream, 0, len);
+    int frames = len / static_cast<int>(2 * sizeof(int16_t));
+    if (b && b->audio_mtx) {
         SDL_LockMutex(b->audio_mtx);
-        rab_pull(&b->bridge, reinterpret_cast<int16_t*>(stream), frames);
+        if (b->bridge_ready)
+            rab_pull(&b->bridge, reinterpret_cast<int16_t*>(stream), frames);
         SDL_UnlockMutex(b->audio_mtx);
     } else {
         SDL_memset(stream, 0, len);
@@ -1605,6 +1616,8 @@ PresentationLayout current_presentation_layout(Backend* b, int* out_w, int* out_
             : compute_presentation_layout(drawable_w, drawable_h, b->base_w, b->base_h);
     }
 #endif
+    if (b->integer_scale)
+        layout = compute_integer_presentation_layout(drawable_w, drawable_h, b->base_w, b->base_h);
     // Portrait top anchoring (per-present game request): the image hugs the
     // top safe edge so host-drawn controls get all of the space below it.
 #if defined(__ANDROID__)
@@ -1612,7 +1625,7 @@ PresentationLayout current_presentation_layout(Backend* b, int* out_w, int* out_
 #else
     // The fixed native desktop path presents through SDL's logical size,
     // which always centres; only explicit-destination paths can anchor.
-    const bool explicit_destination = b->expanded_view || b->resize_driven_view;
+    const bool explicit_destination = b->expanded_view || b->resize_driven_view || b->integer_scale;
 #endif
     if (explicit_destination && b->anchor_top && drawable_h > drawable_w &&
         layout.height > 0 && layout.height < drawable_h) {
@@ -2114,7 +2127,7 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     SDL_SetTextureScaleMode(
         b->texture,
-        b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+        b->linear_filter && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
 
 #if defined(GBARECOMP_RUNTIME_UI)
@@ -2130,19 +2143,12 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     open_first_game_controller(b);
     open_device_gyro(b);
 
-    // Open the audio device at 65536 Hz mono 16-bit signed. The
-    // running BIOS sets SOUNDBIAS resolution=1 which raises the
-    // mixer's effective sample rate from 32768 to 65536; opening
-    // the device at 32768 (the power-on default) caused SDL to play
-    // back at half speed, hit the 250 ms queue cap, and flush —
-    // audible as muffled / watery chime artifacts. SDL2 resamples
-    // internally if the host hardware doesn't natively support
-    // 65536, so this rate is portable. Failure is non-fatal —
-    // silent video still works.
+    // The host device receives stereo S16. Both playback modes convert from
+    // the block's SOUNDBIAS rate; the initial device rate is only a preference.
     SDL_AudioSpec want{};
     want.freq     = 65536;
     want.format   = AUDIO_S16SYS;
-    want.channels = 1;
+    want.channels = 2;
     want.samples  = 1024;  // ~15 ms callback quantum at 65 kHz
     const char* direct_audio_env = std::getenv("GBARECOMP_AUDIO_DIRECT");
     b->audio_direct =
@@ -2150,24 +2156,22 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     want.callback = b->audio_direct ? nullptr : gba_audio_callback;
     want.userdata = b->audio_direct ? nullptr : b;
     SDL_AudioSpec got{};
-    // In direct mode, disallow application-visible format changes so SDL
-    // converts the exact 65536 Hz mono stream to the physical device itself.
-    // Bridge mode instead opens at the native rate and performs that clock
-    // conversion in RAB.
     const char* audio_device_env = std::getenv("GBARECOMP_AUDIO_DEVICE");
     const char* audio_device_name =
         audio_device_env && *audio_device_env ? audio_device_env : nullptr;
     b->audio_dev = SDL_OpenAudioDevice(audio_device_name, /*iscapture=*/0,
                                        &want, &got,
-                                       b->audio_direct
-                                           ? 0
-                                           : SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+                                       SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+    if (b->audio_dev && (got.channels != 2 || got.format != AUDIO_S16SYS || got.freq <= 0)) {
+        SDL_CloseAudioDevice(b->audio_dev);
+        b->audio_dev = 0;
+    }
     if (b->audio_dev != 0) {
         if (b->audio_direct) {
             b->audio_direct_rate = got.freq;
             std::fprintf(stderr,
                          "host_window: audio=direct-queue driver=%s "
-                         "device=%s format=%dHz mono S16 quantum=%u\n",
+                         "device=%s format=%dHz stereo S16 quantum=%u\n",
                          SDL_GetCurrentAudioDriver()
                              ? SDL_GetCurrentAudioDriver() : "(unknown)",
                          audio_device_name ? audio_device_name : "(default)",
@@ -2188,8 +2192,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
             b->audio_mtx = SDL_CreateMutex();
             rab_config cfg;
             rab_config_defaults(&cfg);
-            cfg.channels    = 1;
-            cfg.source_rate = 65536.0;                 // engine's standardized GBA mixer rate
+            cfg.channels    = 2;
+            cfg.source_rate = 65536.0;                 // re-tuned on the first rate-tagged block
             cfg.host_rate   = static_cast<double>(got.freq);
             cfg.target_ms   = 60.0;                     // steady cushion (matches NES)
             cfg.preroll_ms  = 250.0;                    // boot pre-roll: hide the cold-start
@@ -2217,18 +2221,19 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
 // (We are already inside namespace gbarecomp, so declare it unqualified.)
 uint64_t overlay_game_thread_compile_ns();
 
-void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
+void HostWindow::push_audio_stereo_block(const int16_t* samples, std::size_t count,
                                   uint32_t rate) {
-    if (!open_ || !impl_ || !samples || count == 0) return;
+    if (!open_ || !impl_ || !samples || count == 0 || count > INT_MAX / 4 ||
+        !(rate == 32768 || rate == 65536 || rate == 131072 || rate == 262144)) return;
     auto* b = static_cast<Backend*>(impl_);
     if (b->audio_dev == 0) return;
 
     // Volume (launcher setting + VolumeUp/Down hotkeys): scale into scratch
     // before the bridge. 100 = passthrough, byte-identical to before.
     if (b->volume != 100) {
-        b->volume_buf.resize(count);
+        b->volume_buf.resize(count * 2);
         const int v = b->volume;
-        for (std::size_t i = 0; i < count; ++i)
+        for (std::size_t i = 0; i < count * 2; ++i)
             b->volume_buf[i] = static_cast<int16_t>(
                 (static_cast<int32_t>(samples[i]) * v) / 100);
         samples = b->volume_buf.data();
@@ -2247,8 +2252,11 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
         b->audio_direct_min_bytes =
             std::min(b->audio_direct_min_bytes, queued_before);
 
-        const Uint32 bytes = static_cast<Uint32>(count * sizeof(int16_t));
-        if (SDL_QueueAudio(b->audio_dev, samples, bytes) != 0) {
+        b->audio_direct_pcm.clear();
+        if (!b->audio_direct_stream.convert(samples, count, rate,
+                                             b->audio_direct_rate, b->audio_direct_pcm)) return;
+        const Uint32 bytes = static_cast<Uint32>(b->audio_direct_pcm.size() * sizeof(int16_t));
+        if (bytes && SDL_QueueAudio(b->audio_dev, b->audio_direct_pcm.data(), bytes) != 0) {
             static bool s_reported_queue_failure = false;
             if (!s_reported_queue_failure) {
                 std::fprintf(stderr,
@@ -2264,8 +2272,9 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
             std::max(b->audio_direct_max_bytes, queued_after);
         ++b->audio_direct_pushes;
         b->audio_direct_samples += count;
+        b->audio_direct_seconds += static_cast<double>(count) / rate;
 
-        constexpr Uint32 kDirectPrerollBytes = 16384;  // 125 ms at 65536 Hz S16
+        const Uint32 kDirectPrerollBytes = b->audio_direct_rate * 4 / 8; // 125 ms, stereo S16
         if (!b->audio_direct_started &&
             queued_after >= kDirectPrerollBytes) {
             b->audio_direct_started = true;
@@ -2278,7 +2287,7 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
             s_direct_probe = (e && *e && *e != '0') ? 1 : 0;
         }
         if (s_direct_probe) {
-            for (std::size_t i = 0; i < count; ++i) {
+            for (std::size_t i = 0; i < count * 2; ++i) {
                 const int sample = samples[i];
                 if (sample != 0) ++b->audio_direct_probe_nonzero;
                 b->audio_direct_probe_peak =
@@ -2286,14 +2295,13 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
                 b->audio_direct_probe_square_sum +=
                     static_cast<long double>(sample) * sample;
             }
-            b->audio_direct_probe_samples += count;
+            b->audio_direct_probe_samples += count * 2;
         }
         if (s_direct_probe && (b->audio_direct_pushes % 120ULL) == 0ULL) {
             const double bytes_per_ms =
                 static_cast<double>(b->audio_direct_rate) *
-                sizeof(int16_t) / 1000.0;
-            const double audio_secs =
-                static_cast<double>(b->audio_direct_samples) / 65536.0;
+                (2 * sizeof(int16_t)) / 1000.0;
+            const double audio_secs = b->audio_direct_seconds;
             const double rms = b->audio_direct_probe_samples
                 ? std::sqrt(static_cast<double>(
                       b->audio_direct_probe_square_sum /
@@ -2340,8 +2348,8 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
             cfg.source_rate = static_cast<double>(rate);
             rab_free(&b->bridge);
             if (rab_init(&b->bridge, &cfg) != 0) {
-                SDL_UnlockMutex(b->audio_mtx);
                 b->bridge_ready = false;
+                SDL_UnlockMutex(b->audio_mtx);
                 return;
             }
         } else {
@@ -2350,11 +2358,11 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
         SDL_UnlockMutex(b->audio_mtx);
     }
 
-    // Producer: append mono frames into the bridge ring. The SDL callback
+    // Producer: append interleaved stereo frames into the bridge ring. The SDL callback
     // (gba_audio_callback) drains it at the device rate with band-limited
     // resampling + a P-only fill servo — no queue underrun, no hard flush.
     SDL_LockMutex(b->audio_mtx);
-    rab_push(&b->bridge, samples, static_cast<int>(count)); // mono: count == frames
+    rab_push(&b->bridge, samples, static_cast<int>(count));
     SDL_UnlockMutex(b->audio_mtx);
 
     // ── NES-mode crackle probe (measure step) ──────────────────────────
@@ -2365,10 +2373,12 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
     if (s_probe < 0) { const char* e = std::getenv("GBARECOMP_AUDIO_PROBE"); s_probe = (e && *e && *e != '0') ? 1 : 0; }
     if (s_probe) {
         static unsigned long long s_pushes = 0, s_samples = 0;
+        static double s_seconds = 0;
         s_pushes++; s_samples += count;
+        s_seconds += static_cast<double>(count) / rate;
         if ((s_pushes % 120ULL) == 0ULL) {
             rab_stats st; rab_get_stats(&b->bridge, &st);
-            double secs = static_cast<double>(s_samples) / 65536.0;
+            double secs = s_seconds;
             double stretch_ms = st.stretch_frames * 1000.0
                               / static_cast<double>(b->bridge.cfg.host_rate);
             // Game-thread codegen time: cumulative + this-window delta. The delta
@@ -2395,6 +2405,31 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
 void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
     // Legacy callers that do not tag a rate: assume the engine default.
     push_audio_block(samples, count, 65536u);
+}
+
+void HostWindow::push_audio_block(const int16_t* samples, std::size_t count, uint32_t rate) {
+    if (!impl_ || !samples || count == 0 || count > INT_MAX / 4) return;
+    auto* b = static_cast<Backend*>(impl_);
+    b->mono_stereo_pcm.resize(count * 2);
+    for (std::size_t i = 0; i < count; ++i)
+        b->mono_stereo_pcm[i*2] = b->mono_stereo_pcm[i*2+1] = samples[i];
+    push_audio_stereo_block(b->mono_stereo_pcm.data(), count, rate);
+}
+
+void HostWindow::reset_audio() {
+    if (!impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    if (b->audio_direct) {
+        if (b->audio_dev) { SDL_PauseAudioDevice(b->audio_dev, 1); SDL_ClearQueuedAudio(b->audio_dev); }
+        b->audio_direct_stream.reset();
+        b->audio_direct_started = false;
+    } else if (b->bridge_ready) {
+        SDL_LockMutex(b->audio_mtx);
+        const rab_config cfg = b->bridge.cfg;
+        rab_free(&b->bridge);
+        b->bridge_ready = rab_init(&b->bridge, &cfg) == 0;
+        SDL_UnlockMutex(b->audio_mtx);
+    }
 }
 
 void HostWindow::set_title(const char* title) {
@@ -2555,7 +2590,7 @@ bool HostWindow::set_surface_size(int base_w, int base_h) {
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     SDL_SetTextureScaleMode(
         replacement,
-        b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+        b->linear_filter && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
     SDL_DestroyTexture(b->texture);
     destroy_sharp_texture(b);
@@ -2568,7 +2603,7 @@ bool HostWindow::set_surface_size(int base_w, int base_h) {
     // A live Display choice can cross between SDL's native logical viewport
     // and the explicit wide destination. Reset both coordinate systems, or
     // Native -> 16:9 draws drawable coordinates through the old 240x160 scale.
-    const bool explicit_view = b->expanded_view || b->resize_driven_view;
+    const bool explicit_view = b->expanded_view || b->resize_driven_view || b->integer_scale;
     SDL_RenderSetLogicalSize(b->renderer, explicit_view ? 0 : base_w, explicit_view ? 0 : base_h);
     if (explicit_view) SDL_RenderSetViewport(b->renderer, nullptr);
     SDL_SetWindowResizable(b->window,
@@ -2632,7 +2667,7 @@ bool HostWindow::present_hd(const gba::GbaHighResolutionFrame::DrawFrame& frame)
     SDL_Texture* texture = b->hd_gpu->render(frame,b->color_lut.get());
     if (!texture) return false;
 #if SDL_VERSION_ATLEAST(2,0,12)
-    SDL_SetTextureScaleMode(texture,b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+    SDL_SetTextureScaleMode(texture,b->linear_filter && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
     b->resident_frame = texture;
     present(nullptr,frame.width*frame.scale,frame.height*frame.scale);
@@ -2664,7 +2699,7 @@ bool HostWindow::present_native(const std::shared_ptr<const gba::GbaNativeDrawFr
     auto* texture=b->hd_gpu->native_display(b->color_lut.get());
     if(!texture)return false;
 #if SDL_VERSION_ATLEAST(2,0,12)
-    SDL_SetTextureScaleMode(texture,b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+    SDL_SetTextureScaleMode(texture,b->linear_filter && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
     b->resident_frame=texture;
     present(nullptr,240,160);
@@ -2707,7 +2742,7 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
             if (replacement) {
                 SDL_SetTextureBlendMode(replacement, SDL_BLENDMODE_NONE);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
-                SDL_SetTextureScaleMode(replacement, b->linear_filter ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+                SDL_SetTextureScaleMode(replacement, b->linear_filter && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
                 SDL_DestroyTexture(b->texture); destroy_sharp_texture(b);
                 b->texture = replacement;
@@ -2828,7 +2863,7 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
     const SDL_Rect destination{layout.x, layout.y, layout.width, layout.height};
     SDL_RenderCopy(b->renderer, frame_texture, nullptr, &destination);
 #else
-    if (!b->expanded_view && !b->resize_driven_view) {
+    if (!b->expanded_view && !b->resize_driven_view && !b->integer_scale) {
         SDL_RenderCopy(b->renderer, frame_texture, nullptr, nullptr);
     } else {
         if (layout.width > 0 && layout.height > 0) {
@@ -2864,6 +2899,25 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
         }
     }
 #endif
+    // Present-time CRT-style bands never alter the guest framebuffer or HD
+    // readback. At less than 2x there is no room for a dark half-scanline.
+    if (b->scanlines && b->scanline_strength > 0 && layout.height >= b->base_h * 2) {
+        int logical_w = 0, logical_h = 0;
+        SDL_RenderGetLogicalSize(b->renderer, &logical_w, &logical_h);
+        SDL_RenderSetLogicalSize(b->renderer, 0, 0);
+        SDL_RenderSetViewport(b->renderer, nullptr);
+        SDL_SetRenderDrawBlendMode(b->renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(b->renderer, 0, 0, 0,
+            static_cast<Uint8>(b->scanline_strength * 255 / 100));
+        for (int y = 0; y < b->base_h; ++y) {
+            const int top = layout.y + (2 * y + 1) * layout.height / (2 * b->base_h);
+            const int bottom = layout.y + (y + 1) * layout.height / b->base_h;
+            const SDL_Rect band{layout.x, top, layout.width, bottom - top};
+            SDL_RenderFillRect(b->renderer, &band);
+        }
+        SDL_SetRenderDrawBlendMode(b->renderer, SDL_BLENDMODE_NONE);
+        SDL_RenderSetLogicalSize(b->renderer, logical_w, logical_h);
+    }
     render_host_layers(b);
     // MC-WS-002: time the present itself (vsync blocks here — or doesn't)
     // and stamp the DWM refresh counter into the cadence ring.
@@ -2904,6 +2958,7 @@ void HostWindow::load_input_config(const char* dir,
     b->assist_fast_forward_multiplier = std::clamp(
         fast_forward_multiplier_default, 2, 10);
     const std::string config_path=(std::filesystem::path(dir)/(config_filename&&config_filename[0]?config_filename:"config.ini")).string();
+    b->launcher_config_path = config_path;
     const std::string keybinds_path=(std::filesystem::path(dir)/(keybinds_filename&&keybinds_filename[0]?keybinds_filename:"keybinds.ini")).string();
 #if defined(GBARECOMP_GBA_PAD_BINDS)
     b->input_config_dir=dir;load_controller_bindings(b);
@@ -3051,12 +3106,47 @@ void HostWindow::set_linear_filter(bool enabled) {
     b->linear_filter = enabled;
 #if SDL_VERSION_ATLEAST(2, 0, 12)
     SDL_SetTextureScaleMode(b->texture,
-        enabled ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+        enabled && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
 #endif
 }
 
 bool HostWindow::linear_filter() const {
     return open_ && impl_ && static_cast<const Backend*>(impl_)->linear_filter;
+}
+
+void HostWindow::set_integer_scale(bool enabled) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    b->integer_scale = enabled;
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_SetTextureScaleMode(b->texture, b->linear_filter && !enabled ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+#endif
+    save_presentation_settings(b->launcher_config_path, b->integer_scale, b->scanlines, b->scanline_strength);
+#if !defined(__ANDROID__)
+    const bool explicit_view = b->expanded_view || b->resize_driven_view || enabled;
+    SDL_RenderSetLogicalSize(b->renderer, explicit_view ? 0 : b->base_w, explicit_view ? 0 : b->base_h);
+    SDL_RenderSetViewport(b->renderer, nullptr);
+#endif
+}
+
+bool HostWindow::integer_scale() const {
+    return open_ && impl_ && static_cast<const Backend*>(impl_)->integer_scale;
+}
+
+void HostWindow::set_scanlines(bool enabled, int strength_pct) {
+    if (!open_ || !impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    b->scanlines = enabled;
+    b->scanline_strength = std::clamp(strength_pct, 0, 100);
+    save_presentation_settings(b->launcher_config_path, b->integer_scale, b->scanlines, b->scanline_strength);
+}
+
+bool HostWindow::scanlines() const {
+    return open_ && impl_ && static_cast<const Backend*>(impl_)->scanlines;
+}
+
+int HostWindow::scanline_strength() const {
+    return open_ && impl_ ? static_cast<const Backend*>(impl_)->scanline_strength : 35;
 }
 
 void HostWindow::set_audio_enabled(bool enabled) {
@@ -3076,7 +3166,7 @@ void HostWindow::set_resize_driven_view(bool enabled) {
     auto* b = static_cast<Backend*>(impl_);
     b->resize_driven_view = enabled;
 #if !defined(__ANDROID__)
-    const bool explicit_view = b->expanded_view || enabled;
+    const bool explicit_view = b->expanded_view || enabled || b->integer_scale;
     SDL_RenderSetLogicalSize(b->renderer, explicit_view ? 0 : b->base_w, explicit_view ? 0 : b->base_h);
     if (explicit_view) SDL_RenderSetViewport(b->renderer, nullptr);
 #endif
@@ -3245,6 +3335,7 @@ bool HostWindow::wait_for_foreground() {
     b->backgrounded = false;
     b->health_prev_present = 0;  // the time away is not a stall
     if (resumed && b->audio_dev) {
+        reset_audio();
         if (b->audio_direct) {
             // Rebuild the cushion rather than replaying a stale queue.
             SDL_ClearQueuedAudio(b->audio_dev);
@@ -3760,6 +3851,11 @@ int  HostWindow::volume() const { return 100; }
 int  HostWindow::window_scale() const { return 1; }
 void HostWindow::set_linear_filter(bool /*enabled*/) {}
 bool HostWindow::linear_filter() const { return false; }
+void HostWindow::set_integer_scale(bool) {}
+bool HostWindow::integer_scale() const { return false; }
+void HostWindow::set_scanlines(bool, int) {}
+bool HostWindow::scanlines() const { return false; }
+int HostWindow::scanline_strength() const { return 35; }
 bool HostWindow::saved_audio_enhanced(bool& /*enabled*/) const { return false; }
 void HostWindow::save_audio_enhanced(bool /*enabled*/) {}
 void HostWindow::set_audio_enabled(bool /*enabled*/) {}
@@ -3791,6 +3887,8 @@ void HostWindow::push_audio_samples(const int16_t* /*samples*/,
                                     std::size_t /*count*/) {}
 void HostWindow::push_audio_block(const int16_t* /*samples*/,
                                   std::size_t /*count*/, uint32_t /*rate*/) {}
+void HostWindow::push_audio_stereo_block(const int16_t*, std::size_t, uint32_t) {}
+void HostWindow::reset_audio() {}
 
 void HostWindow::service_events() {}
 

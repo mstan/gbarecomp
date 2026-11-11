@@ -50,7 +50,20 @@ int main(int argc,char** argv) {
         window.load_input_config(fixture_dir.c_str());
         check((button(SDL_CONTROLLER_BUTTON_A,1).keyinput&1u)==0,"default Xbox A remains GBA A");button(SDL_CONTROLLER_BUTTON_A,0);
         check((button(SDL_CONTROLLER_BUTTON_B,1).keyinput&2u)==0,"default Xbox B remains GBA B");button(SDL_CONTROLLER_BUTTON_B,0);
+        const SDL_GameControllerButton defaults[] = {
+            SDL_CONTROLLER_BUTTON_DPAD_UP, SDL_CONTROLLER_BUTTON_DPAD_DOWN,
+            SDL_CONTROLLER_BUTTON_DPAD_LEFT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT,
+            SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B,
+            SDL_CONTROLLER_BUTTON_LEFTSHOULDER, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,
+            SDL_CONTROLLER_BUTTON_START, SDL_CONTROLLER_BUTTON_BACK};
+        for (int i = 0; i < 10; ++i) {
+            check((button(defaults[i], 1).keyinput & (1u << kRuiGbaKeyBits[i])) == 0,
+                  "every default controller button reaches its GBA input");
+            button(defaults[i], 0);
+        }
         RecompLauncherCGameInfo game{};launcher_profile_apply_gba(&game);
+        check(game.has_integer_scale && game.has_scanlines,
+              "GBA profile exposes implemented presentation controls");
         RecompLauncherCSettings settings{};settings.player_src[0]=2;
         std::snprintf(settings.player_gamepad_guid[0],sizeof(settings.player_gamepad_guid[0]),"%s",guid);
         auto* model=new LauncherModel{};
@@ -63,14 +76,48 @@ int main(int argc,char** argv) {
         gbarecomp_seam::seam_config_load(config_path,&loaded_profile);
         check(loaded_profile.player_source==2 && loaded_profile.player_guid==guid &&
               loaded_profile.volume==73,"launcher profile preserves device and setting");
+#if defined(RECOMP_LAUNCHER_HAS_LAUNCH_OPTIONS)
+        {
+            gbarecomp::RunOptions launch_opts;
+            launch_opts.launcher_game_version = "v0.0.0-fixture";
+            std::vector<std::string> arguments{fixture_dir + "/fixture.exe", "--no-launcher"};
+            check(gbarecomp_launcher_preboot(arguments, launch_opts) == 0,
+                  "one-shot skip boots without opening a launcher or picker");
+            check(std::find(arguments.begin(), arguments.end(), "--no-launcher") == arguments.end() &&
+                  std::find(arguments.begin(), arguments.end(), "73") != arguments.end(),
+                  "one-shot skip consumes switch and honors saved settings");
+            check(std::string(recomp_launcher_get_game_version()) == "v0.0.0-fixture",
+                  "title version reaches shared launcher metadata");
+            gbarecomp_seam::seam_config_load(config_path, &loaded_profile);
+            check(loaded_profile.skip_launcher == 0, "one-shot skip preserves saved launcher preference");
+            check(recomp_launcher_cli_should_skip(RECOMP_LAUNCHER_CLI_SHOW, 1) == 0 &&
+                  recomp_launcher_cli_should_skip(RECOMP_LAUNCHER_CLI_DEFAULT, 1) == 1,
+                  "force-show and saved-skip remain independent");
+        }
+#endif
         launcher_binds_load(model,config_path.c_str(),keys_path.c_str());
         launcher_binds_set_pad_button(model,1,5,LNG_PADBIND_BUTTON,SDL_CONTROLLER_BUTTON_X,0);
         check(std::string(model->pad_binds[0][5])=="x","launcher capture displays Xbox X");
-        delete model;
         window.load_input_config(fixture_dir.c_str());
         check((button(SDL_CONTROLLER_BUTTON_X,1).keyinput&2u)==0,"captured Xbox X drives GBA B");
         check((button(SDL_CONTROLLER_BUTTON_X,0).keyinput&2u)!=0,"Xbox X release releases GBA B");
         check((button(SDL_CONTROLLER_BUTTON_B,1).keyinput&2u)!=0,"former Xbox B mapping is removed");button(SDL_CONTROLLER_BUTTON_B,0);
+        launcher_binds_set_pad_button(model,1,5,LNG_PADBIND_AXIS,SDL_CONTROLLER_AXIS_LEFTX,1);
+        window.load_input_config(fixture_dir.c_str());
+        SDL_JoystickSetVirtualAxis(pad,SDL_CONTROLLER_AXIS_LEFTX,3000);pump();
+        check((pump().keyinput&2u)!=0,"axis remap honors deadzone");
+        SDL_JoystickSetVirtualAxis(pad,SDL_CONTROLLER_AXIS_LEFTX,24000);pump();
+        check((pump().keyinput&2u)==0,"positive axis remap drives GBA B");
+        SDL_JoystickSetVirtualAxis(pad,SDL_CONTROLLER_AXIS_LEFTX,-24000);pump();
+        check((pump().keyinput&2u)!=0,"opposite axis direction does not drive GBA B");
+        SDL_JoystickSetVirtualAxis(pad,SDL_CONTROLLER_AXIS_LEFTX,0);pump();
+        launcher_binds_set_pad_button(model,1,5,LNG_PADBIND_NONE,0,0);
+        window.load_input_config(fixture_dir.c_str());
+        check((button(SDL_CONTROLLER_BUTTON_X,1).keyinput&2u)!=0,"unbinding removes former mapped source");
+        button(SDL_CONTROLLER_BUTTON_X,0);
+        launcher_binds_set_pad_button(model,1,5,LNG_PADBIND_BUTTON,SDL_CONTROLLER_BUTTON_X,0);
+        window.load_input_config(fixture_dir.c_str());
+        delete model;
         pump();
         button(SDL_CONTROLLER_BUTTON_LEFTSTICK,1); check(recomp_runtime_ui_is_open(ui),"L3 opens");button(SDL_CONTROLLER_BUTTON_LEFTSTICK,0);
         button(SDL_CONTROLLER_BUTTON_DPAD_DOWN,1);check(ui->section_index==1,"D-pad navigates");
