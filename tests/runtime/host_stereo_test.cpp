@@ -22,6 +22,12 @@ static void set_env(const char* key,const char* value) {
 
 int main(int argc,char** argv) {
     if(argc!=2)return 2;
+    bool disk=false,dummy=false;
+    for(int i=0;i<SDL_GetNumAudioDrivers();++i)
+        disk|=std::string(SDL_GetAudioDriver(i))=="disk";
+    for(int i=0;i<SDL_GetNumVideoDrivers();++i)
+        dummy|=std::string(SDL_GetVideoDriver(i))=="dummy";
+    if(!disk||!dummy)return 77; // Optional SDL test drivers, not runtime requirements.
     set_env("SDL_VIDEODRIVER","dummy");
     set_env("SDL_RENDER_DRIVER","software");
     set_env("SDL_AUDIODRIVER","disk");

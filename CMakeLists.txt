@@ -1124,6 +1124,7 @@ if(GBARECOMP_SDL2_OK)
         target_include_directories(host_stereo_tests PRIVATE src/debug ${SDL2_INCLUDE_DIRS})
         target_link_gbarecomp_runtime_stack(host_stereo_tests)
         add_test(NAME host_stereo_tests COMMAND host_stereo_tests "${CMAKE_CURRENT_BINARY_DIR}/host-stereo-test")
+        set_tests_properties(host_stereo_tests PROPERTIES SKIP_RETURN_CODE 77)
     endif()
     add_executable(presentation_upload_tests
         tests/runtime/presentation_upload_test.cpp src/runtime/color_lut.cpp)
