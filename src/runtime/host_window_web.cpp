@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <filesystem>
 #include <memory>
 #include <sstream>
 #include <thread>
@@ -414,9 +415,11 @@ HostWindow::Events HostWindow::pump() {
     return e;
 }
 void HostWindow::service_events(){} // All DOM service belongs to the page; do not consume commands here.
-void HostWindow::load_input_config(const char* dir,bool assist,int turbo) {
+void HostWindow::load_input_config(const char* dir,bool assist,int turbo,const char* config_filename,const char* keybinds_filename) {
     if(!impl_)return;auto& b=*backend(impl_);b.assist=assist;b.turbo=std::clamp(turbo,2,10);
-    std::string base=dir?dir:".";base+='/';auto keys=read_file(base+"keybinds.ini"),config=read_file(base+"config.ini");
+    const std::filesystem::path base=dir?dir:".";
+    auto keys=read_file((base/(keybinds_filename&&keybinds_filename[0]?keybinds_filename:"keybinds.ini")).string());
+    auto config=read_file((base/(config_filename&&config_filename[0]?config_filename:"config.ini")).string());
     MAIN_THREAD_EM_ASM({globalThis.GbrHost.configure(UTF8ToString($0),UTF8ToString($1));},keys.c_str(),config.c_str());
 }
 void HostWindow::set_fullscreen(int mode){if(impl_)MAIN_THREAD_EM_ASM({globalThis.GbrHost.fullscreenRequest($0);},std::clamp(mode,0,2));}

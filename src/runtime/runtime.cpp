@@ -3267,7 +3267,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             }
             win.load_input_config(exe_dir.c_str(),
                                   opts.assist_tools_enabled_by_default,
-                                  opts.assist_fast_forward_multiplier_default);
+                                  opts.assist_fast_forward_multiplier_default,
+                                  opts.launcher_config_filename,
+                                  opts.launcher_keybinds_filename);
             win.configure_touch(opts.input_frame != nullptr,
                                 opts.touch_gesture_claims,
                                 opts.touch_pad_default, args.touch_emulation);
