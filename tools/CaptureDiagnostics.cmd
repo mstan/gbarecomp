@@ -18,6 +18,6 @@ echo Select your controller and press then release its buttons during capture.
 echo Close the launcher normally when finished.
 "%GAME%" --launcher > "%~dp0launcher-diagnostics.log" 2>&1
 set "GAME_EXIT=%ERRORLEVEL%"
-echo Exit code: %GAME_EXIT%>> "%~dp0launcher-diagnostics.log"
+>> "%~dp0launcher-diagnostics.log" echo Exit code: %GAME_EXIT%
 echo Reports: launcher-diagnostics.log and controller-input.jsonl
 exit /b %GAME_EXIT%
