@@ -1375,6 +1375,11 @@ target_include_directories(save_config_tests PRIVATE src/runtime)
 target_link_libraries(save_config_tests PRIVATE gbarecomp_gba)
 add_test(NAME save_config_tests COMMAND save_config_tests)
 
+add_executable(launcher_input_cache_tests tests/runtime/launcher_input_cache_test.cpp)
+target_include_directories(launcher_input_cache_tests PRIVATE src/runtime)
+add_test(NAME launcher_input_cache_tests COMMAND launcher_input_cache_tests
+    "${CMAKE_CURRENT_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+
 add_executable(presentation_layout_tests tests/presentation_layout/test_main.cpp)
 target_include_directories(presentation_layout_tests PRIVATE src/runtime)
 add_test(NAME presentation_layout_tests COMMAND presentation_layout_tests)

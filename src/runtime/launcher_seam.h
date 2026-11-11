@@ -38,6 +38,7 @@
 #if defined(RECOMP_LAUNCHER)
 
 #include "runtime.h"
+#include "launcher_input_cache.h"
 #include "multiplayer_launch.h"
 #include "../gba/gba_bios.h"
 #if defined(GBARECOMP_ENABLE_MODS)
@@ -257,24 +258,6 @@ inline std::string exe_dir(const std::vector<std::string>& args) {
         if (p.has_parent_path()) return p.parent_path().string();
     }
     return ".";
-}
-
-inline std::string read_single_line(const std::string& path) {
-    std::ifstream f(path);
-    std::string line;
-    if (f && std::getline(f, line)) {
-        while (!line.empty() && (line.back() == '\r' || line.back() == '\n' ||
-                                 line.back() == ' ' || line.back() == '\t'))
-            line.pop_back();
-        return line;
-    }
-    return {};
-}
-
-inline void write_single_line(const std::string& path, const std::string& value) {
-    if (value.empty()) return;
-    std::ofstream f(path, std::ios::trunc);
-    if (f) f << value << "\n";
 }
 
 // Minimal reader for a single `key = "value"` under [section] in game.toml —
