@@ -2,6 +2,7 @@
 #include "gba/gba_bios.h"
 #include "gba/sha1.h"
 #include "gba/crc32.h"
+#include "runtime/launcher_input_cache.h"
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -14,13 +15,17 @@ static void check(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
 }
 struct Fixture {
-    fs::path dir = fs::temp_directory_path() / ("gbarecomp-boot-assets-" +
-        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::path dir;
     fs::path bios = dir / "bios.bin", rom = dir / "rom.gba";
-    Fixture() { check(fs::create_directory(dir), "unique fixture directory"); }
+    explicit Fixture(fs::path parent = fs::temp_directory_path()) :
+        dir(parent / ("gbarecomp-boot-assets-" +
+            std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))),
+        bios(dir / "bios.bin"), rom(dir / "rom.gba") {
+        check(fs::create_directory(dir), "unique fixture directory");
+    }
     ~Fixture() {
         std::error_code error;
-        fs::remove(bios, error); fs::remove(rom, error); fs::remove(dir, error);
+        fs::remove_all(dir, error);
     }
 };
 static void write(const fs::path& path, const std::vector<unsigned char>& bytes) {
@@ -68,6 +73,29 @@ int main() {
               warning.crc32==gba::crc32(bytes.data(),bytes.size()), "picker warning metadata");
         spec.hash_mismatch_is_error=true;
         check(!gbarecomp::validate_asset_path(f.rom.string(), spec).ok, "strict asset policy");
+        {
+            Fixture first(fs::current_path()), moved;
+            struct CwdGuard {
+                fs::path saved = fs::current_path();
+                ~CwdGuard() { std::error_code ec; fs::current_path(saved, ec); }
+            } cwd;
+            write(first.rom, bytes);
+            spec.persist_cache = true; spec.expected_sha1 = digest.c_str(); spec.cache_filename = "rom.cfg";
+            auto pick = gbarecomp::resolve_asset(first.rom.string(), spec, (first.dir / "game.exe").string());
+            check(pick.ok && gbarecomp_seam::read_single_line((first.dir / "rom.cfg").string()) == "rom.gba",
+                  "runtime first selection must retain package-relative cache");
+            fs::copy_file(first.rom, moved.rom);
+            fs::copy_file(first.dir / "rom.cfg", moved.dir / "rom.cfg");
+            fs::remove(first.rom);
+            fs::current_path(first.dir); // unrelated working dir on G:, package moved to C: in Windows QA
+            auto relocated = gbarecomp::resolve_asset("", spec, (moved.dir / "game.exe").string());
+            check(relocated.ok && relocated.bytes == bytes && fs::equivalent(relocated.path, moved.rom),
+                  "moved cached input must resolve beside executable, independent of working dir");
+            write(first.rom, bytes);
+            auto external = gbarecomp::resolve_asset("rom.gba", spec, (moved.dir / "game.exe").string());
+            check(external.ok && fs::equivalent(gbarecomp_seam::read_single_line((moved.dir / "rom.cfg").string()), first.rom),
+                  "explicit relative CLI input must retain its actual working-dir location");
+        }
         std::cout << "boot asset snapshot, file/memory BIOS differential, ownership and rejection contracts passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n'; return 1;
