@@ -85,7 +85,9 @@ public:
     // files don't exist.
     void load_input_config(const char* dir,
                            bool assist_tools_default = true,
-                           int fast_forward_multiplier_default = 4);
+                           int fast_forward_multiplier_default = 4,
+                           const char* config_filename = "config.ini",
+                           const char* keybinds_filename = "keybinds.ini");
 
     // Live window/audio controls (hotkey + launcher-driven). All no-ops when
     // the window isn't open or this build has no SDL2.

@@ -284,6 +284,7 @@ struct RunOptions {
     const char* launcher_save_path = nullptr;   // explicit save file (game.toml
                                                 // [save].path); null => <rom>.sav
                                                 // derived from the seeded ROM
+    std::size_t launcher_native_save_bytes = 0; // optional raw native import size
     // Opt into recomp-ui's verified IPS/IPS32/BPS source-ROM patch surface.
     // Patched images are generated under the executable's mods/rom-patches
     // cache; the original ROM and patch file are never modified.

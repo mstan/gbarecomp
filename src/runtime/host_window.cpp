@@ -1,6 +1,9 @@
 // host_window.cpp — SDL2-backed window. Stubs out when SDL2 isn't found.
 
 #include "host_window.h"
+#if defined(GBARECOMP_GBA_PAD_BINDS)
+#include "consoles/gba/gba_pad_binds.h"
+#endif
 #include <stdexcept>
 
 #include <algorithm>
@@ -13,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -491,6 +495,14 @@ struct Backend {
     // GBA KEYINPUT bit (0..9) per bound SDL scancode; seeded from the
     // built-in defaults, overridden by keybinds.ini [player1].
     SDL_Scancode bind_sc[10] = {};      // indexed by GBA KEYINPUT bit
+#if defined(GBARECOMP_GBA_PAD_BINDS)
+    std::string input_config_dir;
+    std::string preferred_pad_guid;
+    int pad_buttons[10] = {};
+    int pad_axes[10] = {};
+    int pad_axis_dirs[10] = {};
+    int pad_deadzone = 6553;
+#endif
     HotkeyBind   hotkeys[HK_COUNT];     // [KeyMap] bindings
     SDL_Scancode assist_key[2] = {
         SDL_SCANCODE_1, SDL_SCANCODE_2
@@ -588,6 +600,29 @@ void close_game_controller(Backend* b) {
     b->controller_gyro = false;
 }
 
+#if defined(GBARECOMP_GBA_PAD_BINDS)
+void load_controller_bindings(Backend* b) {
+    std::string directory=b->input_config_dir;
+    if(directory.empty()) {char* base=SDL_GetBasePath();if(base){directory=base;SDL_free(base);}}
+    const std::string path=directory+"/input.ini";
+    char guid[40]={};
+    if(b->controller) SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(
+        SDL_GameControllerGetJoystick(b->controller)),guid,sizeof(guid));
+    rui_pad_binds_init(&kRuiGbaPadSpec,path.c_str());
+    b->pad_deadzone=std::max(1,rui_pad_binds_deadzone(&kRuiGbaPadSpec,path.c_str(),guid)*32767/100);
+    for(int i=0;i<10;++i) {
+        char source[48];rui_pad_binds_label(&kRuiGbaPadSpec,path.c_str(),guid,i,source,sizeof(source));
+        b->pad_buttons[i]=(int)SDL_GameControllerGetButtonFromString(source);
+        b->pad_axes[i]=-1;b->pad_axis_dirs[i]=0;
+        const size_t size=std::strlen(source);
+        if(size && (source[size-1]=='+' || source[size-1]=='-')) {
+            b->pad_axis_dirs[i]=source[size-1]=='+'?1:-1;source[size-1]=0;
+            b->pad_axes[i]=(int)SDL_GameControllerGetAxisFromString(source);
+        }
+    }
+}
+#endif
+
 bool open_game_controller(Backend* b, int device_index) {
     if (!b || b->controller || device_index < 0 ||
         !SDL_IsGameController(device_index))
@@ -595,9 +630,19 @@ bool open_game_controller(Backend* b, int device_index) {
 
     SDL_GameController* controller = SDL_GameControllerOpen(device_index);
     if (!controller) return false;
+#if defined(GBARECOMP_GBA_PAD_BINDS)
+    if(!b->preferred_pad_guid.empty()) {
+        char guid[40];SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(
+            SDL_GameControllerGetJoystick(controller)),guid,sizeof(guid));
+        if(b->preferred_pad_guid!=guid) {SDL_GameControllerClose(controller);return false;}
+    }
+#endif
     b->controller = controller;
     SDL_Joystick* joystick = SDL_GameControllerGetJoystick(controller);
     b->controller_id = joystick ? SDL_JoystickInstanceID(joystick) : -1;
+#if defined(GBARECOMP_GBA_PAD_BINDS)
+    load_controller_bindings(b);
+#endif
 #if SDL_VERSION_ATLEAST(2, 0, 14)
     if (SDL_GameControllerHasSensor(controller, SDL_SENSOR_GYRO) &&
         SDL_GameControllerSetSensorEnabled(
@@ -2850,16 +2895,22 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
 
 void HostWindow::load_input_config(const char* dir,
                                    bool assist_tools_default,
-                                   int fast_forward_multiplier_default) {
+                                   int fast_forward_multiplier_default,
+                                   const char* config_filename,
+                                   const char* keybinds_filename) {
     if (!open_ || !impl_ || !dir) return;
     auto* b = static_cast<Backend*>(impl_);
     b->assist_tools = assist_tools_default;
     b->assist_fast_forward_multiplier = std::clamp(
         fast_forward_multiplier_default, 2, 10);
-    const std::string base = std::string(dir) + "/";
+    const std::string config_path=(std::filesystem::path(dir)/(config_filename&&config_filename[0]?config_filename:"config.ini")).string();
+    const std::string keybinds_path=(std::filesystem::path(dir)/(keybinds_filename&&keybinds_filename[0]?keybinds_filename:"keybinds.ini")).string();
+#if defined(GBARECOMP_GBA_PAD_BINDS)
+    b->input_config_dir=dir;load_controller_bindings(b);
+#endif
 
     // keybinds.ini [player1] (recomp-ui generic format, scancode names).
-    ini_scan_section((base + "keybinds.ini").c_str(), "player1",
+    ini_scan_section(keybinds_path.c_str(), "player1",
                      [b](const char* key, const char* val) {
         for (const auto& bk : kBindKeys) {
             if (SDL_strcasecmp(key, bk.name) != 0) continue;
@@ -2870,7 +2921,7 @@ void HostWindow::load_input_config(const char* dir,
     });
 
     // config.ini [KeyMap] (keycode names with Ctrl+/Alt+/Shift+ prefixes).
-    ini_scan_section((base + "config.ini").c_str(), "KeyMap",
+    ini_scan_section(config_path.c_str(), "KeyMap",
                      [b](const char* key, const char* val) {
         for (int h = 0; h < HK_COUNT; ++h) {
             if (SDL_strcasecmp(key, kHotkeyNames[h]) != 0) continue;
@@ -2883,7 +2934,7 @@ void HostWindow::load_input_config(const char* dir,
     // scancodes; controller values use recomp-ui's portable button/axis
     // encoding. Keeping these in [Launcher] lets the pre-boot menu and the
     // runtime share one configuration file.
-    ini_scan_section((base + "config.ini").c_str(), "Launcher",
+    ini_scan_section(config_path.c_str(), "Launcher",
                      [b](const char* key, const char* val) {
         if (SDL_strcasecmp(key, "assist_tools") == 0)
             b->assist_tools = std::atoi(val) != 0;
@@ -2898,7 +2949,19 @@ void HostWindow::load_input_config(const char* dir,
             b->assist_pad[0] = std::atoi(val);
         else if (SDL_strcasecmp(key, "assist_fast_pad") == 0)
             b->assist_pad[1] = std::atoi(val);
+#if defined(GBARECOMP_GBA_PAD_BINDS)
+        else if(SDL_strcasecmp(key,"player_guid")==0) b->preferred_pad_guid=val;
+#endif
     });
+#if defined(GBARECOMP_GBA_PAD_BINDS)
+    if(!b->preferred_pad_guid.empty() && b->controller) {
+        char guid[40];SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(
+            SDL_GameControllerGetJoystick(b->controller)),guid,sizeof(guid));
+        if(b->preferred_pad_guid!=guid) close_game_controller(b);
+    }
+    if(!b->controller) for(int i=0;i<SDL_NumJoysticks();++i)
+        if(open_game_controller(b,i))break;
+#endif
 }
 
 bool HostWindow::assist_tools_enabled() const {
@@ -3511,6 +3574,17 @@ HostWindow::Events HostWindow::pump() {
     // inputs. Keyboard and controller are additive so either can be used at
     // any time, including while testing motion.
     if (b->controller && SDL_GameControllerGetAttached(b->controller)) {
+#if defined(GBARECOMP_GBA_PAD_BINDS)
+        for(int i=0;i<10;++i) {
+            bool pressed=b->pad_buttons[i]>=0 && SDL_GameControllerGetButton(
+                b->controller,(SDL_GameControllerButton)b->pad_buttons[i]);
+            if(b->pad_axes[i]>=0) {
+                const int value=SDL_GameControllerGetAxis(b->controller,(SDL_GameControllerAxis)b->pad_axes[i]);
+                pressed|=b->pad_axis_dirs[i]>0?value>=b->pad_deadzone:value<=-b->pad_deadzone;
+            }
+            if(pressed)keys&=static_cast<uint16_t>(~(1u<<kRuiGbaKeyBits[i]));
+        }
+#else
         const struct {
             int bit;
             SDL_GameControllerButton button;
@@ -3530,6 +3604,7 @@ HostWindow::Events HostWindow::pump() {
             if (SDL_GameControllerGetButton(b->controller, binding.button))
                 keys &= static_cast<uint16_t>(~(1u << binding.bit));
         }
+#endif
     }
     if (b->touch_controls) {
         const uint16_t touch_buttons = active_touch_buttons(b);
@@ -3674,7 +3749,9 @@ void HostWindow::present(const uint8_t*, unsigned, unsigned) {}
 
 void HostWindow::load_input_config(const char* /*dir*/,
                                    bool /*assist_tools_default*/,
-                                   int /*fast_forward_multiplier_default*/) {}
+                                   int /*fast_forward_multiplier_default*/,
+                                   const char* /*config_filename*/,
+                                   const char* /*keybinds_filename*/) {}
 void HostWindow::set_fullscreen(int /*mode*/) {}
 int  HostWindow::fullscreen() const { return 0; }
 void HostWindow::adjust_scale(int /*delta*/) {}

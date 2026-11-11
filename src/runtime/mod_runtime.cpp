@@ -1084,9 +1084,11 @@ bool save_state(Runtime& runtime, std::string* error) {
     for (const auto& [package_id, selection] : runtime.selections) {
         for (const auto& [feature_id, feature] : selection.features) {
             file << "\n[[feature]]\npackage_id = " << quote_toml(package_id)
-                 << "\nid = " << quote_toml(feature_id)
-                 << "\nenabled = " << (feature.enabled ? "true" : "false")
-                 << "\n";
+                 << "\nid = " << quote_toml(feature_id) << "\n";
+            // An inherited value is not an explicit player choice. Retain
+            // that distinction when options or catalog queries create a row.
+            if (feature.has_enabled)
+                file << "enabled = " << (feature.enabled ? "true" : "false") << "\n";
             if (!feature.values.empty()) {
                 file << "\n[feature.values]\n";
                 for (const auto& [key, value] : feature.values)

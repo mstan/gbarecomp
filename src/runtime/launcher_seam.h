@@ -329,6 +329,8 @@ struct SeamConfig {
     int  affine_filter = -1;
     int  screen_kind = 0;      // kScreenTokens index
     int  volume = 100;
+    int player_source = 1;
+    std::string player_guid;
     int  skip_launcher = 0;
     int  widescreen = 0;       // legacy fixed-width toggle
     int  aspect_index = 0;     // games with a launcher_aspect vocabulary only
@@ -347,6 +349,7 @@ struct SeamConfig {
 
 inline void seam_config_load(const std::string& path, SeamConfig* c) {
     std::ifstream f(path);
+    std::fprintf(stderr,"[gbarecomp:launcher-profile] load path=\"%s\" readable=%d\n",path.c_str(),f.good()?1:0);
     if (!f) return;
     std::string line;
     bool in_section = false;
@@ -378,6 +381,8 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
         else if (key == "affine_filter") c->affine_filter = std::atoi(val.c_str());
         else if (key == "screen")        c->screen_kind = screen_token_to_index(val);
         else if (key == "volume")        c->volume = std::atoi(val.c_str());
+        else if (key == "player_source") c->player_source=std::clamp(std::atoi(val.c_str()),0,2);
+        else if (key == "player_guid") c->player_guid=val;
         else if (key == "skip_launcher") c->skip_launcher = std::atoi(val.c_str());
         else if (key == "widescreen")    c->widescreen = std::atoi(val.c_str());
         else if (key == "aspect_index")  c->aspect_index = std::atoi(val.c_str());
@@ -436,7 +441,9 @@ inline void seam_config_save(const std::string& path, const SeamConfig& c) {
     while (!kept.empty() && kept.back().empty()) kept.pop_back();
 
     std::ofstream f(path, std::ios::trunc);
-    if (!f) return;
+    if (!f) {
+        std::fprintf(stderr,"[gbarecomp:launcher-profile] save path=\"%s\" written=0\n",path.c_str());return;
+    }
     for (const auto& l : kept) f << l << "\n";
     if (!kept.empty()) f << "\n";
     f << "[Launcher]\n";
@@ -447,6 +454,8 @@ inline void seam_config_save(const std::string& path, const SeamConfig& c) {
     f << "affine_filter = " << c.affine_filter << "\n";
     f << "screen = " << kScreenTokens[c.screen_kind] << "\n";
     f << "volume = " << c.volume << "\n";
+    f << "player_source = " << c.player_source << "\n";
+    f << "player_guid = " << c.player_guid << "\n";
     f << "skip_launcher = " << c.skip_launcher << "\n";
     f << "widescreen = " << c.widescreen << "\n";
     f << "aspect_index = " << c.aspect_index << "\n";
@@ -462,6 +471,8 @@ inline void seam_config_save(const std::string& path, const SeamConfig& c) {
     f << "assist_fast_pad = " << c.assist_fast_pad << "\n";
     f << "rom_patch_enabled = " << c.rom_patch_enabled << "\n";
     f << "rom_patch_path = " << c.rom_patch_path << "\n";
+    f.flush();
+    std::fprintf(stderr,"[gbarecomp:launcher-profile] save path=\"%s\" written=%d volume=%d fullscreen=%d\n",path.c_str(),f.good()?1:0,c.volume,c.fullscreen);
 }
 
 // ---- config.ini [Solar] ------------------------------------------------------
@@ -786,7 +797,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     ls.enable_audio  = 1;
     ls.audio_freq    = 32768;             // GBA mixer base rate (display only)
     ls.volume        = cfg.volume;
-    ls.player_src[0] = 1;                 // keyboard (gbarecomp host input)
+    ls.player_src[0] = cfg.player_source;
+#if defined(RECOMP_LAUNCHER_HAS_PLAYER_GAMEPAD_GUID)
+    std::snprintf(ls.player_gamepad_guid[0],sizeof(ls.player_gamepad_guid[0]),"%s",cfg.player_guid.c_str());
+#endif
     ls.skip_launcher = cfg.skip_launcher;
     bool solar_in_launcher = false;
     if (opts.has_solar_sensor) solar_in_launcher = push_solar_settings(ls, solar);
@@ -898,6 +912,9 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         save_display = p.string();
     }
     if (!save_display.empty()) gi.sram_path = save_display.c_str();
+#if defined(RECOMP_LAUNCHER_HAS_NATIVE_SAVE_BYTES)
+    gi.native_save_bytes = opts.launcher_native_save_bytes;
+#endif
 
     std::string title = std::string(gi.name) + " \xE2\x80\x94 Launcher";
 #if defined(RECOMP_UI_HAS_NETPLAY_HOST)
@@ -909,9 +926,9 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     int rc = recomp_launcher_run_window(title.c_str(), &ls, &gi, dir.c_str(),
                                         seed_rom.c_str(),
                                         picked_rom, sizeof(picked_rom));
-    if (rc == 1) return 1;    // user closed the launcher: quit without booting
-    if (rc != 0) return 0;    // unavailable: fall back to the asset picker
+    if (rc != 0 && rc != 1) return 0; // unavailable: fall back to the asset picker
 #if defined(RECOMP_UI_HAS_NETPLAY_HOST)
+    if (rc == 0) {
 #if defined(RECOMP_LAUNCHER_HAS_NETPLAY_VIEW)
     if (opts.netplay) {
         opts.netplay->view=gbarecomp_seam::netplay_view_at(ls.netplay_view_index,opts.netplay->view_policy);
@@ -920,6 +937,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
 #endif
     try { gbarecomp_seam::accept_netplay(ls.netplay_launch,opts); }
     catch (const std::exception& e) { std::fprintf(stderr,"netplay: %s\n",e.what()); return 1; }
+    }
 #endif
 
     // ---- persist + translate the committed settings -------------------------
@@ -937,6 +955,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     cfg.screen_kind   = (ls.screen_kind >= 0 && ls.screen_kind <= 4)
                           ? ls.screen_kind : 0;
     cfg.volume        = ls.volume;
+    cfg.player_source=std::clamp(ls.player_src[0],0,2);
+#if defined(RECOMP_LAUNCHER_HAS_PLAYER_GAMEPAD_GUID)
+    cfg.player_guid=ls.player_gamepad_guid[0];
+#endif
     cfg.skip_launcher = ls.skip_launcher ? 1 : 0;
     cfg.widescreen    = ls.widescreen ? 1 : 0;
     cfg.adaptive_view = ls.adaptive_view ? 1 : 0;
@@ -963,6 +985,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     // would just churn the file the game owns.
     if (solar_in_launcher && pull_solar_settings(ls, &solar))
         seam_solar_save(config_path, solar);
+
+    // Closing the launcher still commits its settings. Save before returning
+    // so a player need not start a game just to retain an audio/display edit.
+    if (rc == 1) return 1;
 
     if (picked_rom[0]) {
         args.push_back("--rom");
