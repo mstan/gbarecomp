@@ -7,14 +7,14 @@
 #include <type_traits>
 
 namespace gbarecomp::web {
-// Version 2: touch ring, per-frame host overlay display list, page-published
-// presentation geometry (layout, insets, density) and pad state.
-constexpr uint32_t Magic = 0x47425257, Version = 2, Dirty = 4;
+// Version 3: interleaved stereo PCM; all audio counts remain frames.
+constexpr uint32_t Magic = 0x47425257, Version = 3, Dirty = 4;
 // Ownership handshake for Backend storage during page-side detach. JS may only
 // publish SafeToFree after the AudioWorklet stopped and AudioContext closed.
 enum DetachState : uint32_t { DetachPending, DetachSafeToFree, DetachUnsafeRetain };
 constexpr uint32_t PixelBytes = gba::GbaPpu::kMaxRenderWidth * gba::GbaPpu::kMaxRenderHeight * 3;
 constexpr uint32_t AudioSlots = 16, AudioSamples = 2048, CommandSlots = 64;
+constexpr uint32_t AudioChannels = 2;
 constexpr uint32_t TouchSlots = 128, OverlayCmds = 1024;
 // Single source of truth: also exported as a named JS descriptor by the backend.
 //   touchMode      worker -> page: TouchMode bits (configure_touch)
@@ -60,7 +60,7 @@ struct VideoSlot {
  uint32_t overlayCount, overlayDropped;
  OverlayCmd overlay[OverlayCmds];
 };
-struct AudioSlot { uint32_t count, rate, epoch; int16_t samples[AudioSamples]; };
+struct AudioSlot { uint32_t count, rate, epoch; int16_t samples[AudioSamples * AudioChannels]; };
 struct Command { uint32_t seq, kind, arg; };
 // Page -> worker pointer events (drawable pixels). `kind` is a TouchKind, with
 // TouchFromMouse set when desktop touch emulation produced it.
@@ -83,7 +83,7 @@ static_assert(std::is_standard_layout_v<Shared> && alignof(Shared) >= 4);
 // always publishable; the page validates every frame against maxWidth/maxHeight.
 static_assert(PixelBytes % 4 == 0 && offsetof(VideoSlot, pixels) == 16);
 static_assert(offsetof(VideoSlot, overlayCount) % 4 == 0 && sizeof(OverlayCmd) == 32);
-static_assert(sizeof(AudioSlot) == 12 + AudioSamples * 2);
+static_assert(sizeof(AudioSlot) == 12 + AudioSamples * AudioChannels * sizeof(int16_t));
 static_assert(sizeof(TouchSlot) == 16 && offsetof(Shared, touches) % 4 == 0);
 static_assert((AudioSlots & (AudioSlots-1)) == 0 && (CommandSlots & (CommandSlots-1)) == 0);
 static_assert((TouchSlots & (TouchSlots-1)) == 0);

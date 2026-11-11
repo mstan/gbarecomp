@@ -4,7 +4,7 @@
 const DEFAULT_KEYS=['KeyX','KeyZ','ShiftRight','Enter','ArrowRight','ArrowLeft','ArrowUp','ArrowDown','KeyV','KeyC'];
 const COMMAND={Pause:1,Save:2,Load:3,WindowBigger:4,WindowSmaller:5,VolumeUp:6,VolumeDown:7,DisplayPerf:8,Rewind:9,SolarBrighter:10,SolarDimmer:11,SolarLive:12};
 const DETACH={Pending:0,SafeToFree:1,UnsafeRetain:2};
-const ABI_VERSION=2;
+const ABI_VERSION=3;
 // host_web_shared.h TouchKind / TouchMode.
 const TOUCH={Down:0,Move:1,Up:2,Cancel:3,TwoFingerTap:16,ThreeFingerTap:17,Back:18,FromMouse:0x100};
 const TOUCH_MODE={Policy:1,Emulate:2};
@@ -111,7 +111,7 @@ class Host {
       const context=this.audio; // detach nulls this.audio before close() reports 'closed'
       context.onstatechange=()=>{this.stats.audio=context.state;this.report('Audio '+context.state);};
       await this.audio.audioWorklet.addModule('audio_worklet_bundle.js');
-      this.node=new AudioWorkletNode(this.audio,'gbr-audio',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[1]});
+      this.node=new AudioWorkletNode(this.audio,'gbr-audio',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2]});
       this.gain=this.audio.createGain();this.node.connect(this.gain).connect(this.audio.destination);
       this.node.onprocessorerror=()=>this.audioFailure('Audio processor failed');
       // resume() may remain pending under autoplay. Worklet setup can still finish.

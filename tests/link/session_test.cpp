@@ -387,6 +387,11 @@ void native_exchange() {
     for (auto* m : {&a,&b}) {
         m->execution.cpu.R[15] = 0x08000000;
         m->execution.program_dispatch = program;
+        m->bus.write16(0x04000084,0x80);
+        m->bus.write16(0x04000080,0x2077);
+        m->bus.write16(0x04000082,2);
+        m->bus.write16(0x04000068,0xf080);
+        m->bus.write16(0x0400006c,0x87c0);
     }
     a.execution.cpu.R[0] = 0x1111;
     b.execution.cpu.R[0] = 0x2222;
@@ -396,6 +401,7 @@ void native_exchange() {
     CHECK(session->cable().transfer_active());
     checkpoint_parts(*session);
     CHECK(a.bus.read32(0x02000000) == 0);
+    a.bus.audio().discard_output();b.bus.audio().discard_output();
     const auto baseline = session->save_state();
     const auto baseline_hash = session->state_hash();
     std::printf("two-machine fixture snapshot: %zu bytes\n", baseline.size());
@@ -419,11 +425,18 @@ void native_exchange() {
     CHECK(session->cable().cycle(0) == session->cycle());
     CHECK(session->cable().cycle(1) == session->cycle());
     const auto expected = session->save_state();
+    std::array<int16_t,128> first_pcm{},replay_pcm{};
+    const auto pcm_frames=a.bus.audio().drain_stereo_samples(first_pcm.data(),64);
+    bool audible=false;
+    for(size_t i=0;i<pcm_frames;++i){audible|=first_pcm[i*2]!=0;CHECK(first_pcm[i*2+1]==0);}
+    CHECK(audible);
     CHECK(session->load_state(baseline,&error));
     CHECK(session->state_hash() == baseline_hash);
     checkpoint_parts(*session);
     session->run_until(6000);
     CHECK(session->save_state() == expected);
+    CHECK(session->machine(10).bus.audio().drain_stereo_samples(replay_pcm.data(),64)==pcm_frames);
+    CHECK(first_pcm==replay_pcm);
     const std::uint16_t inputs[] = {1, 2};
     session->run_frame(inputs);
     CHECK((session->machine(10).bus.io().read16(0x130) & 0x3ff) == 0x3fd);

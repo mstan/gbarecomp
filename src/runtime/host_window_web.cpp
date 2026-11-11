@@ -65,6 +65,7 @@ std::string descriptor() {
       << ",\"overlayStride\":" << sizeof(OverlayCmd)
       << ",\"audio\":" << offsetof(Shared,audio) << ",\"audioStride\":" << sizeof(AudioSlot)
       << ",\"audioSamples\":" << AudioSamples << ",\"audioSlots\":" << AudioSlots
+      << ",\"audioChannels\":" << AudioChannels
       << ",\"commands\":" << offsetof(Shared,commands) << ",\"commandSlots\":" << CommandSlots
       << ",\"touches\":" << offsetof(Shared,touches) << ",\"touchSlots\":" << TouchSlots
       << ",\"touchStride\":" << sizeof(TouchSlot) << '}';
@@ -361,6 +362,15 @@ void HostWindow::present(const uint8_t* rgb,unsigned sampled_w,unsigned sampled_
 }
 void HostWindow::push_audio_samples(const int16_t* x,std::size_t n){push_audio_block(x,n,65536);}
 void HostWindow::push_audio_block(const int16_t* x,std::size_t n,uint32_t rate) {
+    if(!x)return;
+    int16_t stereo[AudioSamples * AudioChannels];
+    while(n) {
+        const auto count=std::min(n,std::size_t(AudioSamples));
+        for(std::size_t i=0;i<count;++i) stereo[i*2]=stereo[i*2+1]=x[i];
+        push_audio_stereo_block(stereo,count,rate); x+=count;n-=count;
+    }
+}
+void HostWindow::push_audio_stereo_block(const int16_t* x,std::size_t n,uint32_t rate) {
     if(!impl_||!x||!(rate==32768||rate==65536||rate==131072||rate==262144))return;
     auto& b=*backend(impl_);auto& s=b.shared;auto& c=s.control;
     if(c.audioReady!=1 || c.resetAck.load()!=c.resetRequest.load())return;
@@ -368,7 +378,7 @@ void HostWindow::push_audio_block(const int16_t* x,std::size_t n,uint32_t rate) 
         uint32_t w=c.audioWrite.load(std::memory_order_relaxed),r=c.audioRead.load(std::memory_order_acquire);
         if(uint32_t(w-r)>=AudioSlots){c.audioOverflow.fetch_add(n);reset_audio();return;}
         auto& a=s.audio[w&(AudioSlots-1)]; a.count=std::min(n,std::size_t(AudioSamples)); a.rate=rate;a.epoch=b.epoch;
-        std::copy_n(x,a.count,a.samples); x+=a.count;n-=a.count;
+        std::copy_n(x,a.count * AudioChannels,a.samples); x+=a.count * AudioChannels;n-=a.count;
         c.audioPublished.fetch_add(a.count);c.audioWrite.store(w+1,std::memory_order_release);
     }
 }

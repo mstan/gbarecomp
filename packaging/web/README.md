@@ -5,6 +5,13 @@ game. It produces a WebAssembly bundle with the web host, audio worklet and
 IDBFS-backed saves. The recompiler is not available in the browser, so generate
 the game and BIOS with a native build first.
 
+The host wire ABI is version 3. Audio slots carry interleaved signed 16-bit
+left/right PCM; counts and capacities are stereo frames, with two scalar
+samples per frame. Build the worker, page and worklet together. The worklet
+rejects older mono descriptors. SOUNDBIAS rate changes and playback resets
+apply to both channels, and mono mod clips/streams are centered without
+advancing their source clock twice.
+
 **The bundle contains no ROM and no BIOS.** Each player picks their own dump of
 the game ROM and their own GBA BIOS in the page. The ROM must match the SHA-1
 this bundle was built for; both files are kept in that browser's IndexedDB for

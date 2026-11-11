@@ -34,6 +34,7 @@
 #if defined(GBARECOMP_HAVE_SDL2)
 
 #include <SDL.h>
+#include "stereo_audio_stream.h"
 
 #if defined(GBARECOMP_RUNTIME_UI)
 #include "imgui.h"
@@ -424,13 +425,16 @@ struct Backend {
     rab_bridge    bridge{};
     bool          bridge_ready = false;
     SDL_mutex*    audio_mtx = nullptr;
-    // Diagnostic/direct path: let SDL own format conversion and queue the
-    // engine's verified 65536 Hz mono stream without passing it through RAB.
+    // Diagnostic queued path: persistent SDL conversion at each true source rate.
     bool          audio_direct = false;
     bool          audio_direct_started = false;
     int           audio_direct_rate = 65536;
+    StereoAudioStream audio_direct_stream;
+    std::vector<int16_t> audio_direct_pcm;
+    std::vector<int16_t> mono_stereo_pcm;
     uint64_t      audio_direct_pushes = 0;
     uint64_t      audio_direct_samples = 0;
+    double        audio_direct_seconds = 0;
     uint64_t      audio_direct_underruns = 0;
     // Session health: one clock read per present, summarised in the log when
     // the app goes to the background (it may be killed there) and on close.
@@ -1382,15 +1386,17 @@ runtime::ColorSettings resolve_color_settings(const char* toml_screen) {
     return s;
 }
 
-// SDL audio pull callback: render exactly `len` bytes of device-rate mono S16
+// SDL audio pull callback: render exactly `len` bytes of device-rate stereo S16
 // from the bridge ring. The bridge emits faded silence (not raw zeros) before
 // prime / on underrun, so a momentarily-starved producer no longer clicks.
 void gba_audio_callback(void* userdata, Uint8* stream, int len) {
     auto* b = static_cast<Backend*>(userdata);
-    int frames = len / static_cast<int>(sizeof(int16_t)); // mono
-    if (b && b->bridge_ready) {
+    SDL_memset(stream, 0, len);
+    int frames = len / static_cast<int>(2 * sizeof(int16_t));
+    if (b && b->audio_mtx) {
         SDL_LockMutex(b->audio_mtx);
-        rab_pull(&b->bridge, reinterpret_cast<int16_t*>(stream), frames);
+        if (b->bridge_ready)
+            rab_pull(&b->bridge, reinterpret_cast<int16_t*>(stream), frames);
         SDL_UnlockMutex(b->audio_mtx);
     } else {
         SDL_memset(stream, 0, len);
@@ -2137,19 +2143,12 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     open_first_game_controller(b);
     open_device_gyro(b);
 
-    // Open the audio device at 65536 Hz mono 16-bit signed. The
-    // running BIOS sets SOUNDBIAS resolution=1 which raises the
-    // mixer's effective sample rate from 32768 to 65536; opening
-    // the device at 32768 (the power-on default) caused SDL to play
-    // back at half speed, hit the 250 ms queue cap, and flush —
-    // audible as muffled / watery chime artifacts. SDL2 resamples
-    // internally if the host hardware doesn't natively support
-    // 65536, so this rate is portable. Failure is non-fatal —
-    // silent video still works.
+    // The host device receives stereo S16. Both playback modes convert from
+    // the block's SOUNDBIAS rate; the initial device rate is only a preference.
     SDL_AudioSpec want{};
     want.freq     = 65536;
     want.format   = AUDIO_S16SYS;
-    want.channels = 1;
+    want.channels = 2;
     want.samples  = 1024;  // ~15 ms callback quantum at 65 kHz
     const char* direct_audio_env = std::getenv("GBARECOMP_AUDIO_DIRECT");
     b->audio_direct =
@@ -2157,24 +2156,22 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     want.callback = b->audio_direct ? nullptr : gba_audio_callback;
     want.userdata = b->audio_direct ? nullptr : b;
     SDL_AudioSpec got{};
-    // In direct mode, disallow application-visible format changes so SDL
-    // converts the exact 65536 Hz mono stream to the physical device itself.
-    // Bridge mode instead opens at the native rate and performs that clock
-    // conversion in RAB.
     const char* audio_device_env = std::getenv("GBARECOMP_AUDIO_DEVICE");
     const char* audio_device_name =
         audio_device_env && *audio_device_env ? audio_device_env : nullptr;
     b->audio_dev = SDL_OpenAudioDevice(audio_device_name, /*iscapture=*/0,
                                        &want, &got,
-                                       b->audio_direct
-                                           ? 0
-                                           : SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+                                       SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
+    if (b->audio_dev && (got.channels != 2 || got.format != AUDIO_S16SYS || got.freq <= 0)) {
+        SDL_CloseAudioDevice(b->audio_dev);
+        b->audio_dev = 0;
+    }
     if (b->audio_dev != 0) {
         if (b->audio_direct) {
             b->audio_direct_rate = got.freq;
             std::fprintf(stderr,
                          "host_window: audio=direct-queue driver=%s "
-                         "device=%s format=%dHz mono S16 quantum=%u\n",
+                         "device=%s format=%dHz stereo S16 quantum=%u\n",
                          SDL_GetCurrentAudioDriver()
                              ? SDL_GetCurrentAudioDriver() : "(unknown)",
                          audio_device_name ? audio_device_name : "(default)",
@@ -2195,8 +2192,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
             b->audio_mtx = SDL_CreateMutex();
             rab_config cfg;
             rab_config_defaults(&cfg);
-            cfg.channels    = 1;
-            cfg.source_rate = 65536.0;                 // engine's standardized GBA mixer rate
+            cfg.channels    = 2;
+            cfg.source_rate = 65536.0;                 // re-tuned on the first rate-tagged block
             cfg.host_rate   = static_cast<double>(got.freq);
             cfg.target_ms   = 60.0;                     // steady cushion (matches NES)
             cfg.preroll_ms  = 250.0;                    // boot pre-roll: hide the cold-start
@@ -2224,18 +2221,19 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
 // (We are already inside namespace gbarecomp, so declare it unqualified.)
 uint64_t overlay_game_thread_compile_ns();
 
-void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
+void HostWindow::push_audio_stereo_block(const int16_t* samples, std::size_t count,
                                   uint32_t rate) {
-    if (!open_ || !impl_ || !samples || count == 0) return;
+    if (!open_ || !impl_ || !samples || count == 0 || count > INT_MAX / 4 ||
+        !(rate == 32768 || rate == 65536 || rate == 131072 || rate == 262144)) return;
     auto* b = static_cast<Backend*>(impl_);
     if (b->audio_dev == 0) return;
 
     // Volume (launcher setting + VolumeUp/Down hotkeys): scale into scratch
     // before the bridge. 100 = passthrough, byte-identical to before.
     if (b->volume != 100) {
-        b->volume_buf.resize(count);
+        b->volume_buf.resize(count * 2);
         const int v = b->volume;
-        for (std::size_t i = 0; i < count; ++i)
+        for (std::size_t i = 0; i < count * 2; ++i)
             b->volume_buf[i] = static_cast<int16_t>(
                 (static_cast<int32_t>(samples[i]) * v) / 100);
         samples = b->volume_buf.data();
@@ -2254,8 +2252,11 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
         b->audio_direct_min_bytes =
             std::min(b->audio_direct_min_bytes, queued_before);
 
-        const Uint32 bytes = static_cast<Uint32>(count * sizeof(int16_t));
-        if (SDL_QueueAudio(b->audio_dev, samples, bytes) != 0) {
+        b->audio_direct_pcm.clear();
+        if (!b->audio_direct_stream.convert(samples, count, rate,
+                                             b->audio_direct_rate, b->audio_direct_pcm)) return;
+        const Uint32 bytes = static_cast<Uint32>(b->audio_direct_pcm.size() * sizeof(int16_t));
+        if (bytes && SDL_QueueAudio(b->audio_dev, b->audio_direct_pcm.data(), bytes) != 0) {
             static bool s_reported_queue_failure = false;
             if (!s_reported_queue_failure) {
                 std::fprintf(stderr,
@@ -2271,8 +2272,9 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
             std::max(b->audio_direct_max_bytes, queued_after);
         ++b->audio_direct_pushes;
         b->audio_direct_samples += count;
+        b->audio_direct_seconds += static_cast<double>(count) / rate;
 
-        constexpr Uint32 kDirectPrerollBytes = 16384;  // 125 ms at 65536 Hz S16
+        const Uint32 kDirectPrerollBytes = b->audio_direct_rate * 4 / 8; // 125 ms, stereo S16
         if (!b->audio_direct_started &&
             queued_after >= kDirectPrerollBytes) {
             b->audio_direct_started = true;
@@ -2285,7 +2287,7 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
             s_direct_probe = (e && *e && *e != '0') ? 1 : 0;
         }
         if (s_direct_probe) {
-            for (std::size_t i = 0; i < count; ++i) {
+            for (std::size_t i = 0; i < count * 2; ++i) {
                 const int sample = samples[i];
                 if (sample != 0) ++b->audio_direct_probe_nonzero;
                 b->audio_direct_probe_peak =
@@ -2293,14 +2295,13 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
                 b->audio_direct_probe_square_sum +=
                     static_cast<long double>(sample) * sample;
             }
-            b->audio_direct_probe_samples += count;
+            b->audio_direct_probe_samples += count * 2;
         }
         if (s_direct_probe && (b->audio_direct_pushes % 120ULL) == 0ULL) {
             const double bytes_per_ms =
                 static_cast<double>(b->audio_direct_rate) *
-                sizeof(int16_t) / 1000.0;
-            const double audio_secs =
-                static_cast<double>(b->audio_direct_samples) / 65536.0;
+                (2 * sizeof(int16_t)) / 1000.0;
+            const double audio_secs = b->audio_direct_seconds;
             const double rms = b->audio_direct_probe_samples
                 ? std::sqrt(static_cast<double>(
                       b->audio_direct_probe_square_sum /
@@ -2347,8 +2348,8 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
             cfg.source_rate = static_cast<double>(rate);
             rab_free(&b->bridge);
             if (rab_init(&b->bridge, &cfg) != 0) {
-                SDL_UnlockMutex(b->audio_mtx);
                 b->bridge_ready = false;
+                SDL_UnlockMutex(b->audio_mtx);
                 return;
             }
         } else {
@@ -2357,11 +2358,11 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
         SDL_UnlockMutex(b->audio_mtx);
     }
 
-    // Producer: append mono frames into the bridge ring. The SDL callback
+    // Producer: append interleaved stereo frames into the bridge ring. The SDL callback
     // (gba_audio_callback) drains it at the device rate with band-limited
     // resampling + a P-only fill servo — no queue underrun, no hard flush.
     SDL_LockMutex(b->audio_mtx);
-    rab_push(&b->bridge, samples, static_cast<int>(count)); // mono: count == frames
+    rab_push(&b->bridge, samples, static_cast<int>(count));
     SDL_UnlockMutex(b->audio_mtx);
 
     // ── NES-mode crackle probe (measure step) ──────────────────────────
@@ -2372,10 +2373,12 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
     if (s_probe < 0) { const char* e = std::getenv("GBARECOMP_AUDIO_PROBE"); s_probe = (e && *e && *e != '0') ? 1 : 0; }
     if (s_probe) {
         static unsigned long long s_pushes = 0, s_samples = 0;
+        static double s_seconds = 0;
         s_pushes++; s_samples += count;
+        s_seconds += static_cast<double>(count) / rate;
         if ((s_pushes % 120ULL) == 0ULL) {
             rab_stats st; rab_get_stats(&b->bridge, &st);
-            double secs = static_cast<double>(s_samples) / 65536.0;
+            double secs = s_seconds;
             double stretch_ms = st.stretch_frames * 1000.0
                               / static_cast<double>(b->bridge.cfg.host_rate);
             // Game-thread codegen time: cumulative + this-window delta. The delta
@@ -2402,6 +2405,31 @@ void HostWindow::push_audio_block(const int16_t* samples, std::size_t count,
 void HostWindow::push_audio_samples(const int16_t* samples, std::size_t count) {
     // Legacy callers that do not tag a rate: assume the engine default.
     push_audio_block(samples, count, 65536u);
+}
+
+void HostWindow::push_audio_block(const int16_t* samples, std::size_t count, uint32_t rate) {
+    if (!impl_ || !samples || count == 0 || count > INT_MAX / 4) return;
+    auto* b = static_cast<Backend*>(impl_);
+    b->mono_stereo_pcm.resize(count * 2);
+    for (std::size_t i = 0; i < count; ++i)
+        b->mono_stereo_pcm[i*2] = b->mono_stereo_pcm[i*2+1] = samples[i];
+    push_audio_stereo_block(b->mono_stereo_pcm.data(), count, rate);
+}
+
+void HostWindow::reset_audio() {
+    if (!impl_) return;
+    auto* b = static_cast<Backend*>(impl_);
+    if (b->audio_direct) {
+        if (b->audio_dev) { SDL_PauseAudioDevice(b->audio_dev, 1); SDL_ClearQueuedAudio(b->audio_dev); }
+        b->audio_direct_stream.reset();
+        b->audio_direct_started = false;
+    } else if (b->bridge_ready) {
+        SDL_LockMutex(b->audio_mtx);
+        const rab_config cfg = b->bridge.cfg;
+        rab_free(&b->bridge);
+        b->bridge_ready = rab_init(&b->bridge, &cfg) == 0;
+        SDL_UnlockMutex(b->audio_mtx);
+    }
 }
 
 void HostWindow::set_title(const char* title) {
@@ -3307,6 +3335,7 @@ bool HostWindow::wait_for_foreground() {
     b->backgrounded = false;
     b->health_prev_present = 0;  // the time away is not a stall
     if (resumed && b->audio_dev) {
+        reset_audio();
         if (b->audio_direct) {
             // Rebuild the cushion rather than replaying a stale queue.
             SDL_ClearQueuedAudio(b->audio_dev);
@@ -3858,6 +3887,8 @@ void HostWindow::push_audio_samples(const int16_t* /*samples*/,
                                     std::size_t /*count*/) {}
 void HostWindow::push_audio_block(const int16_t* /*samples*/,
                                   std::size_t /*count*/, uint32_t /*rate*/) {}
+void HostWindow::push_audio_stereo_block(const int16_t*, std::size_t, uint32_t) {}
+void HostWindow::reset_audio() {}
 
 void HostWindow::service_events() {}
 
