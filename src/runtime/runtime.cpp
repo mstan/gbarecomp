@@ -2407,8 +2407,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         // state. Discard them so a pre-load cue cannot continue over the
         // restored world, but retain the stream capability: loading does not
         // rerun plugin activation, and the restored event must be able to
-        // explicitly restart its already-registered source. The host bridge's
-        // already-queued native audio remains a separate future flush concern.
+        // explicitly restart its already-registered source. The host bridge
+        // observes the state epoch before accepting the next producer block.
         gba_mod_audio_on_savestate_load();
         // KEYINPUT reflects the live controller, never the instant the state
         // was saved: re-latch the host keys over the restored register.
@@ -2421,9 +2421,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         g_runtime_cycles = 0;
         runtime_fp_reset();
         ++g_runtime_state_epoch;
-#if defined(GBARECOMP_WEB_HOST)
         bus.audio().discard_playback();
-#endif
         return true;
     };
     auto do_savestate_save_bytes = [&](std::vector<uint8_t>& bytes,
@@ -2441,9 +2439,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         g_runtime_cycles = 0;
         runtime_fp_reset();
         ++g_runtime_state_epoch;
-#if defined(GBARECOMP_WEB_HOST)
         bus.audio().discard_playback();
-#endif
         return true;
     };
 
@@ -4232,34 +4228,32 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             if (autosave_on) autosave_now(frame);
         }
     };
-#if defined(GBARECOMP_WEB_HOST)
     uint64_t host_audio_state_epoch = g_runtime_state_epoch;
-#endif
     auto drain_host_audio = [&]() {
-        int16_t audio_buf[2048];
-#if defined(GBARECOMP_WEB_HOST)
+        int16_t audio_buf[2048 * 2];
         if (host_audio_state_epoch != g_runtime_state_epoch) {
             // State restore owns audio invalidation through this epoch. Keep
             // load/rewind command handlers free of direct reset_audio() calls.
             win.reset_audio();
             host_audio_state_epoch = g_runtime_state_epoch;
         }
+#if defined(GBARECOMP_WEB_HOST)
         // Bounded work, including 262144 Hz source frames and rate transitions.
         for (int budget = 0; budget < 16; ++budget) {
             uint32_t rate = 0;
-            const auto n = bus.audio().drain_sample_block(audio_buf, 2048, rate);
+            const auto n = bus.audio().drain_stereo_sample_block(audio_buf, 2048, rate);
             if (!n) break;
             if (!fast_forward_active) {
-                gba_mod_audio_mix_at_rate(audio_buf, n, rate);
-                win.push_audio_block(audio_buf, n, rate);
+                gba_mod_audio_mix_stereo_at_rate(audio_buf, n, rate);
+                win.push_audio_stereo_block(audio_buf, n, rate);
             }
         }
 #else
         uint32_t rate = 0;
-        const auto n = bus.audio().drain_sample_block(audio_buf, 2048, rate);
+        const auto n = bus.audio().drain_stereo_sample_block(audio_buf, 2048, rate);
         if (n && !fast_forward_active) {
-            gba_mod_audio_mix_at_rate(audio_buf, n, rate);
-            win.push_audio_block(audio_buf, n, rate);
+            gba_mod_audio_mix_stereo_at_rate(audio_buf, n, rate);
+            win.push_audio_stereo_block(audio_buf, n, rate);
         }
 #endif
     };
@@ -4296,8 +4290,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (waited && pacer) pacer->reset();
 #if defined(GBARECOMP_WEB_HOST)
         win.report_paused(false);
-        if (waited) { bus.audio().discard_playback(); win.reset_audio(); }
 #endif
+        if (waited) { bus.audio().discard_playback(); win.reset_audio(); }
     };
 
     if (args.window) {

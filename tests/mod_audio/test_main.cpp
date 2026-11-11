@@ -195,6 +195,38 @@ void test_stream_rejects_untrusted_callers() {
           "stream registration fails without activation authorization");
 }
 
+void test_stereo_composition() {
+    gba_mod_audio_stop_all();
+    const int16_t ramp[]={100,300,500,700};
+    const auto clip=register_enabled(ramp,4);
+    for(uint32_t rate : {32768u,65536u,131072u,262144u}) {
+        gba_mod_audio_stop_all();
+        check(gba_mod_audio_play(clip,100,1)==1,"stereo clip starts");
+        std::array<int16_t,7> mono{};
+        gba_mod_audio_mix_at_rate(mono.data(),mono.size(),rate);
+        gba_mod_audio_stop_all();
+        check(gba_mod_audio_play(clip,100,1)==1,"stereo reference restarts");
+        std::array<int16_t,14> stereo{};
+        for(size_t i=0;i<7;++i){stereo[i*2]=1000;stereo[i*2+1]=-2000;}
+        // Split at an odd frame to exercise held source samples across blocks.
+        gba_mod_audio_mix_stereo_at_rate(stereo.data(),3,rate);
+        gba_mod_audio_mix_stereo_at_rate(stereo.data()+6,4,rate);
+        for(size_t i=0;i<7;++i)
+            check(stereo[i*2]==1000+mono[i]&&stereo[i*2+1]==-2000+mono[i],
+                  "centered overlays advance once per stereo frame and retain native separation");
+    }
+    gba_mod_audio_stop_all();
+    const auto loud=register_enabled(ramp,4);
+    check(gba_mod_audio_play(loud,100,1)==1,"saturation overlay starts");
+    int16_t pcm[]={32760,-1000};
+    gba_mod_audio_mix_stereo_at_rate(pcm,1,65536);
+    check(pcm[0]==32767&&pcm[1]==-900,"stereo saturation is independent");
+    gba_mod_audio_reset();
+    int16_t reset[]={101,-202};
+    gba_mod_audio_mix_stereo_at_rate(reset,1,131072);
+    check(reset[0]==101&&reset[1]==-202,"reset removes overlays and held samples on both channels");
+}
+
 }  // namespace
 
 int main() {
@@ -203,6 +235,7 @@ int main() {
     test_saturation_and_replacement();
     test_producer_rates();
     test_stream_rejects_untrusted_callers();
+    test_stereo_composition();
     if (failures) return 1;
     std::puts("GBA mod audio: bounded producer PCM mixer passed");
     return 0;

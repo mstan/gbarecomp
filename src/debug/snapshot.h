@@ -38,7 +38,7 @@ class ModStateRegistry;
 // and the SWI-return continuation ledger.
 // Older layouts are rejected before restoration; native cartridge saves have
 // their own independent format and are unaffected.
-constexpr uint32_t kSnapshotVersion = 5;
+constexpr uint32_t kSnapshotVersion = 6; // Stereo pending PCM; old snapshots are disposable.
 
 // ── SnapshotWriter ─────────────────────────────────────────────────
 // Append-only little-endian byte sink. Header-only.
@@ -99,6 +99,8 @@ public:
     }
 
     bool ok() const { return ok_; }
+    // A subsystem can reject an in-bounds but invalid payload.
+    void reject() { fail(); }
     std::size_t remaining() const { return static_cast<std::size_t>(end_ - cur_); }
 
 private:

@@ -1113,6 +1113,18 @@ if(Python3_Interpreter_FOUND AND NOT CMAKE_CROSSCOMPILING)
             --output "${CMAKE_CURRENT_BINARY_DIR}/optimization-identity-test")
 endif()
 if(GBARECOMP_SDL2_OK)
+    add_executable(stereo_audio_stream_tests tests/runtime/stereo_audio_stream_test.cpp)
+    target_include_directories(stereo_audio_stream_tests PRIVATE src/runtime ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(stereo_audio_stream_tests PRIVATE ${SDL2_LIBRARIES})
+    add_test(NAME stereo_audio_stream_tests COMMAND stereo_audio_stream_tests)
+    # A standalone SDK fixture: title-supplied ImGui/launcher libraries are
+    # intentionally unnecessary for exercising the host audio implementation.
+    if(NOT GBARECOMP_RUNTIME_UI_ROOT)
+        add_executable(host_stereo_tests tests/runtime/host_stereo_test.cpp tools/bios_smoke/dispatch_stub.cpp)
+        target_include_directories(host_stereo_tests PRIVATE src/debug ${SDL2_INCLUDE_DIRS})
+        target_link_gbarecomp_runtime_stack(host_stereo_tests)
+        add_test(NAME host_stereo_tests COMMAND host_stereo_tests "${CMAKE_CURRENT_BINARY_DIR}/host-stereo-test")
+    endif()
     add_executable(presentation_upload_tests
         tests/runtime/presentation_upload_test.cpp src/runtime/color_lut.cpp)
     target_include_directories(presentation_upload_tests PRIVATE src/runtime ${SDL2_INCLUDE_DIRS})

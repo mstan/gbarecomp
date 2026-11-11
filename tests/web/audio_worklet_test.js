@@ -10,14 +10,14 @@ function fixture(factory) {
   const messages = [], pushed = [], resets = [];
   let Processor, frees = 0;
   const dsp = {
-    HEAP16: new Int16Array(4096),
+    HEAP16: new Int16Array(8192),
     _dsp_init: rate => { assert.equal(rate, 48000); return 0; },
     _dsp_free: () => { ++frees; },
-    _dsp_input: () => 0, _dsp_output: () => 4096,
+    _dsp_input: () => 0, _dsp_output: () => 8192,
     _dsp_reset: index => resets.push(index),
-    _dsp_push: n => pushed.push(Array.from(dsp.HEAP16.subarray(0, n))),
+    _dsp_push: n => pushed.push(Array.from(dsp.HEAP16.subarray(0, n*2))),
     _dsp_pull: (n, ending) => {
-      dsp.HEAP16.fill(16384, 2048, 2048 + n);
+      for(let i=0;i<n;++i){dsp.HEAP16[4096+i*2]=16384;dsp.HEAP16[4096+i*2+1]=-8192;}
       return ending ? 0 : n;
     },
     _dsp_fill: () => 0, _dsp_underruns: () => 3,
@@ -35,8 +35,8 @@ function fixture(factory) {
   const fields = Object.fromEntries(['hostRate', 'audioReady', 'resetRequest', 'resetAck',
     'audioRead', 'audioWrite', 'audioConsumed', 'audioFill', 'underruns', 'concealed',
     'audioDspOverflow'].map((name, index) => [name, index]));
-  const descriptor = {fields, audio: 128, audioSlots: 4, audioSamples: 8, audioStride: 28};
-  const buffer = new SharedArrayBuffer(256), control = new Int32Array(buffer);
+  const descriptor = {version:3, audioChannels:2,fields, audio: 128, audioSlots: 4, audioSamples: 8, audioStride: 44};
+  const buffer = new SharedArrayBuffer(512), control = new Int32Array(buffer);
   const send = data => processor.port.onmessage({data});
   const attach = () => send({type: 'attach', buffer, ptr: 0, descriptor});
   const load = name => Atomics.load(control, fields[name]) >>> 0;
@@ -44,15 +44,16 @@ function fixture(factory) {
   const block = (cursor, count, rate, epoch = 0) => {
     const offset = descriptor.audio + (cursor & 3) * descriptor.audioStride;
     new Uint32Array(buffer, offset, 3).set([count, rate, epoch]);
-    new Int16Array(buffer, offset + 12, 8).set([100, -200, 300, -400]);
+    new Int16Array(buffer, offset + 12, 16).set([100, -200, 300, -400,500,-600,700,-800]);
   };
   const render = () => {
     const output = new Float32Array(128).fill(1);
-    const running = processor.process([], [[output]]);
-    return {output, running};
+    const right = new Float32Array(128).fill(1);
+    const running = processor.process([], [[output,right]]);
+    return {output,right, running};
   };
   return {processor, dsp, messages, pushed, resets, attach, send, load, store, block,
-    render, frees: () => frees};
+    render, descriptor, frees: () => frees};
 }
 
 async function test_queue_and_reset() {
@@ -66,12 +67,14 @@ async function test_queue_and_reset() {
   f.store('audioWrite', 1);
   f.block(0xffffffff, 4, 65536);
   f.block(0, 2, 32768);
-  const {output} = f.render();
-  assert.deepEqual(f.pushed, [[100, -200, 300, -400], [100, -200]]);
+  const {output,right} = f.render();
+  assert.deepEqual(f.pushed, [[100,-200,300,-400,500,-600,700,-800], [100,-200,300,-400]]);
   assert.deepEqual(f.resets, [1, 0], 'rate transition changes DSP bank');
   assert.equal(f.load('audioRead'), 1, 'consumer cursor wraps at uint32');
   assert.equal(f.load('audioConsumed'), 6);
   assert(output.some(x => x > 0) && output.every(x => Number.isFinite(x) && Math.abs(x) <= 1));
+  assert(right.some(x=>x<0));
+  for(let i=0;i<output.length;++i)assert(Math.abs(output[i]+2*right[i])<1e-6,'worklet preserves L/R through fades');
   assert.equal(f.load('underruns'), 3);
   assert.equal(f.load('concealed'), 4);
   assert.equal(f.load('audioDspOverflow'), 5);
@@ -98,6 +101,10 @@ async function test_queue_and_reset() {
 }
 
 async function test_bad_metadata() {
+  const old=fixture();old.descriptor.version=2;
+  await old.attach();assert.equal(old.messages[0].type,'error');assert.equal(old.load('audioReady'),0);
+  const mono=fixture();mono.descriptor.audioChannels=1;
+  await mono.attach();assert.equal(mono.messages[0].type,'error');assert.equal(mono.load('audioReady'),0);
   for (const [count, rate] of [[0, 65536], [9, 65536], [4, 48000]]) {
     const f = fixture();
     await f.attach();

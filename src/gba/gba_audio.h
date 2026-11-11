@@ -71,6 +71,13 @@ public:
     // the number actually written. Used by the host audio backend
     // and by the TCP audio_samples command.
     std::size_t drain_samples(int16_t* out, std::size_t max);
+    // Interleaved signed S16 L,R frames. Capacity/return values are FRAMES;
+    // callers provide room for 2*max_frames scalar samples. Legacy drains
+    // above/below retain a diagnostic (L+R)/2 downmix.
+    static constexpr std::size_t kOutputChannels = 2;
+    std::size_t drain_stereo_samples(int16_t* out, std::size_t max_frames);
+    std::size_t drain_stereo_sample_block(int16_t* out, std::size_t max_frames,
+                                         uint32_t& rate);
     // Drop host playback only; preserve deterministic mixer/FIFO state.
     void discard_output() { ring_tail_ = ring_head_; }
 
@@ -314,9 +321,15 @@ private:
     // posts 2, 4, 8, or 16 samples depending on SOUNDBIAS resolution.
     uint32_t cycle_accumulator_ = 0;
 
-    // Output ring. Mono int16_t samples at kSampleRate. The host
-    // audio backend pulls from this in chunks.
-    std::vector<int16_t> ring_;
+    // Output ring of stereo frames, tagged with the production rate.
+    struct StereoFrame {
+        int16_t left=0, right=0;
+        int16_t mono() const {
+            return static_cast<int16_t>((static_cast<int32_t>(left)+right)/2);
+        }
+    };
+    static_assert(sizeof(StereoFrame)==2*sizeof(int16_t));
+    std::vector<StereoFrame> ring_;
     std::vector<uint8_t> ring_rate_;
     std::size_t ring_head_ = 0;
     std::size_t ring_tail_ = 0;
@@ -326,7 +339,7 @@ private:
     // by (absolute sample index % kCapRingSize). Allocated lazily on reset.
     std::vector<CapSample> cap_ring_;
     void cap_push(const CapSample& s);
-    int16_t current_samples_[kMaxSamplesPerEvent] = {};
+    StereoFrame current_samples_[kMaxSamplesPerEvent] = {};
     uint8_t current_sample_rates_[kMaxSamplesPerEvent] = {};
     CapSample current_caps_[kMaxSamplesPerEvent] = {};
     // 2nd-order Butterworth low-pass (8 kHz) on the PSG part while the MP2K
@@ -336,13 +349,15 @@ private:
         float b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
         float x1 = 0, x2 = 0, y1 = 0, y2 = 0;
         bool  primed = false;
-    } psg_lp_;
+    } psg_lp_[2];
     uint32_t sample_index_ = 0;
     std::vector<FifoTrace> trace_;
     uint32_t trace_write_ = 0;
     uint32_t trace_count_ = 0;
 
-    void ring_push(int16_t s, uint8_t rate_tag);
+    void ring_push(StereoFrame s, uint8_t rate_tag);
+    std::size_t drain_output(int16_t* out, std::size_t max_frames,
+                              bool stereo, uint32_t* rate);
     void fifo_push_word(DirectFifo& fifo, uint32_t word);
     void fifo_clear_queue(DirectFifo& fifo);
     void fifo_reset(DirectFifo& fifo);
@@ -355,7 +370,7 @@ private:
     // MP2K shadow while it substitutes. The single place both the event and
     // the mid-event catch-up (sample_until_current_time) produce samples.
     void mix_slot(uint32_t slot);
-    int16_t psg_low_pass(int16_t in);
+    int16_t psg_low_pass(int16_t in, PsgLowPass& filter);
     void run_sample_event();
     void ch1_trigger();
     void ch2_trigger();
@@ -370,7 +385,7 @@ private:
         int16_t direct_a = 0;
         int16_t direct_b = 0;
     };
-    int16_t mix_one_sample(uint32_t direct_slot, bool include_direct = true,
+    StereoFrame mix_one_sample(uint32_t direct_slot, bool include_direct = true,
                            ChannelTap* tap = nullptr);
 
     // ── MP2K HLE shadow (verified-enhancement; default off) ──────
