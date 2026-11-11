@@ -872,6 +872,35 @@ int main() {
         gbarecomp::mod_runtime_committed_cheat_count() != 0)
         return fail("failed initialize retained committed cheats");
 
+    // Catalog inspection creates selection rows even when the player has not
+    // overridden a feature. Commit/reload must retain the manifest's default.
+    std::string default_on_manifest = manifest.substr(0, manifest.find("[[asset]]"));
+    const auto inherited_default = default_on_manifest.find("default_enabled = false");
+    default_on_manifest.replace(inherited_default,
+        std::string("default_enabled = false").size(), "default_enabled = true");
+    if (!write_text(package / "manifest.toml", default_on_manifest))
+        return fail("could not write default-on fixture");
+    fs::remove(mods / "state.toml", ec);
+    for (int pass = 0; pass < 2; ++pass) {
+        if (!gbarecomp::mod_runtime_initialize(mods, "test-game", sha1, &error) ||
+            !gbarecomp::mod_runtime_commit(rom_path, &error))
+            return fail("default-on commit failed: " + error);
+        gbarecomp::mod_runtime_activate_plugins();
+        if (!g_active)
+            return fail("inherited default-on feature was lost across commit/reload");
+    }
+    // An explicit player choice must still win over the inherited default.
+    if (!write_state(false, false, {}))
+        return fail("could not write explicit-disabled fixture");
+    for (int pass = 0; pass < 2; ++pass) {
+        if (!gbarecomp::mod_runtime_initialize(mods, "test-game", sha1, &error) ||
+            !gbarecomp::mod_runtime_commit(rom_path, &error))
+            return fail("explicit-disabled commit failed: " + error);
+        gbarecomp::mod_runtime_activate_plugins();
+        if (g_active)
+            return fail("inherited default overrode explicit disabled selection");
+    }
+
     fs::remove_all(sandbox, ec);
     std::cout << "GBA mod runtime: target gate, strict external asset, "
                  "persisted feature toggle, trusted activation, and reset passed\n";
