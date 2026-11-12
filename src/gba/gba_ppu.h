@@ -311,6 +311,17 @@ extern "C" unsigned g_ws_bg_x_provider_layers;
 extern "C" int (*g_ws_bg_xy_provider)(int bg, int x, int y, int* source_x, int* source_y);
 extern "C" unsigned g_ws_bg_xy_provider_layers;
 
+// Optional authoritative WIN0/WIN1 mapping for expanded horizontal output.
+// Input X is physical output X minus the native viewport's left offset; Y
+// retains its native-relative scanline. Return 0 to keep X, or 1 to use
+// *out_window_x. This changes masks only, never BG/OBJ texture coordinates or
+// vertical window bounds. While installed, output window controls also gate
+// authored margins and remapped BG/OBJ pixels; source-window bypasses are off.
+// OBJ-window stencil indexing stays at the original physical native-relative X.
+// Native 240-wide rendering (including internal upscaling) ignores this hook.
+extern "C" int (*g_ws_window_x_provider)(int native_relative_x, int y,
+                                         int* out_window_x);
+
 // A game can publish read-only BG samplers whose results depend only on the
 // row's immutable inputs. This allows candidate ordering/occlusion to omit
 // hidden samples. The exact three scalar bindings are captured here: replacing
