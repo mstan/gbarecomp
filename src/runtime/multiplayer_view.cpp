@@ -61,7 +61,7 @@ namespace {
 #define VIEW_GLOBALS(X) \
     X(gba::g_ws_tilemap_provider) X(gba::g_ws_bg_x_provider) \
     X(gba::g_ws_bg_x_provider_layers) X(gba::g_ws_bg_xy_provider) \
-    X(gba::g_ws_bg_xy_provider_layers) X(gba::g_ws_affine_filter_enabled) \
+    X(gba::g_ws_bg_xy_provider_layers) X(gba::g_ws_window_x_provider) X(gba::g_ws_affine_filter_enabled) \
     X(gba::g_ws_affine_filter_provider) X(gba::g_ws_authored_margin_layers) \
     X(gba::g_ws_native_view_left) \
     X(gba::g_ws_pillarbox) X(gba::g_ws_pillarbox_left) X(gba::g_ws_pillarbox_right) \

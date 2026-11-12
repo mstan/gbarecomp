@@ -955,6 +955,154 @@ void test_extended_view_extends_nearest_window_edge() {
     g_margin_provider_action = gba::kWsTilemapReplace;
 }
 
+int window_mapper_calls = 0;
+int scale_window_x(int hx, int, int* output) {
+    ++window_mapper_calls;
+    *output = (hx + 120) / 2; // Physical 480px output -> native 240px mask.
+    return 1;
+}
+int unchanged_window_x(int, int, int* output) { *output = -999; return 0; }
+int constant_window_x(int, int, int* output) { *output = 10; return 1; }
+int remap_window_bg(int bg, int hx, int y, int* sx, int* sy) {
+    if (bg != 0) return 0;
+    *sx = hx + 24; *sy = y;
+    return 1;
+}
+int authored_window_obj_y(int, uint16_t attr0, uint16_t, uint16_t, int* output) {
+    *output = attr0 & 255; return 1;
+}
+
+void test_wide_window_mapping_circle_and_native_isolation() {
+    Fixture f;
+    store16(&f.io[0x08], 0x0180); // BG0, 8bpp, map block 1.
+    store16(&f.pal[0], 0x7c00); // Blue masked backdrop.
+    for (unsigned x = 0; x < 8; ++x) {
+        store16(&f.pal[2 * (x + 1)], static_cast<uint16_t>(3 * (x + 1)));
+        for (unsigned y = 0; y < 8; ++y) f.vram[y * 8 + x] = x + 1;
+    }
+    // WIN1 masks everything except the per-row WIN0 circle. Its full-native
+    // width must stretch too; WINOUT deliberately enables BG0 to detect leaks.
+    store16(&f.io[0x42], 0x00f0); store16(&f.io[0x46], 0x00a0);
+    store16(&f.io[0x44], 0x148c); // Keep original vertical extent [20,140).
+    store16(&f.io[0x48], 0x0001); store16(&f.io[0x4a], 0x0001);
+    f.ppu.set_view_margins(120, 120, 0, 0);
+    std::vector<uint8_t> texture(f.ppu.render_bytes());
+    f.ppu.render(texture.data(), 0x0100, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+    const auto render_circle = [&](auto provider) {
+        gba::g_ws_window_x_provider = provider;
+        for (int y = 0; y < 160; ++y) {
+            const int dy = y - 80;
+            int radius = 0;
+            while ((radius + 1) * (radius + 1) + dy * dy <= 70 * 70) ++radius;
+            store16(&f.io[0x40], static_cast<uint16_t>(((120 - radius) << 8) | (120 + radius)));
+            f.ppu.render_scanline(y, 0x6100, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+        }
+        f.ppu.mark_framebuffer_latched();
+        const auto* pixels = f.ppu.latched_framebuffer();
+        return std::vector<uint8_t>(pixels, pixels + f.ppu.render_bytes());
+    };
+    gba::g_ws_tilemap_provider = test_margin_tilemap;
+    for (unsigned authored : {0u, 1u}) {
+        gba::g_ws_authored_margin_layers = authored;
+        const auto legacy = render_circle(static_cast<decltype(gba::g_ws_window_x_provider)>(nullptr));
+        // Exercise the ordered text-plane path too when that backend is built.
+        gba::publish_read_only_wide_bg_providers(nullptr, true);
+        const auto mapped = render_circle(scale_window_x);
+        for (int y = 0; y < 160; ++y) {
+            const int dy = y - 80;
+            int radius = 0;
+            while ((radius + 1) * (radius + 1) + dy * dy <= 70 * 70) ++radius;
+            for (int x = 0; x < 480; ++x) {
+                const int native_x = x / 2;
+                const int dx = native_x - 120;
+                const bool visible = y >= 20 && y < 140 && dx >= -radius && dx < radius;
+                const auto offset = (y * 480 + x) * 3;
+                if (visible) {
+                    if (std::memcmp(mapped.data() + offset, texture.data() + offset, 3)) {
+                        std::fprintf(stderr, "window mapping changed texture at %d,%d\n", x, y);
+                        std::exit(1);
+                    }
+                } else expect_pixel(mapped.data() + offset, 0, 0, 255, "mapped circle leaked outside output mask");
+            }
+        }
+        if (legacy == mapped) { std::fprintf(stderr, "circle fixture did not exercise window mapping\n"); std::exit(1); }
+        gba::clear_read_only_wide_bg_providers();
+        if (render_circle(static_cast<decltype(gba::g_ws_window_x_provider)>(nullptr)) != legacy) {
+            std::fprintf(stderr, "null hook changed legacy authored-margin policy\n"); std::exit(1);
+        }
+    }
+    gba::g_ws_tilemap_provider = nullptr; gba::g_ws_authored_margin_layers = 0;
+    // Return 0 ignores even a written output value and preserves coordinates.
+    const auto unmapped = render_circle(static_cast<decltype(gba::g_ws_window_x_provider)>(nullptr));
+    if (render_circle(unchanged_window_x) != unmapped) std::exit(1);
+    f.ppu.set_view_margins(0, 0, 0, 0);
+    for (unsigned scale : {1u, 2u}) {
+        f.ppu.set_internal_resolution(scale);
+        const auto native = render_circle(static_cast<decltype(gba::g_ws_window_x_provider)>(nullptr));
+        window_mapper_calls = 0;
+        if (render_circle(scale_window_x) != native || window_mapper_calls != 0) {
+            std::fprintf(stderr, "wide window hook affected native 240 rendering\n"); std::exit(1);
+        }
+    }
+    gba::g_ws_window_x_provider = nullptr;
+}
+
+void test_wide_window_mapping_remaps_blend_and_obj_masks() {
+    Fixture f;
+    disable_all_objects(f);
+    store16(&f.io[0x08], 0x0180);
+    std::fill_n(f.vram.begin(), 64, 1); store16(&f.pal[2], 0x001f);
+    store16(&f.pal[0], 0x7c00);
+    store16(&f.io[0x40], 0x6478); // WIN0 [100,120).
+    store16(&f.io[0x44], 0x00a0);
+    store16(&f.io[0x48], 0x0021); // BG0 + color effects inside.
+    store16(&f.io[0x4a], 0x0001); // BG0 outside, without effects.
+    store16(&f.io[0x50], 0x00c1); store16(&f.io[0x54], 8); // 50% darkening.
+    f.ppu.set_view_margins(120, 120, 0, 0);
+    std::vector<uint8_t> image(f.ppu.render_bytes());
+    gba::g_ws_window_x_provider = scale_window_x;
+    gba::g_ws_bg_xy_provider = remap_window_bg; gba::g_ws_bg_xy_provider_layers = 1;
+    gba::g_ws_tilemap_provider = test_margin_tilemap;
+    for (unsigned authored : {0u, 1u}) {
+        gba::g_ws_authored_margin_layers = authored;
+        f.ppu.render(image.data(), 0x2100, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+        expect_pixel(image.data() + 235 * 3, 132, 0, 0, "BGXY blend must use output mask");
+        expect_pixel(image.data() + 195 * 3, 255, 0, 0, "BGXY source mask must not change output blend");
+        store16(&f.io[0x4a], 0); // Output outside must reject remapped/authored BGs.
+        f.ppu.render(image.data(), 0x2100, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+        expect_pixel(image.data(), 0, 0, 255, "authored or BGXY bypass leaked through output mask");
+        expect_pixel(image.data() + 235 * 3, 132, 0, 0, "source mask incorrectly culled remapped output");
+        // Synthetic authored OBJ rows are subject to the same output gate.
+        gba::g_ws_obj_margin_provider = margin_object_row;
+        f.ppu.render(image.data(), 0x3100, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+        expect_pixel(image.data() + 96 * 3, 0, 0, 255, "authored OBJ ignored output window gate");
+        gba::g_ws_obj_margin_provider = nullptr;
+        store16(&f.io[0x4a], 1);
+    }
+    gba::g_ws_bg_xy_provider = nullptr; gba::g_ws_bg_xy_provider_layers = 0xf;
+    gba::g_ws_tilemap_provider = nullptr; gba::g_ws_authored_margin_layers = 0;
+    std::fill_n(f.vram.begin() + 0x10000, 32, 0x11);
+    store16(&f.pal[0x202], 0x03e0); // Green authored OBJ.
+    store16(&f.io[0x48], 0x0031); store16(&f.io[0x4a], 0);
+    gba::g_ws_authored_margin_layers = 1;
+    gba::g_ws_obj_attr_y_provider = authored_window_obj_y;
+    store16(&f.oam[0], 0); store16(&f.oam[2], 508); store16(&f.oam[4], 0);
+    store16(&f.oam[8], 0); store16(&f.oam[10], 86); store16(&f.oam[12], 0);
+    f.ppu.render(image.data(), 0x3100, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+    expect_pixel(image.data() + 116 * 3, 0, 0, 255, "authored OAM margin bypassed output mask");
+    expect_pixel(image.data() + 206 * 3, 0, 255, 0, "mapped output window hid visible OAM");
+    gba::g_ws_obj_attr_y_provider = nullptr; gba::g_ws_authored_margin_layers = 0;
+    gba::g_ws_window_x_provider = constant_window_x;
+    store16(&f.io[0x50], 0); store16(&f.io[0x4a], 1); // OBJ window hides BG0.
+    disable_all_objects(f);
+    store16(&f.oam[0], 0x0800); store16(&f.oam[2], 10); store16(&f.oam[4], 0);
+    f.ppu.render(image.data(), 0xb100, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+    expect_pixel(image.data() + 130 * 3, 0, 0, 255, "OBJ window lost physical mask position");
+    expect_pixel(image.data() + 129 * 3, 255, 0, 0, "OBJ window moved with mapped WIN0 X");
+    expect_pixel(image.data(), 255, 0, 0, "mapped X incorrectly indexed OBJ stencil in margin");
+    gba::g_ws_window_x_provider = nullptr;
+}
+
 void test_bitmap_mode3_direct_color_and_affine_origin() {
     Fixture f;
     set_bg2_identity(f);
@@ -1971,6 +2119,8 @@ int main() {
     test_extended_view_obj_native_clip_is_opt_in();
     test_authored_margin_objects_preserve_center_and_depth();
     test_extended_view_extends_nearest_window_edge();
+    test_wide_window_mapping_circle_and_native_isolation();
+    test_wide_window_mapping_remaps_blend_and_obj_masks();
     test_bitmap_mode3_direct_color_and_affine_origin();
     test_bitmap_mode4_palette_transparency_and_page_flip();
     test_bitmap_mode5_bounds_and_page_flip();

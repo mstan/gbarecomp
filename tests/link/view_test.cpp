@@ -10,7 +10,13 @@
 using namespace gbarecomp;
 namespace {
 int anchor_left = -1;
-void anchor_frame(const ExtendedViewFrameInfo*) { gba::g_ws_native_view_left = anchor_left; }
+int owned_window_calls = 0, unrelated_window_calls = 0;
+int owned_window_x(int, int, int*) { ++owned_window_calls; return 0; }
+int unrelated_window_x(int, int, int*) { ++unrelated_window_calls; return 0; }
+void anchor_frame(const ExtendedViewFrameInfo*) {
+    gba::g_ws_native_view_left = anchor_left;
+    gba::g_ws_window_x_provider = owned_window_x;
+}
 void anchored_raster() {
     auto bus=std::make_unique<gba::GbaBus>();
     bus->rtc().set_emulated_clock(0);
@@ -39,10 +45,13 @@ void anchored_raster() {
         reference->set_view_margins(left,44-left,0,0);
         for(unsigned y=0;y<160;++y) {
             gba::g_ws_native_view_left=13; // an unrelated presentation's policy
+            gba::g_ws_window_x_provider=unrelated_window_x;
             source->render_scanline(y,0x3100,io,bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
             canonical->render_scanline(y,0x3100,io,bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
             CHECK(gba::g_ws_native_view_left==13);
+            CHECK(gba::g_ws_window_x_provider==unrelated_window_x);
             gba::g_ws_native_view_left=-1;
+            gba::g_ws_window_x_provider=nullptr;
             reference->render_scanline(y,0x3100,io,bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
         }
         source->mark_framebuffer_latched(); reference->mark_framebuffer_latched();
@@ -52,6 +61,7 @@ void anchored_raster() {
         CHECK(gba::save_device_state(*bus,*source)==gba::save_device_state(*bus,*canonical));
         mirror.restored();
     }
+    CHECK(owned_window_calls>0 && unrelated_window_calls==0);
     source->set_presentation_observer(nullptr);
     gba::g_ws_native_view_left=-1;
 }

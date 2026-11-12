@@ -42,6 +42,7 @@ extern "C" int (*g_ws_bg_x_provider)(int bg, int output_x, int screen_y,
 extern "C" unsigned g_ws_bg_x_provider_layers = 0xFu;
 extern "C" int (*g_ws_bg_xy_provider)(int, int, int, int*, int*) = nullptr;
 extern "C" unsigned g_ws_bg_xy_provider_layers = 0xFu;
+extern "C" int (*g_ws_window_x_provider)(int, int, int*) = nullptr;
 extern "C" int (*g_ws_ui_pixel_provider)(int, int, std::uint16_t*) = nullptr;
 extern "C" int g_ws_affine_filter_enabled = 0;
 extern "C" int (*g_ws_affine_filter_provider)(int, int) = nullptr;
@@ -1665,31 +1666,36 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
                                  kVanW, kVanH);
         obj_window_mask = obj_window_storage;
     }
-    auto window_control_at_hx = [&](int hx) -> uint16_t {
+    const bool authoritative_windows = g_ws_window_x_provider && out_w != kVanW;
+    auto window_control_at_xy = [&](int hx, int sy) -> uint16_t {
         if (!any_window) return 0x3Fu;
-        if (win0_row && win_h_in(0x40, hx)) return winin & 0x3Fu;
-        if (win1_row && win_h_in(0x42, hx)) return (winin >> 8) & 0x3Fu;
+        int window_x = hx;
+        if (authoritative_windows) {
+            int mapped_x = hx;
+            if (g_ws_window_x_provider(hx, sy, &mapped_x) == 1) window_x = mapped_x;
+        }
+        if ((sy == y ? win0_row : win0_en && win_v_row(0x44, sy)) &&
+            win_h_in(0x40, window_x)) return winin & 0x3Fu;
+        if ((sy == y ? win1_row : win1_en && win_v_row(0x46, sy)) &&
+            win_h_in(0x42, window_x)) return (winin >> 8) & 0x3Fu;
+        if (sy != y) {
+            // Do not invent an OBJ-window stencil for a different scanline.
+            return objwin_en ? 0u : static_cast<uint16_t>(winout & 0x3Fu);
+        }
         if (obj_window_mask && hx >= 0 && hx < static_cast<int>(kVanW) &&
             obj_window_mask[hx])
             return static_cast<uint16_t>((winout >> 8) & 0x3Fu);
         return static_cast<uint16_t>(winout & 0x3Fu);
     };
-    auto window_control_at_xy = [&](int hx, int sy) -> uint16_t {
-        if (sy == y) return window_control_at_hx(hx);
-        if (!any_window) return 0x3Fu;
-        if (win0_en && win_v_row(0x44, sy) && win_h_in(0x40, hx)) return winin & 0x3Fu;
-        if (win1_en && win_v_row(0x46, sy) && win_h_in(0x42, hx)) return (winin >> 8) & 0x3Fu;
-        // Do not invent an OBJ-window stencil for a different scanline.
-        return objwin_en ? 0u : static_cast<uint16_t>(winout & 0x3Fu);
-    };
+    auto window_control_at_hx = [&](int hx) { return window_control_at_xy(hx, y); };
     // A guest-authored window has no defined continuation beyond the native
     // 240-pixel scanline. Extend it into the margins only when every authentic
     // pixel selects the same window control. Sampling just an edge and the
     // center misses narrow apertures (including OBJ-window stencils) that lie
     // between those probes and can leak scenery around transitions.
-    uint16_t uniform_window_control = window_control_at_hx(0);
+    uint16_t uniform_window_control = authoritative_windows ? 0 : window_control_at_hx(0);
     bool window_control_is_uniform = true;
-    if (g_ws_tilemap_provider && any_window) {
+    if (!authoritative_windows && g_ws_tilemap_provider && any_window) {
         for (int hx = 1; hx < static_cast<int>(kVanW); ++hx) {
             if (window_control_at_hx(hx) != uniform_window_control) {
                 window_control_is_uniform = false;
@@ -1698,11 +1704,11 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
         }
     }
     const bool black_nonuniform_window_margins =
-        g_ws_tilemap_provider && any_window && !window_control_is_uniform &&
+        !authoritative_windows && g_ws_tilemap_provider && any_window && !window_control_is_uniform &&
         !g_ws_authored_margin_layers;
     auto window_control = [&](uint32_t x) -> uint16_t {
         int hx = static_cast<int>(x) - static_cast<int>(ox);
-        if (g_ws_tilemap_provider &&
+        if (!authoritative_windows && g_ws_tilemap_provider &&
             (hx < 0 || hx >= static_cast<int>(kVanW))) {
             // Minish's room provider treats expanded columns as lying outside
             // every native WIN0/WIN1 rectangle, so WINOUT controls the world
@@ -1898,11 +1904,11 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
                             const uint32_t output_x = x + j;
                             if (!useful(output_x, candidate_key)) continue;
                             const int hx = static_cast<int>(output_x) - static_cast<int>(ox);
-                            const bool authored_margin = g_ws_authored_margin_layers &&
+                            const bool authored_margin = !authoritative_windows && g_ws_authored_margin_layers &&
                                 (!native_row || hx < 0 || hx >= 240);
                             if (!layer_enabled(output_x, layer) && !authored_margin) continue;
                             const int sample_x = source_x + direction * static_cast<int>(j);
-                            if (remapped && (hx < 0 || hx >= 240) && sample_x >= 0 && sample_x < 240 &&
+                            if (!authoritative_windows && remapped && (hx < 0 || hx >= 240) && sample_x >= 0 && sample_x < 240 &&
                                 !(window_control_at_xy(sample_x, y) & (1u << layer))) continue;
                             if (!prepared) {
                                 prepared = true;
@@ -1980,7 +1986,7 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
                 for (uint32_t j = 0; j < count; ++j) {
                     const uint32_t sx = x + j;
                     if (!useful(sx, candidate_key)) continue;
-                    const bool margin = g_ws_authored_margin_layers &&
+                    const bool margin = !authoritative_windows && g_ws_authored_margin_layers &&
                         (sx < ox || sx >= ox + kVanW);
                     if (!layer_enabled(sx, layer) && !margin) continue;
                     const uint32_t px = (entry & 0x0400u) ? 7u - begin - j : begin + j;
@@ -2003,7 +2009,7 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
 #endif
             if (!useful(x, candidate_key)) continue;
             int hx = static_cast<int>(x) - static_cast<int>(ox);
-            const bool authored_margin = g_ws_authored_margin_layers &&
+            const bool authored_margin = !authoritative_windows && g_ws_authored_margin_layers &&
                 (!native_row || hx < 0 || hx >= static_cast<int>(kVanW));
             // Minish supplies room-map entries for margins independently of
             // the native 240px WIN0/WIN1 HUD/dialog masks. Ignore only their
@@ -2024,7 +2030,8 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
                     remapped = xy_remapped = true;
                 }
             }
-            if (!layer_enabled(x, layer) && !authored_margin && !xy_remapped) continue;
+            if (!layer_enabled(x, layer) && !authored_margin &&
+                (!xy_remapped || authoritative_windows)) continue;
             if (g_ws_bg_x_provider &&
                 (g_ws_bg_x_provider_layers & (1u << layer)) && !remapped) {
                 int provided_hx = hx;
@@ -2051,7 +2058,7 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
             // scenery they mirror (e.g. battle arenas whose WINOUT drops the
             // world layer behind HUD windows). Non-remapped margins keep the
             // established WINOUT/fail-closed behavior.
-            if (remapped && (xy_remapped || hx < 0 || hx >= static_cast<int>(kVanW)) &&
+            if (!authoritative_windows && remapped && (xy_remapped || hx < 0 || hx >= static_cast<int>(kVanW)) &&
                 sample_hx >= 0 && sample_hx < static_cast<int>(kVanW) &&
                 (window_control_at_xy(sample_hx, sample_y) & (1u << layer)) == 0)
                 continue;
@@ -2121,7 +2128,7 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
             }
             if ((pal_idx & (color256 ? 0xFFu : 0x0Fu)) == 0) continue;
             const uint16_t color = load_u16_le(&pal[pal_idx * 2]);
-            const bool sample_blend = xy_remapped
+            const bool sample_blend = xy_remapped && !authoritative_windows
                 ? (window_control_at_xy(sample_hx, sample_y) & 0x20) != 0
                 : blend_enabled(x);
             submit(x, color,
@@ -2459,7 +2466,7 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
                     (screen_x < static_cast<int>(ox) ||
                      screen_x >= static_cast<int>(ox) + static_cast<int>(kVanW)))
                     return;
-                const bool authored_margin = authored_y && g_ws_authored_margin_layers &&
+                const bool authored_margin = !authoritative_windows && authored_y && g_ws_authored_margin_layers &&
                     (!native_row || screen_x < static_cast<int>(ox) ||
                      screen_x >= static_cast<int>(ox) + static_cast<int>(kVanW));
                 if (!layer_enabled(static_cast<uint32_t>(screen_x), 4) && !authored_margin) return;
@@ -2579,7 +2586,7 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
                 // rectangles, just like the regular-BG providers above. A
                 // game's WINOUT often disables OBJ beyond the stock screen.
                 if ((pixel.color & 0x8000) || pixel.priority > 3 ||
-                    (!layer_enabled(x, 4) && !g_ws_authored_margin_layers)) continue;
+                    (!layer_enabled(x, 4) && (authoritative_windows || !g_ws_authored_margin_layers))) continue;
                 submit(x, pixel.color, pixel.priority * 256 + (pixel.order & 127), 4,
                        pixel.semi_transparent && blend_enabled(x),
                        (second_targets & (1u << 4)) != 0);
