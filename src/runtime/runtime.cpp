@@ -1631,7 +1631,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 throw std::runtime_error(err);
             boot.local_save=args.save_path;
             if (boot.local_save.empty()) { boot.local_save=args.rom; boot.local_save.replace_extension(".sav"); }
-            boot.config_directory=std::filesystem::absolute(argv[0]).parent_path();
+            boot.config_directory = opts.config_dir && *opts.config_dir
+                ? std::filesystem::path(opts.config_dir)
+                : std::filesystem::absolute(argv[0]).parent_path();
             return opts.netplay->run(*opts.netplay,boot);
         } catch (const std::exception& e) {
             std::fprintf(stderr,"[gbarecomp:netplay] %s\n",e.what());
@@ -3284,11 +3286,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         sync_native_draw();
 #endif
         // Rebindable input: keybinds.ini (player buttons, recomp-ui generic
-        // format) + config.ini [KeyMap] (system hotkeys), both next to the
-        // exe. Missing files leave the built-in defaults.
+        // format) + config.ini [KeyMap] (system hotkeys), both in the config
+        // directory. Missing files leave the built-in defaults.
         {
             std::string exe_dir = ".";
-            if (argc > 0 && argv[0] && argv[0][0]) {
+            if (opts.config_dir && *opts.config_dir) {
+                exe_dir = opts.config_dir;
+            } else if (argc > 0 && argv[0] && argv[0][0]) {
                 std::filesystem::path p(argv[0]);
                 if (p.has_parent_path()) exe_dir = p.parent_path().string();
             }
@@ -4363,8 +4367,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // without that hook (GBARECOMP_PRESENT_IN_PLACE=0) are not captured.
     const std::filesystem::path diag_exe_path(argc > 0 && argv[0] ? argv[0] : "");
     const std::filesystem::path diag_exe_dir =
-        diag_exe_path.has_parent_path() ? diag_exe_path.parent_path()
-                                        : std::filesystem::path(".");
+        opts.config_dir && *opts.config_dir ? std::filesystem::path(opts.config_dir)
+        : diag_exe_path.has_parent_path() ? diag_exe_path.parent_path()
+                                          : std::filesystem::path(".");
     DiagnosticReplayConfig diag_config;
     diag_config.tag = diag_exe_path.stem().string();
     if (diag_config.tag.empty()) diag_config.tag = "gbarecomp";
