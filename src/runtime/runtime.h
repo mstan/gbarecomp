@@ -266,6 +266,10 @@ struct RunOptions {
     // player-facing value remains centered on 1.00x.
     float gyro_sensitivity_calibration = 1.0f;
 
+    // Player config, keybinds and diagnostics. Null keeps the executable
+    // directory, the historical behaviour.
+    const char* config_dir = nullptr;
+
     // ---- pre-boot launcher identity (launcher_seam.h, RECOMP_LAUNCHER builds) --
     // Consumed by the recomp-ui launcher seam a game's main() runs BEFORE
     // run_game(); the runtime itself never reads these. All optional.
