@@ -161,6 +161,47 @@ void test_brightness_native_domain_and_green_precision() {
     expect_pixel(f.rgb.data(), 24, 49, 16, "darken native-domain rounding");
 }
 
+void test_semitransparent_obj_ignores_window_effect_mask() {
+    Fixture f;
+    disable_all_objects(f);
+    store16(&f.io[0x08], 0x0181); // Opaque blue BG0 behind red OBJ0.
+    std::fill_n(f.vram.begin(), 64, 1);
+    std::fill_n(f.vram.begin()+0x10000, 32, 0x11);
+    store16(&f.pal[0], 0x03e0);
+    store16(&f.pal[2], 0x7c00);
+    store16(&f.pal[0x202], 0x001f);
+    store16(&f.oam[0], 0x0400); // Semi-transparent 8x8 OBJ.
+    store16(&f.io[0x40], 0x00ff);
+    store16(&f.io[0x44], 0x00ff);
+    store16(&f.io[0x4a], 0x001f);
+    store16(&f.io[0x50], 0x0100); // BG0 second target; effect mode is OFF.
+    store16(&f.io[0x52], 0x0808);
+    std::vector<uint8_t> image(gba::GbaPpu::kMaxFramebufferBytes);
+    for (unsigned width : {240u,288u}) {
+        const unsigned margin=(width-240)/2;
+        f.ppu.set_view_margins(margin,margin,0,0);
+        store16(&f.oam[0],0x0400);
+        store16(&f.io[0x48],0x001f); // OBJ visible, normal window effects OFF.
+        store16(&f.io[0x50],0x0100);
+        f.ppu.render(image.data(),0x3140,f.io.data(),f.vram.data(),f.oam.data(),f.pal.data());
+        expect_pixel(image.data()+(4*width+margin+4)*3,132,0,132,
+                     "window color-effect mask must not make semi-transparent OBJ opaque");
+        store16(&f.io[0x48],0x000f); // OBJ visibility still follows the window.
+        f.ppu.render(image.data(),0x3140,f.io.data(),f.vram.data(),f.oam.data(),f.pal.data());
+        expect_pixel(image.data()+(4*width+margin+4)*3,0,0,255,
+                     "semi-transparent OBJ ignored window layer visibility");
+        store16(&f.io[0x48],0x001f);
+        store16(&f.oam[0],0); // Ordinary OBJ must not inherit forced alpha.
+        f.ppu.render(image.data(),0x3140,f.io.data(),f.vram.data(),f.oam.data(),f.pal.data());
+        expect_pixel(image.data()+(4*width+margin+4)*3,255,0,0,
+                     "ordinary OBJ accidentally forced to alpha");
+        store16(&f.io[0x50],0x2041); // Normal BG effect remains window-masked.
+        f.ppu.render(image.data(),0x2140,f.io.data(),f.vram.data(),f.oam.data(),f.pal.data());
+        expect_pixel(image.data()+(4*width+margin+4)*3,0,0,255,
+                     "normal BG effect ignored window color-effect mask");
+    }
+}
+
 int portrait_tiles(int bg, int, int y, uint16_t* tile) {
     if (bg != 1) return 0;
     *tile = y < 0 ? 1 : 2;
@@ -2105,6 +2146,7 @@ int main() {
     test_authored_ui_pixels_are_expanded_only();
     test_alpha_native_domain_and_green_precision();
     test_brightness_native_domain_and_green_precision();
+    test_semitransparent_obj_ignores_window_effect_mask();
     test_extended_view_geometry_and_clamp();
     test_authored_portrait_geometry_and_composition();
     test_authored_ui_xy_uses_source_window_and_effects();
