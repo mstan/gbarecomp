@@ -392,6 +392,14 @@ extern "C" int (*g_ws_obj_attr_y_provider)(int oam_index,
 // keeps the established expanded-viewport OBJ test.
 extern "C" int g_ws_obj_native_clip;
 
+// Optional display-only continuation of a cyclic native scanline. Return 240
+// for a world OBJ whose visible native texels should repeat into wide margins,
+// or zero for ordinary placement (for example screen-space HUD objects).
+// Other periods are rejected. Native columns, OAM and the canonical renderer
+// are never modified; native wrap copies contribute only their visible part.
+extern "C" int (*g_ws_obj_x_period_provider)(int oam_index,
+    std::uint16_t attr0, std::uint16_t attr1, std::uint16_t attr2);
+
 // Read-only, game-authored OBJ coverage for expanded margins. RGB555 bit 15
 // marks a transparent pixel. Priority uses the hardware 0..3 BG/OBJ order.
 // The PPU never consumes this layer inside the native 240x160 viewport.
