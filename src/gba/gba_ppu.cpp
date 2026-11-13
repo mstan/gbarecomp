@@ -68,6 +68,9 @@ extern "C" int (*g_ws_obj_attr_x_provider)(int, std::uint16_t,
 // still run first, so a game can re-place known-safe HUD sprites and clip the
 // rest.
 extern "C" int g_ws_obj_native_clip = 0;
+extern "C" int (*g_ws_obj_x_period_provider)(int, std::uint16_t,
+    std::uint16_t, std::uint16_t) = nullptr;
+extern "C" int (*g_ws_obj_window_x_provider)(int, int, int*) = nullptr;
 extern "C" int (*g_ws_obj_attr_y_provider)(int, std::uint16_t,
                                             std::uint16_t, std::uint16_t,
                                             int*) = nullptr;
@@ -1671,7 +1674,7 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
     auto window_control_at_xy = [&](int hx, int sy) -> uint16_t {
         if (!any_window) return 0x3Fu;
         int window_x = hx;
-        if (authoritative_windows) {
+        if (authoritative_windows && g_ws_window_x_provider) {
             int mapped_x = hx;
             if (g_ws_window_x_provider(hx, sy, &mapped_x) == 1) window_x = mapped_x;
         }
@@ -1683,8 +1686,14 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
             // Do not invent an OBJ-window stencil for a different scanline.
             return objwin_en ? 0u : static_cast<uint16_t>(winout & 0x3Fu);
         }
-        if (obj_window_mask && hx >= 0 && hx < static_cast<int>(kVanW) &&
-            obj_window_mask[hx])
+        int stencil_x = hx;
+        if (obj_window_mask && authoritative_windows && g_ws_obj_window_x_provider) {
+            int mapped_x = hx;
+            if (g_ws_obj_window_x_provider(hx, sy, &mapped_x) == 1)
+                stencil_x = mapped_x;
+        }
+        if (obj_window_mask && stencil_x >= 0 && stencil_x < static_cast<int>(kVanW) &&
+            obj_window_mask[stencil_x])
             return static_cast<uint16_t>((winout >> 8) & 0x3Fu);
         return static_cast<uint16_t>(winout & 0x3Fu);
     };
@@ -2457,7 +2466,10 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
             // into the next priority's BG band.
             int key = priority * 256 + idx;
             bool obj_target2 = (second_targets & (1u << 4)) != 0;
-            auto emit_obj = [&](int tex_x, int tex_y, int screen_x) {
+            const bool repeat_native_x = g_ws_obj_x_period_provider &&
+                g_ws_obj_x_period_provider(idx, attr0, attr1, attr2) ==
+                    static_cast<int>(kVanW);
+            auto emit_at = [&](int tex_x, int tex_y, int screen_x) {
                 if (screen_x < 0 || screen_x >= static_cast<int>(out_w)) return;
                 if (!useful(static_cast<uint32_t>(screen_x), key)) return;
                 // Opt-in policy: hardware-faithful OBJ placement only within
@@ -2502,6 +2514,25 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
                 uint32_t ux = static_cast<uint32_t>(screen_x);
                 const bool t1 = obj_mode == 1;
                 submit(ux, color, key, 4, t1, obj_target2);
+            };
+            auto emit_obj = [&](int tex_x, int tex_y, int screen_x) {
+                if (!repeat_native_x) {
+                    emit_at(tex_x, tex_y, screen_x);
+                    return;
+                }
+                // Repeat only texels actually visible in the native field.
+                // A game may already publish seam copies at X-240/X+240;
+                // clipping the source prevents double alpha composition and
+                // retains the original OAM priority of each visible piece.
+                const int hx = screen_x - static_cast<int>(ox);
+                if (hx < 0 || hx >= static_cast<int>(kVanW)) return;
+                emit_at(tex_x, tex_y, screen_x);
+                for (int x = screen_x - static_cast<int>(kVanW); x >= 0;
+                     x -= static_cast<int>(kVanW))
+                    emit_at(tex_x, tex_y, x);
+                for (int x = screen_x + static_cast<int>(kVanW);
+                     x < static_cast<int>(out_w); x += static_cast<int>(kVanW))
+                    emit_at(tex_x, tex_y, x);
             };
             if (rot_scale) {
                 int bw = disable_or_double ? sw * 2 : sw;

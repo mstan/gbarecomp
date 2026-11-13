@@ -322,6 +322,17 @@ extern "C" unsigned g_ws_bg_xy_provider_layers;
 extern "C" int (*g_ws_window_x_provider)(int native_relative_x, int y,
                                          int* out_window_x);
 
+// Additional native OBJ-window stencil mapping, active only alongside an
+// installed g_ws_window_x_provider in expanded horizontal output. Without
+// that authoritative rectangular provider this hook is ignored. It does
+// not change WIN0/WIN1, their margin policy, or object texture coordinates.
+// Return 0 to keep
+// the physical native-relative X, or 1 to index the stencil at *out_window_x.
+// Default-null preserves the existing physical-stencil window-provider
+// contract. Native 240-wide rendering ignores this hook too.
+extern "C" int (*g_ws_obj_window_x_provider)(int native_relative_x, int y,
+                                             int* out_window_x);
+
 // A game can publish read-only BG samplers whose results depend only on the
 // row's immutable inputs. This allows candidate ordering/occlusion to omit
 // hidden samples. The exact three scalar bindings are captured here: replacing
@@ -391,6 +402,14 @@ extern "C" int (*g_ws_obj_attr_y_provider)(int oam_index,
 // providers above run first and may re-place known-safe sprites. Default 0
 // keeps the established expanded-viewport OBJ test.
 extern "C" int g_ws_obj_native_clip;
+
+// Optional display-only continuation of a cyclic native scanline. Return 240
+// for a world OBJ whose visible native texels should repeat into wide margins,
+// or zero for ordinary placement (for example screen-space HUD objects).
+// Other periods are rejected. Native columns, OAM and the canonical renderer
+// are never modified; native wrap copies contribute only their visible part.
+extern "C" int (*g_ws_obj_x_period_provider)(int oam_index,
+    std::uint16_t attr0, std::uint16_t attr1, std::uint16_t attr2);
 
 // Read-only, game-authored OBJ coverage for expanded margins. RGB555 bit 15
 // marks a transparent pixel. Priority uses the hardware 0..3 BG/OBJ order.

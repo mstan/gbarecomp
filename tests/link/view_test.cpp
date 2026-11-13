@@ -11,11 +11,23 @@ using namespace gbarecomp;
 namespace {
 int anchor_left = -1;
 int owned_window_calls = 0, unrelated_window_calls = 0;
+int owned_stencil_calls = 0, unrelated_stencil_calls = 0;
+int owned_period_calls = 0, unrelated_period_calls = 0;
 int owned_window_x(int, int, int*) { ++owned_window_calls; return 0; }
 int unrelated_window_x(int, int, int*) { ++unrelated_window_calls; return 0; }
+int owned_stencil_x(int, int, int*) { ++owned_stencil_calls; return 0; }
+int unrelated_stencil_x(int, int, int*) { ++unrelated_stencil_calls; return 0; }
+int owned_period(int, std::uint16_t, std::uint16_t, std::uint16_t) {
+    ++owned_period_calls; return 0;
+}
+int unrelated_period(int, std::uint16_t, std::uint16_t, std::uint16_t) {
+    ++unrelated_period_calls; return 0;
+}
 void anchor_frame(const ExtendedViewFrameInfo*) {
     gba::g_ws_native_view_left = anchor_left;
     gba::g_ws_window_x_provider = owned_window_x;
+    gba::g_ws_obj_window_x_provider = owned_stencil_x;
+    gba::g_ws_obj_x_period_provider = owned_period;
 }
 void anchored_raster() {
     auto bus=std::make_unique<gba::GbaBus>();
@@ -46,13 +58,19 @@ void anchored_raster() {
         for(unsigned y=0;y<160;++y) {
             gba::g_ws_native_view_left=13; // an unrelated presentation's policy
             gba::g_ws_window_x_provider=unrelated_window_x;
-            source->render_scanline(y,0x3100,io,bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
-            canonical->render_scanline(y,0x3100,io,bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
+            gba::g_ws_obj_window_x_provider=unrelated_stencil_x;
+            gba::g_ws_obj_x_period_provider=unrelated_period;
+            source->render_scanline(y,0xb100,io,bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
+            canonical->render_scanline(y,0xb100,io,bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
             CHECK(gba::g_ws_native_view_left==13);
             CHECK(gba::g_ws_window_x_provider==unrelated_window_x);
+            CHECK(gba::g_ws_obj_window_x_provider==unrelated_stencil_x);
+            CHECK(gba::g_ws_obj_x_period_provider==unrelated_period);
             gba::g_ws_native_view_left=-1;
             gba::g_ws_window_x_provider=nullptr;
-            reference->render_scanline(y,0x3100,io,bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
+            gba::g_ws_obj_window_x_provider=nullptr;
+            gba::g_ws_obj_x_period_provider=nullptr;
+            reference->render_scanline(y,0xb100,io,bus->vram_ptr(),bus->oam_ptr(),bus->pal_ptr());
         }
         source->mark_framebuffer_latched(); reference->mark_framebuffer_latched();
         canonical->mark_framebuffer_latched();
@@ -62,6 +80,8 @@ void anchored_raster() {
         mirror.restored();
     }
     CHECK(owned_window_calls>0 && unrelated_window_calls==0);
+    CHECK(owned_stencil_calls>0 && unrelated_stencil_calls==0);
+    CHECK(owned_period_calls>0 && unrelated_period_calls==0);
     source->set_presentation_observer(nullptr);
     gba::g_ws_native_view_left=-1;
 }

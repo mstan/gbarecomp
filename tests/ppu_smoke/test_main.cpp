@@ -1142,6 +1142,25 @@ void test_wide_window_mapping_remaps_blend_and_obj_masks() {
     expect_pixel(image.data() + 129 * 3, 255, 0, 0, "OBJ window moved with mapped WIN0 X");
     expect_pixel(image.data(), 255, 0, 0, "mapped X incorrectly indexed OBJ stencil in margin");
     gba::g_ws_window_x_provider = nullptr;
+    // Installing only a no-op stencil mapper must not change the rectangular
+    // window provider's legacy uniform/authored margin policy.
+    disable_all_objects(f);
+    store16(&f.io[0x40], 0x00f0); store16(&f.io[0x48], 0x003f);
+    store16(&f.io[0x4a], 0);
+    gba::g_ws_tilemap_provider = test_margin_tilemap;
+    for (unsigned authored : {0u, 1u}) {
+        gba::g_ws_authored_margin_layers = authored;
+        f.ppu.render(image.data(), 0x2100, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+        const auto legacy = image;
+        gba::g_ws_obj_window_x_provider = +[](int, int, int*) { return 0; };
+        f.ppu.render(image.data(), 0x2100, f.io.data(), f.vram.data(), f.oam.data(), f.pal.data());
+        if (image != legacy) {
+            std::fprintf(stderr, "no-op OBJ stencil hook changed rectangular margin policy\n");
+            std::exit(1);
+        }
+        gba::g_ws_obj_window_x_provider = nullptr;
+    }
+    gba::g_ws_tilemap_provider = nullptr; gba::g_ws_authored_margin_layers = 0;
 }
 
 void test_bitmap_mode3_direct_color_and_affine_origin() {
