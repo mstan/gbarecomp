@@ -612,6 +612,12 @@ target_compile_definitions(gbarecomp_runtime PRIVATE
 target_link_libraries(gbarecomp_runtime PUBLIC
     gbarecomp_gba gbarecomp_debug gbarecomp_recompile_core
     gbarecomp_heal_gate)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # The runtime itself owns worker threads and dlopen. Consumers that omit
+    # the launcher must not rely on its unrelated transitive dependencies.
+    find_package(Threads REQUIRED)
+    target_link_libraries(gbarecomp_runtime PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+endif()
 set_property(TARGET gbarecomp_runtime PROPERTY POSITION_INDEPENDENT_CODE ON)
 if(GBARECOMP_SDL2_OK)
     target_compile_definitions(gbarecomp_runtime PUBLIC GBARECOMP_HAVE_SDL2)
@@ -1398,6 +1404,10 @@ add_test(NAME launcher_input_cache_tests COMMAND launcher_input_cache_tests
 add_executable(presentation_layout_tests tests/presentation_layout/test_main.cpp)
 target_include_directories(presentation_layout_tests PRIVATE src/runtime)
 add_test(NAME presentation_layout_tests COMMAND presentation_layout_tests)
+
+add_executable(simulation_archive_tests tests/simulation_archive/test_main.cpp)
+target_include_directories(simulation_archive_tests PRIVATE src/gba)
+add_test(NAME simulation_archive_tests COMMAND simulation_archive_tests)
 
 # Touch input: gesture recognizer, hub rings/scripts, key synthesis, JSON.
 add_gbarecomp_runtime_stack_test(touch_input_tests tests/touch_input/test_main.cpp)
