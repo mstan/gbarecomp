@@ -70,6 +70,7 @@ extern "C" int (*g_ws_obj_attr_x_provider)(int, std::uint16_t,
 extern "C" int g_ws_obj_native_clip = 0;
 extern "C" int (*g_ws_obj_x_period_provider)(int, std::uint16_t,
     std::uint16_t, std::uint16_t) = nullptr;
+extern "C" int (*g_ws_obj_window_x_provider)(int, int, int*) = nullptr;
 extern "C" int (*g_ws_obj_attr_y_provider)(int, std::uint16_t,
                                             std::uint16_t, std::uint16_t,
                                             int*) = nullptr;
@@ -1669,11 +1670,12 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
                                  kVanW, kVanH);
         obj_window_mask = obj_window_storage;
     }
-    const bool authoritative_windows = g_ws_window_x_provider && out_w != kVanW;
+    const bool authoritative_windows =
+        (g_ws_window_x_provider || g_ws_obj_window_x_provider) && out_w != kVanW;
     auto window_control_at_xy = [&](int hx, int sy) -> uint16_t {
         if (!any_window) return 0x3Fu;
         int window_x = hx;
-        if (authoritative_windows) {
+        if (authoritative_windows && g_ws_window_x_provider) {
             int mapped_x = hx;
             if (g_ws_window_x_provider(hx, sy, &mapped_x) == 1) window_x = mapped_x;
         }
@@ -1685,8 +1687,14 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
             // Do not invent an OBJ-window stencil for a different scanline.
             return objwin_en ? 0u : static_cast<uint16_t>(winout & 0x3Fu);
         }
-        if (obj_window_mask && window_x >= 0 && window_x < static_cast<int>(kVanW) &&
-            obj_window_mask[window_x])
+        int stencil_x = hx;
+        if (obj_window_mask && authoritative_windows && g_ws_obj_window_x_provider) {
+            int mapped_x = hx;
+            if (g_ws_obj_window_x_provider(hx, sy, &mapped_x) == 1)
+                stencil_x = mapped_x;
+        }
+        if (obj_window_mask && stencil_x >= 0 && stencil_x < static_cast<int>(kVanW) &&
+            obj_window_mask[stencil_x])
             return static_cast<uint16_t>((winout >> 8) & 0x3Fu);
         return static_cast<uint16_t>(winout & 0x3Fu);
     };

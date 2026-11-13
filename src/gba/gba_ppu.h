@@ -322,6 +322,14 @@ extern "C" unsigned g_ws_bg_xy_provider_layers;
 extern "C" int (*g_ws_window_x_provider)(int native_relative_x, int y,
                                          int* out_window_x);
 
+// Independent authoritative mapping for the native OBJ-window stencil. It
+// does not change WIN0/WIN1 or object texture coordinates. Return 0 to keep
+// the physical native-relative X, or 1 to index the stencil at *out_window_x.
+// Default-null preserves the existing physical-stencil window-provider
+// contract. Native 240-wide rendering ignores this hook too.
+extern "C" int (*g_ws_obj_window_x_provider)(int native_relative_x, int y,
+                                             int* out_window_x);
+
 // A game can publish read-only BG samplers whose results depend only on the
 // row's immutable inputs. This allows candidate ordering/occlusion to omit
 // hidden samples. The exact three scalar bindings are captured here: replacing

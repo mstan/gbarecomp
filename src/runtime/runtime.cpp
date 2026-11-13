@@ -1402,6 +1402,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gba::g_ws_obj_attr_x_provider = nullptr;
     gba::g_ws_obj_native_clip = 0;
     gba::g_ws_obj_x_period_provider = nullptr;
+    gba::g_ws_obj_window_x_provider = nullptr;
     gba::g_ws_obj_margin_provider = nullptr;
     gba::g_ws_bg_x_provider = nullptr;
     gba::g_ws_bg_x_provider_layers = 0xFu;

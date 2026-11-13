@@ -46,6 +46,7 @@ void periodic_objects() {
         else if(scene==4) put(io,0x4a,0x3f21); // OBJ visible only in OBJ-window
         else put(io,0x4a,0x003f);
         gba::g_ws_window_x_provider=cyclic_window;
+        gba::g_ws_obj_window_x_provider=cyclic_window;
         gba::g_ws_obj_x_period_provider=repeat_world;
         reference->render(native.data(),display,io.data(),vram.data(),oam.data(),pal.data());
         for(unsigned width : {288u,480u}) {
@@ -77,6 +78,7 @@ void periodic_objects() {
     wide->mark_framebuffer_latched();const auto* rgb=wide->latched_framebuffer();
     CHECK(rgb[(24*480+190)*3]>200 && rgb[(24*480+430)*3]==0);
     gba::g_ws_obj_x_period_provider=nullptr;gba::g_ws_window_x_provider=nullptr;
+    gba::g_ws_obj_window_x_provider=nullptr;
     std::puts("periodic OBJ native-center/seam/alpha/affine/priority/windows and HUD exclusion passed");
 }
 }
