@@ -46,6 +46,7 @@
 #include "mod_runtime.h"
 #endif
 #include "../gba/sha1.h"
+#include "mod_rom_data.h"
 #include "diagnostic_replay.h"
 #include "replay_writer.h"
 #include "snapshot.h"
@@ -1661,6 +1662,20 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             return 1;
         }
         mod_runtime_activate_plugins();
+        if (opts.prepare_mod_rom_data) {
+            const std::string source_sha1 = rom_sha1;
+            if (!mod_rom_data_internal::prepare(opts, rom, &rom_sha1, &err)) {
+                std::fprintf(stderr,
+                    "[gbarecomp:mods] ROM data preparation failed: %s\n",
+                    err.c_str());
+                return 1;
+            }
+            if (rom_sha1 != source_sha1) {
+                std::fprintf(stderr,
+                    "[gbarecomp:mods] prepared ROM data sha1=%s\n",
+                    rom_sha1.c_str());
+            }
+        }
         if (!args.internal_resolution_set && gba_mod_internal_resolution() > 0)
             args.internal_resolution = gba_mod_internal_resolution();
         // Retain catalog defaults unless the title exposes and the player

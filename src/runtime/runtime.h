@@ -15,6 +15,8 @@ namespace gbarecomp {
 struct GbaNetplayLaunch;
 struct ViewGeometry;
 
+enum class ModRomDataResult { Unchanged, Prepared, Failed };
+
 struct TouchFrameInfo;   // touch_input.h
 class HostOverlay;       // host_overlay.h
 
@@ -56,6 +58,15 @@ struct RunOptions {
     // Packages target this stable ID plus builtin_rom_sha1 and may activate
     // only trusted callbacks statically registered by the game executable.
     const char* mod_game_id = nullptr;
+    // Optional trusted, offline data-only preparation. Called once after the
+    // original cartridge and selected mod assets have been verified, before
+    // any guest execution. The buffer is the process-local ROM image; its
+    // header and all generated instructions/literals must remain unchanged.
+    // A Prepared image receives its own snapshot/replay/cache identity. The
+    // original cartridge file is never written. Online boot bypasses mods.
+    ModRomDataResult (*prepare_mod_rom_data)(std::uint8_t* data,
+                                            std::size_t size,
+                                            const char** error) = nullptr;
     // Make a view feature authoritative over legacy TOML, CLI, and environment
     // inputs, including its fixed/initial width request. Games with unrelated
     // catalogs leave this false.
