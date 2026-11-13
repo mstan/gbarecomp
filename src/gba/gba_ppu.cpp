@@ -1670,8 +1670,7 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
                                  kVanW, kVanH);
         obj_window_mask = obj_window_storage;
     }
-    const bool authoritative_windows =
-        (g_ws_window_x_provider || g_ws_obj_window_x_provider) && out_w != kVanW;
+    const bool authoritative_windows = g_ws_window_x_provider && out_w != kVanW;
     auto window_control_at_xy = [&](int hx, int sy) -> uint16_t {
         if (!any_window) return 0x3Fu;
         int window_x = hx;

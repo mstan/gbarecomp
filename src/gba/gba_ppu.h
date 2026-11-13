@@ -322,8 +322,11 @@ extern "C" unsigned g_ws_bg_xy_provider_layers;
 extern "C" int (*g_ws_window_x_provider)(int native_relative_x, int y,
                                          int* out_window_x);
 
-// Independent authoritative mapping for the native OBJ-window stencil. It
-// does not change WIN0/WIN1 or object texture coordinates. Return 0 to keep
+// Additional native OBJ-window stencil mapping, active only alongside an
+// installed g_ws_window_x_provider in expanded horizontal output. Without
+// that authoritative rectangular provider this hook is ignored. It does
+// not change WIN0/WIN1, their margin policy, or object texture coordinates.
+// Return 0 to keep
 // the physical native-relative X, or 1 to index the stencil at *out_window_x.
 // Default-null preserves the existing physical-stencil window-provider
 // contract. Native 240-wide rendering ignores this hook too.
