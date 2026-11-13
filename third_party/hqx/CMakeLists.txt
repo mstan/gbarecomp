@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+cmake_minimum_required(VERSION 3.20)
+project(gbarecomp_hqx C)
+add_library(gbarecomp_hqx SHARED init.c hq2x.c hq3x.c hq4x.c)
+target_compile_definitions(gbarecomp_hqx PRIVATE DLL_EXPORT)
+set_target_properties(gbarecomp_hqx PROPERTIES PREFIX "" OUTPUT_NAME "gbarecomp-hqx")
+target_compile_features(gbarecomp_hqx PRIVATE c_std_99)
+if(MINGW AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    target_link_options(gbarecomp_hqx PRIVATE -Wl,--kill-at)
+endif()

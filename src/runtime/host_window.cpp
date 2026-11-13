@@ -1,6 +1,9 @@
 // host_window.cpp — SDL2-backed window. Stubs out when SDL2 isn't found.
 
 #include "host_window.h"
+#if defined(GBARECOMP_ENABLE_HQ2X)
+#include "hq2x_filter.h"
+#endif
 #if defined(GBARECOMP_GBA_PAD_BINDS)
 #include "consoles/gba/gba_pad_binds.h"
 #endif
@@ -348,6 +351,9 @@ HostWindow* g_haptic_window = nullptr;
 std::atomic<bool> g_settings_menu_requested{false};
 
 struct Backend {
+#if defined(GBARECOMP_ENABLE_HQ2X)
+    Hq2xFilter hq2x;
+#endif
     SDL_Window*   window   = nullptr;
     SDL_Renderer* renderer = nullptr;
     SDL_Texture*  texture  = nullptr;
@@ -507,9 +513,9 @@ struct Backend {
 #if defined(GBARECOMP_GBA_PAD_BINDS)
     std::string input_config_dir;
     std::string preferred_pad_guid;
-    int pad_buttons[10] = {};
-    int pad_axes[10] = {};
-    int pad_axis_dirs[10] = {};
+    int pad_buttons[20] = {};
+    int pad_axes[20] = {};
+    int pad_axis_dirs[20] = {};
     int pad_deadzone = 6553;
 #endif
     HotkeyBind   hotkeys[HK_COUNT];     // [KeyMap] bindings
@@ -619,7 +625,7 @@ void load_controller_bindings(Backend* b) {
         SDL_GameControllerGetJoystick(b->controller)),guid,sizeof(guid));
     rui_pad_binds_init(&kRuiGbaPadSpec,path.c_str());
     b->pad_deadzone=std::max(1,rui_pad_binds_deadzone(&kRuiGbaPadSpec,path.c_str(),guid)*32767/100);
-    for(int i=0;i<10;++i) {
+    for(int i=0;i<kRuiGbaPadSpec.count && i<20;++i) {
         char source[48];rui_pad_binds_label(&kRuiGbaPadSpec,path.c_str(),guid,i,source,sizeof(source));
         b->pad_buttons[i]=(int)SDL_GameControllerGetButtonFromString(source);
         b->pad_axes[i]=-1;b->pad_axis_dirs[i]=0;
@@ -2645,6 +2651,9 @@ bool HostWindow::drawable_size(int* width, int* height) const {
 }
 
 bool HostWindow::hd_jobs_available() {
+#if defined(GBARECOMP_ENABLE_HQ2X)
+    if (hq2x_enabled()) return false; // The optional filter needs the CPU picture.
+#endif
 #if defined(GBARECOMP_GPU_HD_EXPERIMENT)
     if (!open_ || !impl_) return false;
     auto* b = static_cast<Backend*>(impl_);
@@ -2717,6 +2726,13 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
     if (!rgb888 && !frame_texture) return;
     if (!sampled_w) sampled_w = unsigned(b->base_w);
     if (!sampled_h) sampled_h = unsigned(b->base_h);
+#if defined(GBARECOMP_ENABLE_HQ2X)
+    if (rgb888 && hq2x_enabled()) {
+        if (const auto* filtered=b->hq2x.apply(rgb888,sampled_w,sampled_h)) {
+            rgb888=filtered; sampled_w*=2; sampled_h*=2;
+        }
+    }
+#endif
     if (!frame_texture) {
         int texture_w = 0, texture_h = 0;
         SDL_QueryTexture(b->texture, nullptr, nullptr, &texture_w, &texture_h);
@@ -3666,14 +3682,16 @@ HostWindow::Events HostWindow::pump() {
     // any time, including while testing motion.
     if (b->controller && SDL_GameControllerGetAttached(b->controller)) {
 #if defined(GBARECOMP_GBA_PAD_BINDS)
-        for(int i=0;i<10;++i) {
+        /* Older UI pins supply ten sources; newer pins append ten alternate
+         * sources. Rebuild KEYINPUT from all held sources on every poll. */
+        for(int i=0;i<kRuiGbaPadSpec.count && i<20;++i) {
             bool pressed=b->pad_buttons[i]>=0 && SDL_GameControllerGetButton(
                 b->controller,(SDL_GameControllerButton)b->pad_buttons[i]);
             if(b->pad_axes[i]>=0) {
                 const int value=SDL_GameControllerGetAxis(b->controller,(SDL_GameControllerAxis)b->pad_axes[i]);
                 pressed|=b->pad_axis_dirs[i]>0?value>=b->pad_deadzone:value<=-b->pad_deadzone;
             }
-            if(pressed)keys&=static_cast<uint16_t>(~(1u<<kRuiGbaKeyBits[i]));
+            if(pressed)keys&=static_cast<uint16_t>(~(1u<<kRuiGbaKeyBits[i%10]));
         }
 #else
         const struct {

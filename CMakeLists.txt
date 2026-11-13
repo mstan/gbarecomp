@@ -1570,3 +1570,5 @@ if(GBARECOMP_SDL2_OK AND EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/consoles/gba/g
             "${CMAKE_CURRENT_BINARY_DIR}/display-contract-fixture")
     endif()
 endif()
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/hq2x.cmake")

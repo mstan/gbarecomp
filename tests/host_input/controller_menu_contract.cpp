@@ -116,6 +116,48 @@ int main(int argc,char** argv) {
         check((button(SDL_CONTROLLER_BUTTON_X,1).keyinput&2u)!=0,"unbinding removes former mapped source");
         button(SDL_CONTROLLER_BUTTON_X,0);
         launcher_binds_set_pad_button(model,1,5,LNG_PADBIND_BUTTON,SDL_CONTROLLER_BUTTON_X,0);
+#if defined(RUI_GBA_PAD_BIND_SLOTS) && RUI_GBA_PAD_BIND_SLOTS >= 2
+        launcher_binds_set_pad_button_slot(model,1,5,1,LNG_PADBIND_BUTTON,SDL_CONTROLLER_BUTTON_Y,0);
+        check(std::string(model->pad_binds[0][5])=="x" &&
+              std::string(model->pad_binds_alt[0][5])=="y","primary and alternate labels are independent");
+        window.load_input_config(fixture_dir.c_str());
+        check((button(SDL_CONTROLLER_BUTTON_Y,1).keyinput&2u)==0,"alternate button drives GBA B");
+        button(SDL_CONTROLLER_BUTTON_X,1);
+        check((button(SDL_CONTROLLER_BUTTON_Y,0).keyinput&2u)==0,"releasing alternate keeps held primary active");
+        check((button(SDL_CONTROLLER_BUTTON_X,0).keyinput&2u)!=0,"both buttons released releases GBA B");
+        button(SDL_CONTROLLER_BUTTON_Y,1);button(SDL_CONTROLLER_BUTTON_X,1);
+        check((button(SDL_CONTROLLER_BUTTON_X,0).keyinput&2u)==0,"releasing primary keeps held alternate active");
+        button(SDL_CONTROLLER_BUTTON_Y,0);
+        launcher_binds_set_pad_button_slot(model,1,5,1,LNG_PADBIND_AXIS,SDL_CONTROLLER_AXIS_TRIGGERLEFT,1);
+        check(std::string(model->pad_binds_alt[0][5])=="lefttrigger+","trigger alternative is captured");
+        rui_pad_binds_init(&kRuiGbaPadSpec,bindings.c_str());
+        launcher_binds_refresh(model);
+        check(std::string(model->pad_binds_alt[0][5])=="lefttrigger+","trigger alternative persists after store reload");
+        window.load_input_config(fixture_dir.c_str());
+        // SDL maps the virtual joystick's signed trigger axis to [0,32767].
+        SDL_JoystickSetVirtualAxis(pad,SDL_CONTROLLER_AXIS_TRIGGERLEFT,-28000);pump();
+        check((pump().keyinput&2u)!=0,"trigger alternative honors deadzone");
+        SDL_JoystickSetVirtualAxis(pad,SDL_CONTROLLER_AXIS_TRIGGERLEFT,24000);pump();
+        check((pump().keyinput&2u)==0,"trigger alternative drives GBA B");
+        button(SDL_CONTROLLER_BUTTON_X,1);
+        SDL_JoystickSetVirtualAxis(pad,SDL_CONTROLLER_AXIS_TRIGGERLEFT,-32768);pump();
+        check((pump().keyinput&2u)==0,"trigger release preserves held button");
+        check((button(SDL_CONTROLLER_BUTTON_X,0).keyinput&2u)!=0,"trigger and button both released");
+        launcher_binds_set_pad_button_slot(model,1,5,1,LNG_PADBIND_NONE,0,0);
+        window.load_input_config(fixture_dir.c_str());
+        SDL_JoystickSetVirtualAxis(pad,SDL_CONTROLLER_AXIS_TRIGGERLEFT,24000);pump();
+        check((pump().keyinput&2u)!=0,"clearing alternate removes trigger without changing primary");
+        SDL_JoystickSetVirtualAxis(pad,SDL_CONTROLLER_AXIS_TRIGGERLEFT,-32768);pump();
+        launcher_binds_set_pad_button_slot(model,1,2,1,LNG_PADBIND_AXIS,SDL_CONTROLLER_AXIS_LEFTX,-1);
+        launcher_binds_set_pad_button_slot(model,1,3,1,LNG_PADBIND_AXIS,SDL_CONTROLLER_AXIS_LEFTX,1);
+        window.load_input_config(fixture_dir.c_str());
+        SDL_JoystickSetVirtualAxis(pad,SDL_CONTROLLER_AXIS_LEFTX,-24000);pump();
+        check((pump().keyinput&0x30u)==0x10u,"negative stick drives left without right");
+        SDL_JoystickSetVirtualAxis(pad,SDL_CONTROLLER_AXIS_LEFTX,24000);pump();
+        check((pump().keyinput&0x30u)==0x20u,"positive stick drives right without left");
+        SDL_JoystickSetVirtualAxis(pad,SDL_CONTROLLER_AXIS_LEFTX,0);pump();
+        check((pump().keyinput&0x30u)==0x30u,"stick center releases both directions");
+#endif
         window.load_input_config(fixture_dir.c_str());
         delete model;
         pump();

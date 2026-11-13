@@ -54,3 +54,13 @@ MPL-covered.
 
 libmgba itself is linked only into the opt-in oracle binary
 (`-DGBARECOMP_BUILD_ORACLE=ON`), never into a shipping native build.
+
+## hqx (optional)
+
+`third_party/hqx` contains the unchanged hqx C sources by Maxim Stepin and
+Cameron Zemek from commit `a1c7d415f4bb7b947c4c2e47faf220b0148f4bac` of
+https://github.com/grom358/hqx, licensed LGPL-2.1-or-later. The optional
+`GBARECOMP_ENABLE_HQ2X` build supplies a separate replaceable shared library.
+Its complete source, license, authors and rebuilding instructions accompany
+packages that include it. See [third_party/hqx/README.md](third_party/hqx/README.md)
+and [COPYING](third_party/hqx/COPYING).
