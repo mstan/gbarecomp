@@ -526,6 +526,12 @@ target_compile_definitions(gbarecomp_runtime PRIVATE
 target_link_libraries(gbarecomp_runtime PUBLIC
     gbarecomp_gba gbarecomp_debug gbarecomp_recompile_core
     gbarecomp_heal_gate)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # The runtime itself owns worker threads and dlopen. Consumers that omit
+    # the launcher must not rely on its unrelated transitive dependencies.
+    find_package(Threads REQUIRED)
+    target_link_libraries(gbarecomp_runtime PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+endif()
 set_property(TARGET gbarecomp_runtime PROPERTY POSITION_INDEPENDENT_CODE ON)
 if(GBARECOMP_SDL2_OK)
     target_compile_definitions(gbarecomp_runtime PUBLIC GBARECOMP_HAVE_SDL2)
