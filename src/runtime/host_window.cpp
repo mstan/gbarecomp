@@ -1548,36 +1548,12 @@ PresentationLayout current_presentation_layout(Backend* b, int* out_w, int* out_
         drawable_w <= 0 || drawable_h <= 0) {
         SDL_GetWindowSize(b->window, &drawable_w, &drawable_h);
     }
-    PresentationLayout layout{};
-    if (b->resize_driven_view || b->expanded_view || b->touch_policy) {
-        // Responsive games fill the whole display (live rotation included);
-        // touch-first games also fill it, since their controls are gestures.
-        layout = compute_adaptive_presentation_layout(drawable_w, drawable_h,
-                                                      b->base_w, b->base_h);
-    } else {
-        // Pad-only titles: reserve roughly one fifth of the display on each
-        // side for the controls. Prefer an exact integer multiple so pixel art
-        // stays crisp and symmetric.
-        const int width_limited_scale =
-            static_cast<int>((drawable_w * 0.62f) / b->base_w);
-        const int height_limited_scale =
-            static_cast<int>((drawable_h * 0.90f) / b->base_h);
-        const int integer_scale =
-            std::max(1, std::min(width_limited_scale, height_limited_scale));
-        int game_w = b->base_w * integer_scale;
-        int game_h = b->base_h * integer_scale;
-        int scale_out = integer_scale;
-        if (game_w > drawable_w || game_h > drawable_h) {
-            const float scale = std::min(
-                static_cast<float>(drawable_w) / b->base_w,
-                static_cast<float>(drawable_h) / b->base_h);
-            game_w = std::max(1, static_cast<int>(b->base_w * scale));
-            game_h = std::max(1, static_cast<int>(b->base_h * scale));
-            scale_out = 0;
-        }
-        layout = {(drawable_w - game_w) / 2, (drawable_h - game_h) / 2,
-                  game_w, game_h, scale_out};
-    }
+    // Fit every game to the real Activity surface at its selected aspect.
+    // Touch controls already draw over that surface and use this same layout
+    // for input mapping; reserving fixed side rails shrinks pad-only games
+    // even when the player uses a controller or hides the pad.
+    PresentationLayout layout = compute_adaptive_presentation_layout(
+        drawable_w, drawable_h, b->base_w, b->base_h);
 #else
     PresentationLayout layout{};
     if (!b->expanded_view && !b->resize_driven_view) {
@@ -2071,8 +2047,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     }
     b->cadence.init();
 #if defined(__ANDROID__)
-    // Mobile presentation owns the whole drawable: a centered integer-scaled
-    // game viewport plus dedicated side rails for touch controls.
+    // Mobile presentation fits the game to the whole drawable; host controls
+    // and their input mapping share the explicit presentation rectangle.
     SDL_RenderSetLogicalSize(b->renderer, 0, 0);
     SDL_SetRenderDrawColor(b->renderer, 0, 0, 0, 255);
 #else
