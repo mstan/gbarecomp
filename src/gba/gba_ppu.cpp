@@ -928,8 +928,8 @@ void render_scanline_impl(uint8_t* rgb,
             if ((ui_variants & 2) && !(ui_job->world_hidden_layers & (1u << layer)) &&
                 (world_control[x] & (1u << layer)) &&
                 (layer >= 4 || (dispcnt & (0x100u << layer)))) {
-                cand.target1 = (world_control[x] & 0x20) &&
-                    (layer == 4 ? ui_object_alpha : (first_targets & (1u << layer)) != 0);
+                cand.target1 = layer == 4 ? ui_object_alpha :
+                    (world_control[x] & 0x20) && (first_targets & (1u << layer)) != 0;
                 insert(world_top[x], world_second[x], cand);
             }
             return;
@@ -1401,8 +1401,9 @@ void render_scanline_impl(uint8_t* rgb,
             }
             const uint16_t color = load_u16_le(&obj_pal[pal_index * 2]);
             uint32_t ux = static_cast<uint32_t>(screen_x);
-            bool t1 = blend_enabled(ux) &&
-                obj_mode == 1;
+            // Semi-transparent OBJ forces alpha independently of the window
+            // color-effect flag. The OBJ layer visibility was checked above.
+            const bool t1 = obj_mode == 1;
             submit(ux, color, key, 4, t1, obj_target2);
         };
         if (rot_scale) {
@@ -2499,7 +2500,7 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
                 }
                 const uint16_t color = load_u16_le(&obj_pal[pal_index * 2]);
                 uint32_t ux = static_cast<uint32_t>(screen_x);
-                bool t1 = (blend_enabled(ux) || authored_margin) && obj_mode == 1;
+                const bool t1 = obj_mode == 1;
                 submit(ux, color, key, 4, t1, obj_target2);
             };
             if (rot_scale) {
@@ -2588,7 +2589,7 @@ void render_scanline_wide_impl(uint8_t* rgb, int y, uint16_t dispcnt,
                 if ((pixel.color & 0x8000) || pixel.priority > 3 ||
                     (!layer_enabled(x, 4) && (authoritative_windows || !g_ws_authored_margin_layers))) continue;
                 submit(x, pixel.color, pixel.priority * 256 + (pixel.order & 127), 4,
-                       pixel.semi_transparent && blend_enabled(x),
+                       pixel.semi_transparent,
                        (second_targets & (1u << 4)) != 0);
             }
         }
