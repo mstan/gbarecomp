@@ -177,6 +177,20 @@ label = "Enhanced"
 
 Supported types are `boolean`, `choice`, and bounded `integer`.
 
+### HQx pixel smoothing
+
+Titles can offer the replaceable HQx library as one default-off feature with a
+`choice` option for HQ2x, HQ3x or HQ4x. A trusted title plugin reads its committed
+option with `gba_mod_option_value`, then calls `gbarecomp::set_hqx_scale` from
+`hq2x_filter.h` with 2, 3 or 4. A reset callback selects 0 for normal pixels.
+Only one factor can be selected. The original `set_hq2x_enabled` entry point
+continues to select 2 or 0 for existing plugins.
+
+Filtering changes only the host presentation picture, including an adaptive
+view's full logical width. It does not change the guest raster or snapshot.
+The library remains dynamically replaceable, and `gbarecomp_stage_hq2x` stages
+its complete corresponding HQx sources, build file and LGPL notices.
+
 ### Cheat codes
 
 Cheats are delivered as ordinary package features; there is no separate

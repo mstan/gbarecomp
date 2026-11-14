@@ -2652,7 +2652,7 @@ bool HostWindow::drawable_size(int* width, int* height) const {
 
 bool HostWindow::hd_jobs_available() {
 #if defined(GBARECOMP_ENABLE_HQ2X)
-    if (hq2x_enabled()) return false; // The optional filter needs the CPU picture.
+    if (hqx_scale()) return false; // The optional filter needs the CPU picture.
 #endif
 #if defined(GBARECOMP_GPU_HD_EXPERIMENT)
     if (!open_ || !impl_) return false;
@@ -2727,9 +2727,10 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
     if (!sampled_w) sampled_w = unsigned(b->base_w);
     if (!sampled_h) sampled_h = unsigned(b->base_h);
 #if defined(GBARECOMP_ENABLE_HQ2X)
-    if (rgb888 && hq2x_enabled()) {
-        if (const auto* filtered=b->hq2x.apply(rgb888,sampled_w,sampled_h)) {
-            rgb888=filtered; sampled_w*=2; sampled_h*=2;
+    const unsigned hqx_factor = hqx_scale();
+    if (rgb888 && hqx_factor) {
+        if (const auto* filtered=b->hq2x.apply(rgb888,sampled_w,sampled_h,hqx_factor)) {
+            rgb888=filtered; sampled_w*=hqx_factor; sampled_h*=hqx_factor;
         }
     }
 #endif
