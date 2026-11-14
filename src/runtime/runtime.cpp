@@ -540,14 +540,15 @@ std::uint32_t parse_hex_u32(const std::string& s) {
 
 std::string resolve_config_path(const std::filesystem::path& base,
                                 const std::string& value) {
-    std::filesystem::path p(value);
+    auto p = std::filesystem::u8path(value);
     if (p.is_relative()) p = base / p;
-    return p.lexically_normal().string();
+    const auto utf8 = p.lexically_normal().u8string();
+    return std::string(utf8.begin(), utf8.end());
 }
 
 bool read_file(const std::string& path, std::vector<uint8_t>* out,
                std::string* err) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(std::filesystem::u8path(path), std::ios::binary | std::ios::ate);
     if (!f) {
         if (err) *err = "could not open " + path;
         return false;
@@ -734,7 +735,7 @@ bool write_file(const std::string& path, const std::vector<uint8_t>& bytes,
         }
     }
 
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    std::ofstream f(std::filesystem::u8path(path), std::ios::binary | std::ios::trunc);
     if (!f) {
         if (err) *err = "could not open save file for write " + path;
         return false;
@@ -1382,7 +1383,26 @@ extern "C" unsigned g_ws_extra_left  = 0;
 extern "C" unsigned g_ws_extra_right = 0;
 extern "C" unsigned g_ws_view_width  = 240;
 
+bool resolve_native_save_override(int argc, char** argv, const RunOptions& opts,
+                                  std::string* path, std::string* error) {
+    if (!path) return false;
+    Args args;
+    if (opts.builtin_game_name && *opts.builtin_game_name)
+        args.game_short_name = opts.builtin_game_name;
+    find_config_arg(argc, argv, &args);
+    if (!load_config(&args, error)) {
+        std::error_code ec;
+        if (std::filesystem::exists(args.config, ec)) return false;
+    }
+    if (!parse_cli(argc, argv, &args, error)) return false;
+    *path = args.save_path;
+    if (path->empty() && opts.launcher_save_path && *opts.launcher_save_path)
+        *path = opts.launcher_save_path;
+    return true;
+}
+
 int run_game(int argc, char** argv, const RunOptions& opts) {
+    runtime_select_native_program(nullptr);
     // Game runners install this before entering run_game(). Clear it on every
     // return path so a later game launched in the same process cannot call a
     // stale game-specific copied-code dispatcher.
@@ -1390,6 +1410,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         ~RamDispatchHookReset() {
             g_runtime_ram_dispatch_hook = nullptr;
             g_runtime_force_interp_hook = nullptr;
+            runtime_select_native_program(nullptr);
         }
     } ram_dispatch_hook_reset;
 
@@ -1449,6 +1470,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
         return 1;
     }
+    if (args.save_path.empty() && opts.launcher_save_path && *opts.launcher_save_path)
+        args.save_path = opts.launcher_save_path;
     const float gyro_sensitivity_calibration =
         std::isfinite(opts.gyro_sensitivity_calibration) &&
                 opts.gyro_sensitivity_calibration > 0.0f
@@ -1603,6 +1626,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         return 1;
     }
 
+    if (opts.mod_native_program_count && opts.builtin_rom_sha1 &&
+        rom_sha1 != lower_ascii(opts.builtin_rom_sha1)) {
+        std::fprintf(stderr,
+            "[gbarecomp:runtime] compiled mod profiles require the original cartridge; "
+            "select the exact patch in Mods instead of overriding its ROM identity\n");
+        return 1;
+    }
     gba::RomHeader header = gba::parse_rom(rom.data(), rom.size());
     if (!header.ok) {
         std::fprintf(stderr, "[gbarecomp:runtime] invalid ROM header: %s\n",
@@ -1653,6 +1683,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     header.save_signature.c_str());
     }
 
+    const ModNativeProgramProfile* selected_native_program = nullptr;
 #if defined(GBARECOMP_ENABLE_MODS)
     if (mods_ready) {
         if (!mod_runtime_commit(args.rom, &err)) {
@@ -1664,7 +1695,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         mod_runtime_activate_plugins();
         if (opts.prepare_mod_rom_data) {
             const std::string source_sha1 = rom_sha1;
-            if (!mod_rom_data_internal::prepare(opts, rom, &rom_sha1, &err)) {
+            if (!mod_rom_data_internal::prepare(opts, rom, &rom_sha1, &err,
+                                                &selected_native_program)) {
                 std::fprintf(stderr,
                     "[gbarecomp:mods] ROM data preparation failed: %s\n",
                     err.c_str());
@@ -1684,6 +1716,17 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             args.resize_view = gba_mod_adaptive_view_enabled() != 0;
     }
 #endif
+    if (selected_native_program) {
+        runtime_select_native_program(selected_native_program->program);
+        if (args.save_path.empty()) {
+            auto path = std::filesystem::u8path(args.rom);
+            path.replace_extension(std::string(".") + selected_native_program->save_namespace + ".sav");
+            const auto utf8 = path.u8string();
+            args.save_path.assign(utf8.begin(), utf8.end());
+        }
+        std::fprintf(stderr, "[gbarecomp:mods] compiled native program=%s save=%s\n",
+            rom_sha1.c_str(), args.save_path.c_str());
+    }
     // Declarative mod cheats ([[cheat]] records of enabled features). They
     // mutate guest RAM, so they run only in a single-player session whose
     // catalog committed them: netplay never loads the catalog (and returned
