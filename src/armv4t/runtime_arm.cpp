@@ -34,14 +34,18 @@
 
 // Forward decls of the per-game dispatch table. Each game's
 // generated/dispatch_table.cpp defines these.
-struct DispatchEntry {
-    uint32_t addr;
-    uint8_t thumb;
-    uint8_t resume;
-    void (*fn)(void);
-};
+#include "native_program.h"
 extern "C" const DispatchEntry kDispatchTable[];
 extern "C" const unsigned kDispatchTableLen;
+namespace {
+const RuntimeNativeProgram* g_selected_native_program = nullptr;
+const DispatchEntry* cart_dispatch() {
+    return g_selected_native_program ? g_selected_native_program->dispatch : kDispatchTable;
+}
+unsigned cart_dispatch_count() {
+    return g_selected_native_program ? g_selected_native_program->dispatch_count : kDispatchTableLen;
+}
+}
 
 // BIOS dispatch table. Lives in src/runtime/generated_bios/
 // bios_dispatch_table.cpp — placeholder until `gba_recompile --bios`
@@ -922,6 +926,7 @@ namespace {
 const RuntimeNativeRamTemplate* g_native_ram_templates = nullptr;
 const RuntimeNativeRamEntry* g_native_ram_entries = nullptr;
 uint32_t g_native_ram_template_count = 0, g_native_ram_entry_count = 0;
+RuntimeNativeProgram g_original_ram_program{};
 struct NativeRamCache {
     uint32_t pc = 0, base = 0;
     const RuntimeNativeRamEntry* entry = nullptr;
@@ -1063,7 +1068,7 @@ const DispatchEntry* dispatch_resolve(uint32_t target_pc) {
         entry = lookup_in(
             kBiosDispatchTable, kBiosDispatchTableLen, pc, thumb);
     } else {
-        entry = lookup_in(kDispatchTable, kDispatchTableLen, pc, thumb);
+        entry = lookup_in(cart_dispatch(), cart_dispatch_count(), pc, thumb);
     }
     if (entry) {
         g_runtime_resume_pc = entry->resume ? pc : 0u;
@@ -1159,17 +1164,27 @@ extern "C" int runtime_has_static_entry(uint32_t pc, int thumb) {
     if (guarded_code_address(a,thumb != 0)) return 0;
     const DispatchEntry* entry = (a < kBiosRegionEnd)
         ? lookup_in(kBiosDispatchTable, kBiosDispatchTableLen, a, thumb != 0)
-        : lookup_in(kDispatchTable, kDispatchTableLen, a, thumb != 0);
+        : lookup_in(cart_dispatch(), cart_dispatch_count(), a, thumb != 0);
     return entry != nullptr ? 1 : 0;
 }
 
 extern "C" void runtime_register_native_ram_templates(
     const RuntimeNativeRamTemplate* templates, uint32_t template_count,
     const RuntimeNativeRamEntry* entries, uint32_t entry_count) {
-    g_native_ram_templates = templates;
-    g_native_ram_template_count = template_count;
-    g_native_ram_entries = entries;
-    g_native_ram_entry_count = entry_count;
+    // Only the unprefixed original image auto-registers during static startup.
+    g_original_ram_program = {nullptr, 0, templates, template_count, entries, entry_count};
+    runtime_select_native_program(g_selected_native_program);
+}
+
+extern "C" void runtime_select_native_program(const RuntimeNativeProgram* program) {
+    // No guest can observe a partially selected cart/RAM profile: the runner
+    // calls this before it installs bus callbacks or starts execution.
+    g_selected_native_program = program;
+    const auto& ram = program ? *program : g_original_ram_program;
+    g_native_ram_templates = ram.ram_templates;
+    g_native_ram_template_count = ram.ram_template_count;
+    g_native_ram_entries = ram.ram_entries;
+    g_native_ram_entry_count = ram.ram_entry_count;
     for (auto& cached : g_native_ram_cache) cached = {};
 }
 

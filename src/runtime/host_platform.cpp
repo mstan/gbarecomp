@@ -1,6 +1,7 @@
 #include "host_platform.h"
 
 #include <cstdio>
+#include <filesystem>
 #include <thread>
 
 #if defined(_WIN32)
@@ -119,7 +120,18 @@ void FramePacer::wait_for_next_frame(uint64_t frames) {
 
 std::vector<unsigned char> read_file(const std::string& path, std::string* error) {
     std::vector<unsigned char> out;
+#if defined(_WIN32)
+    // Catalog/launcher paths are UTF-8 even without an active-code-page
+    // manifest (for example on older Windows Server installations).
+    std::FILE* f = nullptr;
+    try { f = _wfopen(std::filesystem::u8path(path).c_str(), L"rb"); }
+    catch (const std::exception&) {
+        if (error) *error = "invalid UTF-8 file path: " + path;
+        return out;
+    }
+#else
     std::FILE* f = std::fopen(path.c_str(), "rb");
+#endif
     if (!f) {
         if (error) *error = "open failed: " + path;
         return out;
