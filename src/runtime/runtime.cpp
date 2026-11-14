@@ -1955,11 +1955,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 requested_width = 240;
         }
 #endif
+        const auto view_ceiling = resize_view_enabled
+            ? opts.max_resize_view_width : opts.max_view_width;
         ViewGeometry geometry = resolve_view_geometry(
-            requested_width, opts.max_view_width, ws_wip_enabled,
+            requested_width, view_ceiling, ws_wip_enabled,
             gba::GbaPpu::kMaxRenderWidth);
         if (geometry.width == 240 && requested_width != 240 &&
-            !ws_wip_enabled && opts.max_view_width <= 240 && !args.quiet) {
+            !ws_wip_enabled && view_ceiling <= 240 && !args.quiet) {
             std::fprintf(stderr,
                 "[gbarecomp:runtime] extended view requested at %dx160, "
                 "but this game has not opted in; rendering faithful 240x160\n",
