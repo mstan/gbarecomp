@@ -2176,6 +2176,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // the run loop stops stepping the guest but keeps pumping input and
     // re-presenting the last frame.
     bool host_paused = false;
+    // Observer requests park the same host loop as the pause hotkey, leaving
+    // SDL events, presentation and queued snapshots available.
+    std::atomic<bool> observer_pause_requested{false};
+    std::atomic<bool> observer_pause_parked{false};
 
     auto pump_idle = [&](uint32_t max_cycles) -> uint32_t {
         uint32_t chunk = ppu.cycles_until_next_event();
@@ -3086,11 +3090,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             octx.savestate_load = [&](const std::string& p, std::string& e) {
                 return observer_request(false, p, e);
             };
+            octx.pause = [&]() { observer_pause_requested.store(true); };
+            octx.resume = [&]() { observer_pause_requested.store(false); };
             octx.run_status = [&]() -> std::string {
                 char buf[192];
+                const bool parked = observer_pause_parked.load();
                 std::snprintf(buf, sizeof(buf),
-                    "{\"ok\":true,\"run\":\"windowed\",\"parked\":false,"
+                    "{\"ok\":true,\"run\":\"%s\",\"parked\":%s,"
                     "\"pc\":\"0x%08X\",\"frame\":%llu,\"vblank_starts\":%llu}",
+                    parked ? "paused" : "windowed",
+                    parked ? "true" : "false",
                     static_cast<unsigned>(g_cpu.R[15]),
                     static_cast<unsigned long long>(ppu.frame_count()),
                     static_cast<unsigned long long>(g_runtime_vblank_starts));
@@ -3103,7 +3112,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             });
             std::fprintf(stderr,
                          "[gbarecomp:runtime] windowed observe TCP on 127.0.0.1:%d "
-                         "(reads, touch_*, game commands, queued savestates; no step)\n",
+                         "(reads, touch_*, game commands, queued savestates, pause/resume; no step)\n",
                          observe_port);
         }
         if (args.fullscreen) win.set_fullscreen(args.fullscreen);
@@ -3940,11 +3949,12 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     };
     auto service_host_pause = [&]() {
         bool waited = false;
-        while (!host_quit && args.window && (host_paused
+        while (!host_quit && args.window && (host_paused || observer_pause_requested.load()
 #if defined(GBARECOMP_WEB_HOST)
                 || win.auto_paused()
 #endif
                 )) {
+            observer_pause_parked.store(true);
 #if defined(GBARECOMP_WEB_HOST)
             win.report_paused(true);
             if (!waited) {
@@ -3968,6 +3978,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
 #endif
         }
+        observer_pause_parked.store(false);
         if (waited && pacer) pacer->reset();
 #if defined(GBARECOMP_WEB_HOST)
         win.report_paused(false);
