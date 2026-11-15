@@ -1,7 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <array>
-#include <bit>
+#include <cstring>
 #include <cstdint>
 #include <limits>
 #include <span>
@@ -35,7 +35,11 @@ public:
                 bits = 0;
                 for (unsigned i = 0; i < sizeof(U); ++i)
                     bits |= static_cast<Bits>(input_[cursor_++]) << (8 * i);
-                item = std::bit_cast<U>(bits);
+                // Some supported C++20 libraries (including Steam's SDK) lack
+                // bit_cast. Copy the representation without a signed conversion.
+                U decoded;
+                std::memcpy(&decoded, &bits, sizeof(decoded));
+                item = decoded;
             } else {
                 for (unsigned i = 0; i < sizeof(U); ++i) output_.push_back(static_cast<std::uint8_t>(bits >> (8 * i)));
             }
