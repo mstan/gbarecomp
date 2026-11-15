@@ -320,6 +320,20 @@ the generic launcher control hidden and set
 `RunOptions::mod_owns_adaptive_view`; the package state then remains
 authoritative over stale config, CLI, or environment values.
 
+A title may set `RunOptions::prepare_mod_rom_data` for a trusted, statically
+linked data-only enhancement. It runs once after original-cartridge validation
+and committed plugin activation, before the bus or CPU receives the process-local
+image. The default is null. The callback must preserve the cartridge header and
+every instruction, folded literal and copied-code byte used by that title's
+generated native program; verify the actual generated corpus before using it.
+Executable changes require a separately regenerated native program instead.
+Return `Prepared` to recompute the effective image SHA-1 used by snapshots,
+diagnostic replay and the overlay cache, `Unchanged` when no preparation is
+needed, or `Failed` with a stable error string to reject launch. The runtime
+also rejects header changes and invalid results before guest execution.
+Original cartridge files and native saves are not rewritten by this hook.
+Online launch bypasses mod activation and this callback.
+
 Trusted view plugins can read validated enabled-feature options with
 `gba_mod_option_value(package_id, feature_id, option_id)`. Values are immutable
 until the next commit/initialization; unavailable or disabled options return
@@ -337,6 +351,7 @@ them inside native X 0..239. `g_ws_authored_margin_layers` exempts these authore
 pixels from native window layer masks, as it does authored BG pixels, while
 preserving BG depth and OBJ enable. All hooks are cleared between games.
 
-The initial operation vocabulary is intentionally limited to trusted
-activation plugins. Future guarded ROM writes, asset overlays, and hooks must
-retain the same pre-boot validation and no-arbitrary-code model.
+Package operations remain limited to trusted activation plugins. The optional
+title callback does not let a package supply executable code or arbitrary ROM
+writes. Future operations must retain the same pre-boot validation and
+no-arbitrary-code model.

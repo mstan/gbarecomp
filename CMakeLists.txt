@@ -461,6 +461,7 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/multiplayer_session.cpp
     src/runtime/multiplayer_slice.cpp
     src/runtime/runtime.cpp
+    src/runtime/mod_rom_data.cpp
     src/runtime/diagnostic_replay.cpp
     src/runtime/save_config.cpp
     src/runtime/bios_hle.cpp
@@ -942,6 +943,11 @@ if(UNIX)
 endif()
 
 if(GBARECOMP_ENABLE_MODS)
+    add_executable(mod_rom_data_tests
+        tests/mod_runtime/rom_data_test.cpp
+        src/runtime/mod_rom_data.cpp src/gba/sha1.cpp)
+    target_include_directories(mod_rom_data_tests PRIVATE src/runtime src/gba)
+    add_test(NAME mod_rom_data_tests COMMAND mod_rom_data_tests)
     add_executable(mod_runtime_tests
         tests/mod_runtime/test_main.cpp
         # The runtime's foreign-background publication API owns only the
