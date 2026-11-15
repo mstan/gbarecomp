@@ -62,6 +62,11 @@ int main(int argc,char** argv) {
             button(defaults[i], 0);
         }
         RecompLauncherCGameInfo game{};launcher_profile_apply_gba(&game);
+        static const int assist_keys[RECOMP_LAUNCHER_MAX_ASSIST_BINDINGS] = {30,31};
+        static const int assist_pads[RECOMP_LAUNCHER_MAX_ASSIST_BINDINGS] = {
+            RECOMP_LAUNCHER_PAD_AXIS(4,1),RECOMP_LAUNCHER_PAD_AXIS(5,1)};
+        game.has_assist_tools=1;game.assist_binding_count=2;
+        game.assist_default_key_bind=assist_keys;game.assist_default_pad_bind=assist_pads;
         check(game.has_integer_scale && game.has_scanlines,
               "GBA profile exposes implemented presentation controls");
         RecompLauncherCSettings settings{};settings.player_src[0]=2;
@@ -159,6 +164,81 @@ int main(int argc,char** argv) {
         check((pump().keyinput&0x30u)==0x30u,"stick center releases both directions");
 #endif
         window.load_input_config(fixture_dir.c_str());
+        // Both triggers can replace GBA shoulders while Assist is explicitly
+        // unbound. Exercise the same config -> launcher -> runtime transfer.
+        launcher_binds_set_pad_button(model,1,6,LNG_PADBIND_AXIS,SDL_CONTROLLER_AXIS_TRIGGERLEFT,1);
+        launcher_binds_set_pad_button(model,1,7,LNG_PADBIND_AXIS,SDL_CONTROLLER_AXIS_TRIGGERRIGHT,1);
+        auto persist_assist=[&] {
+            launcher_model_commit(model,&settings);
+            gbarecomp_seam::seam_assist_from_launcher(settings,saved_profile);
+            gbarecomp_seam::seam_config_save(config_path,saved_profile);
+            gbarecomp_seam::seam_config_load(config_path,&loaded_profile);
+            gbarecomp_seam::seam_assist_to_launcher(loaded_profile,settings);
+            launcher_model_init(model,&settings,&game,nullptr);
+            window.load_input_config(fixture_dir.c_str());
+        };
+        auto clear_assist=[&] {
+            for(int action=0;action<2;++action) {
+                launcher_model_begin_assist_capture(model,action,true);
+                launcher_model_set_captured_pad(model,0);launcher_model_cancel_capture(model);
+                launcher_model_begin_assist_capture(model,action,false);
+                launcher_model_set_captured_key(model,0);launcher_model_cancel_capture(model);
+            }
+        };
+        clear_assist();persist_assist();
+        check(model->s.assist_pad_bind[0]<=0 && model->s.assist_pad_bind[1]<=0 &&
+              model->s.assist_key_bind[0]<=0 && model->s.assist_key_bind[1]<=0,
+              "cleared Assist bindings remain unbound after config and launcher reload");
+        persist_assist();
+        check(loaded_profile.assist_rewind_pad==0 && loaded_profile.assist_fast_pad==0 &&
+              loaded_profile.assist_rewind_key==0 && loaded_profile.assist_fast_key==0,
+              "reopening and saving retains canonical unbound config values");
+        auto trigger=[&](int axis,int value) {
+            check(SDL_JoystickSetVirtualAxis(pad,axis,value)==0,"virtual trigger set");
+            const auto first=pump();auto event=pump();
+            event.rewind=event.rewind || first.rewind;return event;
+        };
+        trigger(SDL_CONTROLLER_AXIS_TRIGGERRIGHT,-32768);
+        trigger(SDL_CONTROLLER_AXIS_TRIGGERLEFT,-32768);
+        auto lt=trigger(SDL_CONTROLLER_AXIS_TRIGGERLEFT,24000);
+        check((lt.keyinput&0x300u)==0x100u && !lt.rewind && !lt.fast_forward,
+              "left trigger drives only GBA L with Assist cleared");
+        trigger(SDL_CONTROLLER_AXIS_TRIGGERLEFT,-32768);
+        auto rt=trigger(SDL_CONTROLLER_AXIS_TRIGGERRIGHT,24000);
+        check((rt.keyinput&0x300u)==0x200u && !rt.rewind && !rt.fast_forward,
+              "right trigger drives only GBA R with Assist cleared");
+        trigger(SDL_CONTROLLER_AXIS_TRIGGERRIGHT,-32768);
+        check((button(SDL_CONTROLLER_BUTTON_LEFTSHOULDER,1).keyinput&0x300u)==0x300u,
+              "old left shoulder no longer drives GBA L");button(SDL_CONTROLLER_BUTTON_LEFTSHOULDER,0);
+        check((button(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,1).keyinput&0x300u)==0x300u,
+              "old right shoulder no longer drives GBA R");button(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,0);
+        for(int action=0;action<2;++action) {
+            launcher_model_begin_assist_capture(model,action,true);
+            launcher_model_set_captured_pad(model,RECOMP_LAUNCHER_PAD_BUTTON(
+                action==0?SDL_CONTROLLER_BUTTON_LEFTSHOULDER:SDL_CONTROLLER_BUTTON_RIGHTSHOULDER));
+            launcher_model_cancel_capture(model);
+        }
+        persist_assist();
+        check(button(SDL_CONTROLLER_BUTTON_LEFTSHOULDER,1).rewind,"rewind remaps to left shoulder");
+        button(SDL_CONTROLLER_BUTTON_LEFTSHOULDER,0);
+        check(button(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,1).fast_forward,"fast-forward remaps to right shoulder");
+        button(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,0);
+        lt=trigger(SDL_CONTROLLER_AXIS_TRIGGERLEFT,24000);rt=trigger(SDL_CONTROLLER_AXIS_TRIGGERRIGHT,24000);
+        check((rt.keyinput&0x300u)==0 && !rt.fast_forward && !lt.rewind,
+              "both gameplay triggers stay independent of remapped Assist");
+        trigger(SDL_CONTROLLER_AXIS_TRIGGERLEFT,-32768);trigger(SDL_CONTROLLER_AXIS_TRIGGERRIGHT,-32768);
+        launcher_model_reset_assist_bindings(model);
+        check(model->s.assist_pad_bind[0]==assist_pads[0] && model->s.assist_pad_bind[1]==assist_pads[1] &&
+              model->s.assist_key_bind[0]==assist_keys[0] && model->s.assist_key_bind[1]==assist_keys[1],
+              "Reset Assist Controls restores declared defaults after clearing and remapping");
+        persist_assist();
+        check(trigger(SDL_CONTROLLER_AXIS_TRIGGERLEFT,24000).rewind,
+              "reset default left trigger rewinds at runtime");
+        trigger(SDL_CONTROLLER_AXIS_TRIGGERLEFT,-32768);
+        check(trigger(SDL_CONTROLLER_AXIS_TRIGGERRIGHT,24000).fast_forward,
+              "reset default right trigger fast-forwards at runtime");
+        trigger(SDL_CONTROLLER_AXIS_TRIGGERRIGHT,-32768);
+        clear_assist();persist_assist();
         delete model;
         pump();
         button(SDL_CONTROLLER_BUTTON_LEFTSTICK,1); check(recomp_runtime_ui_is_open(ui),"L3 opens");button(SDL_CONTROLLER_BUTTON_LEFTSTICK,0);
@@ -190,6 +270,14 @@ int main(int argc,char** argv) {
         check((reopened.pump().keyinput&2u)==0,"GBA B to Xbox X persists after reopening");
         SDL_JoystickSetVirtualButton(pad,SDL_CONTROLLER_BUTTON_X,0);SDL_JoystickUpdate();SDL_PumpEvents();
         check((reopened.pump().keyinput&2u)!=0,"reopened mapping releases cleanly");
+        for(int i=0;i<2;++i) {
+            const int axis=i?SDL_CONTROLLER_AXIS_TRIGGERRIGHT:SDL_CONTROLLER_AXIS_TRIGGERLEFT;
+            SDL_JoystickSetVirtualAxis(pad,axis,24000);SDL_JoystickUpdate();SDL_PumpEvents();reopened.pump();
+            const auto event=reopened.pump();
+            check((event.keyinput&(i?0x100u:0x200u))==0 && !event.fast_forward && !event.rewind,
+                  "reopened host retains trigger gameplay mapping without Assist");
+            SDL_JoystickSetVirtualAxis(pad,axis,-32768);SDL_JoystickUpdate();SDL_PumpEvents();reopened.pump();
+        }
     }
     recomp_runtime_ui_destroy(ui);SDL_JoystickClose(pad);SDL_JoystickDetachVirtual(device);SDL_Quit();
     std::printf("controller menu contract: %d failure(s)\n",failures);return failures?1:0;
