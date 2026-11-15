@@ -10,12 +10,27 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
+#include "../armv4t/native_program.h"
 
 namespace gbarecomp {
 struct GbaNetplayLaunch;
 struct ViewGeometry;
 
-enum class ModRomDataResult { Unchanged, Prepared, Failed };
+enum class ModRomDataResult { Unchanged, Prepared, Failed, PreparedNativeProgram };
+
+// Code-changing mods must name a separately generated immutable program for
+// the exact prepared image. This is not a data-only alias or patch importer.
+struct ModNativeProgramProfile {
+    const char* rom_sha1;
+    const RuntimeNativeProgram* program;
+    // Safe filename component; applied only to the default battery path.
+    // An explicit --save/TOML path remains an intentional player choice.
+    const char* save_namespace;
+    // Owning staged Mods feature, used only to route preboot native-save UI.
+    const char* package_id = nullptr;
+    const char* feature_id = nullptr;
+};
 
 struct TouchFrameInfo;   // touch_input.h
 class HostOverlay;       // host_overlay.h
@@ -61,12 +76,16 @@ struct RunOptions {
     // Optional trusted, offline data-only preparation. Called once after the
     // original cartridge and selected mod assets have been verified, before
     // any guest execution. The buffer is the process-local ROM image; its
-    // header and all generated instructions/literals must remain unchanged.
-    // A Prepared image receives its own snapshot/replay/cache identity. The
+    // header must remain unchanged. Prepared requires all generated code,
+    // literals and copied routines to remain unchanged. PreparedNativeProgram
+    // instead requires an exact compiled profile from mod_native_programs.
+    // A prepared image receives its own snapshot/replay/cache identity. The
     // original cartridge file is never written. Online boot bypasses mods.
     ModRomDataResult (*prepare_mod_rom_data)(std::uint8_t* data,
                                             std::size_t size,
                                             const char** error) = nullptr;
+    const ModNativeProgramProfile* mod_native_programs = nullptr;
+    std::size_t mod_native_program_count = 0;
     // Make a view feature authoritative over legacy TOML, CLI, and environment
     // inputs, including its fixed/initial width request. Games with unrelated
     // catalogs leave this false.
@@ -349,6 +368,11 @@ struct RunOptions {
     // repos stage one file per variant (e.g. "assets/img/boxart_firered.tga").
     const char* launcher_boxart = nullptr;
 };
+
+// Read only the same config/region overlays and CLI save override as boot.
+// Empty result means the cartridge/profile-derived default; no game or UI runs.
+bool resolve_native_save_override(int argc, char** argv, const RunOptions& options,
+                                  std::string* path, std::string* error);
 
 int run_game(int argc, char** argv, const RunOptions& opts = {});
 

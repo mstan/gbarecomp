@@ -1567,6 +1567,14 @@ if(GBARECOMP_SDL2_OK AND EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/consoles/gba/g
         "${CMAKE_CURRENT_BINARY_DIR}/controller-contract-fixture")
     set_tests_properties(gba_controller_menu_contract PROPERTIES SKIP_RETURN_CODE 77)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
+        if(GBARECOMP_ENABLE_MODS)
+            add_executable(mod_native_save_path_tests tests/mod_runtime/native_save_path_test.cpp
+                tools/bios_smoke/dispatch_stub.cpp)
+            target_link_gbarecomp_runtime_stack(mod_native_save_path_tests)
+            recomp_target_launcher_ui(mod_native_save_path_tests CONSOLE gba)
+            add_test(NAME mod_native_save_path COMMAND mod_native_save_path_tests
+                "${CMAKE_CURRENT_BINARY_DIR}/native-save-path-fixture")
+        endif()
         add_executable(gba_display_contract_tests tests/host_input/display_contract.cpp
             tools/bios_smoke/dispatch_stub.cpp)
         target_link_gbarecomp_runtime_stack(gba_display_contract_tests)

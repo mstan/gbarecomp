@@ -634,6 +634,44 @@ inline void seam_append_setting_args(std::vector<std::string>& args,
     }
 }
 
+#if defined(RECOMP_LAUNCHER_HAS_NATIVE_SAVE_PATH_PROVIDER) && defined(GBARECOMP_ENABLE_MODS)
+struct NativeSaveContext {
+    const gbarecomp::RunOptions* options;
+    const RecompLauncherCModProvider* mods;
+    std::string explicit_path;
+    std::string path;
+};
+inline const char* native_save_path(void* opaque, const char* rom_path) {
+    auto& context = *static_cast<NativeSaveContext*>(opaque);
+    const auto& options = *context.options;
+    if (!context.explicit_path.empty()) return context.explicit_path.c_str();
+    if (!rom_path || !*rom_path) return nullptr;
+    const char* selected_namespace = nullptr;
+    if (context.mods) for (std::size_t p = 0; p < options.mod_native_program_count; ++p) {
+        const auto& profile = options.mod_native_programs[p];
+        if (!profile.package_id || !profile.feature_id) continue;
+        for (std::size_t f = 0; f < context.mods->feature_count(context.mods->ctx); ++f) {
+            RecompLauncherCModFeature feature{};
+            if (!context.mods->feature_get(context.mods->ctx, f, &feature)) return nullptr;
+            if (feature.enabled && feature.package_id && feature.id &&
+                std::strcmp(feature.package_id, profile.package_id) == 0 &&
+                std::strcmp(feature.id, profile.feature_id) == 0) {
+                if (!profile.save_namespace || !*profile.save_namespace) return nullptr;
+                if (selected_namespace && std::strcmp(selected_namespace, profile.save_namespace))
+                    return nullptr;
+                selected_namespace = profile.save_namespace;
+            }
+        }
+    }
+    auto path = std::filesystem::u8path(rom_path);
+    path.replace_extension(selected_namespace
+        ? std::string(".") + selected_namespace + ".sav" : ".sav");
+    const auto utf8 = path.u8string();
+    context.path.assign(utf8.begin(), utf8.end());
+    return context.path.c_str();
+}
+#endif
+
 }  // namespace gbarecomp_seam
 
 // Run the pre-boot launcher. Returns 1 if the user quit (caller returns 0
@@ -928,17 +966,33 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         gi.aspect_experimental = 1;
         gi.widescreen_supported = 0;   // the cycle supersedes the bool toggle
     }
+    std::vector<char*> save_argv;
+    for (auto& arg : args) save_argv.push_back(arg.data());
+    std::string save_override, save_error;
+    if (!gbarecomp::resolve_native_save_override(static_cast<int>(save_argv.size()),
+            save_argv.data(), opts, &save_override, &save_error)) {
+        std::fprintf(stderr, "[gbarecomp:launcher] invalid save configuration: %s\n",
+                     save_error.c_str());
+        return 1;
+    }
     // Save row: the explicit per-game save path when the game declares one,
     // else the runtime's <rom>.sav convention derived from the seeded ROM.
     std::string save_display;
-    if (opts.launcher_save_path && opts.launcher_save_path[0]) {
-        save_display = opts.launcher_save_path;
+    if (!save_override.empty()) {
+        save_display = save_override;
     } else if (!seed_rom.empty()) {
         std::filesystem::path p(seed_rom);
         p.replace_extension(".sav");
         save_display = p.string();
     }
     if (!save_display.empty()) gi.sram_path = save_display.c_str();
+#if defined(RECOMP_LAUNCHER_HAS_NATIVE_SAVE_PATH_PROVIDER) && defined(GBARECOMP_ENABLE_MODS)
+    NativeSaveContext native_save_context{&opts, mod_provider, save_override, {}};
+    if (opts.mod_native_program_count && mod_provider) {
+        gi.native_save_path_ctx = &native_save_context;
+        gi.native_save_path = &gbarecomp_seam::native_save_path;
+    }
+#endif
 #if defined(RECOMP_LAUNCHER_HAS_NATIVE_SAVE_BYTES)
     gi.native_save_bytes = opts.launcher_native_save_bytes;
 #endif

@@ -133,6 +133,15 @@ AssetResult load_and_validate(const std::string& path,
     AssetResult r;
     r.path = path;
     std::string err;
+    // Check declared asset size before reading/allocating the file body.
+    if (spec.expected_size) {
+        std::error_code ec;
+        const auto size = fs::file_size(fs::u8path(path), ec);
+        if (ec || size != spec.expected_size) {
+            r.error = std::string(spec.display_name) + " size mismatch or unavailable file: " + path;
+            return r;
+        }
+    }
     r.bytes = read_file(path, &err);
     if (!err.empty() || r.bytes.empty()) {
         r.error = err.empty() ? ("read failed: " + path) : err;

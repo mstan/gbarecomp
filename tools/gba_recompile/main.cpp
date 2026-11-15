@@ -577,9 +577,8 @@ void write_dispatch_table(const std::string& dir,
         "// runtime calls runtime_dispatch(addr) which binary-searches\n"
         "// this table by address and current CPSR.T mode.\n\n"
         "#include <cstdint>\n"
+        "#include \"native_program.h\"\n"
         "#include \"%s\"\n\n"
-        "struct DispatchEntry { uint32_t addr; uint8_t thumb; "
-        "uint8_t resume; void (*fn)(void); };\n"
         "extern \"C\" const DispatchEntry %s[] = {\n",
         names.header.c_str(), names.table_symbol.c_str());
     const auto entries =
@@ -642,11 +641,30 @@ void write_dispatch_table(const std::string& dir,
         for (const auto& e : ram_entries)
             std::fprintf(f, "{0x%llXull, %uu, %uu},\n",
                          static_cast<unsigned long long>(e.key), e.index, e.offset);
-        std::fprintf(f,
-            "};\nstruct RegisterNativeRam { RegisterNativeRam() {\n"
-            "runtime_register_native_ram_templates(ram_templates, %zuu, "
-            "ram_entries, %zuu);\n} } register_native_ram;\n} // namespace\n",
-            ram_templates.size(), ram_entries.size());
+        if (names.table_symbol == "kDispatchTable") {
+            std::fprintf(f,
+                "};\nstruct RegisterNativeRam { RegisterNativeRam() {\n"
+                "runtime_register_native_ram_templates(ram_templates, %zuu, "
+                "ram_entries, %zuu);\n} } register_native_ram;\n} // namespace\n",
+                ram_templates.size(), ram_entries.size());
+        } else {
+            const auto prefix = names.table_symbol.substr(0,
+                names.table_symbol.size() - std::string("kDispatchTable").size());
+            std::fprintf(f,
+                "};\n} // namespace\n"
+                "extern \"C\" const RuntimeNativeProgram %skNativeProgram = {\n"
+                "%s, %s, ram_templates, %zuu, ram_entries, %zuu};\n",
+                prefix.c_str(), names.table_symbol.c_str(),
+                names.table_len_symbol.c_str(), ram_templates.size(), ram_entries.size());
+        }
+    }
+    if (ram_templates.empty() && names.table_symbol != "kDispatchTable" &&
+        names.table_symbol.find("kBiosDispatchTable") == std::string::npos) {
+        const auto prefix = names.table_symbol.substr(0,
+            names.table_symbol.size() - std::string("kDispatchTable").size());
+        std::fprintf(f, "extern \"C\" const RuntimeNativeProgram %skNativeProgram = {"
+            "%s, %s, nullptr, 0, nullptr, 0};\n", prefix.c_str(),
+            names.table_symbol.c_str(), names.table_len_symbol.c_str());
     }
     std::fclose(f);
     commit_generated_file(temp, path);

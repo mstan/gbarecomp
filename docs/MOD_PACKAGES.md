@@ -334,6 +334,22 @@ also rejects header changes and invalid results before guest execution.
 Original cartridge files and native saves are not rewritten by this hook.
 Online launch bypasses mod activation and this callback.
 
+For an exact code-changing variant, return `PreparedNativeProgram` instead and
+declare a `RunOptions::mod_native_programs` catalog entry containing its exact
+effective SHA-1 and a separately generated `RuntimeNativeProgram`. The catalog
+selects the cartridge dispatch table and copied-RAM templates/entries together
+before any guest fetch or cache/snapshot use. No match, duplicate matches or an
+invalid save namespace reject launch; selection resets to the stock program on
+every run. The generator's `--output-prefix` creates a linkable program without
+auto-registering a second set of RAM templates. `Prepared` retains its original
+data-only contract.
+
+Each compiled variant may declare a separate default native-save namespace.
+Supplying its owning package/feature IDs also makes the launcher's Save row and
+import/clear controls follow the staged choice. Explicit config/CLI save paths
+take precedence. Current-build states identify the effective ROM and reject a
+different program; this does not change native progress files.
+
 Trusted view plugins can read validated enabled-feature options with
 `gba_mod_option_value(package_id, feature_id, option_id)`. Values are immutable
 until the next commit/initialization; unavailable or disabled options return
@@ -352,6 +368,6 @@ pixels from native window layer masks, as it does authored BG pixels, while
 preserving BG depth and OBJ enable. All hooks are cleared between games.
 
 Package operations remain limited to trusted activation plugins. The optional
-title callback does not let a package supply executable code or arbitrary ROM
+title callback does not load native code from packages or accept arbitrary ROM
 writes. Future operations must retain the same pre-boot validation and
 no-arbitrary-code model.
