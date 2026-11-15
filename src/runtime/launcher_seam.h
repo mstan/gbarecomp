@@ -333,6 +333,24 @@ struct SeamConfig {
     std::string rom_patch_path;
 };
 
+// The GBA config supplies concrete defaults. Shared UI zero means "unset",
+// so translate the config's explicit clear into its existing unbound sentinel.
+inline void seam_assist_to_launcher(const SeamConfig& cfg,
+                                    RecompLauncherCSettings& settings) {
+    settings.assist_key_bind[0] = cfg.assist_rewind_key == 0 ? -1 : cfg.assist_rewind_key;
+    settings.assist_key_bind[1] = cfg.assist_fast_key == 0 ? -1 : cfg.assist_fast_key;
+    settings.assist_pad_bind[0] = cfg.assist_rewind_pad == 0 ? -1 : cfg.assist_rewind_pad;
+    settings.assist_pad_bind[1] = cfg.assist_fast_pad == 0 ? -1 : cfg.assist_fast_pad;
+}
+
+inline void seam_assist_from_launcher(const RecompLauncherCSettings& settings,
+                                      SeamConfig& cfg) {
+    cfg.assist_rewind_key = std::max(0, settings.assist_key_bind[0]);
+    cfg.assist_fast_key = std::max(0, settings.assist_key_bind[1]);
+    cfg.assist_rewind_pad = std::max(0, settings.assist_pad_bind[0]);
+    cfg.assist_fast_pad = std::max(0, settings.assist_pad_bind[1]);
+}
+
 inline void seam_config_load(const std::string& path, SeamConfig* c) {
     std::ifstream f(path);
     std::fprintf(stderr,"[gbarecomp:launcher-profile] load path=\"%s\" readable=%d\n",path.c_str(),f.good()?1:0);
@@ -874,10 +892,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     ls.assist_tools = cfg.assist_tools;
     ls.assist_fast_forward_multiplier =
         cfg.assist_fast_forward_multiplier;
-    ls.assist_key_bind[0] = cfg.assist_rewind_key;
-    ls.assist_key_bind[1] = cfg.assist_fast_key;
-    ls.assist_pad_bind[0] = cfg.assist_rewind_pad;
-    ls.assist_pad_bind[1] = cfg.assist_fast_pad;
+    gbarecomp_seam::seam_assist_to_launcher(cfg, ls);
     ls.rom_patch_enabled = cfg.rom_patch_enabled;
     std::snprintf(ls.rom_patch_path, sizeof(ls.rom_patch_path), "%s",
                   cfg.rom_patch_path.c_str());
@@ -1059,10 +1074,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     cfg.assist_tools = ls.assist_tools ? 1 : 0;
     cfg.assist_fast_forward_multiplier = std::clamp(
         ls.assist_fast_forward_multiplier, 2, 10);
-    cfg.assist_rewind_key = ls.assist_key_bind[0];
-    cfg.assist_fast_key = ls.assist_key_bind[1];
-    cfg.assist_rewind_pad = ls.assist_pad_bind[0];
-    cfg.assist_fast_pad = ls.assist_pad_bind[1];
+    gbarecomp_seam::seam_assist_from_launcher(ls, cfg);
     cfg.rom_patch_enabled = ls.rom_patch_enabled ? 1 : 0;
     cfg.rom_patch_path = ls.rom_patch_path;
     seam_config_save(config_path, cfg);
