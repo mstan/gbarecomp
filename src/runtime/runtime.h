@@ -159,6 +159,9 @@ struct RunOptions {
     // its resource bounds; the implementation remains engine-owned and
     // reusable. Slot hotkeys continue to cover 1-9, while menus can reach 10.
     bool expose_assist_tools = false;
+    // Optional archive import, requiring a build with GBARECOMP_ROM_ARCHIVES.
+    // Decoding never extracts files or replaces the player's selected path.
+    bool enable_rom_archives = false;
     bool assist_tools_enabled_by_default = true;
     // Always-on diagnostic replay capture for interactive windowed sessions
     // (docs/DIAGNOSTIC_REPLAY.md). Players opt out with GBARECOMP_DIAGNOSTICS=0

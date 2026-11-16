@@ -491,6 +491,17 @@ add_library(gbarecomp_runtime STATIC
     # tracked empty stub; locally generated BIOS output is selected as a unit.
 )
 gbarecomp_target_link_host_stack(gbarecomp_runtime INTERFACE)
+# Optional bounded cartridge import. Other platforms keep their raw-ROM path.
+option(GBARECOMP_ROM_ARCHIVES "Read ZIP/RAR/7z ROM containers with libarchive" OFF)
+add_library(gbarecomp_rom_input STATIC src/runtime/rom_input.cpp)
+target_link_libraries(gbarecomp_runtime PUBLIC gbarecomp_rom_input)
+if(GBARECOMP_ROM_ARCHIVES)
+    # Older releases have known RAR5/7z reader faults. Do not silently use an
+    # old system decoder when the cartridge importer is enabled.
+    find_package(LibArchive 3.8.11 REQUIRED)
+    target_link_libraries(gbarecomp_rom_input PUBLIC LibArchive::LibArchive)
+    target_compile_definitions(gbarecomp_rom_input PRIVATE GBARECOMP_ROM_ARCHIVES=1)
+endif()
 if(GBARECOMP_BIOS_MATH_IMPLEMENTATION STREQUAL "HLE")
     target_compile_definitions(gbarecomp_runtime PRIVATE GBARECOMP_BIOS_MATH_HLE=1)
 endif()
@@ -890,12 +901,26 @@ add_executable(boot_asset_tests
     src/runtime/host_platform.cpp
     src/gba/gba_bios.cpp src/gba/sha1.cpp src/gba/crc32.cpp)
 target_include_directories(boot_asset_tests PRIVATE src)
+target_link_libraries(boot_asset_tests PRIVATE gbarecomp_rom_input)
 # A broken cache regression must fail rather than open a native picker in CI.
 target_compile_definitions(boot_asset_tests PRIVATE GBARECOMP_TEST_NO_ASSET_DIALOGS=1)
 if(WIN32)
     target_link_libraries(boot_asset_tests PRIVATE comdlg32 user32 winmm)
 endif()
 add_test(NAME boot_asset_tests COMMAND boot_asset_tests)
+if(GBARECOMP_ROM_ARCHIVES)
+    add_executable(rom_input_tests tests/runtime/rom_input_test.cpp
+        src/runtime/asset_picker.cpp src/runtime/host_platform.cpp
+        src/gba/sha1.cpp src/gba/crc32.cpp)
+    target_include_directories(rom_input_tests PRIVATE src)
+    target_compile_definitions(rom_input_tests PRIVATE GBARECOMP_TEST_NO_ASSET_DIALOGS=1)
+    target_link_libraries(rom_input_tests PRIVATE gbarecomp_rom_input)
+    if(WIN32)
+        target_link_libraries(rom_input_tests PRIVATE comdlg32 user32 winmm)
+    endif()
+    add_test(NAME rom_input_tests COMMAND rom_input_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/rom-input-fixture")
+endif()
 
 add_executable(link_tests tests/link/test_main.cpp
     tests/heal_gate/runtime_stubs.cpp src/runtime/multiplayer_config.cpp)
@@ -970,6 +995,10 @@ if(GBARECOMP_ENABLE_MODS)
         src/gba/sha1.cpp)
     target_include_directories(mod_runtime_tests PRIVATE
         src/runtime src/gba src/armv4t)
+    target_link_libraries(mod_runtime_tests PRIVATE gbarecomp_rom_input)
+    if(GBARECOMP_ROM_ARCHIVES)
+        target_compile_definitions(mod_runtime_tests PRIVATE GBARECOMP_TEST_ROM_ARCHIVES=1)
+    endif()
     if(WIN32 OR MSYS)
         target_link_libraries(mod_runtime_tests PRIVATE comdlg32 user32 winmm)
     endif()

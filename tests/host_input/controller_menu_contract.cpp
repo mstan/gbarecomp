@@ -3,6 +3,8 @@
 #include "host_window.h"
 #include "recomp_runtime_ui_internal.h"
 #include <cstdio>
+#include <algorithm>
+#include <fstream>
 #include <cstdlib>
 #include <filesystem>
 #include "consoles/gba/gba_pad_binds.h"
@@ -19,6 +21,34 @@ void check(bool yes, const char* what) { if (!yes) { std::fprintf(stderr,"FAIL: 
 int main(int argc,char** argv) {
     const std::string fixture_dir=argc>1?argv[1]:"controller-contract-fixture";
     std::filesystem::create_directories(fixture_dir);
+    // The same resolved config used by the launcher must reach the runtime,
+    // including skip-launcher boots. Host frequency never selects a guest rate.
+    const auto audio_config=std::filesystem::path(fixture_dir)/"audio-selection.ini";
+    for (const int rate : {32000,32040,44100,48000,32768}) {
+        { std::ofstream file(audio_config);file<<"[Sound]\nAudioFreq="<<rate<<"\nKeep=1\n[Launcher]\nvolume=73\n"; }
+        gbarecomp_seam::SeamConfig selected;
+        gbarecomp_seam::seam_config_load(audio_config.string(),&selected);
+        gbarecomp::RunOptions options;
+        std::vector<std::string> args;
+        gbarecomp_seam::seam_append_setting_args(args,selected,options);
+        auto found=std::find(args.begin(),args.end(),"--audio-rate");
+        check(found!=args.end() && found+1!=args.end() && std::atoi((found+1)->c_str())==rate,
+              "saved host output rate reaches runtime settings transport");
+        gbarecomp_seam::seam_config_save(audio_config.string(),selected);
+        std::ifstream file(audio_config);std::string saved((std::istreambuf_iterator<char>(file)),{});
+        check(saved.find("AudioFreq="+std::to_string(rate))!=std::string::npos &&
+              saved.find("Keep=1")!=std::string::npos,
+              "saving launcher settings preserves explicit Sound preferences");
+    }
+    { std::ofstream file(audio_config);file<<"[Sound]\nAudioFreq=0\n"; }
+    gbarecomp_seam::SeamConfig fresh;
+    gbarecomp_seam::seam_config_load(audio_config.string(),&fresh);
+    std::vector<std::string> fresh_args;
+    gbarecomp_seam::seam_append_setting_args(fresh_args,fresh,gbarecomp::RunOptions{});
+    auto rate_arg=std::find(fresh_args.begin(),fresh_args.end(),"--audio-rate");
+    check(rate_arg!=fresh_args.end() && rate_arg+1!=fresh_args.end() && *(rate_arg+1)=="48000",
+          "invalid or absent preference uses a supported launcher rate");
+    check(std::filesystem::remove(audio_config),"remove own audio setting fixture");
     SDL_setenv("SDL_VIDEODRIVER","dummy",1);
     SDL_setenv("SDL_AUDIODRIVER","dummy",1);
     SDL_SetHint(SDL_HINT_RENDER_DRIVER,"software");
@@ -107,25 +137,35 @@ int main(int argc,char** argv) {
             gbarecomp_seam::seam_config_save((install / "absolute-player.ini").string(), alternate);
             alternate.volume = 95;
             gbarecomp_seam::seam_config_save((other_cwd / "config.ini").string(), alternate);
+            const auto sound = [](const fs::path& path, int rate) {
+                std::ofstream file(path,std::ios::app);file<<"\n[Sound]\nAudioFreq="<<rate<<"\n";
+            };
+            sound(user / "config.ini",32000);
+            sound(user / "variants/player.ini",32040);
+            sound(install / "absolute-player.ini",44100);
+            sound(install / "config.ini",48000);
+            sound(other_cwd / "config.ini",8000);
             const auto original_cwd = fs::current_path();
             fs::current_path(other_cwd);
             gbarecomp::RunOptions paths;
             const std::string user_text = user.string();
             const std::string absolute_file = (install / "absolute-player.ini").string();
-            const auto boots_with_volume = [&](const char* root, const char* filename, int volume) {
+            const auto boots_with_volume = [&](const char* root, const char* filename, int volume, int rate) {
                 paths.config_dir = root;
                 paths.launcher_config_filename = filename;
                 std::vector<std::string> args{(install / "fixture.exe").string(), "--no-launcher"};
-                return gbarecomp_launcher_preboot(args, paths) == 0 &&
-                    std::find(args.begin(), args.end(), std::to_string(volume)) != args.end();
+                if (gbarecomp_launcher_preboot(args, paths) != 0) return false;
+                const auto audio = std::find(args.begin(),args.end(),"--audio-rate");
+                return std::find(args.begin(),args.end(),std::to_string(volume)) != args.end() &&
+                    audio != args.end() && audio+1 != args.end() && *(audio+1) == std::to_string(rate);
             };
-            check(boots_with_volume(user_text.c_str(), nullptr, 41),
+            check(boots_with_volume(user_text.c_str(), nullptr, 41, 32000),
                   "launcher reads explicit player root instead of install or cwd");
-            check(boots_with_volume("../player state with spaces", "variants/player.ini", 52),
+            check(boots_with_volume("../player state with spaces", "variants/player.ini", 52, 32040),
                   "relative state root and filename resolve together");
-            check(boots_with_volume(user_text.c_str(), absolute_file.c_str(), 63),
+            check(boots_with_volume(user_text.c_str(), absolute_file.c_str(), 63, 44100),
                   "absolute filename override wins over player root");
-            check(boots_with_volume(nullptr, nullptr, 73) && boots_with_volume("", nullptr, 73),
+            check(boots_with_volume(nullptr, nullptr, 73, 48000) && boots_with_volume("", nullptr, 73, 48000),
                   "null and empty roots preserve executable settings from a different cwd");
             fs::current_path(original_cwd);
         }

@@ -1,6 +1,7 @@
 // asset_picker.cpp — see asset_picker.h.
 
 #include "asset_picker.h"
+#include "rom_input.h"
 
 #include <cctype>
 #include <cstdio>
@@ -142,7 +143,12 @@ AssetResult load_and_validate(const std::string& path,
             return r;
         }
     }
-    r.bytes = read_file(path, &err);
+    if (spec.allow_rom_archives) {
+        if (!read_rom_input(path, spec.expected_sha1, &r.bytes, &err)) {
+            r.error = err;
+            return r;
+        }
+    } else r.bytes = read_file(path, &err);
     if (!err.empty() || r.bytes.empty()) {
         r.error = err.empty() ? ("read failed: " + path) : err;
         return r;
