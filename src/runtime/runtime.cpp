@@ -1583,6 +1583,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         spec.cache_filename = "rom.cfg";
         spec.expected_size  = 0;  // GBA ROMs vary in size; SHA-1 covers it
         spec.expected_sha1  = args.rom_sha1.c_str();
+        spec.allow_rom_archives = opts.enable_rom_archives;
         spec.expected_crc32 = args.rom_crc32;
         auto r = resolve_asset(args.rom, spec, argv[0]);
         if (!r.ok) {

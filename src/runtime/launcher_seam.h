@@ -39,6 +39,7 @@
 
 #include "runtime.h"
 #include "launcher_input_cache.h"
+#include "rom_input.h"
 #include "multiplayer_launch.h"
 #include "../gba/gba_bios.h"
 #if defined(GBARECOMP_ENABLE_MODS)
@@ -64,6 +65,28 @@
 #include <vector>
 
 namespace gbarecomp_seam {
+#if defined(RECOMP_LAUNCHER_HAS_ROM_READER)
+inline int read_launcher_rom(void* ctx, const char* path, uint8_t** out,
+                             size_t* size, char* error, size_t error_size) {
+    *out = nullptr; *size = 0;
+    std::vector<std::uint8_t> bytes;
+    std::string why;
+    if (!gbarecomp::read_rom_input(path ? path : "", static_cast<const char*>(ctx), &bytes, &why)) {
+        if (error && error_size) std::snprintf(error, error_size, "%s", why.c_str());
+        return 0;
+    }
+    auto* copy = static_cast<uint8_t*>(std::malloc(bytes.size()));
+    if (!copy) {
+        if (error && error_size) std::snprintf(error, error_size, "There is not enough memory to read this ROM.");
+        return 0;
+    }
+    std::memcpy(copy, bytes.data(), bytes.size());
+    *out = copy; *size = bytes.size();
+    return 1;
+}
+inline void free_launcher_rom(void*, uint8_t* bytes) { std::free(bytes); }
+#endif
+
 
 inline int verify_retail_gba_bios(const char* path,
                                   RecompLauncherCBiosVerify* out) {
@@ -956,6 +979,17 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         gi.known_sha1_hex = sha1_one;
         gi.num_known_sha1 = 1;
     }
+#if defined(RECOMP_LAUNCHER_HAS_ROM_READER)
+    if (opts.enable_rom_archives && gbarecomp::rom_archives_available()) {
+        static const char* patterns[] = {"*.gba", "*.zip", "*.rar", "*.7z"};
+        gi.rom_patterns = patterns;
+        gi.num_rom_patterns = 4;
+        gi.rom_filter_desc = "GBA ROM or ZIP, RAR, 7z archive";
+        gi.rom_read = &gbarecomp_seam::read_launcher_rom;
+        gi.rom_read_free = &gbarecomp_seam::free_launcher_rom;
+        gi.rom_read_ctx = const_cast<char*>(launcher_source_sha1);
+    }
+#endif
     gi.widescreen_supported = opts.launcher_expose_widescreen &&
         opts.widescreen_view_width > 240 ? 1 : 0;
     set_has_solar_sensor(gi, opts.has_solar_sensor);
