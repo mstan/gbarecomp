@@ -62,17 +62,26 @@ int main(int argc,char** argv) {
             button(defaults[i], 0);
         }
         RecompLauncherCGameInfo game{};launcher_profile_apply_gba(&game);
-        static const int assist_keys[RECOMP_LAUNCHER_MAX_ASSIST_BINDINGS] = {30,31};
-        static const int assist_pads[RECOMP_LAUNCHER_MAX_ASSIST_BINDINGS] = {
-            RECOMP_LAUNCHER_PAD_AXIS(4,1),RECOMP_LAUNCHER_PAD_AXIS(5,1)};
-        game.has_assist_tools=1;game.assist_binding_count=2;
-        game.assist_default_key_bind=assist_keys;game.assist_default_pad_bind=assist_pads;
+        gbarecomp::RunOptions shortcut_profile;
+        shortcut_profile.expose_assist_tools = argc > 2 && std::atoi(argv[2]) != 0;
+        gbarecomp_seam::seam_assist_metadata(shortcut_profile, game);
+        check(game.has_assist_tools == (shortcut_profile.expose_assist_tools ? 1 : 0),
+              "shortcut metadata preserves the title Assist capability");
+        check(game.assist_binding_count == 2 && game.assist_binding_labels &&
+              std::string(game.assist_binding_labels[0]) == "Rewind" &&
+              std::string(game.assist_binding_labels[1]) == "Fast-forward",
+              "both host shortcut controls are exposed for the actual title profile");
+        const int* assist_keys = game.assist_default_key_bind;
+        const int* assist_pads = game.assist_default_pad_bind;
         check(game.has_integer_scale && game.has_scanlines,
               "GBA profile exposes implemented presentation controls");
         RecompLauncherCSettings settings{};settings.player_src[0]=2;
         std::snprintf(settings.player_gamepad_guid[0],sizeof(settings.player_gamepad_guid[0]),"%s",guid);
         auto* model=new LauncherModel{};
         launcher_model_init(model,&settings,&game,nullptr);
+        check(model->assist_binding_count == 2 && model->assist_binding_labels &&
+              model->has_assist_tools == game.has_assist_tools,
+              "controller model exposes host controls without enabling optional Assist");
         const std::string config_path=fixture_dir+"/config.ini",keys_path=fixture_dir+"/keybinds.ini";
         gbarecomp_seam::SeamConfig saved_profile;
         saved_profile.player_source=2;saved_profile.player_guid=guid;saved_profile.volume=73;

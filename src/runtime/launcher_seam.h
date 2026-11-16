@@ -333,6 +333,32 @@ struct SeamConfig {
     std::string rom_patch_path;
 };
 
+inline void seam_assist_metadata(const gbarecomp::RunOptions& opts,
+                                 RecompLauncherCGameInfo& gi) {
+    static const char* const kAssistBindings[] = {
+        "Rewind", "Fast-forward"
+    };
+    static const int kAssistDefaultKeys[RECOMP_LAUNCHER_MAX_ASSIST_BINDINGS] = {
+        30, 31 /* SDL_SCANCODE_1, SDL_SCANCODE_2 */
+    };
+    static const int kAssistDefaultPads[RECOMP_LAUNCHER_MAX_ASSIST_BINDINGS] = {
+        RECOMP_LAUNCHER_PAD_AXIS(4, 1),
+        RECOMP_LAUNCHER_PAD_AXIS(5, 1),
+    };
+    gi.has_assist_tools = opts.expose_assist_tools ? 1 : 0;
+    gi.assist_tools_note =
+        "Rewind returns to a recent point kept in memory. Fast-forward runs "
+        "without the normal frame limiter. Keyboard and controller controls "
+        "can be changed below.";
+    gi.assist_binding_labels = kAssistBindings;
+    // Rewind and fast-forward are also host controls when Assist is absent.
+    gi.assist_binding_count = 2;
+    gi.assist_default_key_bind = kAssistDefaultKeys;
+    gi.assist_default_pad_bind = kAssistDefaultPads;
+    gi.assist_fast_forward_min = 2;
+    gi.assist_fast_forward_max = 10;
+}
+
 // The GBA config supplies concrete defaults. Shared UI zero means "unset",
 // so translate the config's explicit clear into its existing unbound sentinel.
 inline void seam_assist_to_launcher(const SeamConfig& cfg,
@@ -937,27 +963,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         opts.resize_driven_view && opts.max_resize_view_width > 240 ? 1 : 0;
     gi.config_path = config_path.c_str();
     gi.keybinds_path = keybinds_path.c_str();
-    static const char* const kAssistBindings[] = {
-        "Rewind", "Fast-forward"
-    };
-    static const int kAssistDefaultKeys[RECOMP_LAUNCHER_MAX_ASSIST_BINDINGS] = {
-        30, 31 /* SDL_SCANCODE_1, SDL_SCANCODE_2 */
-    };
-    static const int kAssistDefaultPads[RECOMP_LAUNCHER_MAX_ASSIST_BINDINGS] = {
-        RECOMP_LAUNCHER_PAD_AXIS(4, 1),
-        RECOMP_LAUNCHER_PAD_AXIS(5, 1),
-    };
-    gi.has_assist_tools = opts.expose_assist_tools ? 1 : 0;
-    gi.assist_tools_note =
-        "Rewind returns to a recent point kept in memory. Fast-forward runs "
-        "without the normal frame limiter. Keyboard and controller controls "
-        "can be changed below.";
-    gi.assist_binding_labels = kAssistBindings;
-    gi.assist_binding_count = opts.expose_assist_tools ? 2 : 0;
-    gi.assist_default_key_bind = kAssistDefaultKeys;
-    gi.assist_default_pad_bind = kAssistDefaultPads;
-    gi.assist_fast_forward_min = 2;
-    gi.assist_fast_forward_max = 10;
+    gbarecomp_seam::seam_assist_metadata(opts, gi);
     gi.boxart_path = opts.launcher_boxart;   // NULL => default assets/img/boxart.tga
     gi.bios_verify = &gbarecomp_seam::verify_retail_gba_bios;
     gi.rom_patch_supported =
