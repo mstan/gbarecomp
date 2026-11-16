@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cmath>
 
 int main() {
     SDL_setenv("SDL_AUDIODRIVER","dummy",1);
@@ -10,7 +11,7 @@ int main() {
     gbarecomp::StereoAudioStream stream;
     std::array<int16_t,2048> pcm{};
     for(unsigned i=0;i<1024;++i){pcm[i*2]=12000;pcm[i*2+1]=-6000;}
-    for(int host:{65536,48000}) for(uint32_t rate:{32768u,65536u,131072u,262144u}) {
+    for(int host:{32000,32040,44100,48000,65536}) for(uint32_t rate:{32768u,65536u,131072u,262144u}) {
         stream.reset();std::vector<int16_t> output;
         // Same total stream split at odd boundaries: state must survive calls.
         if(!stream.convert(pcm.data(),13,rate,host,output)||
@@ -23,6 +24,25 @@ int main() {
             audible|=output[i*2]>1000;
         }
         if(!audible)return 4;
+    }
+    // Distinct L/R tones expose pitch changes and missing/merged channels.
+    for (int host : {32000,32040,44100,48000}) {
+        constexpr unsigned rate=32768;
+        std::vector<int16_t> tone(rate*2), converted;
+        for (unsigned i=0;i<rate;++i) {
+            tone[i*2]=static_cast<int16_t>(12000*std::sin(6.283185307179586*220*i/rate));
+            tone[i*2+1]=static_cast<int16_t>(9000*std::sin(6.283185307179586*440*i/rate));
+        }
+        stream.reset();
+        if (!stream.convert(tone.data(),rate,rate,host,converted)||!stream.finish(converted)) return 12;
+        if (converted.size()!=size_t(host)*2) return 13;
+        for (unsigned channel=0;channel<2;++channel) {
+            unsigned crossings=0;
+            for (int i=65;i<host-64;++i)
+                crossings+=converted[(i-1)*2+channel]<=0 && converted[i*2+channel]>0;
+            const double hz=double(crossings)*host/(host-129);
+            if (std::abs(hz-(channel?440:220))>2.0) return 14;
+        }
     }
     stream.reset();std::vector<int16_t> output;
     for(unsigned i=0;i<127;++i) {

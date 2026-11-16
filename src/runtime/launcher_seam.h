@@ -316,6 +316,7 @@ struct SeamConfig {
     int  affine_filter = -1;
     int  screen_kind = 0;      // kScreenTokens index
     int  volume = 100;
+    int  audio_rate = 48000; // Host output preference; never the guest mixer clock.
     int player_source = 1;
     std::string player_guid;
     int  skip_launcher = 0;
@@ -383,7 +384,7 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
     std::fprintf(stderr,"[gbarecomp:launcher-profile] load path=\"%s\" readable=%d\n",path.c_str(),f.good()?1:0);
     if (!f) return;
     std::string line;
-    bool in_section = false;
+    bool in_section = false, in_sound = false;
     while (std::getline(f, line)) {
         size_t b = line.find_first_not_of(" \t");
         if (b == std::string::npos) continue;
@@ -392,9 +393,10 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
         if (s.empty() || s[0] == '#' || s[0] == ';') continue;
         if (s[0] == '[') {
             in_section = s.rfind("[Launcher]", 0) == 0;
+            in_sound = s.rfind("[Sound]", 0) == 0;
             continue;
         }
-        if (!in_section) continue;
+        if (!in_section && !in_sound) continue;
         size_t eq = s.find('=');
         if (eq == std::string::npos) continue;
         auto trim = [](std::string v) {
@@ -405,6 +407,12 @@ inline void seam_config_load(const std::string& path, SeamConfig* c) {
         };
         std::string key = trim(s.substr(0, eq));
         std::string val = trim(s.substr(eq + 1));
+        if (in_sound) {
+            const int rate = std::atoi(val.c_str());
+            if (key == "AudioFreq" && rate >= 8000 && rate <= 96000)
+                c->audio_rate = rate;
+            continue;
+        }
         if (key == "scale")         c->scale = std::atoi(val.c_str());
         else if (key == "fullscreen")    c->fullscreen = std::atoi(val.c_str());
         else if (key == "linear_filter") c->linear_filter = std::atoi(val.c_str());
@@ -617,6 +625,8 @@ inline void seam_append_setting_args(std::vector<std::string>& args,
     args.push_back(std::to_string(c.scale));
     args.push_back("--volume");
     args.push_back(std::to_string(c.volume));
+    args.push_back("--audio-rate");
+    args.push_back(std::to_string(c.audio_rate));
     args.push_back("--linear-filter");
     args.push_back(c.linear_filter ? "1" : "0");
     args.insert(args.end(), {"--integer-scale", c.integer_scale ? "1" : "0",
@@ -905,7 +915,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         opts.netplay->view_policy);
 #endif
     ls.enable_audio  = 1;
-    ls.audio_freq    = 32768;             // GBA mixer base rate (display only)
+    ls.audio_freq    = cfg.audio_rate;    // Host output rate; SOUNDBIAS stays guest-owned.
     ls.volume        = cfg.volume;
     ls.player_src[0] = cfg.player_source;
 #if defined(RECOMP_LAUNCHER_HAS_PLAYER_GAMEPAD_GUID)
@@ -1063,6 +1073,8 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     cfg.screen_kind   = (ls.screen_kind >= 0 && ls.screen_kind <= 4)
                           ? ls.screen_kind : 0;
     cfg.volume        = ls.volume;
+    if (ls.audio_freq >= 8000 && ls.audio_freq <= 96000)
+        cfg.audio_rate = ls.audio_freq;
     cfg.player_source=std::clamp(ls.player_src[0],0,2);
 #if defined(RECOMP_LAUNCHER_HAS_PLAYER_GAMEPAD_GUID)
     cfg.player_guid=ls.player_gamepad_guid[0];

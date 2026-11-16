@@ -1857,7 +1857,7 @@ bool HostWindow::is_available() { return true; }
 bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
                       const char* screen, bool linear_filter, bool sharp_filter,
                       bool resize_driven_view,
-                      bool freely_resizable_window) {
+                      bool freely_resizable_window, int audio_rate) {
     if (open_) return true;
     if (scale < 1) scale = 1;
     if (base_w < 1) base_w = 240;
@@ -2152,7 +2152,7 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     // The host device receives stereo S16. Both playback modes convert from
     // the block's SOUNDBIAS rate; the initial device rate is only a preference.
     SDL_AudioSpec want{};
-    want.freq     = 65536;
+    want.freq     = audio_rate >= 8000 && audio_rate <= 96000 ? audio_rate : 65536;
     want.format   = AUDIO_S16SYS;
     want.channels = 2;
     want.samples  = 1024;  // ~15 ms callback quantum at 65 kHz
@@ -2173,6 +2173,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         b->audio_dev = 0;
     }
     if (b->audio_dev != 0) {
+        std::fprintf(stderr, "host_window: audio requested=%dHz output=%dHz stereo S16\n",
+                     want.freq, got.freq);
         if (b->audio_direct) {
             b->audio_direct_rate = got.freq;
             std::fprintf(stderr,
@@ -3830,7 +3832,7 @@ bool HostWindow::open(int /*scale*/, int /*base_w*/, int /*base_h*/,
                       const char* /*title*/, const char* /*screen*/,
                       bool /*linear_filter*/, bool /*sharp_filter*/,
                       bool /*resize_driven_view*/,
-                      bool /*freely_resizable_window*/) {
+                      bool /*freely_resizable_window*/, int /*audio_rate*/) {
     std::fprintf(stderr,
                  "host_window: built without SDL2; --window unavailable\n");
     return false;

@@ -3,6 +3,8 @@
 #include "host_window.h"
 #include "recomp_runtime_ui_internal.h"
 #include <cstdio>
+#include <algorithm>
+#include <fstream>
 #include <cstdlib>
 #include <filesystem>
 #include "consoles/gba/gba_pad_binds.h"
@@ -19,6 +21,34 @@ void check(bool yes, const char* what) { if (!yes) { std::fprintf(stderr,"FAIL: 
 int main(int argc,char** argv) {
     const std::string fixture_dir=argc>1?argv[1]:"controller-contract-fixture";
     std::filesystem::create_directories(fixture_dir);
+    // The same resolved config used by the launcher must reach the runtime,
+    // including skip-launcher boots. Host frequency never selects a guest rate.
+    const auto audio_config=std::filesystem::path(fixture_dir)/"audio-selection.ini";
+    for (const int rate : {32000,32040,44100,48000,32768}) {
+        { std::ofstream file(audio_config);file<<"[Sound]\nAudioFreq="<<rate<<"\nKeep=1\n[Launcher]\nvolume=73\n"; }
+        gbarecomp_seam::SeamConfig selected;
+        gbarecomp_seam::seam_config_load(audio_config.string(),&selected);
+        gbarecomp::RunOptions options;
+        std::vector<std::string> args;
+        gbarecomp_seam::seam_append_setting_args(args,selected,options);
+        auto found=std::find(args.begin(),args.end(),"--audio-rate");
+        check(found!=args.end() && found+1!=args.end() && std::atoi((found+1)->c_str())==rate,
+              "saved host output rate reaches runtime settings transport");
+        gbarecomp_seam::seam_config_save(audio_config.string(),selected);
+        std::ifstream file(audio_config);std::string saved((std::istreambuf_iterator<char>(file)),{});
+        check(saved.find("AudioFreq="+std::to_string(rate))!=std::string::npos &&
+              saved.find("Keep=1")!=std::string::npos,
+              "saving launcher settings preserves explicit Sound preferences");
+    }
+    { std::ofstream file(audio_config);file<<"[Sound]\nAudioFreq=0\n"; }
+    gbarecomp_seam::SeamConfig fresh;
+    gbarecomp_seam::seam_config_load(audio_config.string(),&fresh);
+    std::vector<std::string> fresh_args;
+    gbarecomp_seam::seam_append_setting_args(fresh_args,fresh,gbarecomp::RunOptions{});
+    auto rate_arg=std::find(fresh_args.begin(),fresh_args.end(),"--audio-rate");
+    check(rate_arg!=fresh_args.end() && rate_arg+1!=fresh_args.end() && *(rate_arg+1)=="48000",
+          "invalid or absent preference uses a supported launcher rate");
+    check(std::filesystem::remove(audio_config),"remove own audio setting fixture");
     SDL_setenv("SDL_VIDEODRIVER","dummy",1);
     SDL_setenv("SDL_AUDIODRIVER","dummy",1);
     SDL_SetHint(SDL_HINT_RENDER_DRIVER,"software");
