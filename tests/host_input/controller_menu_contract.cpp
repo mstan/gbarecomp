@@ -92,6 +92,44 @@ int main(int argc,char** argv) {
               loaded_profile.volume==73,"launcher profile preserves device and setting");
 #if defined(RECOMP_LAUNCHER_HAS_LAUNCH_OPTIONS)
         {
+            namespace fs = std::filesystem;
+            const auto install = fs::absolute(fixture_dir);
+            const auto user = install / "player state with spaces";
+            const auto other_cwd = install / "different-working-directory";
+            fs::create_directories(user / "variants");
+            fs::create_directories(other_cwd);
+            gbarecomp_seam::SeamConfig alternate;
+            alternate.volume = 41;
+            gbarecomp_seam::seam_config_save((user / "config.ini").string(), alternate);
+            alternate.volume = 52;
+            gbarecomp_seam::seam_config_save((user / "variants/player.ini").string(), alternate);
+            alternate.volume = 63;
+            gbarecomp_seam::seam_config_save((install / "absolute-player.ini").string(), alternate);
+            alternate.volume = 95;
+            gbarecomp_seam::seam_config_save((other_cwd / "config.ini").string(), alternate);
+            const auto original_cwd = fs::current_path();
+            fs::current_path(other_cwd);
+            gbarecomp::RunOptions paths;
+            const std::string user_text = user.string();
+            const std::string absolute_file = (install / "absolute-player.ini").string();
+            const auto boots_with_volume = [&](const char* root, const char* filename, int volume) {
+                paths.config_dir = root;
+                paths.launcher_config_filename = filename;
+                std::vector<std::string> args{(install / "fixture.exe").string(), "--no-launcher"};
+                return gbarecomp_launcher_preboot(args, paths) == 0 &&
+                    std::find(args.begin(), args.end(), std::to_string(volume)) != args.end();
+            };
+            check(boots_with_volume(user_text.c_str(), nullptr, 41),
+                  "launcher reads explicit player root instead of install or cwd");
+            check(boots_with_volume("../player state with spaces", "variants/player.ini", 52),
+                  "relative state root and filename resolve together");
+            check(boots_with_volume(user_text.c_str(), absolute_file.c_str(), 63),
+                  "absolute filename override wins over player root");
+            check(boots_with_volume(nullptr, nullptr, 73) && boots_with_volume("", nullptr, 73),
+                  "null and empty roots preserve executable settings from a different cwd");
+            fs::current_path(original_cwd);
+        }
+        {
             gbarecomp::RunOptions launch_opts;
             launch_opts.launcher_game_version = "v0.0.0-fixture";
             std::vector<std::string> arguments{fixture_dir + "/fixture.exe", "--no-launcher"};

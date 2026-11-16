@@ -187,6 +187,7 @@ std::vector<GBAModActivationCallback>& reset_callbacks() {
 
 struct Runtime {
     fs::path root;
+    fs::path state_root;
     std::string game_id;
     std::string rom_sha1;
     std::map<std::string, std::map<std::string, Package>> packages;
@@ -953,7 +954,7 @@ bool scan(Runtime& runtime, std::string* error) {
 
 bool load_state(Runtime& runtime, std::string* error) {
     runtime.selections.clear();
-    const fs::path path = runtime.root / "state.toml";
+    const fs::path path = runtime.state_root / "state.toml";
     if (!fs::exists(path)) return true;
     std::ifstream file(path);
     if (!file) {
@@ -1057,7 +1058,7 @@ std::string quote_toml(const std::string& value) {
 
 bool save_state(Runtime& runtime, std::string* error) {
     std::error_code ec;
-    fs::create_directories(runtime.root, ec);
+    fs::create_directories(runtime.state_root, ec);
     // Unique temp per process: concurrent launches (parallel harnesses,
     // multiple instances) publish the same derived state. A shared temp name
     // let one process's rename consume another's file (ENOENT), whose retry
@@ -1069,8 +1070,8 @@ bool save_state(Runtime& runtime, std::string* error) {
     const auto publish_pid = static_cast<unsigned long long>(::getpid());
 #endif
     const fs::path temp =
-        runtime.root / ("state.toml." + std::to_string(publish_pid) + ".tmp");
-    const fs::path output = runtime.root / "state.toml";
+        runtime.state_root / ("state.toml." + std::to_string(publish_pid) + ".tmp");
+    const fs::path output = runtime.state_root / "state.toml";
     std::ofstream file(temp, std::ios::trunc);
     if (!file) {
         set_error(error, "cannot write mod state");
@@ -1998,7 +1999,8 @@ RecompLauncherCModProvider provider = {
 bool mod_runtime_initialize(const fs::path& root,
                             const std::string& game_id,
                             const std::string& rom_sha1,
-                            std::string* error) {
+                            std::string* error,
+                            const fs::path& state_root) {
     // Reinitialization is an authorization boundary too.  A malformed or
     // rejected new catalog cannot retain a prior plugin's producer callback or
     // native-output policy while the runtime is deciding what is committed.
@@ -2011,6 +2013,7 @@ bool mod_runtime_initialize(const fs::path& root,
     runtime.committed_options.clear();
     runtime.committed_cheats.clear();
     runtime.root = root;
+    runtime.state_root = state_root.empty() ? root : state_root;
     runtime.game_id = game_id;
     runtime.rom_sha1 = rom_sha1;
     if (game_id.empty() || !valid_sha1(rom_sha1)) {

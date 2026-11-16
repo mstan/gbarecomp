@@ -38,6 +38,7 @@
 #if defined(RECOMP_LAUNCHER)
 
 #include "runtime.h"
+#include "player_config.h"
 #include "launcher_input_cache.h"
 #include "multiplayer_launch.h"
 #include "../gba/gba_bios.h"
@@ -774,12 +775,11 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     if ((headless && !force_launcher) || (opts.netplay && opts.netplay->enabled)) return 0;
 
     const std::string dir = exe_dir(args);
+    const auto player_dir = gbarecomp::player_config_directory(
+        opts, args.empty() ? nullptr : args[0].c_str());
     const auto state_path = [&](const char* filename,
                                 const char* fallback) -> std::string {
-        const char* chosen = (filename && filename[0]) ? filename : fallback;
-        std::filesystem::path path(chosen);
-        if (path.is_absolute()) return path.string();
-        return (std::filesystem::path(dir) / path).string();
+        return gbarecomp::player_config_file(player_dir, filename, fallback).string();
     };
     const std::string config_path =
         state_path(opts.launcher_config_filename, "config.ini");
@@ -793,7 +793,8 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         std::string mod_error;
         if (gbarecomp::mod_runtime_initialize(
                 std::filesystem::path(dir) / "mods",
-                opts.mod_game_id, opts.builtin_rom_sha1, &mod_error)) {
+                opts.mod_game_id, opts.builtin_rom_sha1, &mod_error,
+                player_dir / "mods")) {
             mod_provider = gbarecomp::mod_runtime_launcher_provider();
         } else {
             std::fprintf(stderr, "[gbarecomp:launcher] mods unavailable: %s\n",
@@ -930,7 +931,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
     std::string rom_patch_cache_dir;
     if (opts.launcher_enable_rom_patches) {
         const std::filesystem::path cache =
-            std::filesystem::path(dir) / "mods" / "rom-patches";
+            player_dir / "mods" / "rom-patches";
         std::error_code cache_error;
         std::filesystem::create_directories(cache, cache_error);
         if (!cache_error) rom_patch_cache_dir = cache.string();
@@ -1020,7 +1021,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
 
     std::string title = std::string(gi.name) + " \xE2\x80\x94 Launcher";
 #if defined(RECOMP_UI_HAS_NETPLAY_HOST)
-    try { gbarecomp_seam::configure_netplay(gi,opts,dir); }
+    try { gbarecomp_seam::configure_netplay(gi,opts,player_dir.string()); }
     catch (const std::exception& e) { std::fprintf(stderr,"netplay: %s\n",e.what()); return 1; }
 #endif
 
