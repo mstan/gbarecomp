@@ -245,7 +245,7 @@ void drain_touches(Backend& b,const Geometry& g) {
 HostWindow::HostWindow()=default;
 HostWindow::~HostWindow(){close();}
 bool HostWindow::is_available(){return true;}
-bool HostWindow::open(int scale,int w,int h,const char*,const char* screen,bool linear,bool sharp,bool resize,bool) {
+bool HostWindow::open(int scale,int w,int h,const char*,const char* screen,bool linear,bool sharp,bool resize,bool,int) {
     close();
     if(!dimensions(w,h)) return false;
     auto b=std::make_unique<Backend>(); b->width=w; b->height=h; b->scale=std::clamp(scale,1,8); b->resize=resize;

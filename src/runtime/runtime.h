@@ -299,6 +299,10 @@ struct RunOptions {
     // player-facing value remains centered on 1.00x.
     float gyro_sensitivity_calibration = 1.0f;
 
+    // Player config, keybinds and diagnostics. Null keeps the executable
+    // directory, the historical behaviour.
+    const char* config_dir = nullptr;
+
     // ---- pre-boot launcher identity (launcher_seam.h, RECOMP_LAUNCHER builds) --
     // Consumed by the recomp-ui launcher seam a game's main() runs BEFORE
     // run_game(); the runtime itself never reads these. All optional.
@@ -309,7 +313,8 @@ struct RunOptions {
     const char* launcher_game_config = nullptr;
     // Actual title package/build metadata, shown by opted-in recomp-ui pins.
     const char* launcher_game_version = nullptr;
-    // Optional launcher state/cache filenames, relative to the executable dir.
+    // Optional launcher state/cache filenames, relative to config_dir (or the
+    // executable directory when config_dir is null). Absolute filenames win.
     // Multi-variant repos can use these to keep side-by-side launchers from
     // sharing one config.ini / rom.cfg in the same build output directory.
     const char* launcher_config_filename = nullptr;

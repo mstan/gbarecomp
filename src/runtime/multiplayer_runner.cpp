@@ -121,7 +121,7 @@ int run(const GbaNetplayLaunch& launch,const GbaNetplayBoot& boot) {
         throw std::runtime_error("cannot open netplay transport");
     HostWindow window;
     if (!window.open(boot.scale,initial_width,160,boot.title.c_str(),boot.screen.c_str(),
-            boot.linear_filter,boot.sharp_filter,adaptive,true))
+            boot.linear_filter,boot.sharp_filter,adaptive,true,boot.audio_rate))
         throw std::runtime_error("cannot open netplay window");
     window.load_input_config(boot.config_directory.string().c_str(),false);
     window.set_fullscreen(boot.fullscreen); window.set_volume(boot.volume);

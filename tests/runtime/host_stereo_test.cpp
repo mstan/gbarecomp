@@ -32,15 +32,16 @@ int main(int argc,char** argv) {
     set_env("SDL_RENDER_DRIVER","software");
     set_env("SDL_AUDIODRIVER","disk");
     set_env("SDL_DISKAUDIODELAY","15");
+    for (const int host_rate : {32000,32040,44100,48000})
     for(bool queued:{false,true}) {
-        const auto file=std::string(argv[1])+(queued?"-queued.raw":"-callback.raw");
+        const auto file=std::string(argv[1])+"-"+std::to_string(host_rate)+(queued?"-queued.raw":"-callback.raw");
         set_env("SDL_DISKAUDIOFILE",file.c_str());
         // An explicit disk-device path also avoids SDL2's Windows getenv
         // scratch-buffer alias between its output filename and delay hint.
         set_env("GBARECOMP_AUDIO_DEVICE",file.c_str());
         set_env("GBARECOMP_AUDIO_DIRECT",queued?"1":"0");
         gbarecomp::HostWindow window;
-        if(!window.open(1,240,160,"audio fixture"))return 3;
+        if(!window.open(1,240,160,"audio fixture",nullptr,false,false,false,false,host_rate))return 3;
         window.set_volume(50);
         std::array<int16_t,4096> pcm{};
         for(unsigned i=0;i<2048;++i){pcm[i*2]=12000;pcm[i*2+1]=-6000;}
