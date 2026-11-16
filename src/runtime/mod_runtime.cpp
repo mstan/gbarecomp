@@ -1,4 +1,5 @@
 #include "mod_runtime.h"
+#include "rom_input.h"
 #include "gba_high_resolution.h"
 #include "codebreaker.h"
 #include "mod_function_hooks.h"
@@ -2074,12 +2075,16 @@ bool mod_runtime_commit_impl(const fs::path& rom_path, bool allow_picker,
     runtime.committed_options.clear();
     runtime.committed_cheats.clear();
     if (!rom_path.empty()) {
-        std::string digest;
-        if (!sha1_file(rom_path, digest, &runtime.error)) {
+        // The selected path can be a container. Verify the same decoded ROM
+        // identity as the launcher/runtime, without extracting or changing it.
+        const auto utf8 = rom_path.u8string();
+        std::vector<std::uint8_t> rom;
+        if (!read_rom_input(std::string(utf8.begin(), utf8.end()),
+                            runtime.rom_sha1.c_str(), &rom, &runtime.error)) {
             set_error(error, runtime.error);
             return false;
         }
-        if (digest != runtime.rom_sha1) {
+        if (gba::sha1(rom.data(), rom.size()).hex() != runtime.rom_sha1) {
             runtime.error =
                 "The selected ROM does not match this mod catalog target.";
             set_error(error, runtime.error);

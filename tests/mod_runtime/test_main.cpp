@@ -4,6 +4,10 @@
 #include "foreign_presentation_internal.h"
 #include "mod_audio.h"
 #include "sha1.h"
+#if defined(GBARECOMP_TEST_ROM_ARCHIVES)
+#include <archive.h>
+#include <archive_entry.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -387,6 +391,33 @@ int main() {
         !gbarecomp::mod_runtime_commit(rom_path, &error)) {
         return fail("unrelated-feature plan failed: " + error);
     }
+#if defined(GBARECOMP_TEST_ROM_ARCHIVES)
+    // A launcher-verified ROM archive must also survive the real mod commit,
+    // while an archive containing a different image must still be rejected.
+    for (bool compatible : {true, false}) {
+        const fs::path container = sandbox / (compatible ? "game.zip" : "wrong.zip");
+        archive* writer = archive_write_new();
+        archive_entry* member = archive_entry_new();
+        if (!writer || !member || archive_write_set_format_zip(writer) != ARCHIVE_OK ||
+            archive_write_open_filename(writer, container.string().c_str()) != ARCHIVE_OK)
+            return fail("could not create ROM archive fixture");
+        std::vector<unsigned char> payload = rom;
+        if (!compatible) payload[0] ^= 1;
+        archive_entry_set_pathname(member, "nested/game.gba");
+        archive_entry_set_filetype(member, AE_IFREG);
+        archive_entry_set_perm(member, 0644);
+        archive_entry_set_size(member, payload.size());
+        if (archive_write_header(writer, member) != ARCHIVE_OK ||
+            archive_write_data(writer, payload.data(), payload.size()) != static_cast<la_ssize_t>(payload.size()) ||
+            archive_write_close(writer) != ARCHIVE_OK)
+            return fail("could not write ROM archive fixture");
+        archive_entry_free(member); archive_write_free(writer);
+        if (gbarecomp::mod_runtime_commit(container, &error) != compatible)
+            return fail("ROM archive mod commit did not preserve strict target identity: " + error);
+    }
+    if (!gbarecomp::mod_runtime_commit(rom_path, &error))
+        return fail("raw ROM commit changed after archive selection");
+#endif
     gbarecomp::mod_runtime_activate_plugins();
     if (g_active || gba_mod_diagnostic_replay_enabled() != -1 ||
         gba_mod_adaptive_view_enabled() ||
