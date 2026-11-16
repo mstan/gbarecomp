@@ -901,6 +901,28 @@ int main() {
             return fail("inherited default overrode explicit disabled selection");
     }
 
+    // A read-only application's catalog stays discoverable while selections
+    // are written to a distinct player-owned root. Never rewrite its state.
+    const auto state_bytes = [&]() {
+        std::ifstream input(mods / "state.toml", std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    const std::string bundled_state = state_bytes();
+    const fs::path player_mods = sandbox / "player state with spaces" / "mods";
+    if (!gbarecomp::mod_runtime_initialize(mods, "test-game", sha1, &error, player_mods) ||
+        !gbarecomp::mod_runtime_commit(rom_path, &error))
+        return fail("separate player mod state could not commit: " + error);
+    gbarecomp::mod_runtime_activate_plugins();
+    if (!g_active || !fs::exists(player_mods / "state.toml") || state_bytes() != bundled_state)
+        return fail("separate state did not retain package defaults without changing installed state");
+    if (!write_text(player_mods / "state.toml", bundled_state) ||
+        !gbarecomp::mod_runtime_initialize(mods, "test-game", sha1, &error, player_mods) ||
+        !gbarecomp::mod_runtime_commit(rom_path, &error))
+        return fail("player mod selection could not reload: " + error);
+    gbarecomp::mod_runtime_activate_plugins();
+    if (g_active || state_bytes() != bundled_state)
+        return fail("player disabled choice was not restored independently of bundled state");
+
     fs::remove_all(sandbox, ec);
     std::cout << "GBA mod runtime: target gate, strict external asset, "
                  "persisted feature toggle, trusted activation, and reset passed\n";

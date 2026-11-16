@@ -20,6 +20,7 @@
 // step_once() becomes a real `runtime_dispatch` driver.
 
 #include "runtime.h"
+#include "player_config.h"
 #include "suspend_guard.h"
 #include "multiplayer_launch.h"
 #include "view_config.h"
@@ -1402,6 +1403,8 @@ bool resolve_native_save_override(int argc, char** argv, const RunOptions& opts,
 }
 
 int run_game(int argc, char** argv, const RunOptions& opts) {
+    const auto player_dir = player_config_directory(
+        opts, argc > 0 && argv ? argv[0] : nullptr);
     runtime_select_native_program(nullptr);
     // Game runners install this before entering run_game(). Clear it on every
     // return path so a later game launched in the same process cannot call a
@@ -1513,7 +1516,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             executable.has_parent_path() ? executable.parent_path()
                                          : std::filesystem::path(".");
         if (!mod_runtime_initialize(executable_dir / "mods",
-                                    opts.mod_game_id, args.rom_sha1, &err)) {
+                                    opts.mod_game_id, args.rom_sha1, &err,
+                                    player_dir / "mods")) {
             std::fprintf(stderr,
                          "[gbarecomp:runtime] mods unavailable: %s\n",
                          err.c_str());
@@ -1541,7 +1545,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         spec.dialog_filter  = "GBA BIOS (*.bin;*.BIN)\0*.bin;*.BIN\0"
                               "All Files (*.*)\0*.*\0";
         spec.dialog_title   = "Select your GBA BIOS dump (gba_bios.bin)";
-        spec.cache_filename = "bios.cfg";
+        const auto cache_path = player_config_file(
+            player_dir, opts.launcher_bios_cache_filename, "bios.cfg").string();
+        spec.cache_filename = cache_path.c_str();
         spec.expected_size  = gba::GbaBios::kSize;
         spec.expected_sha1  = args.bios_sha1.empty()
                                 ? gba::GbaBios::kExpectedSha1
@@ -1580,7 +1586,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         spec.dialog_filter  = "GBA ROM (*.gba;*.GBA)\0*.gba;*.GBA\0"
                               "All Files (*.*)\0*.*\0";
         spec.dialog_title   = "Select the game ROM (.gba)";
-        spec.cache_filename = "rom.cfg";
+        const auto cache_path = player_config_file(
+            player_dir, opts.launcher_rom_cache_filename, "rom.cfg").string();
+        spec.cache_filename = cache_path.c_str();
         spec.expected_size  = 0;  // GBA ROMs vary in size; SHA-1 covers it
         spec.expected_sha1  = args.rom_sha1.c_str();
         spec.expected_crc32 = args.rom_crc32;
@@ -1664,7 +1672,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 throw std::runtime_error(err);
             boot.local_save=args.save_path;
             if (boot.local_save.empty()) { boot.local_save=args.rom; boot.local_save.replace_extension(".sav"); }
-            boot.config_directory=std::filesystem::absolute(argv[0]).parent_path();
+            boot.config_directory = player_dir;
             return opts.netplay->run(*opts.netplay,boot);
         } catch (const std::exception& e) {
             std::fprintf(stderr,"[gbarecomp:netplay] %s\n",e.what());
@@ -3350,14 +3358,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         sync_native_draw();
 #endif
         // Rebindable input: keybinds.ini (player buttons, recomp-ui generic
-        // format) + config.ini [KeyMap] (system hotkeys), both next to the
-        // exe. Missing files leave the built-in defaults.
+        // format) + config.ini [KeyMap] (system hotkeys), both in the config
+        // directory. Missing files leave the built-in defaults.
         {
-            std::string exe_dir = ".";
-            if (argc > 0 && argv[0] && argv[0][0]) {
-                std::filesystem::path p(argv[0]);
-                if (p.has_parent_path()) exe_dir = p.parent_path().string();
-            }
+            const std::string exe_dir = player_dir.string();
             win.load_input_config(exe_dir.c_str(),
                                   opts.assist_tools_enabled_by_default,
                                   opts.assist_fast_forward_multiplier_default,
@@ -4435,9 +4439,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // boundary that is identical in a live session and in playback; sessions
     // without that hook (GBARECOMP_PRESENT_IN_PLACE=0) are not captured.
     const std::filesystem::path diag_exe_path(argc > 0 && argv[0] ? argv[0] : "");
-    const std::filesystem::path diag_exe_dir =
-        diag_exe_path.has_parent_path() ? diag_exe_path.parent_path()
-                                        : std::filesystem::path(".");
+    const std::filesystem::path diag_exe_dir = player_dir;
+    const auto player_config = player_config_file(
+        player_dir, opts.launcher_config_filename, "config.ini");
     DiagnosticReplayConfig diag_config;
     diag_config.tag = diag_exe_path.stem().string();
     if (diag_config.tag.empty()) diag_config.tag = "gbarecomp";
@@ -4456,7 +4460,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             diag_config.history_bytes = static_cast<std::size_t>(n) * 1024u * 1024u;
     }
     diag_config.sidecars = {
-        {(diag_exe_dir / "config.ini").string(), ".config.ini"},
+        {player_config.string(), ".config.ini"},
         {args.config, ".game.toml"},
         {(diag_exe_dir / "mods" / "state.toml").string(), ".mods.toml"},
         {args.save_path, ".sav"},
@@ -4613,7 +4617,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         gbarecomp::overlay_set_adoption_mode(gbarecomp::OverlayAdoptionMode::Replay);
     } else {
         bool want = diagnostic_replay_setting(
-            (diag_exe_dir / "config.ini").string(), opts.diagnostic_replay_default);
+            player_config.string(), opts.diagnostic_replay_default);
 #if defined(GBARECOMP_ENABLE_MODS)
         if (mods_ready && gba_mod_diagnostic_replay_enabled() >= 0)
             want = gba_mod_diagnostic_replay_enabled() != 0;

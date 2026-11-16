@@ -17,10 +17,13 @@ struct RecompLauncherCModProvider;
 namespace gbarecomp {
 
 // Load the package catalog rooted at <exe>/mods for one verified game.
+// An optional separate state_root holds writable selections only; bundled
+// packages and resource lookup stay under root.
 bool mod_runtime_initialize(const std::filesystem::path& root,
                             const std::string& game_id,
                             const std::string& rom_sha1,
-                            std::string* error = nullptr);
+                            std::string* error = nullptr,
+                            const std::filesystem::path& state_root = {});
 
 // Validate and persist the staged feature selections for the selected ROM.
 bool mod_runtime_commit(const std::filesystem::path& rom_path = {},
