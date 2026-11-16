@@ -55,12 +55,13 @@ public:
     // GBARECOMP_SCREEN env var, when set, overrides it.
     // `linear_filter` selects ordinary linear scaling. `sharp_filter` uses a
     // GPU integer prescale followed by a small fractional linear pass and
-    // takes precedence when both are requested.
+    // takes precedence when both are requested. `audio_rate` is the preferred
+    // host-device rate; guest PCM is always converted from its tagged source rate.
     bool open(int scale = 3, int base_w = 240, int base_h = 160,
               const char* title = "gbarecomp", const char* screen = nullptr,
               bool linear_filter = false, bool sharp_filter = false,
               bool resize_driven_view = false,
-              bool freely_resizable_window = false);
+              bool freely_resizable_window = false, int audio_rate = 65536);
     void close();
     void set_title(const char* title);
     bool is_open() const { return open_; }

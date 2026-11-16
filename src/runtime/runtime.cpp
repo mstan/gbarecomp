@@ -195,6 +195,7 @@ struct Args {
     // --fullscreen=<0|1|2> selects explicitly.
     int fullscreen = 0;
     int  volume = 100;            // --volume 0..100: pushed-sample gain
+    int audio_rate = 65536;       // Preferred host rate; source PCM retains its true rate.
     bool linear_filter = false;   // --linear-filter 1: linear texture scaling
     bool integer_scale = false;
     bool scanlines = false;
@@ -864,7 +865,7 @@ constexpr std::string_view kCliValueFlags[] = {
     "--save",        "--save-path",     "--gyro-sensitivity",
     "--sharp-filter", "--linear-filter", "--affine-filter", "--internal-resolution", "--screen",
     "--integer-scale", "--scanlines", "--scanline-strength",
-    "--volume",      "--replay-diagnostic", "--state-dir",
+    "--volume",      "--audio-rate",    "--replay-diagnostic", "--state-dir",
 };
 
 bool cli_flag_takes_value(std::string_view flag) {
@@ -1128,6 +1129,15 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             if (v < 0) v = 0;
             if (v > 2) v = 2;
             args->fullscreen = v;
+            continue;
+        }
+        if (s == "--audio-rate") {
+            const char* value = need_value("--audio-rate");
+            if (!value) return false;
+            if (!parse_int(value, &args->audio_rate) || args->audio_rate < 8000 || args->audio_rate > 96000) {
+                if (err) *err = "invalid --audio-rate value (expected 8000..96000 Hz)";
+                return false;
+            }
             continue;
         }
         if (s == "--volume") {
@@ -1651,7 +1661,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             boot.rom_path=args.rom; boot.bios_path=args.bios;
             boot.title=opts.builtin_game_name ? opts.builtin_game_name : "GBA";
             boot.screen=args.screen; boot.scale=args.scale; boot.fullscreen=args.fullscreen;
-            boot.volume=args.volume; boot.linear_filter=args.linear_filter;
+            boot.volume=args.volume; boot.audio_rate=args.audio_rate; boot.linear_filter=args.linear_filter;
             boot.sharp_filter=args.sharp_filter; boot.show_fps=opts.show_fps_by_default;
             boot.affine_filter=args.affine_filter;
             boot.internal_resolution=args.internal_resolution;
@@ -3335,7 +3345,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                       runtime_title,
                       args.screen.empty() ? nullptr : args.screen.c_str(),
                       args.linear_filter, args.sharp_filter,
-                      resize_view_enabled, opts.freely_resizable_window)) {
+                      resize_view_enabled, opts.freely_resizable_window, args.audio_rate)) {
             gbarecomp::overlay_loader_shutdown();
             runtime_shutdown();
             return 1;

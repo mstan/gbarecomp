@@ -26,6 +26,7 @@ struct GbaNetplayBoot {
     std::filesystem::path local_save, config_directory;
     std::filesystem::path rom_path, bios_path;
     int scale=3, fullscreen=0, volume=100;
+    int audio_rate=65536;
     unsigned internal_resolution=1;
     std::uint32_t finish_tick=0; // explicit --frames, must agree at startup
     bool linear_filter=false, sharp_filter=false, show_fps=false, affine_filter=false;
