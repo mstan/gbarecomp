@@ -466,9 +466,7 @@ public class GbaSetupActivity extends Activity {
         worker.execute(() -> {
             try {
                 if (requestCode == IMPORT_SAVE) {
-                    try (InputStream input = getContentResolver().openInputStream(uri)) {
-                        saves.importSave(input);
-                    }
+                    saves.importSave(getContentResolver().openInputStream(uri));
                 } else {
                     byte[] snapshot = saves.exportSave(previous);
                     try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {

@@ -3,6 +3,8 @@
 Games opt in with `saveFile` (a path relative to Android's private files
 directory) and `saveBytes` (the exact raw cartridge-save size) in `gbaGame`.
 Keep those values aligned with the Android game TOML's `[save]` section.
+Set `RunOptions::launcher_native_save_managed_externally` for that Android
+entry point so the legacy launcher SRAM Import/Clear row stays absent.
 
 The launch screen shows **Saved game**, with Import and Export buttons.
 Quit the game to return to that screen. A launcher that supports app shortcuts
