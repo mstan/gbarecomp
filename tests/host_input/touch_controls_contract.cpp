@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
     check(pad != nullptr, "native virtual controller"); if (!pad) return 1;
     SDL_setenv("GBARECOMP_TOUCH_CONTROLS", "1", 1);
     {
-        gbarecomp::HostWindow touch; check(touch.open(3), "touch-capable native window");
+        gbarecomp::HostWindow touch; check(touch.open(3, 240, 160, "Touch controls contract"), "touch-capable native window");
         touch.configure_touch(false, 0, 1, true);
         touch.set_touch_config_dir(dir.string().c_str());
         check(touch.touch_controls_available() && touch.touch_pad_visible(), "fresh visible default");
@@ -93,6 +93,33 @@ int main(int argc, char** argv) {
         check((held.keyinput & 1u) && !(held.keyinput & 0x40u),
               "a held finger cannot reactivate a hidden button after moving");
         finger(SDL_FINGERUP, 1, 0.945f, 0.785f);
+        touch.present(rgb.data());
+        SDL_Window* owned = nullptr;
+        for (Uint32 id = 1; id <= 16; ++id) {
+            auto* candidate = SDL_GetWindowFromID(id);
+            if (candidate && !std::strcmp(SDL_GetWindowTitle(candidate), "Touch controls contract"))
+                owned = candidate;
+        }
+        check(owned != nullptr, "find only this process's named test window");
+        if (owned) {
+            auto* renderer = SDL_GetRenderer(owned); int width = 0, height = 0;
+            check(renderer && SDL_GetRendererOutputSize(renderer, &width, &height) == 0,
+                  "read native test renderer extent");
+            if (renderer && width > 0 && height > 0) {
+                std::vector<std::uint32_t> pixels(static_cast<std::size_t>(width) * height);
+                check(SDL_RenderReadPixels(renderer, nullptr, SDL_PIXELFORMAT_ARGB8888,
+                                           pixels.data(), width * 4) == 0,
+                      "read actual hidden-pad host chrome");
+                check((pixels[std::size_t(height * 0.061f) * width + width / 2] & 0xffffffu) != 0,
+                      "Menu remains visibly drawn while every game button is hidden");
+            }
+        }
+        finger(SDL_FINGERDOWN, 3, 0.5f, 0.061f);
+        check(recomp_runtime_ui_is_open(ui), "tapping visible Menu opens Settings with hidden buttons");
+        finger(SDL_FINGERUP, 3, 0.5f, 0.061f);
+        check(!touch.touch_pad_visible(), "opening Menu cannot click the new Settings row accidentally");
+        recomp_runtime_ui_close(ui);
+
         SDL_JoystickSetVirtualButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP, 0);
         SDL_JoystickSetVirtualButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK, 1);
         SDL_JoystickUpdate(); touch.pump();

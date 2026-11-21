@@ -718,6 +718,7 @@ struct PadLayout {
     PadCircle a, b;
     PadRect l, r, select, start;
     PadRect toggle;
+    PadRect menu;
 };
 
 PadLayout compute_pad_layout(const Backend* b) {
@@ -812,6 +813,10 @@ PadLayout compute_pad_layout(const Backend* b) {
     cx = std::clamp(cx, left + tw * 0.5f, std::max(left + tw * 0.5f, right - tw * 0.5f));
     cy = std::clamp(cy, top + th * 0.5f, std::max(top + th * 0.5f, bottom - th * 0.5f));
     p.toggle = {cx - tw * 0.5f, cy - th * 0.5f, tw, th};
+    // Keep Settings reachable when every game button is hidden. Its host
+    // control stays between the shoulders, inside the same safe-area bounds.
+    p.menu = {(left + right) * 0.5f - 7.5f * mm, top + margin,
+              15.0f * mm, shoulder_h};
     return p;
 }
 
@@ -853,6 +858,15 @@ bool pad_toggle_available(const Backend* b) {
     // The toggle is offered only when something other than the pad can drive
     // the game; a pad-only title must never be left without controls.
     return b && b->touch_policy && (b->touch_controls || b->touch_emulation);
+}
+
+bool menu_button_available(const Backend* b) {
+#if defined(GBARECOMP_RUNTIME_UI)
+    return b && b->touch_controls && b->runtime_ui;
+#else
+    (void)b;
+    return false;
+#endif
 }
 
 Backend::TouchPoint* find_touch(Backend* b, SDL_FingerID id) {
@@ -1181,6 +1195,25 @@ void draw_pad_toggle(Backend* b, HostOverlay& ov) {
     ov.fill_circle(r.x + r.w * 0.80f, cy + s * 0.5f, s * 0.55f, {230, 238, 248, 190}, S);
 }
 
+void draw_menu_button(Backend* b, HostOverlay& ov) {
+    if (!menu_button_available(b)) return;
+    const auto r = compute_pad_layout(b).menu;
+    const auto space = OverlaySpace::Drawable;
+    ov.fill_rect(r.x, r.y, r.w, r.h, r.h * 0.25f, {20, 26, 38, 170}, space);
+    ov.stroke_rect(r.x, r.y, r.w, r.h, r.h * 0.25f, 1.5f, {230, 238, 248, 190}, space);
+    if (ov.text_supported()) {
+        const float size = 3.4f * b->px_per_mm;
+        ov.text(r.x + r.w * 0.5f, r.y + (r.h - size) * 0.5f, size,
+                {230, 238, 248, 235}, "Menu", OverlayAlign::Center, space);
+    } else {
+        for (int i = -1; i <= 1; ++i) {
+            const float y = r.y + r.h * (0.5f + 0.2f * i);
+            ov.line(r.x + r.w * 0.3f, y, r.x + r.w * 0.7f, y,
+                    1.5f, {230, 238, 248, 235}, space);
+        }
+    }
+}
+
 // Progress ring for the engine-owned long press (opens runtime settings)
 // when no game policy claims the gesture.
 void draw_engine_long_press(Backend* b, HostOverlay& ov) {
@@ -1486,6 +1519,7 @@ void draw_host_chrome(Backend* b, HostOverlay& ov, bool menu_open) {
     if (b->host_overlay) b->host_overlay(&ov);
     draw_touch_pad(b, ov);
     draw_pad_toggle(b, ov);
+    draw_menu_button(b, ov);
     draw_engine_long_press(b, ov);
 }
 
@@ -3511,6 +3545,14 @@ HostWindow::Events HostWindow::pump() {
                     const uint16_t buttons =
                         (b->pad_visible && b->touch_controls)
                             ? pad_buttons_at(pad, px, py, b->px_per_mm) : 0;
+#if defined(GBARECOMP_RUNTIME_UI)
+                    if (menu_button_available(b) && pad.menu.contains(px, py)) {
+                        // This finger belongs to Settings, never to the guest.
+                        // The established menu handoff also consumes its Up.
+                        open_runtime_menu_from_touch(b);
+                        continue;
+                    }
+#endif
                     // The toggle wins over the pad so it can never be buried
                     // under a button (it is small and player-movable).
                     if (pad_toggle_available(b) &&
