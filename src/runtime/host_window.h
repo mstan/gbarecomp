@@ -133,6 +133,7 @@ public:
                          bool emulate_touch);
     // Loads/persists the player's pad choice in <dir>/config.ini [Touch].
     void set_touch_config_dir(const char* dir);
+    bool touch_controls_available() const;
     bool touch_pad_visible() const;
     void set_touch_pad_visible(bool visible);
     // Logical view margins inside the surface (for touch/overlay mapping).

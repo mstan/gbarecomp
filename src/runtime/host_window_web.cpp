@@ -476,6 +476,7 @@ void HostWindow::configure_touch(bool policy,std::uint32_t claims,int pad_defaul
 // The page persists the pad choice per game in localStorage (the browser
 // analogue of <dir>/config.ini [Touch]); MEMFS paths do not survive a reload.
 void HostWindow::set_touch_config_dir(const char*) {}
+bool HostWindow::touch_controls_available() const { return impl_ && backend(impl_)->shared.control.touchControls.load()!=0; }
 bool HostWindow::touch_pad_visible() const { return impl_ && backend(impl_)->shared.control.padVisible.load()!=0; }
 void HostWindow::set_touch_pad_visible(bool visible) {
     if(!impl_)return;
