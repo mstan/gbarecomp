@@ -1635,6 +1635,10 @@ if(GBARECOMP_SDL2_OK AND EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/recomp_runtime
         tools/bios_smoke/dispatch_stub.cpp)
     target_link_gbarecomp_runtime_stack(gba_touch_controls_contract_tests)
     recomp_target_launcher_ui(gba_touch_controls_contract_tests CONSOLE gba)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_definitions(gba_touch_controls_contract_tests PRIVATE GBARECOMP_TOUCH_CAPTURE=1)
+        target_link_options(gba_touch_controls_contract_tests PRIVATE "-Wl,--wrap=SDL_RenderPresent")
+    endif()
     add_test(NAME gba_touch_controls_contract COMMAND gba_touch_controls_contract_tests
         "${CMAKE_CURRENT_BINARY_DIR}/touch-controls-contract-fixture")
     set_tests_properties(gba_touch_controls_contract PROPERTIES SKIP_RETURN_CODE 77)

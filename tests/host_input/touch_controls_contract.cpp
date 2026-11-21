@@ -7,6 +7,36 @@
 #include <fstream>
 #include <vector>
 
+// Reuse the existing FPS-overlay fixture's pre-present readback seam. Reading
+// after Present is undefined, and a logical viewport can clip a whole-window
+// read. This Linux-only wrapper leaves other supported test builds portable.
+#if defined(GBARECOMP_TOUCH_CAPTURE)
+static bool capture_next_present = false;
+static std::vector<unsigned char> capture_rgba;
+static int capture_width = 0, capture_height = 0;
+extern "C" void __real_SDL_RenderPresent(SDL_Renderer*);
+extern "C" void __wrap_SDL_RenderPresent(SDL_Renderer* renderer) {
+    if (capture_next_present) {
+        int lw = 0, lh = 0; float sx = 1, sy = 1; SDL_Rect viewport{};
+        SDL_GetRendererOutputSize(renderer, &capture_width, &capture_height);
+        SDL_RenderGetLogicalSize(renderer, &lw, &lh);
+        SDL_RenderGetScale(renderer, &sx, &sy); SDL_RenderSetScale(renderer, 1, 1);
+        SDL_RenderGetViewport(renderer, &viewport);
+        SDL_RenderSetLogicalSize(renderer, 0, 0); SDL_RenderSetViewport(renderer, nullptr);
+        capture_rgba.resize(std::size_t(capture_width) * capture_height * 4);
+        if (SDL_RenderReadPixels(renderer, nullptr, SDL_PIXELFORMAT_RGBA32,
+                                 capture_rgba.data(), capture_width * 4) != 0) {
+            std::fprintf(stderr, "Host readback: %s\n", SDL_GetError());
+            capture_rgba.clear();
+        }
+        SDL_RenderSetLogicalSize(renderer, lw, lh); SDL_RenderSetScale(renderer, 1, 1);
+        SDL_RenderSetViewport(renderer, &viewport); SDL_RenderSetScale(renderer, sx, sy);
+        capture_next_present = false;
+    }
+    __real_SDL_RenderPresent(renderer);
+}
+#endif
+
 #if !SDL_VERSION_ATLEAST(2, 24, 0)
 int main() { return 77; }
 #else
@@ -93,27 +123,21 @@ int main(int argc, char** argv) {
         check((held.keyinput & 1u) && !(held.keyinput & 0x40u),
               "a held finger cannot reactivate a hidden button after moving");
         finger(SDL_FINGERUP, 1, 0.945f, 0.785f);
+#if defined(GBARECOMP_TOUCH_CAPTURE)
+        capture_next_present = true;
+#endif
         touch.present(rgb.data());
-        SDL_Window* owned = nullptr;
-        for (Uint32 id = 1; id <= 16; ++id) {
-            auto* candidate = SDL_GetWindowFromID(id);
-            if (candidate && !std::strcmp(SDL_GetWindowTitle(candidate), "Touch controls contract"))
-                owned = candidate;
+#if defined(GBARECOMP_TOUCH_CAPTURE)
+        check(!capture_rgba.empty(), "capture actual hidden-pad host chrome before presentation");
+        if (!capture_rgba.empty()) {
+            const auto pixel = (std::size_t(capture_height * 0.061f) * capture_width + capture_width / 2) * 4;
+            check(capture_rgba[pixel] || capture_rgba[pixel + 1] || capture_rgba[pixel + 2],
+                  "Menu remains visibly drawn while every game button is hidden");
+            std::ofstream image(dir / "menu-hidden.rgba", std::ios::binary);
+            image.write(reinterpret_cast<const char*>(capture_rgba.data()), capture_rgba.size());
+            std::printf("Hidden-pad Menu capture: %dx%d RGBA\n", capture_width, capture_height);
         }
-        check(owned != nullptr, "find only this process's named test window");
-        if (owned) {
-            auto* renderer = SDL_GetRenderer(owned); int width = 0, height = 0;
-            check(renderer && SDL_GetRendererOutputSize(renderer, &width, &height) == 0,
-                  "read native test renderer extent");
-            if (renderer && width > 0 && height > 0) {
-                std::vector<std::uint32_t> pixels(static_cast<std::size_t>(width) * height);
-                check(SDL_RenderReadPixels(renderer, nullptr, SDL_PIXELFORMAT_ARGB8888,
-                                           pixels.data(), width * 4) == 0,
-                      "read actual hidden-pad host chrome");
-                check((pixels[std::size_t(height * 0.061f) * width + width / 2] & 0xffffffu) != 0,
-                      "Menu remains visibly drawn while every game button is hidden");
-            }
-        }
+#endif
         finger(SDL_FINGERDOWN, 3, 0.5f, 0.061f);
         check(recomp_runtime_ui_is_open(ui), "tapping visible Menu opens Settings with hidden buttons");
         finger(SDL_FINGERUP, 3, 0.5f, 0.061f);
@@ -126,6 +150,7 @@ int main(int argc, char** argv) {
         check(recomp_runtime_ui_is_open(ui), "physical controller menu works with hidden buttons");
         SDL_JoystickSetVirtualButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK, 0);
         SDL_JoystickUpdate(); touch.pump(); recomp_runtime_ui_close(ui);
+        SDL_Delay(260); // Existing menu handoff suppresses trailing synthetic mouse events.
         finger(SDL_FINGERDOWN, 2, 0.5f, 0.5f); SDL_Delay(700); touch.pump();
         check(recomp_runtime_ui_is_open(ui), "native long press still opens Settings with hidden buttons");
         finger(SDL_FINGERUP, 2, 0.5f, 0.5f);
