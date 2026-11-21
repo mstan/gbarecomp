@@ -1,7 +1,7 @@
 // Actual canonical firmware is a private argument, never embedded. This tests
 // the build-selected math-only hook with the full legacy catalog Off.
 #include "bios_firmware_fixture.h"
-#include <bit>
+#include "../../src/gba/signed_bits.h"
 #include <limits>
 
 namespace { bool allow_native_window=true; }
@@ -59,8 +59,8 @@ int main(int argc,char** argv) try {
     for(int32_t x:coordinates)for(int32_t y:coordinates)for(bool thumb:{false,true})check(10,x,y,thumb);
     uint32_t seed=0x31a7b05du;
     for(unsigned i=0;i<96;++i) {
-        seed=seed*1664525u+1013904223u;const int32_t x=std::bit_cast<int32_t>(seed);
-        seed=seed*1664525u+1013904223u;const int32_t y=std::bit_cast<int32_t>(seed);
+        seed=seed*1664525u+1013904223u;const int32_t x=gba::signed_bits<int32_t>(seed);
+        seed=seed*1664525u+1013904223u;const int32_t y=gba::signed_bits<int32_t>(seed);
         for(bool thumb:{false,true})check(10,x,y,thumb);
     }
     Memory untouched;untouched.bios=firmware;active=&untouched;

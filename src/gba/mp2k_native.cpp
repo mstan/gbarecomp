@@ -1,7 +1,7 @@
 #include "mp2k_native.h"
+#include "signed_bits.h"
 
 #include <array>
-#include <bit>
 #include <cstring>
 
 namespace gba {
@@ -20,9 +20,9 @@ uint32_t load32(const uint8_t* p) {
 void store32(uint8_t* p, uint32_t value) {
     for (unsigned i = 0; i != 4; ++i) p[i] = uint8_t(value >> (8 * i));
 }
-int32_t signed_byte(uint8_t value) { return std::bit_cast<int8_t>(value); }
+int32_t signed_byte(uint8_t value) { return signed_bits<int8_t>(value); }
 int32_t arithmetic_shift(uint32_t bits, unsigned n) {
-    return std::bit_cast<int32_t>(bits) >> n;
+    return signed_bits<int32_t>(bits) >> n;
 }
 bool overlaps(const uint8_t* a, std::size_t a_bytes,
               const uint8_t* b, std::size_t b_bytes) {
