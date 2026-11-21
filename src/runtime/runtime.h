@@ -325,6 +325,9 @@ struct RunOptions {
                                                 // [save].path); null => <rom>.sav
                                                 // derived from the seeded ROM
     std::size_t launcher_native_save_bytes = 0; // optional raw native import size
+    // The host supplies its own guarded native-save exchange (e.g. Android
+    // documents). Omit the legacy launcher SRAM Import/Clear descriptor.
+    bool launcher_native_save_managed_externally = false;
     // Opt into recomp-ui's verified IPS/IPS32/BPS source-ROM patch surface.
     // Patched images are generated under the executable's mods/rom-patches
     // cache; the original ROM and patch file are never modified.

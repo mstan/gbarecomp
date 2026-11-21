@@ -1051,16 +1051,19 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         p.replace_extension(".sav");
         save_display = p.string();
     }
-    if (!save_display.empty()) gi.sram_path = save_display.c_str();
+    if (!opts.launcher_native_save_managed_externally && !save_display.empty())
+        gi.sram_path = save_display.c_str();
 #if defined(RECOMP_LAUNCHER_HAS_NATIVE_SAVE_PATH_PROVIDER) && defined(GBARECOMP_ENABLE_MODS)
     NativeSaveContext native_save_context{&opts, mod_provider, save_override, {}};
-    if (opts.mod_native_program_count && mod_provider) {
+    if (!opts.launcher_native_save_managed_externally &&
+        opts.mod_native_program_count && mod_provider) {
         gi.native_save_path_ctx = &native_save_context;
         gi.native_save_path = &gbarecomp_seam::native_save_path;
     }
 #endif
 #if defined(RECOMP_LAUNCHER_HAS_NATIVE_SAVE_BYTES)
-    gi.native_save_bytes = opts.launcher_native_save_bytes;
+    gi.native_save_bytes = opts.launcher_native_save_managed_externally
+        ? 0 : opts.launcher_native_save_bytes;
 #endif
 
     std::string title = std::string(gi.name) + " \xE2\x80\x94 Launcher";

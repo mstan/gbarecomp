@@ -77,14 +77,19 @@ public final class NativeSaveStore {
     }
 
     public void importSave(InputStream input) throws IOException {
-        synchronized (SESSION) { requireStopped(); }
         File parent = save.getParentFile();
-        if (!parent.isDirectory() && !parent.mkdirs())
-            throw new IOException("Could not create the private save directory.");
-        File staged = File.createTempFile("save-import-", ".tmp", parent);
+        File staged = null;
         try {
-            try (FileOutputStream output = new FileOutputStream(staged)) {
-                copyExact(input, output);
+            // Own the provider stream and close it BEFORE touching progress.
+            // A provider's close can report an I/O failure after its last read.
+            try (InputStream source = input) {
+                synchronized (SESSION) { requireStopped(); }
+                if (!parent.isDirectory() && !parent.mkdirs())
+                    throw new IOException("Could not create the private save directory.");
+                staged = File.createTempFile("save-import-", ".tmp", parent);
+                try (FileOutputStream output = new FileOutputStream(staged)) {
+                    copyExact(source, output);
+                }
             }
             synchronized (SESSION) {
                 requireStopped();
@@ -103,7 +108,9 @@ public final class NativeSaveStore {
                 Files.deleteIfExists(suspendMarker.toPath());
                 replace(staged, save);
             }
-        } finally { Files.deleteIfExists(staged.toPath()); }
+        } finally {
+            if (staged != null) Files.deleteIfExists(staged.toPath());
+        }
     }
 
     private static void replace(File source, File destination) throws IOException {

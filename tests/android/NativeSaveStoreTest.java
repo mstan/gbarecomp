@@ -71,6 +71,13 @@ public final class NativeSaveStoreTest {
             }), "disconnected source");
             same(save, second, "bad inputs preserve current");
             same(backup, first, "bad inputs preserve backup");
+            rejects(() -> store.importSave(new ByteArrayInputStream(first) {
+                @Override public void close() throws IOException {
+                    throw new IOException("document provider close failed");
+                }
+            }), "provider close failure");
+            same(save, second, "provider close failure preserves native progress");
+            same(backup, first, "provider close failure preserves previous backup");
             NativeSaveStore.gameStarted();
             try {
                 rejects(() -> store.importSave(new ByteArrayInputStream(first)), "live import");
