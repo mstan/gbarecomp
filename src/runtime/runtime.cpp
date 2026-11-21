@@ -62,6 +62,7 @@
 #include "ws_sidecar.h"
 #if defined(GBARECOMP_RUNTIME_UI)
 #include "recomp_runtime_ui.h"
+#include "touch_controls_ui.h"
 #endif
 
 #include <algorithm>
@@ -310,6 +311,8 @@ int runtime_ui_get(void* opaque, const RecompRuntimeUiItem* item, int* out) {
     else if (std::strcmp(item->key, RECOMP_RUNTIME_UI_KEY_VOLUME) == 0) *out = c->window->volume();
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_STATE_SLOT) == 0) *out = c->state_slot;
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FPS) == 0) *out = c->window->fps_readout();
+    else if (std::strcmp(item->key, kTouchControlsUiKey) == 0)
+        return touch_controls_ui_get(c->window, out);
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_AUDIO_ENHANCED) == 0 && c->audio)
         *out = c->audio->shadow_enabled();
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_ASSIST_ENABLED) == 0)
@@ -356,6 +359,8 @@ int runtime_ui_set(void* opaque, const RecompRuntimeUiItem* item, int value) {
         c->state_slot = std::clamp(value, 1, c->state_slot_count);
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_FPS) == 0)
         c->window->set_fps_readout(value != 0);
+    else if (std::strcmp(item->key, kTouchControlsUiKey) == 0)
+        return touch_controls_ui_set(c->window, value);
     else if (std::strcmp(item->key, GBARECOMP_UI_KEY_AUDIO_ENHANCED) == 0 && c->audio) {
         runtime_mmio_catch_up();
         c->audio->set_shadow_enabled(value != 0);
@@ -3663,6 +3668,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             enhanced_item.type        = RECOMP_RUNTIME_UI_BOOL;
             runtime_ui_extras.push_back(enhanced_item);
         }
+
+        if (win.touch_controls_available())
+            runtime_ui_extras.push_back(touch_controls_ui_item());
 
         RecompRuntimeUiItem fps_item{};
         fps_item.key         = GBARECOMP_UI_KEY_FPS;

@@ -1629,6 +1629,17 @@ configure_file(
     @ONLY
 )
 
+if(GBARECOMP_SDL2_OK AND EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/recomp_runtime_ui.h")
+    add_executable(gba_touch_controls_contract_tests
+        tests/host_input/touch_controls_contract.cpp
+        tools/bios_smoke/dispatch_stub.cpp)
+    target_link_gbarecomp_runtime_stack(gba_touch_controls_contract_tests)
+    recomp_target_launcher_ui(gba_touch_controls_contract_tests CONSOLE gba)
+    add_test(NAME gba_touch_controls_contract COMMAND gba_touch_controls_contract_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/touch-controls-contract-fixture")
+    set_tests_properties(gba_touch_controls_contract PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
 if(GBARECOMP_SDL2_OK AND EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/consoles/gba/gba_pad_binds.h")
     add_executable(gba_controller_menu_contract_tests tests/host_input/controller_menu_contract.cpp
         tools/bios_smoke/dispatch_stub.cpp)

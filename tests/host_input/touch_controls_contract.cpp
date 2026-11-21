@@ -1,0 +1,124 @@
+#define SDL_MAIN_HANDLED
+#include <SDL.h>
+#include "touch_controls_ui.h"
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <vector>
+
+#if !SDL_VERSION_ATLEAST(2, 24, 0)
+int main() { return 77; }
+#else
+static int failures = 0;
+static void check(bool ok, const char* message) {
+    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", message); ++failures; }
+}
+int main(int argc, char** argv) {
+    const auto dir = std::filesystem::path(argc > 1 ? argv[1] : "touch-contract-fixture");
+    std::filesystem::create_directories(dir);
+    { std::ofstream file(dir / "config.ini"); file << "[Owner]\nKeep=73\n"; }
+    SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
+    SDL_setenv("SDL_AUDIODRIVER", "dummy", 1);
+    SDL_setenv("GBARECOMP_TOUCH_DPI", "96", 1);
+    SDL_setenv("GBARECOMP_TOUCH_CONTROLS", "0", 1);
+    SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    SDL_SetMainReady(); check(SDL_Init(SDL_INIT_GAMECONTROLLER) == 0, "SDL init");
+    {
+        gbarecomp::HostWindow desktop; check(desktop.open(3), "desktop window");
+        int value = 1;
+        check(!desktop.touch_controls_available() &&
+              !gbarecomp::touch_controls_ui_get(&desktop, &value) &&
+              !gbarecomp::touch_controls_ui_set(&desktop, 1),
+              "unsupported desktop has no active touch setting");
+    }
+    SDL_VirtualJoystickDesc desc{};
+    desc.version = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
+    desc.type = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
+    desc.naxes = SDL_CONTROLLER_AXIS_MAX; desc.nbuttons = SDL_CONTROLLER_BUTTON_MAX;
+    desc.vendor_id = 0xfeed; desc.product_id = 0xbeef; desc.name = "Touch contract controller";
+    desc.button_mask = (1u << SDL_CONTROLLER_BUTTON_MAX) - 1u;
+    desc.axis_mask = (1u << SDL_CONTROLLER_AXIS_MAX) - 1u;
+    const int device = SDL_JoystickAttachVirtualEx(&desc);
+    SDL_Joystick* pad = device >= 0 ? SDL_JoystickOpen(device) : nullptr;
+    check(pad != nullptr, "native virtual controller"); if (!pad) return 1;
+    SDL_setenv("GBARECOMP_TOUCH_CONTROLS", "1", 1);
+    {
+        gbarecomp::HostWindow touch; check(touch.open(3), "touch-capable native window");
+        touch.configure_touch(false, 0, 1, true);
+        touch.set_touch_config_dir(dir.string().c_str());
+        check(touch.touch_controls_available() && touch.touch_pad_visible(), "fresh visible default");
+        const auto item = gbarecomp::touch_controls_ui_item();
+        check(item.type == RECOMP_RUNTIME_UI_BOOL && !std::strcmp(item.label, "Touchscreen controls"),
+              "friendly visible boolean Settings item");
+        RecompRuntimeUiConfig config{};
+        config.title = "Touch settings contract"; config.items = &item; config.item_count = 1;
+        config.callbacks.context = &touch;
+        config.callbacks.get_value = [](void* c, const RecompRuntimeUiItem*, int* v) {
+            return gbarecomp::touch_controls_ui_get(static_cast<gbarecomp::HostWindow*>(c), v);
+        };
+        config.callbacks.set_value = [](void* c, const RecompRuntimeUiItem*, int v) {
+            return gbarecomp::touch_controls_ui_set(static_cast<gbarecomp::HostWindow*>(c), v);
+        };
+        auto* ui = recomp_runtime_ui_create(&config); check(ui != nullptr, "real shared menu model");
+        if (!ui) return 1;
+        touch.set_runtime_ui(ui);
+        recomp_runtime_ui_open(ui);
+        recomp_runtime_ui_handle_input(ui, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
+        recomp_runtime_ui_handle_input(ui, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
+        int value = 1;
+        check(!touch.touch_pad_visible() && gbarecomp::touch_controls_ui_get(&touch, &value) && !value,
+              "actual Settings activation hides the pad through the shared provider");
+        recomp_runtime_ui_handle_input(ui, RECOMP_RUNTIME_UI_INPUT_ACCEPT, 1, 0);
+        check(touch.touch_pad_visible(), "Settings activation restores the pad");
+        recomp_runtime_ui_close(ui);
+        std::vector<std::uint8_t> rgb(240 * 160 * 3); touch.present(rgb.data());
+        auto finger = [&](Uint32 type, SDL_FingerID id, float x, float y) {
+            SDL_Event event{}; event.type = type; event.tfinger.touchId = 55;
+            event.tfinger.fingerId = id; event.tfinger.x = x; event.tfinger.y = y;
+            event.tfinger.pressure = type == SDL_FINGERUP ? 0.0f : 1.0f;
+            check(SDL_PushEvent(&event) == 1, "inject native finger event");
+            return touch.pump();
+        };
+        check((finger(SDL_FINGERDOWN, 1, 0.945f, 0.785f).keyinput & 1u) == 0,
+              "visible touch A reaches actual game input");
+        SDL_JoystickSetVirtualButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP, 1);
+        SDL_JoystickUpdate(); touch.pump();
+        check(gbarecomp::touch_controls_ui_set(&touch, 0), "hide through shared provider");
+        auto held = touch.pump();
+        check((held.keyinput & 1u) && !(held.keyinput & 0x40u),
+              "hiding releases touch A while preserving controller Up");
+        held = finger(SDL_FINGERMOTION, 1, 0.945f, 0.785f);
+        check((held.keyinput & 1u) && !(held.keyinput & 0x40u),
+              "a held finger cannot reactivate a hidden button after moving");
+        finger(SDL_FINGERUP, 1, 0.945f, 0.785f);
+        SDL_JoystickSetVirtualButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP, 0);
+        SDL_JoystickSetVirtualButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK, 1);
+        SDL_JoystickUpdate(); touch.pump();
+        check(recomp_runtime_ui_is_open(ui), "physical controller menu works with hidden buttons");
+        SDL_JoystickSetVirtualButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK, 0);
+        SDL_JoystickUpdate(); touch.pump(); recomp_runtime_ui_close(ui);
+        finger(SDL_FINGERDOWN, 2, 0.5f, 0.5f); SDL_Delay(700); touch.pump();
+        check(recomp_runtime_ui_is_open(ui), "native long press still opens Settings with hidden buttons");
+        finger(SDL_FINGERUP, 2, 0.5f, 0.5f);
+        recomp_runtime_ui_close(ui); touch.set_runtime_ui(nullptr); recomp_runtime_ui_destroy(ui);
+    }
+    {
+        gbarecomp::HostWindow touch; check(touch.open(3), "reopen hidden session");
+        touch.set_touch_config_dir(dir.string().c_str()); touch.configure_touch(false, 0, 1, true);
+        check(!touch.touch_pad_visible(), "saved Off survives restart and a visible title default");
+        std::ifstream file(dir / "config.ini"); const std::string saved((std::istreambuf_iterator<char>(file)), {});
+        check(saved.find("Keep=73") != std::string::npos, "unrelated settings preserved");
+        check(gbarecomp::touch_controls_ui_set(&touch, 1), "save explicit On");
+    }
+    {
+        gbarecomp::HostWindow touch; check(touch.open(3), "reopen visible session");
+        touch.set_touch_config_dir(dir.string().c_str()); touch.configure_touch(false, 0, 0, true);
+        check(touch.touch_pad_visible(), "saved On survives restart and a hidden title default");
+    }
+    SDL_JoystickClose(pad); SDL_JoystickDetachVirtual(device); SDL_Quit();
+    std::printf("touch controls contract: %d failure(s)\n", failures);
+    return failures ? 1 : 0;
+}
+#endif

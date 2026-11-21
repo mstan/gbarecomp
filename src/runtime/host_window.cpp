@@ -3265,6 +3265,10 @@ void HostWindow::save_audio_enhanced(bool enabled) {
     save_touch_config(b);
 }
 
+bool HostWindow::touch_controls_available() const {
+    return open_ && impl_ && static_cast<const Backend*>(impl_)->touch_controls;
+}
+
 bool HostWindow::touch_pad_visible() const {
     if (!open_ || !impl_) return false;
     return static_cast<const Backend*>(impl_)->pad_visible;
@@ -3527,7 +3531,8 @@ HostWindow::Events HostWindow::pump() {
                 touch->y = py;
                 if (touch->pad) {
                     // Sliding between pad buttons follows the finger.
-                    touch->buttons = pad_buttons_at(pad, px, py, b->px_per_mm);
+                    touch->buttons = b->pad_visible && b->touch_controls
+                        ? pad_buttons_at(pad, px, py, b->px_per_mm) : 0;
                 } else if (touch->routed) {
                     route(e.type == SDL_FINGERUP ? TouchPhase::Up : TouchPhase::Move);
                 } else if (touch->toggle) {
@@ -3864,6 +3869,7 @@ void HostWindow::set_runtime_ui(RecompRuntimeUi* /*ui*/) {}
 void HostWindow::configure_touch(bool /*policy*/, std::uint32_t /*claims*/,
                                  int /*pad_default*/, bool /*emulate_touch*/) {}
 void HostWindow::set_touch_config_dir(const char* /*dir*/) {}
+bool HostWindow::touch_controls_available() const { return false; }
 bool HostWindow::touch_pad_visible() const { return false; }
 void HostWindow::set_touch_pad_visible(bool /*visible*/) {}
 void HostWindow::set_view_margins(std::uint32_t, std::uint32_t, std::uint32_t,
