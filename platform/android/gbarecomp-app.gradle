@@ -16,6 +16,7 @@
 //   payloadVersion ("1"), setupNote, gyro (false), payloadDirs ([[from:File, into:String]]),
 //   cmakeArguments ([]), recompUiRoot (File), releaseAbis (["arm64-v8a"]),
 //   debugAbis (["arm64-v8a","x86_64"])
+//   saveFile (relative to private files directory), saveBytes (raw native size)
 //
 // Private personal builds may embed verified assets (never distribute them):
 //   -PprivateRom=<path> [-PprivateBios=<path>]
@@ -113,6 +114,8 @@ android {
             gbaPayloadVersion: "${g.payloadVersion ?: '1'}",
             gbaSetupNote: g.setupNote ?: "",
             gbaGyro: "${g.gyro ?: false}",
+            gbaSaveFile: g.saveFile ?: "",
+            gbaSaveBytes: "${g.saveBytes ?: 0}",
         ]
 
         externalNativeBuild {

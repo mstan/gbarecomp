@@ -31,9 +31,12 @@ import java.nio.charset.StandardCharsets;
 public class GbaGameActivity extends SDLActivity {
     private GbaGameConfig config;
     private boolean nativeReady;
+    private boolean ownsSaveSession;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        NativeSaveStore.gameStarted();
+        ownsSaveSession = true;
         config = GbaGameConfig.load(this);
         setRequestedOrientation(orientationFor(config.orientation));
         try {
@@ -55,6 +58,22 @@ public class GbaGameActivity extends SDLActivity {
             return view.onApplyWindowInsets(insets);
         });
         enterImmersiveMode();
+    }
+
+    @Override
+    protected void onDestroy() {
+        // SDLActivity joins its native thread before returning. A paused or
+        // backgrounded game still owns its cartridge save until that join.
+        try {
+            super.onDestroy();
+        } finally {
+            // SDL tolerates an interrupted join. Keep transfers locked if its
+            // native worker is unexpectedly still alive.
+            if (ownsSaveSession && (mSDLThread == null || !mSDLThread.isAlive())) {
+                ownsSaveSession = false;
+                NativeSaveStore.gameStopped();
+            }
+        }
     }
 
     @Override
