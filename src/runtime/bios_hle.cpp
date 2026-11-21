@@ -26,6 +26,7 @@
 // point in the low bits — another reason LLE stays the oracle.
 
 #include "bios_hle.h"
+#include "../gba/signed_bits.h"
 
 #include "runtime_arm.h"  // g_cpu, runtime_tick, bus_read_u*/bus_write_u*
 #include "runtime_bus_bridge.h"
@@ -125,13 +126,13 @@ uint32_t do_div(int32_t num, int32_t denom) {
 // wrapping bits explicitly, including negative coordinates, rather than
 // relying on signed overflow or left-shifting a negative C++ value.
 int32_t mul32(int32_t a, int32_t b) {
-    return std::bit_cast<int32_t>(uint32_t(a) * uint32_t(b));
+    return signed_bits<int32_t>(uint32_t(a) * uint32_t(b));
 }
 int32_t neg32(int32_t value) {
-    return std::bit_cast<int32_t>(0u - uint32_t(value));
+    return signed_bits<int32_t>(0u - uint32_t(value));
 }
 int32_t ratio14(int32_t numerator, int32_t denominator) {
-    const int32_t scaled = std::bit_cast<int32_t>(uint32_t(numerator) << 14);
+    const int32_t scaled = signed_bits<int32_t>(uint32_t(numerator) << 14);
     if (scaled == INT32_MIN && denominator == -1) return INT32_MIN;
     return scaled / denominator;
 }
