@@ -130,6 +130,19 @@ int main() {
         check(initialize() && get("test.presentation", "view").enabled &&
               !get(package, feature).enabled,
               "lobby changed offline presentation choice or failed to save recording Off");
+        const auto catalog_state = read_file(root / "state.toml");
+        const auto profile = sandbox / "profile";
+        fs::create_directories(profile);
+        write_file(profile / "config.ini", "[Diagnostics]\nreplay_capture=0\n");
+        check(gbarecomp::mod_runtime_initialize(root, "test-game", target, &error,
+                                               profile / "mods") &&
+              !get(package, feature).enabled,
+              "separate player profile lost its legacy recording Off");
+        check(provider->commit_netplay(nullptr, nullptr) &&
+              gbarecomp::mod_runtime_saved_diagnostic_replay_enabled(profile / "mods") == 0 &&
+              read_file(root / "state.toml") == catalog_state,
+              "host-only commit wrote the catalog instead of the player profile");
+        check(initialize(), error.c_str());
         const auto saved_bytes = read_file(root / "state.toml");
         write_file(presentation / "manifest.toml", "invalid catalog for read-only lookup");
         check(gbarecomp::mod_runtime_saved_diagnostic_replay_enabled(root) == 0 &&
