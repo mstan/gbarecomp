@@ -33,7 +33,9 @@ extern "C" void __wrap_SDL_RenderPresent(SDL_Renderer* renderer) {
             capture_rgba.clear();
         }
         SDL_RenderSetLogicalSize(renderer, lw, lh); SDL_RenderSetScale(renderer, 1, 1);
-        SDL_RenderSetViewport(renderer, &viewport); SDL_RenderSetScale(renderer, sx, sy);
+        SDL_RenderSetViewport(renderer, &viewport);
+        float unit_x = 1, unit_y = 1; SDL_RenderGetScale(renderer, &unit_x, &unit_y);
+        SDL_RenderSetScale(renderer, sx / unit_x, sy / unit_y);
         capture_next_present = false;
     }
     __real_SDL_RenderPresent(renderer);

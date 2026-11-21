@@ -30,7 +30,7 @@ extern "C" void __wrap_SDL_RenderPresent(SDL_Renderer* r) {
   SDL_RenderSetLogicalSize(r,0,0);SDL_RenderSetViewport(r,nullptr);
   std::vector<unsigned char> rgba(w*h*4);
   if(SDL_RenderReadPixels(r,nullptr,SDL_PIXELFORMAT_RGBA32,rgba.data(),w*4)!=0)std::abort();
-  SDL_RenderSetLogicalSize(r,lw,lh);SDL_RenderSetScale(r,1,1);SDL_RenderSetViewport(r,&viewport);SDL_RenderSetScale(r,sx,sy);
+  SDL_RenderSetLogicalSize(r,lw,lh);SDL_RenderSetScale(r,1,1);SDL_RenderSetViewport(r,&viewport);float ux=1,uy=1;SDL_RenderGetScale(r,&ux,&uy);SDL_RenderSetScale(r,sx/ux,sy/uy);
   captures[capture_name]={w,h,rgba};
   if(write_captures){std::string path=std::string(capture_name)+".rgba";FILE* f=std::fopen(path.c_str(),"wb");if(!f)std::abort();std::fwrite(rgba.data(),1,rgba.size(),f);std::fclose(f);}
   std::printf("CAPTURE %s %d %d\n",capture_name,w,h);std::fflush(stdout);
