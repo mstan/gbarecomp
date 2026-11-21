@@ -79,8 +79,11 @@ int main() {
             gbarecomp::mod_runtime_activate_plugins();
         };
         auto row = get(package, feature);
-        check(row.enabled && !row.hidden && !row.quick &&
+        check(row.enabled && !row.hidden &&
               std::string(row.group) == "Diagnostics", "visible default-On control missing");
+#if defined(RECOMP_LAUNCHER_HAS_QUICK_MODS)
+        check(!row.quick, "recording control must not opt into Home Quick Mods");
+#endif
         commit();
         check(gba_mod_diagnostic_replay_enabled() == 1 && presentation_activations == 0,
               "recording default depends on presentation activation");
