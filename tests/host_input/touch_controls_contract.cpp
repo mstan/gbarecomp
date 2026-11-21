@@ -1,6 +1,7 @@
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include "touch_controls_ui.h"
+#include "touch_input.h"
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -162,9 +163,21 @@ int main(int argc, char** argv) {
         check(recomp_runtime_ui_is_open(ui), "physical controller menu works with hidden buttons");
         SDL_JoystickSetVirtualButton(pad, SDL_CONTROLLER_BUTTON_LEFTSTICK, 0);
         SDL_JoystickUpdate(); touch.pump(); recomp_runtime_ui_close(ui);
-        SDL_Delay(260); // Existing menu handoff suppresses trailing synthetic mouse events.
-        finger(SDL_FINGERDOWN, 2, 0.5f, 0.5f); SDL_Delay(700); touch.pump();
-        check(recomp_runtime_ui_is_open(ui), "native long press still opens Settings with hidden buttons");
+        SDL_Delay(300); // Let the existing 250ms synthetic-mouse handoff expire.
+        finger(SDL_FINGERDOWN, 2, 0.5f, 0.5f);
+        auto& hub = gbarecomp::TouchHub::instance();
+        const auto points = hub.points();
+        check(points.size() == 1 && points.front().pointer == 2,
+              "hidden-pad finger is routed to the existing gesture recognizer");
+        if (points.size() == 1) {
+            // Exercise the real recognizer's deadline without depending on a
+            // wall-clock sleep landing on the same scheduler tick.
+            hub.advance(points.front().down_ms + hub.gesture_config().long_press_ms);
+            touch.pump();
+        }
+        if (!recomp_runtime_ui_is_open(ui))
+            std::fprintf(stderr, "long press: %s\n", hub.diagnostics_json().c_str());
+        check(recomp_runtime_ui_is_open(ui), "native long-press deadline opens Settings with hidden buttons");
         finger(SDL_FINGERUP, 2, 0.5f, 0.5f);
         recomp_runtime_ui_close(ui); touch.set_runtime_ui(nullptr); recomp_runtime_ui_destroy(ui);
     }
