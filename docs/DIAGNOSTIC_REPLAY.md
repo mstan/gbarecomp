@@ -1,6 +1,6 @@
 # Diagnostic replays
 
-Every interactive windowed session records a **diagnostic replay**: the
+Interactive windowed play records a **diagnostic replay** by default: the
 host inputs that reached the guest at every frame boundary, plus fingerprints of
 the machine each frame produced. When a player reports a bug, the recording lets
 a developer (or an agent) rerun the exact session offline with the same build and
@@ -25,15 +25,22 @@ history is retained within a bounded budget.
   The ROM and BIOS are never recorded.
 - **Budget.** Up to one hour is kept: 360 segments of 600 frames, with at most
   256 MiB of machine checkpoints. Older segments are deleted as you play.
-- **Opting out.** Set the environment variable `GBARECOMP_DIAGNOSTICS=0`, or add
-  this to `config.ini`:
-
-      [Diagnostics]
-      replay_capture=0
-
-  A title can also default it off with `RunOptions::diagnostic_replay_default`.
+- **Recording control.** Open **Mods → Gameplay Diagnostics → Record Gameplay**.
+  Recording is on by default; the saved On or Off choice is independent of
+  presentation mods. Existing recording preferences are imported when the
+  control first becomes available, without replacing an explicit new choice.
 
 ## For developers and agents: reproduce a report
+
+Titles include a targeted manifest for the shared
+`gbarecomp.feature.gameplay-diagnostics` / `record-gameplay` binding, with
+`default_enabled = true`. The engine binds it to the existing recorder API;
+no title recorder or presentation plugin is needed. Netplay lobby commits
+preserve this host preference without activating gameplay mods or replacing
+offline gameplay selections. A read-only state lookup is available without
+loading a catalog. This does not add replay capture to the netplay backend.
+For explicit automated runs, `GBARECOMP_DIAGNOSTICS=0/1` still overrides the
+selection. Older runners without the control retain their configuration fallback.
 
 ```sh
 python tools/replay_diagnostic.py check  <first .replay>

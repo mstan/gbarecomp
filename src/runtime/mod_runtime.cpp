@@ -3,6 +3,8 @@
 #include "codebreaker.h"
 #include "mod_function_hooks.h"
 #include "asset_picker.h"
+#include "diagnostic_replay_setting.h"
+#include "mod_diagnostics.h"
 
 #include "../gba/crc32.h"
 #include "../gba/foreign_presentation_internal.h"
@@ -1122,6 +1124,26 @@ bool save_state(Runtime& runtime, std::string* error) {
     return true;
 }
 
+const Package* diagnostic_replay_package(Runtime& runtime) {
+    const Package* package = selected_package(runtime, kDiagnosticReplayPackage);
+    return package && target_matches(*package, runtime) &&
+        find_feature(*package, kDiagnosticReplayFeature) ? package : nullptr;
+}
+
+bool import_legacy_diagnostic_replay(Runtime& runtime, std::string* error) {
+    const Package* package = diagnostic_replay_package(runtime);
+    if (!package) return true;
+    auto& selection = package_selection(runtime, *package)
+        .features[kDiagnosticReplayFeature];
+    if (selection.has_enabled) return true;
+    const auto legacy = diagnostic_replay_saved_setting(
+        (runtime.root.parent_path() / "config.ini").string());
+    if (!legacy) return true;
+    selection.enabled = *legacy;
+    selection.has_enabled = true;
+    return save_state(runtime, error);
+}
+
 bool read_file(const fs::path& path, std::vector<uint8_t>& out,
                std::string* error) {
     std::ifstream in(path, std::ios::binary);
@@ -1806,6 +1828,44 @@ int provider_commit(void*, const char* image_path) {
     return 1;
 }
 
+int provider_commit_netplay(void*, const char*) {
+    Runtime& runtime = state();
+    Runtime saved;
+    saved.root = runtime.root;
+    if (!load_state(saved, &runtime.error)) return 0;
+    // Only the host recording choice may be committed from a vanilla lobby.
+    // Staged presentation/gameplay choices must not overwrite offline choices.
+    if (const Package* package = diagnostic_replay_package(runtime)) {
+        const auto& choice = package_selection(runtime, *package)
+            .features[kDiagnosticReplayFeature];
+        if (choice.has_enabled) {
+            auto& destination = saved.selections[kDiagnosticReplayPackage];
+            auto& feature = destination.features[kDiagnosticReplayFeature];
+            const bool changed = !feature.has_enabled ||
+                feature.enabled != choice.enabled;
+            if (destination.version.empty()) destination.version = package->version;
+            feature.enabled = choice.enabled;
+            feature.has_enabled = true;
+            if (changed && !save_state(saved, &runtime.error)) return 0;
+        }
+    }
+    runtime.selections = std::move(saved.selections);
+    runtime.committed = {};
+    runtime.committed_options.clear();
+    runtime.committed_asset_paths.clear();
+    runtime.committed_cheats.clear();
+    runtime.adaptive_view_enabled = false;
+    runtime.internal_resolution = 0;
+    runtime.view_width = 0;
+    runtime.diagnostic_replay_enabled =
+        mod_runtime_saved_diagnostic_replay_enabled(runtime.root);
+    gba_mod_disable_all_function_hooks();
+    gba_mod_audio_reset();
+    gba::foreign_presentation_internal::clear();
+    runtime.error.clear();
+    return 1;
+}
+
 const char* provider_error(void*) {
     return state().error.c_str();
 }
@@ -1990,6 +2050,7 @@ RecompLauncherCModProvider provider = {
     provider_diagnostic_get,
     ".gbamod",
     "GBA mod package",
+    provider_commit_netplay,
 };
 #endif
 
@@ -2018,7 +2079,8 @@ bool mod_runtime_initialize(const fs::path& root,
         return false;
     }
     if (!scan(runtime, &runtime.error) ||
-        !load_state(runtime, &runtime.error)) {
+        !load_state(runtime, &runtime.error) ||
+        !import_legacy_diagnostic_replay(runtime, &runtime.error)) {
         set_error(error, runtime.error);
         return false;
     }
@@ -2134,6 +2196,17 @@ bool mod_runtime_commit(const fs::path& rom_path, std::string* error) {
     return mod_runtime_commit_impl(rom_path, false, error);
 }
 
+int mod_runtime_saved_diagnostic_replay_enabled(const fs::path& root) {
+    Runtime saved;
+    saved.root = root;
+    if (!load_state(saved, nullptr)) return -1;
+    const auto package = saved.selections.find(kDiagnosticReplayPackage);
+    if (package == saved.selections.end()) return -1;
+    const auto feature = package->second.features.find(kDiagnosticReplayFeature);
+    return feature != package->second.features.end() && feature->second.has_enabled
+        ? (feature->second.enabled ? 1 : 0) : -1;
+}
+
 void mod_runtime_activate_plugins() {
     Runtime& runtime = state();
     if (!runtime.initialized) return;
@@ -2165,6 +2238,13 @@ void mod_runtime_activate_plugins() {
             }
         } close_stream_activation;
         plugin.callback();
+    }
+    // Host recording has its own visible control. Apply it last so a
+    // presentation reset/activation cannot couple recording to its choice.
+    if (const Package* package = diagnostic_replay_package(runtime)) {
+        const Feature& feature = *find_feature(*package, kDiagnosticReplayFeature);
+        (void)gba_mod_set_diagnostic_replay_enabled(
+            feature_enabled(runtime, *package, feature) ? 1 : 0);
     }
 }
 
