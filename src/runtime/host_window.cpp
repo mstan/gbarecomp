@@ -1574,7 +1574,15 @@ void render_host_layers(Backend* b) {
     SDL_RenderSetLogicalSize(b->renderer, logical_w, logical_h);
     SDL_RenderSetScale(b->renderer, 1.0f, 1.0f);
     SDL_RenderSetViewport(b->renderer, &viewport);
-    SDL_RenderSetScale(b->renderer, scale_x, scale_y);
+    // SDL2-compat reports the effective logical*user scale, while SetScale
+    // accepts the user factor. Native SDL2 uses an absolute scale. Observe
+    // each backend's effective unit factor instead of reapplying the logical
+    // letterbox multiplier on every overlay frame (3 -> 9 -> 27 -> ...).
+    float unit_scale_x = 1.0f, unit_scale_y = 1.0f;
+    SDL_RenderGetScale(b->renderer, &unit_scale_x, &unit_scale_y);
+    SDL_RenderSetScale(b->renderer,
+        scale_x / (unit_scale_x > 0.0f ? unit_scale_x : 1.0f),
+        scale_y / (unit_scale_y > 0.0f ? unit_scale_y : 1.0f));
     SDL_SetRenderDrawBlendMode(b->renderer, SDL_BLENDMODE_NONE);
 }
 

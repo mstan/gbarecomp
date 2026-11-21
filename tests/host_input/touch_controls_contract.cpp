@@ -14,8 +14,10 @@
 static bool capture_next_present = false;
 static std::vector<unsigned char> capture_rgba;
 static int capture_width = 0, capture_height = 0;
+static float presented_scale_x = 0, presented_scale_y = 0;
 extern "C" void __real_SDL_RenderPresent(SDL_Renderer*);
 extern "C" void __wrap_SDL_RenderPresent(SDL_Renderer* renderer) {
+    SDL_RenderGetScale(renderer, &presented_scale_x, &presented_scale_y);
     if (capture_next_present) {
         int lw = 0, lh = 0; float sx = 1, sy = 1; SDL_Rect viewport{};
         SDL_GetRendererOutputSize(renderer, &capture_width, &capture_height);
@@ -104,6 +106,16 @@ int main(int argc, char** argv) {
         check(touch.touch_pad_visible(), "Settings activation restores the pad");
         recomp_runtime_ui_close(ui);
         std::vector<std::uint8_t> rgb(240 * 160 * 3); touch.present(rgb.data());
+#if defined(GBARECOMP_TOUCH_CAPTURE)
+        check(presented_scale_x == 3.0f && presented_scale_y == 3.0f,
+              "overlay preserves the native three-times presentation scale");
+        // Stop repeating on a scale failure, rather than letting the old
+        // exponential transform exhaust memory in SDL's software renderer.
+        for (int frame = 0; frame < 12 && presented_scale_x == 3.0f && presented_scale_y == 3.0f; ++frame)
+            touch.present(rgb.data());
+        check(presented_scale_x == 3.0f && presented_scale_y == 3.0f,
+              "repeated touch overlays keep the effective scale stable");
+#endif
         auto finger = [&](Uint32 type, SDL_FingerID id, float x, float y) {
             SDL_Event event{}; event.type = type; event.tfinger.touchId = 55;
             event.tfinger.fingerId = id; event.tfinger.x = x; event.tfinger.y = y;
