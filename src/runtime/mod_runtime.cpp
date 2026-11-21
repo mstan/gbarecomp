@@ -4,6 +4,8 @@
 #include "codebreaker.h"
 #include "mod_function_hooks.h"
 #include "asset_picker.h"
+#include "diagnostic_replay_setting.h"
+#include "mod_diagnostics.h"
 
 #include "../gba/crc32.h"
 #include "../gba/foreign_presentation_internal.h"
@@ -800,7 +802,8 @@ RequiredAssetPickerSpec required_asset_spec(const RequiredAsset& asset) {
     result.dialog_filter = asset.name + " (" + patterns.str() + ")";
     result.dialog_filter.push_back('\0');
     result.dialog_filter += patterns.str();
-    result.dialog_filter += "\0All Files (*.*)\0*.*\0";
+    constexpr char all_files[] = "\0All Files (*.*)\0*.*\0";
+    result.dialog_filter.append(all_files, sizeof(all_files) - 1);
     result.dialog_title = "Select " + asset.name;
     result.spec.cache_filename = "";
     result.spec.expected_size = static_cast<size_t>(asset.expected_size);
@@ -1122,6 +1125,26 @@ bool save_state(Runtime& runtime, std::string* error) {
         return false;
     }
     return true;
+}
+
+const Package* diagnostic_replay_package(Runtime& runtime) {
+    const Package* package = selected_package(runtime, kDiagnosticReplayPackage);
+    return package && target_matches(*package, runtime) &&
+        find_feature(*package, kDiagnosticReplayFeature) ? package : nullptr;
+}
+
+bool import_legacy_diagnostic_replay(Runtime& runtime, std::string* error) {
+    const Package* package = diagnostic_replay_package(runtime);
+    if (!package) return true;
+    auto& selection = package_selection(runtime, *package)
+        .features[kDiagnosticReplayFeature];
+    if (selection.has_enabled) return true;
+    const auto legacy = diagnostic_replay_saved_setting(
+        (runtime.state_root.parent_path() / "config.ini").string());
+    if (!legacy) return true;
+    selection.enabled = *legacy;
+    selection.has_enabled = true;
+    return save_state(runtime, error);
 }
 
 bool read_file(const fs::path& path, std::vector<uint8_t>& out,
@@ -1808,6 +1831,45 @@ int provider_commit(void*, const char* image_path) {
     return 1;
 }
 
+int provider_commit_netplay(void*, const char*) {
+    Runtime& runtime = state();
+    Runtime saved;
+    saved.root = runtime.root;
+    saved.state_root = runtime.state_root;
+    if (!load_state(saved, &runtime.error)) return 0;
+    // Only the host recording choice may be committed from a vanilla lobby.
+    // Staged presentation/gameplay choices must not overwrite offline choices.
+    if (const Package* package = diagnostic_replay_package(runtime)) {
+        const auto& choice = package_selection(runtime, *package)
+            .features[kDiagnosticReplayFeature];
+        if (choice.has_enabled) {
+            auto& destination = saved.selections[kDiagnosticReplayPackage];
+            auto& feature = destination.features[kDiagnosticReplayFeature];
+            const bool changed = !feature.has_enabled ||
+                feature.enabled != choice.enabled;
+            if (destination.version.empty()) destination.version = package->version;
+            feature.enabled = choice.enabled;
+            feature.has_enabled = true;
+            if (changed && !save_state(saved, &runtime.error)) return 0;
+        }
+    }
+    runtime.selections = std::move(saved.selections);
+    runtime.committed = {};
+    runtime.committed_options.clear();
+    runtime.committed_asset_paths.clear();
+    runtime.committed_cheats.clear();
+    runtime.adaptive_view_enabled = false;
+    runtime.internal_resolution = 0;
+    runtime.view_width = 0;
+    runtime.diagnostic_replay_enabled =
+        mod_runtime_saved_diagnostic_replay_enabled(runtime.state_root);
+    gba_mod_disable_all_function_hooks();
+    gba_mod_audio_reset();
+    gba::foreign_presentation_internal::clear();
+    runtime.error.clear();
+    return 1;
+}
+
 const char* provider_error(void*) {
     return state().error.c_str();
 }
@@ -1945,6 +2007,96 @@ int provider_diagnostic_count(void*, const char* package_id,
         });
 }
 
+int provider_resource_count(void*, const char* package_id,
+                            const char* feature_id) {
+    if (!package_id || !feature_id) return 0;
+    const Package* package = selected_package(state(), package_id);
+    if (!package || !target_matches(*package, state()) ||
+        !find_feature(*package, feature_id)) return 0;
+    return (int)std::count_if(package->required_assets.begin(),
+        package->required_assets.end(), [&](const RequiredAsset& asset) {
+            return asset.feature_id == feature_id;
+        });
+}
+
+int provider_resource_get(void*, const char* package_id,
+                          const char* feature_id, int index,
+                          RecompLauncherCModResource* out) {
+    if (!out || index < 0 ||
+        !provider_resource_count(nullptr, package_id, feature_id)) return 0;
+    const Package& package = *selected_package(state(), package_id);
+    for (const RequiredAsset& asset : package.required_assets) {
+        if (asset.feature_id != feature_id || index-- != 0) continue;
+        std::memset(out, 0, sizeof(*out));
+        copy_text(out->id, asset.id);
+        copy_text(out->label, asset.name);
+        copy_text(out->description, asset.purpose);
+        copy_text(out->file_description, asset.name);
+        std::string patterns;
+        for (const std::string& extension : asset.extensions) {
+            if (!patterns.empty()) patterns += ',';
+            patterns += "*." + extension;
+        }
+        copy_text(out->file_patterns, patterns);
+        copy_text(out->format, "file");
+        out->required = 1;
+        const auto& paths = package_selection(state(), package).asset_paths;
+        const auto path = paths.find(asset.id);
+        if (path != paths.end()) copy_text(out->path, path->second);
+        const Feature& feature = *find_feature(package, feature_id);
+        // Validation runs on edits and again at commit. Getters must not hash
+        // a potentially large source file on every launcher drawing frame.
+        out->verified = out->path[0] && feature_enabled(state(), package, feature);
+        copy_text(out->status, out->path[0] ? "Selected; checked when enabled."
+                                          : "Select the required file.");
+        for (const Diagnostic& diagnostic : state().validation.diagnostics) {
+            if (diagnostic.package_id == package_id &&
+                diagnostic.feature_id == feature_id &&
+                diagnostic.resource == "asset:" + asset.id) {
+                out->verified = 0;
+                copy_text(out->status, diagnostic.message);
+            }
+        }
+        if (out->verified) copy_text(out->status, "Selected file verified.");
+        return 1;
+    }
+    return 0;
+}
+
+int provider_resource_set_path(void*, const char* package_id,
+                               const char* feature_id,
+                               const char* resource_id, const char* path) {
+    if (!resource_id || !path ||
+        !provider_resource_count(nullptr, package_id, feature_id)) return 0;
+    Runtime& runtime = state();
+    const Package& package = *selected_package(runtime, package_id);
+    for (const RequiredAsset& asset : package.required_assets) {
+        if (asset.feature_id != feature_id || asset.id != resource_id) continue;
+        if (*path) {
+            RequiredAssetPickerSpec spec = required_asset_spec(asset);
+            bind_required_asset_spec(&spec);
+            AssetResult result = validate_asset_path(path, spec.spec);
+            if (!result.ok) { runtime.error = result.error; return 0; }
+        }
+        auto& paths = package_selection(runtime, package).asset_paths;
+        const auto before = paths.find(asset.id);
+        const bool had_path = before != paths.end();
+        const std::string old_path = had_path ? before->second : std::string{};
+        if (*path) paths[asset.id] = path;
+        else paths.erase(asset.id);
+        if (!save_state(runtime, &runtime.error)) {
+            if (had_path) paths[asset.id] = old_path;
+            else paths.erase(asset.id);
+            return 0;
+        }
+        refresh_validation();
+        runtime.error.clear();
+        return 1;
+    }
+    runtime.error = "Unknown required file.";
+    return 0;
+}
+
 int provider_diagnostic_get(
     void*, const char* package_id, const char* feature_id,
     int index, RecompLauncherCModDiagnostic* out) {
@@ -1992,6 +2144,10 @@ RecompLauncherCModProvider provider = {
     provider_diagnostic_get,
     ".gbamod",
     "GBA mod package",
+    provider_commit_netplay,
+    provider_resource_count,
+    provider_resource_get,
+    provider_resource_set_path,
 };
 #endif
 
@@ -2022,7 +2178,8 @@ bool mod_runtime_initialize(const fs::path& root,
         return false;
     }
     if (!scan(runtime, &runtime.error) ||
-        !load_state(runtime, &runtime.error)) {
+        !load_state(runtime, &runtime.error) ||
+        !import_legacy_diagnostic_replay(runtime, &runtime.error)) {
         set_error(error, runtime.error);
         return false;
     }
@@ -2102,6 +2259,7 @@ bool mod_runtime_commit_impl(const fs::path& rom_path, bool allow_picker,
     // Only the launcher provider's Commit action may open a picker. Normal
     // runtime/headless commits remain noninteractive and fail closed.
     if (!resolve_required_assets(runtime, allow_picker, &runtime.error)) {
+        runtime.validation = validate(runtime);
         set_error(error, runtime.error);
         return false;
     }
@@ -2150,6 +2308,18 @@ bool mod_runtime_commit(const fs::path& rom_path, std::string* error) {
     return mod_runtime_commit_impl(rom_path, false, error);
 }
 
+int mod_runtime_saved_diagnostic_replay_enabled(const fs::path& root) {
+    Runtime saved;
+    saved.root = root;
+    saved.state_root = root;
+    if (!load_state(saved, nullptr)) return -1;
+    const auto package = saved.selections.find(kDiagnosticReplayPackage);
+    if (package == saved.selections.end()) return -1;
+    const auto feature = package->second.features.find(kDiagnosticReplayFeature);
+    return feature != package->second.features.end() && feature->second.has_enabled
+        ? (feature->second.enabled ? 1 : 0) : -1;
+}
+
 void mod_runtime_activate_plugins() {
     Runtime& runtime = state();
     if (!runtime.initialized) return;
@@ -2181,6 +2351,13 @@ void mod_runtime_activate_plugins() {
             }
         } close_stream_activation;
         plugin.callback();
+    }
+    // Host recording has its own visible control. Apply it last so a
+    // presentation reset/activation cannot couple recording to its choice.
+    if (const Package* package = diagnostic_replay_package(runtime)) {
+        const Feature& feature = *find_feature(*package, kDiagnosticReplayFeature);
+        (void)gba_mod_set_diagnostic_replay_enabled(
+            feature_enabled(runtime, *package, feature) ? 1 : 0);
     }
 }
 

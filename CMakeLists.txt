@@ -1003,6 +1003,38 @@ if(GBARECOMP_ENABLE_MODS)
         target_link_libraries(mod_runtime_tests PRIVATE comdlg32 user32 winmm)
     endif()
     add_test(NAME mod_runtime_tests COMMAND mod_runtime_tests)
+    if(EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/recomp_launcher.h")
+        add_executable(mod_resource_ui_tests
+            tests/mod_runtime/resource_ui_test.cpp
+            tests/mod_runtime/ppu_provider_stub.cpp
+            src/runtime/codebreaker.cpp src/runtime/mod_function_hooks.cpp
+            src/runtime/asset_picker.cpp src/runtime/host_platform.cpp
+            src/gba/mod_audio.cpp src/gba/crc32.cpp src/gba/sha1.cpp)
+        target_compile_definitions(mod_resource_ui_tests PRIVATE
+            GBARECOMP_MOD_UI=1 GBARECOMP_TEST_NO_ASSET_DIALOGS=1)
+        target_include_directories(mod_resource_ui_tests PRIVATE
+            src/runtime src/gba src/armv4t "${GBARECOMP_RUNTIME_UI_ROOT}/src")
+        target_link_libraries(mod_resource_ui_tests PRIVATE gbarecomp_rom_input)
+        if(WIN32 OR MSYS)
+            target_link_libraries(mod_resource_ui_tests PRIVATE comdlg32 user32 winmm)
+        endif()
+        add_test(NAME mod_resource_ui_tests COMMAND mod_resource_ui_tests)
+        add_executable(mod_diagnostics_ui_tests
+            tests/mod_runtime/diagnostics_ui_test.cpp
+            tests/mod_runtime/ppu_provider_stub.cpp
+            src/runtime/codebreaker.cpp src/runtime/mod_function_hooks.cpp
+            src/runtime/asset_picker.cpp src/runtime/host_platform.cpp
+            src/gba/mod_audio.cpp src/gba/crc32.cpp src/gba/sha1.cpp)
+        target_compile_definitions(mod_diagnostics_ui_tests PRIVATE
+            GBARECOMP_MOD_UI=1 GBARECOMP_TEST_NO_ASSET_DIALOGS=1)
+        target_include_directories(mod_diagnostics_ui_tests PRIVATE
+            src/runtime src/gba src/armv4t "${GBARECOMP_RUNTIME_UI_ROOT}/src")
+        target_link_libraries(mod_diagnostics_ui_tests PRIVATE gbarecomp_rom_input)
+        if(WIN32 OR MSYS)
+            target_link_libraries(mod_diagnostics_ui_tests PRIVATE comdlg32 user32 winmm)
+        endif()
+        add_test(NAME mod_diagnostics_ui_tests COMMAND mod_diagnostics_ui_tests)
+    endif()
 endif()
 
 add_executable(codebreaker_tests
