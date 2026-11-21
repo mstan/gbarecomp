@@ -34,6 +34,7 @@ int main() {
         sandbox = fs::temp_directory_path() / ("gbarecomp-diagnostics-ui-" +
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         const auto root = sandbox / "mods";
+        const auto state_root = sandbox / "player" / "mods";
         const auto diagnostic = root / "packages" /
             gbarecomp::kDiagnosticReplayPackage / "1.0.0";
         const auto presentation = root / "packages/test.presentation/1.0.0";
@@ -59,7 +60,7 @@ int main() {
               "presentation fixture registration failed");
         std::string error;
         auto initialize = [&] { return gbarecomp::mod_runtime_initialize(
-            root, "test-game", target, &error); };
+            root, "test-game", target, &error, state_root); };
         check(initialize(), error.c_str());
         const auto* provider = gbarecomp::mod_runtime_launcher_provider();
         check(provider && provider->commit_netplay, "host-only lobby commit unavailable");
@@ -96,7 +97,7 @@ int main() {
         check(!gba_mod_adaptive_view_enabled() && gba_mod_diagnostic_replay_enabled() == 1,
               "presentation Off disabled recording");
 
-        const auto config = sandbox / "config.ini";
+        const auto config = state_root.parent_path() / "config.ini";
         const std::string legacy_off = "[Other]\nkeep=this\n[Diagnostics]\nreplay_capture=0\n";
         write_file(config, legacy_off);
         check(initialize() && !get(package, feature).enabled,
@@ -130,12 +131,13 @@ int main() {
         check(initialize() && get("test.presentation", "view").enabled &&
               !get(package, feature).enabled,
               "lobby changed offline presentation choice or failed to save recording Off");
-        const auto saved_bytes = read_file(root / "state.toml");
+        const auto saved_bytes = read_file(state_root / "state.toml");
         write_file(presentation / "manifest.toml", "invalid catalog for read-only lookup");
-        check(gbarecomp::mod_runtime_saved_diagnostic_replay_enabled(root) == 0 &&
-              read_file(root / "state.toml") == saved_bytes &&
+        check(gbarecomp::mod_runtime_saved_diagnostic_replay_enabled(state_root) == 0 &&
+              read_file(state_root / "state.toml") == saved_bytes &&
               presentation_activations == before_lobby,
               "host-only lookup scanned/activated a catalog or changed state");
+        check(!fs::exists(root / "state.toml"), "catalog root acquired player state");
         // Only these synthetic files exist beneath this unique owned root.
         check(fs::weakly_canonical(sandbox.parent_path()) ==
               fs::weakly_canonical(fs::temp_directory_path()), "fixture containment");

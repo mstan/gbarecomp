@@ -1140,7 +1140,7 @@ bool import_legacy_diagnostic_replay(Runtime& runtime, std::string* error) {
         .features[kDiagnosticReplayFeature];
     if (selection.has_enabled) return true;
     const auto legacy = diagnostic_replay_saved_setting(
-        (runtime.root.parent_path() / "config.ini").string());
+        (runtime.state_root.parent_path() / "config.ini").string());
     if (!legacy) return true;
     selection.enabled = *legacy;
     selection.has_enabled = true;
@@ -1835,6 +1835,7 @@ int provider_commit_netplay(void*, const char*) {
     Runtime& runtime = state();
     Runtime saved;
     saved.root = runtime.root;
+    saved.state_root = runtime.state_root;
     if (!load_state(saved, &runtime.error)) return 0;
     // Only the host recording choice may be committed from a vanilla lobby.
     // Staged presentation/gameplay choices must not overwrite offline choices.
@@ -1861,7 +1862,7 @@ int provider_commit_netplay(void*, const char*) {
     runtime.internal_resolution = 0;
     runtime.view_width = 0;
     runtime.diagnostic_replay_enabled =
-        mod_runtime_saved_diagnostic_replay_enabled(runtime.root);
+        mod_runtime_saved_diagnostic_replay_enabled(runtime.state_root);
     gba_mod_disable_all_function_hooks();
     gba_mod_audio_reset();
     gba::foreign_presentation_internal::clear();
@@ -2310,6 +2311,7 @@ bool mod_runtime_commit(const fs::path& rom_path, std::string* error) {
 int mod_runtime_saved_diagnostic_replay_enabled(const fs::path& root) {
     Runtime saved;
     saved.root = root;
+    saved.state_root = root;
     if (!load_state(saved, nullptr)) return -1;
     const auto package = saved.selections.find(kDiagnosticReplayPackage);
     if (package == saved.selections.end()) return -1;

@@ -1029,6 +1029,7 @@ if(GBARECOMP_ENABLE_MODS)
             GBARECOMP_MOD_UI=1 GBARECOMP_TEST_NO_ASSET_DIALOGS=1)
         target_include_directories(mod_diagnostics_ui_tests PRIVATE
             src/runtime src/gba src/armv4t "${GBARECOMP_RUNTIME_UI_ROOT}/src")
+        target_link_libraries(mod_diagnostics_ui_tests PRIVATE gbarecomp_rom_input)
         if(WIN32 OR MSYS)
             target_link_libraries(mod_diagnostics_ui_tests PRIVATE comdlg32 user32 winmm)
         endif()
