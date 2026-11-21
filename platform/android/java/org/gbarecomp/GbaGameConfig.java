@@ -25,6 +25,8 @@ public final class GbaGameConfig {
     public final String payloadVersion;
     public final String setupNote;
     public final boolean showGyroStatus;
+    public final String saveFile;
+    public final int saveBytes;
 
     private GbaGameConfig(Bundle m) {
         title = string(m, "gbarecomp.title", "gbarecomp");
@@ -40,6 +42,8 @@ public final class GbaGameConfig {
         payloadVersion = string(m, "gbarecomp.payload_version", "1");
         setupNote = string(m, "gbarecomp.setup_note", "");
         showGyroStatus = Boolean.parseBoolean(string(m, "gbarecomp.gyro", "false"));
+        saveFile = string(m, "gbarecomp.save_file", "");
+        saveBytes = Integer.parseInt(string(m, "gbarecomp.save_bytes", "0"));
     }
 
     private static String string(Bundle m, String key, String fallback) {
