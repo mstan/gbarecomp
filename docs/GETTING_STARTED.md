@@ -67,6 +67,26 @@ provide the game's configuration, and integrate display, audio, input and
 saves. Follow that project's BIOS generation/linking pattern using your own
 supported BIOS; neither BIOS nor cartridge data belongs in the repository.
 
+
+## Describe the game project
+
+In the separate game's repository root, write its community metadata with the
+engine's small metadata command. Supply the game's actual name rather than
+guessing it from a filename:
+
+```powershell
+python gbarecomp/tools/write_recomp_json.py .recomp.json `
+  --game "My Game" --project MyGameRecomp --rom 'D:/ROMs/My Game.gba'
+```
+
+Commit `.recomp.json` with the game project. This uses the open
+[recomp.board specification](https://recomp.fyi/spec): it records the original
+system, toolchain, game name and input SHA-1, without copying ROM data or local
+paths. Add `--region` or `--serial` only when you know that release's values.
+New files start at `exploring`; update the status and other metadata as the
+project progresses. Running the command again only fills missing fields and
+keeps maintainer-written values, including supported revisions.
+
 Read the [architecture guide](ARCHITECTURE.md) for the boundary between
 shared GBA hardware and game-owned integration. Keep generated code in
 ignored build output. Fix analysis inputs or the emitter and regenerate
