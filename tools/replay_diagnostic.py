@@ -29,7 +29,7 @@ SIDECARS = (".state", ".config.ini", ".game.toml", ".mods.toml", ".sav", ".args.
 # its own. The value of each listed value-flag is dropped with it.
 DROP_VALUE_FLAGS = {"--rom", "--bios", "--save", "--save-path", "--state-dir", "--tcp",
                     "--tcp-observe", "--load-state", "--frames", "--steps", "--config",
-                    "--replay-diagnostic", "--dump-bmp", "--dump-png", "--scale",
+                    "--replay-diagnostic", "--dump-bmp", "--dump-png", "--dump-state", "--scale",
                     "--rom-sha1", "--rom-crc32", "--bios-sha1"}
 DROP_FLAGS = {"--launcher", "--no-launcher", "--window", "--no-window", "--fullscreen",
               "--uncapped"}
