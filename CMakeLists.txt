@@ -1224,6 +1224,10 @@ target_include_directories(diagnostic_replay_tests PRIVATE src/runtime src/debug
 find_package(Threads REQUIRED)
 target_link_libraries(diagnostic_replay_tests PRIVATE Threads::Threads)
 add_test(NAME diagnostic_replay_tests COMMAND diagnostic_replay_tests)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME diagnostic_replay_args_test COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/runtime/diagnostic_replay_args_test.py")
+endif()
 # Host-stack budget guard — pure pthread/stack logic, links only
 # src/runtime/mobile_platform.cpp.
 add_executable(stack_guard_tests
