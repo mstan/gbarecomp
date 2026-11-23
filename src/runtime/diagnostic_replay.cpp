@@ -1,6 +1,7 @@
 // diagnostic_replay.cpp — see diagnostic_replay.h and docs/DIAGNOSTIC_REPLAY.md.
 
 #include "diagnostic_replay.h"
+#include "diagnostic_replay_setting.h"
 
 #include "replay_writer.h"
 
@@ -863,29 +864,7 @@ std::string diagnostic_executable_hash() {
 const char* diagnostic_engine_revision() { return GBARECOMP_ENGINE_REVISION; }
 
 bool diagnostic_replay_setting(const std::string& config_ini, bool fallback) {
-    std::ifstream in(config_ini);
-    if (!in) return fallback;
-    std::string line;
-    bool section = false;
-    bool value = fallback;
-    auto trim = [](std::string v) {
-        const auto b = v.find_first_not_of(" \t\r");
-        const auto e = v.find_last_not_of(" \t\r");
-        return b == std::string::npos ? std::string() : v.substr(b, e - b + 1);
-    };
-    while (std::getline(in, line)) {
-        line = trim(line);
-        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
-        if (line.front() == '[') {
-            section = trim(line.substr(1, line.find(']') - 1)) == "Diagnostics";
-            continue;
-        }
-        const auto eq = line.find('=');
-        if (!section || eq == std::string::npos) continue;
-        if (trim(line.substr(0, eq)) == "replay_capture")
-            value = trim(line.substr(eq + 1)) != "0";
-    }
-    return value;
+    return diagnostic_replay_saved_setting(config_ini).value_or(fallback);
 }
 
 }  // namespace gbarecomp

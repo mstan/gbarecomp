@@ -49,6 +49,7 @@
 #include "../gba/sha1.h"
 #include "mod_rom_data.h"
 #include "diagnostic_replay.h"
+#include "mod_diagnostics.h"
 #include "replay_writer.h"
 #include "snapshot.h"
 #include "file_replace.h"
@@ -4630,6 +4631,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         bool want = diagnostic_replay_setting(
             player_config.string(), opts.diagnostic_replay_default);
 #if defined(GBARECOMP_ENABLE_MODS)
+        // Read only the host preference even when no gameplay catalog was
+        // activated. Catalog loading and activation remain disabled in netplay.
+        const int saved_recording = mod_runtime_saved_diagnostic_replay_enabled(
+            diag_exe_dir / "mods");
+        if (saved_recording >= 0) want = saved_recording != 0;
         if (mods_ready && gba_mod_diagnostic_replay_enabled() >= 0)
             want = gba_mod_diagnostic_replay_enabled() != 0;
 #endif
