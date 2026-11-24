@@ -461,6 +461,7 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/multiplayer_session.cpp
     src/runtime/multiplayer_slice.cpp
     src/runtime/runtime.cpp
+    src/runtime/host_capture.cpp
     src/runtime/mod_rom_data.cpp
     src/runtime/diagnostic_replay.cpp
     src/runtime/save_config.cpp
@@ -1479,6 +1480,16 @@ add_test(NAME presentation_layout_tests COMMAND presentation_layout_tests)
 add_executable(simulation_archive_tests tests/simulation_archive/test_main.cpp)
 target_include_directories(simulation_archive_tests PRIVATE src/gba)
 add_test(NAME simulation_archive_tests COMMAND simulation_archive_tests)
+
+add_executable(host_capture_tests tests/host_capture_test.cpp
+    src/runtime/host_capture.cpp)
+target_include_directories(host_capture_tests PRIVATE src/runtime)
+add_test(NAME host_capture_unbounded_audio COMMAND host_capture_tests
+    "${CMAKE_CURRENT_BINARY_DIR}/host_capture_unbounded.wav")
+add_test(NAME host_capture_bounded_audio COMMAND host_capture_tests
+    "${CMAKE_CURRENT_BINARY_DIR}/host_capture_bounded.wav" 1)
+add_test(NAME host_capture_invalid_audio COMMAND host_capture_tests
+    "${CMAKE_CURRENT_BINARY_DIR}/absent-capture-output/host_capture.wav" invalid)
 
 # Touch input: gesture recognizer, hub rings/scripts, key synthesis, JSON.
 add_gbarecomp_runtime_stack_test(touch_input_tests tests/touch_input/test_main.cpp)

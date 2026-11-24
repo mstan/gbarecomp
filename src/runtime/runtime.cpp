@@ -33,6 +33,7 @@
 #include "gba_rom_header.h"
 #include "host_platform.h"
 #include "host_window.h"
+#include "host_capture.h"
 #include "color_lut.h"
 #include "touch_input.h"
 #include "runtime_arm.h"
@@ -873,6 +874,9 @@ constexpr std::string_view kCliValueFlags[] = {
     "--sharp-filter", "--linear-filter", "--affine-filter", "--internal-resolution", "--screen",
     "--integer-scale", "--scanlines", "--scanline-strength",
     "--volume",      "--audio-rate",    "--replay-diagnostic", "--state-dir",
+    "--capture-out", "--capture-size",  "--capture-from",  "--capture-to",
+    "--capture-every", "--capture-format", "--capture-wav", "--input-script",
+    "--exit-at-frame",
 };
 
 bool cli_flag_takes_value(std::string_view flag) {
@@ -954,6 +958,18 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             return argv[++i];
         };
 
+        {   // --capture-*, --input-script, --exit-at-frame (host_capture.h):
+            // unattended presented-frame capture in a never-shown window.
+            const int before = i;
+            if (gbarecomp::capture::parse_arg(argc, argv, &i)) {
+                args->window = true;
+                args->window_set = true;
+                args->uncapped = true;
+                args->quiet = true;
+                continue;
+            }
+            if (i != before) return false;
+        }
         if (s == "--config") {
             if (!need_value("--config")) return false;
             continue;
@@ -3811,7 +3827,16 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     const char* input_record_env = std::getenv("GBARECOMP_INPUT_RECORD");
     const char* input_replay_env = std::getenv("GBARECOMP_INPUT_REPLAY");
     const bool input_record_requested = input_record_env && input_record_env[0];
-    const bool input_replay_requested = input_replay_env && input_replay_env[0];
+    std::vector<gbarecomp::capture::InputEvent> capture_script;
+    if (!gbarecomp::capture::load_script(&capture_script)) {
+        runtime_shutdown();
+        return 1;
+    }
+    gbarecomp::capture::set_png_writer(&write_png);
+    const bool capture_script_requested = !capture_script.empty();
+    const bool input_replay_requested =
+        (input_replay_env && input_replay_env[0]) || capture_script_requested;
+    uint64_t input_replay_base = 0;  // capture scripts count from the first run frame
     if (input_record_requested && input_replay_requested) {
         std::fprintf(stderr,
                      "[gbarecomp:runtime] GBARECOMP_INPUT_RECORD and "
@@ -3842,7 +3867,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     std::vector<InputTraceEvent> input_replay_events;
     std::size_t input_replay_index = 0;
-    if (input_replay_requested) {
+    if (capture_script_requested) {
+        for (const auto& e : capture_script)
+            input_replay_events.push_back({e.frame, e.keyinput});
+    } else if (input_replay_requested) {
         std::ifstream replay(input_replay_env);
         if (!replay) {
             std::fprintf(stderr,
@@ -3888,7 +3916,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 
     auto apply_input_replay = [&]() {
         if (!input_replay_requested) return;
-        const uint64_t frame = ppu.frame_count();
+        const uint64_t frame = ppu.frame_count() - input_replay_base;
         while (input_replay_index + 1 < input_replay_events.size() &&
                input_replay_events[input_replay_index + 1].frame <= frame) {
             ++input_replay_index;
@@ -4734,7 +4762,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 last_presented_frame = frame;
                 if (present_frame) {
                     ++frames_presented;
-                    if (args.frames >= 0 && frames_presented >= args.frames)
+                    if ((args.frames >= 0 && frames_presented >= args.frames) ||
+                        gbarecomp::capture::should_exit())
                         host_quit = true;
                     if (pacer) pacer->wait_for_next_frame(banked_frames);
                 }
@@ -4995,6 +5024,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // more frames past the restored frame counter instead of breaking on the
     // first step when the loaded index already exceeds the cap.
     const uint64_t headless_base_frame = ppu.frame_count();
+    if (capture_script_requested) input_replay_base = headless_base_frame;
     // Passive bounded headless runs need no per-frame host work. Keep their
     // guest call stack intact just like windowed play and unwind only after the
     // requested final VBlank. Emerald's IRQ-driven SoundMainRAM mixer is a
@@ -5174,7 +5204,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                 last_presented_frame = frame;
                 if (present_frame) {
                     ++frames_presented;
-                    if (args.frames >= 0 && frames_presented >= args.frames) {
+                    if ((args.frames >= 0 && frames_presented >= args.frames) ||
+                        gbarecomp::capture::should_exit()) {
                         host_quit = true;
                     }
                     // Normal play presents/paces every frame. Fast-forward
@@ -5206,6 +5237,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             break;
         }
     }
+    gbarecomp::capture::finish();
     const double gameplay_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - gameplay_begin).count();
     const uint64_t gameplay_end_frame = ppu.frame_count();
@@ -5400,7 +5432,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gbarecomp::overlay_loader_shutdown();
     runtime_shutdown();
     if (diag_exit) return diag_exit;
-    return save_ok && gpu_dump_ok ? 0 : 1;
+    return save_ok && gpu_dump_ok && !gbarecomp::capture::failed() ? 0 : 1;
 }
 
 }  // namespace gbarecomp

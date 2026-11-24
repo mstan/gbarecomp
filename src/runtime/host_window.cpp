@@ -1,6 +1,7 @@
 // host_window.cpp — SDL2-backed window. Stubs out when SDL2 isn't found.
 
 #include "host_window.h"
+#include "host_capture.h"
 #if defined(GBARECOMP_ENABLE_HQ2X)
 #include "hq2x_filter.h"
 #endif
@@ -1958,10 +1959,17 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         b->hotkeys[h] = parse_hotkey(kHotkeyDefaults[h]);
     // Linear vs nearest scaling is a texture-creation-time hint.
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, linear_filter ? "linear" : "nearest");
-    const int win_w = base_w * scale;
-    const int win_h = base_h * scale;
+    int win_w = base_w * scale;
+    int win_h = base_h * scale;
     const char* hidden_env = std::getenv("GBARECOMP_WINDOW_HIDDEN");
-    const bool hidden_window = hidden_env && *hidden_env && *hidden_env != '0';
+    // Unattended capture: a never-shown window of exactly the capture size.
+    const bool capturing = gbarecomp::capture::requested();
+    if (capturing) {
+        int cw = 0, ch = 0;
+        gbarecomp::capture::window_size(&cw, &ch);
+        if (cw > 0 && ch > 0) { win_w = cw; win_h = ch; }
+    }
+    const bool hidden_window = capturing || (hidden_env && *hidden_env && *hidden_env != '0');
     Uint32 window_flags = (hidden_window ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN) |
         ((b->expanded_view || b->resize_driven_view ||
           b->freely_resizable_window)
@@ -2183,7 +2191,8 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     const char* audio_device_env = std::getenv("GBARECOMP_AUDIO_DEVICE");
     const char* audio_device_name =
         audio_device_env && *audio_device_env ? audio_device_env : nullptr;
-    b->audio_dev = SDL_OpenAudioDevice(audio_device_name, /*iscapture=*/0,
+    // Capture taps the mix in push_audio_stereo_block(); no host device.
+    b->audio_dev = capturing ? 0 : SDL_OpenAudioDevice(audio_device_name, /*iscapture=*/0,
                                        &want, &got,
                                        SDL_AUDIO_ALLOW_FREQUENCY_CHANGE);
     if (b->audio_dev && (got.channels != 2 || got.format != AUDIO_S16SYS || got.freq <= 0)) {
@@ -2252,6 +2261,10 @@ void HostWindow::push_audio_stereo_block(const int16_t* samples, std::size_t cou
     if (!open_ || !impl_ || !samples || count == 0 || count > INT_MAX / 4 ||
         !(rate == 32768 || rate == 65536 || rate == 131072 || rate == 262144)) return;
     auto* b = static_cast<Backend*>(impl_);
+    if (gbarecomp::capture::requested()) {
+        gbarecomp::capture::on_audio(samples, count, rate);
+        return;
+    }
     if (b->audio_dev == 0) return;
 
     // Volume (launcher setting + VolumeUp/Down hotkeys): scale into scratch
@@ -2955,7 +2968,21 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
         SDL_SetRenderDrawBlendMode(b->renderer, SDL_BLENDMODE_NONE);
         SDL_RenderSetLogicalSize(b->renderer, logical_w, logical_h);
     }
-    render_host_layers(b);
+    if (!gbarecomp::capture::requested()) render_host_layers(b);
+    // Unattended capture: read back exactly what a window of this size shows.
+    const bool cap_frame = gbarecomp::capture::requested();
+    if (cap_frame) {
+        std::vector<uint8_t> rgb;
+        int ow = 0, oh = 0;
+        if (gbarecomp::capture::want_readback() &&
+            SDL_GetRendererOutputSize(b->renderer, &ow, &oh) == 0 && ow > 0 && oh > 0) {
+            rgb.resize(std::size_t(ow) * std::size_t(oh) * 3u);
+            if (SDL_RenderReadPixels(b->renderer, nullptr, SDL_PIXELFORMAT_RGB24, rgb.data(),
+                                     ow * 3) != 0)
+                rgb.clear();
+        }
+        gbarecomp::capture::on_frame(rgb.empty() ? nullptr : rgb.data(), ow, oh);
+    }
     // MC-WS-002: time the present itself (vsync blocks here — or doesn't)
     // and stamp the DWM refresh counter into the cadence ring.
     if (b->cadence.active()) {
