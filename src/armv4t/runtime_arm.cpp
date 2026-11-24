@@ -390,6 +390,7 @@ extern "C" uint32_t g_runtime_resume_pc = 0u;
 // SVC-mode exception entry; a return of 1 means the SWI was serviced in HLE and
 // the guest resumes at LR with no BIOS dispatch. 0 falls through to LLE.
 extern "C" int (*g_bios_hle_hook)(uint32_t swi_num) = nullptr;
+extern "C" int (*g_bios_hle_dispatch_hook)(uint32_t pc, int thumb) = nullptr;
 
 namespace {
 // ~8M instructions of history (~60+ PPU-frames). The recomp runs several frames
@@ -1065,6 +1066,8 @@ const DispatchEntry* dispatch_resolve(uint32_t target_pc) {
         // No byte-verified body matched. A fixed mutable-code entry describes
         // the old bytes and must not silently execute after a code rewrite.
     } else if (pc < kBiosRegionEnd) {
+        if (g_bios_hle_dispatch_hook && g_bios_hle_dispatch_hook(pc, thumb ? 1 : 0))
+            return nullptr;
         entry = lookup_in(
             kBiosDispatchTable, kBiosDispatchTableLen, pc, thumb);
     } else {
@@ -1910,6 +1913,7 @@ void runtime_capture_arm_context(RuntimeArmContext& out) {
     out.force_interp = g_runtime_force_interp_hook;
     out.entry_hook = g_runtime_fn_entry_hook;
     out.bios_hook = g_bios_hle_hook;
+    out.bios_dispatch_hook = g_bios_hle_dispatch_hook;
 }
 void runtime_restore_arm_context(const RuntimeArmContext& in) {
     if (in.swi_returns.size() > kSwiLedgerCap)
@@ -1936,6 +1940,7 @@ void runtime_restore_arm_context(const RuntimeArmContext& in) {
     g_runtime_force_interp_step_active = 0;
     g_runtime_fn_entry_hook = in.entry_hook;
     g_bios_hle_hook = in.bios_hook;
+    g_bios_hle_dispatch_hook = in.bios_dispatch_hook;
 }
 void runtime_set_resumable_context(RuntimeArmContext* context) {
     g_resumable_context = context;
