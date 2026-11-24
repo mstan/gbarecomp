@@ -1811,7 +1811,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
 #endif
     gba::bios_hle_set_mode(args.bios_hle ? gba::BiosHleMode::On
                                          : gba::BiosHleMode::Off);
-    gba::bios_hle_set_irq_enabled(args.bios_hle);
+    gba::bios_hle_set_interrupts_enabled(args.bios_hle);
     if (!args.quiet)
         std::printf("bios_backend=%s\n",
                     gba::bios_hle_mode_name(gba::bios_hle_mode()));

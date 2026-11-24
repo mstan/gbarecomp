@@ -465,7 +465,7 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/diagnostic_replay.cpp
     src/runtime/save_config.cpp
     src/runtime/bios_hle.cpp
-    src/runtime/bios_irq_hle.cpp
+    src/runtime/bios_interrupt_hle.cpp
     src/runtime/generated_dispatch.cpp
     src/runtime/runtime_bus_bridge.cpp
     src/runtime/arm_cpu_bridge.cpp

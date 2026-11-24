@@ -41,7 +41,7 @@ enum class BiosHleMode {
 // Install the catalog or the fixed build-selected family. Safe to call once at
 // runtime bring-up. There is no player-facing native-math runtime selector.
 void bios_hle_set_mode(BiosHleMode mode);
-void bios_hle_set_irq_enabled(bool enabled);
+void bios_hle_set_interrupts_enabled(bool enabled);
 
 // Fixed build identity, independent of the grandfathered catalog mode.
 bool bios_native_math_enabled();

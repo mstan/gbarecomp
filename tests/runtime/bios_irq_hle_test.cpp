@@ -21,6 +21,12 @@ constexpr uint32_t kUserStack = 0x03007f00u;
 constexpr uint32_t kIrqI = 0x80u;
 constexpr uint32_t kCallbackLatch = 0x4b534951u;
 constexpr uint32_t kResumeLatch = 0x5149524bu;
+constexpr uint32_t kWaitHandler = kHandler + 8u;
+constexpr uint32_t kWaitCaller = kHandler + 16u;
+constexpr uint32_t kFirmwareFlags = 0x03007ff8u;
+constexpr uint32_t kIe = 0x04000200u;
+constexpr uint32_t kIf = 0x04000202u;
+constexpr uint32_t kIme = 0x04000208u;
 unsigned calls;
 bool exercise_nested;
 
@@ -58,6 +64,75 @@ void handler() {
     g_cpu.R[15] = g_cpu.R[14];
 }
 
+void wait_handler() {
+    require((g_cpu.banked_spsr[ARM_BANK_IRQ] & 0x1fu) == 0x1fu,
+            "wait interrupt preempts the firmware's System-mode frame");
+    const uint16_t acknowledge = bus_read_u16(kIf);
+    bus_write_u16(kIf, acknowledge);
+    bus_write_u16(kFirmwareFlags, bus_read_u16(kFirmwareFlags) | acknowledge);
+    g_cpu.R[15] = g_cpu.R[14];
+}
+
+void check_interrupt_wait(gba::GbaBus& bus) {
+    constexpr uint16_t vblank = gba::GbaIo::IrqVBlank;
+    constexpr uint16_t spurious = gba::GbaIo::IrqTimer0;
+    constexpr uint16_t unrelated = gba::GbaIo::IrqSerial;
+    constexpr uint32_t supervisor_stack = 0x03007fe0u;
+    std::array<uint8_t, 32> rom{};
+    rom[16] = 5;
+    rom[17] = 0xdf;
+    rom[18] = 4;
+    rom[19] = 0xdf;
+    bus.set_rom(rom.data(), rom.size());
+    bus.write32(0x03007ffcu, kWaitHandler);
+    bus.write16(kFirmwareFlags, vblank | unrelated);
+    bus.write16(kIe, vblank | spurious);
+    bus.write8(kIme, 0);
+
+    g_cpu = {};
+    g_cpu.cpsr = 0x3fu;
+    g_cpu.R[2] = 0x1234u;
+    g_cpu.R[4] = 0x5678u;
+    g_cpu.R[13] = kUserStack;
+    g_cpu.R[14] = kInterrupted;
+    g_cpu.R[15] = kWaitCaller + 2u;
+    g_cpu.banked_sp[ARM_BANK_IRQ] = kIrqStack;
+    g_cpu.banked_sp[ARM_BANK_SUPERVISOR] = supervisor_stack;
+    runtime_swi(5);
+    require(bus.io().halted() && (g_cpu.cpsr & 0x3fu) == 0x1fu &&
+                g_cpu.R[13] == kUserStack - 16u,
+            "VBlankIntrWait parks the System-mode service on the guest stack");
+    require(bus.read16(kFirmwareFlags) == unrelated && bus.read16(kIme) == 1,
+            "VBlankIntrWait discards only the old VBlank flag and enables IME");
+
+    bus.io().request_irq(spurious);
+    runtime_tick(1);
+    require(!bus.io().halted(), "unrelated interrupt wakes HALT");
+    runtime_dispatch(g_cpu.R[15]);
+    require(bus.io().halted() && bus.read16(kFirmwareFlags) == (unrelated | spurious),
+            "wait resumes sleeping without consuming an unmatched flag");
+
+    bus.io().request_irq(vblank);
+    runtime_tick(1);
+    require(!bus.io().halted(), "selected interrupt wakes HALT");
+    runtime_dispatch(g_cpu.R[15]);
+    require(g_cpu.cpsr == 0x3fu && g_cpu.R[15] == kWaitCaller + 2u &&
+                g_cpu.R[13] == kUserStack && g_cpu.R[14] == kInterrupted,
+            "wait returns to its Thumb caller and unwinds its stack");
+    require(g_cpu.R[2] == 0x1234u && g_cpu.R[4] == 0x5678u &&
+                g_cpu.banked_sp[ARM_BANK_SUPERVISOR] == supervisor_stack &&
+                bus.read16(kFirmwareFlags) == (unrelated | spurious),
+            "wait preserves caller registers and unrelated wake flags");
+
+    g_cpu.R[0] = 0;
+    g_cpu.R[1] = spurious;
+    g_cpu.R[15] = kWaitCaller + 4u;
+    runtime_swi(4);
+    require(!bus.io().halted() && g_cpu.R[15] == kWaitCaller + 4u &&
+                bus.read16(kFirmwareFlags) == unrelated,
+            "IntrWait can consume an already latched selected flag immediately");
+}
+
 }  // namespace
 
 int main() try {
@@ -76,11 +151,14 @@ int main() try {
     gbarecomp::set_active_bus(bus.get());
     gbarecomp::set_active_ppu(ppu.get());
     runtime_init(bus.get());
-    const DispatchEntry entry{kHandler, 0, 0, handler};
-    const RuntimeNativeProgram program{&entry, 1, nullptr, 0, nullptr, 0};
+    const DispatchEntry entries[] = {
+        {kHandler, 0, 0, handler},
+        {kWaitHandler, 0, 0, wait_handler},
+    };
+    const RuntimeNativeProgram program{entries, 2, nullptr, 0, nullptr, 0};
     runtime_select_native_program(&program);
     bus->write32(0x03007ffcu, kHandler);
-    gba::bios_hle_set_irq_enabled(true);
+    gba::bios_hle_set_interrupts_enabled(true);
     require(g_bios_hle_dispatch_hook(0x18u, 0) == 0, "ordinary call cannot start an IRQ");
     for (bool nested : {false, true}) {
         exercise_nested = nested;
@@ -110,17 +188,18 @@ int main() try {
     }
     gbarecomp::RuntimeArmContext context;
     gbarecomp::runtime_capture_arm_context(context);
-    gba::bios_hle_set_irq_enabled(false);
+    gba::bios_hle_set_interrupts_enabled(false);
     require(!g_bios_hle_dispatch_hook, "disabled HLE keeps original dispatch");
     gbarecomp::runtime_restore_arm_context(context);
     require(g_bios_hle_dispatch_hook == context.bios_dispatch_hook,
             "BIOS dispatch selection follows the bound CPU context");
-    gba::bios_hle_set_irq_enabled(false);
+    check_interrupt_wait(*bus);
+    gba::bios_hle_set_interrupts_enabled(false);
     runtime_select_native_program(nullptr);
     runtime_shutdown();
     gbarecomp::set_active_ppu(nullptr);
     gbarecomp::set_active_bus(nullptr);
-    std::puts("Native IRQ callback, nested return, timing and BIOS prefetch passed");
+    std::puts("Native IRQ callback, nesting, open bus and interrupt waits passed");
 } catch (const std::exception& error) {
     std::fprintf(stderr, "Native IRQ check: %s\n", error.what());
     return 1;
