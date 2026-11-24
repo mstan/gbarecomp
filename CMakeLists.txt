@@ -461,6 +461,7 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/multiplayer_session.cpp
     src/runtime/multiplayer_slice.cpp
     src/runtime/runtime.cpp
+    src/runtime/host_capture.cpp
     src/runtime/mod_rom_data.cpp
     src/runtime/diagnostic_replay.cpp
     src/runtime/save_config.cpp
