@@ -5432,7 +5432,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gbarecomp::overlay_loader_shutdown();
     runtime_shutdown();
     if (diag_exit) return diag_exit;
-    return save_ok && gpu_dump_ok ? 0 : 1;
+    return save_ok && gpu_dump_ok && !gbarecomp::capture::failed() ? 0 : 1;
 }
 
 }  // namespace gbarecomp

@@ -1488,6 +1488,8 @@ add_test(NAME host_capture_unbounded_audio COMMAND host_capture_tests
     "${CMAKE_CURRENT_BINARY_DIR}/host_capture_unbounded.wav")
 add_test(NAME host_capture_bounded_audio COMMAND host_capture_tests
     "${CMAKE_CURRENT_BINARY_DIR}/host_capture_bounded.wav" 1)
+add_test(NAME host_capture_invalid_audio COMMAND host_capture_tests
+    "${CMAKE_CURRENT_BINARY_DIR}/absent-capture-output/host_capture.wav" invalid)
 
 # Touch input: gesture recognizer, hub rings/scripts, key synthesis, JSON.
 add_gbarecomp_runtime_stack_test(touch_input_tests tests/touch_input/test_main.cpp)

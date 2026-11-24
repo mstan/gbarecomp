@@ -23,6 +23,7 @@ struct InputEvent {
 // Consumes argv[*i] (and its value) when it is a capture option.
 bool parse_arg(int argc, char** argv, int* i);
 bool requested();
+bool failed();
 void window_size(int* w, int* h);                // 0x0 when --capture-size was not given
 bool load_script(std::vector<InputEvent>* out);  // false on a bad script
 

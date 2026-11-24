@@ -13,7 +13,7 @@ namespace {
 std::string g_out_dir, g_wav_path, g_script_path;
 int g_w = 0, g_h = 0;
 uint64_t g_from = 0, g_to = UINT64_MAX, g_every = 1, g_exit_at = UINT64_MAX;
-bool g_ppm = false, g_requested = false, g_finished = false;
+bool g_ppm = false, g_requested = false, g_finished = false, g_failed = false;
 uint64_t g_present = 0, g_written = 0, g_wav_frames = 0;
 int g_last_w = 0, g_last_h = 0;
 std::FILE* g_wav = nullptr;
@@ -25,7 +25,7 @@ double g_pos = 0.0;
 int16_t g_prev[2] = {0, 0};
 std::vector<int16_t> g_out;
 
-void wav_header(std::FILE* f, uint32_t data_bytes) {
+bool wav_header(std::FILE* f, uint32_t data_bytes) {
     uint8_t h[44];
     const uint32_t rate = 48000, byte_rate = 48000 * 4, riff = 36 + data_bytes;
     std::memcpy(h, "RIFF", 4);
@@ -45,7 +45,7 @@ void wav_header(std::FILE* f, uint32_t data_bytes) {
     std::memcpy(h + 34, &v16, 2);
     std::memcpy(h + 36, "data", 4);
     std::memcpy(h + 40, &data_bytes, 4);
-    std::fwrite(h, 1, 44, f);
+    return std::fwrite(h, 1, sizeof(h), f) == sizeof(h);
 }
 
 bool in_range(uint64_t f) {
@@ -176,34 +176,63 @@ bool load_script(std::vector<InputEvent>* out) {
     return true;
 }
 
-bool want_readback() { return g_requested && !g_out_dir.empty() && in_range(g_present); }
+bool failed() { return g_failed; }
+
+bool want_readback() {
+    return g_requested && !g_failed && !g_out_dir.empty() && in_range(g_present);
+}
 
 void on_frame(const uint8_t* rgb, int w, int h) {
     const uint64_t f = g_present++;
-    if (g_out_dir.empty() || !in_range(f) || !rgb) return;
+    if (g_failed || g_out_dir.empty() || !in_range(f)) return;
+    if (!rgb || w <= 0 || h <= 0) {
+        std::fprintf(stderr, "gbarecomp capture: no presented pixels for frame %llu\n",
+                     static_cast<unsigned long long>(f));
+        g_failed = true;
+        return;
+    }
     if (g_written == 0) {
         std::error_code ec;
         std::filesystem::create_directories(g_out_dir, ec);
+        if (ec) {
+            std::fprintf(stderr, "gbarecomp capture: cannot create %s: %s\n",
+                         g_out_dir.c_str(), ec.message().c_str());
+            g_failed = true;
+            return;
+        }
     }
     char name[1100];
-    std::snprintf(name, sizeof name, "%s/frame_%06llu.%s", g_out_dir.c_str(),
-                  (unsigned long long)f, g_ppm ? "ppm" : "png");
+    const int length = std::snprintf(name, sizeof name, "%s/frame_%06llu.%s", g_out_dir.c_str(),
+                                     (unsigned long long)f, g_ppm ? "ppm" : "png");
+    if (length < 0 || static_cast<std::size_t>(length) >= sizeof name) {
+        std::fprintf(stderr, "gbarecomp capture: frame path too long in %s\n", g_out_dir.c_str());
+        g_failed = true;
+        return;
+    }
     g_last_w = w;
     g_last_h = h;
+    bool wrote = false;
     if (g_ppm) {
         std::FILE* fp = std::fopen(name, "wb");
-        if (!fp) return;
-        std::fprintf(fp, "P6\n%d %d\n255\n", w, h);
-        std::fwrite(rgb, 1, (std::size_t)w * h * 3, fp);
-        std::fclose(fp);
+        if (fp) {
+            const std::size_t bytes = static_cast<std::size_t>(w) * h * 3;
+            wrote = std::fprintf(fp, "P6\n%d %d\n255\n", w, h) > 0 &&
+                    std::fwrite(rgb, 1, bytes, fp) == bytes;
+            wrote = std::fclose(fp) == 0 && wrote;
+        }
+    } else if (g_png) {
+        wrote = g_png(name, rgb, static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+    }
+    if (wrote) {
         ++g_written;
-    } else if (g_png && g_png(name, rgb, (uint32_t)w, (uint32_t)h)) {
-        ++g_written;
+    } else {
+        std::fprintf(stderr, "gbarecomp capture: cannot write %s\n", name);
+        g_failed = true;
     }
 }
 
 void on_audio(const int16_t* stereo, std::size_t frames, uint32_t rate) {
-    if (!g_requested || g_wav_path.empty() || !stereo || !frames || rate == 0) return;
+    if (!g_requested || g_failed || g_wav_path.empty() || !stereo || !frames || rate == 0) return;
     // The audio block follows the present, so the counter is one past the
     // frame that produced it. An open-ended range has no upper check.
     if (g_present < g_from || (g_to != UINT64_MAX && g_present > g_to + 1))
@@ -211,8 +240,11 @@ void on_audio(const int16_t* stereo, std::size_t frames, uint32_t rate) {
     if (!g_wav_open_tried) {
         g_wav_open_tried = true;
         g_wav = std::fopen(g_wav_path.c_str(), "wb");
-        if (g_wav) wav_header(g_wav, 0);
-        else std::fprintf(stderr, "gbarecomp capture: cannot open %s\n", g_wav_path.c_str());
+        if (!g_wav || !wav_header(g_wav, 0)) {
+            std::fprintf(stderr, "gbarecomp capture: cannot start WAV %s\n", g_wav_path.c_str());
+            g_failed = true;
+            return;
+        }
     }
     if (!g_wav) return;
     const double step = (double)rate / 48000.0;
@@ -233,24 +265,31 @@ void on_audio(const int16_t* stereo, std::size_t frames, uint32_t rate) {
     g_pos -= (double)n;
     g_prev[0] = stereo[(n - 1) * 2];
     g_prev[1] = stereo[(n - 1) * 2 + 1];
-    std::fwrite(g_out.data(), 4, g_out.size() / 2, g_wav);
-    g_wav_frames += g_out.size() / 2;
+    const std::size_t pending = g_out.size() / 2;
+    const std::size_t written = std::fwrite(g_out.data(), 4, pending, g_wav);
+    g_wav_frames += written;
+    if (written != pending) {
+        std::fprintf(stderr, "gbarecomp capture: WAV sample write failed\n");
+        g_failed = true;
+    }
 }
 
 bool should_exit() {
     if (!g_requested) return false;
     const uint64_t end = g_exit_at < g_to ? g_exit_at : g_to;
-    return end != UINT64_MAX && g_present > end;
+    return g_failed || (end != UINT64_MAX && g_present > end);
 }
 
 void finish() {
     if (!g_requested || g_finished) return;
     g_finished = true;
     if (g_wav) {
-        std::fflush(g_wav);
-        std::fseek(g_wav, 0, SEEK_SET);
-        wav_header(g_wav, (uint32_t)(g_wav_frames * 4));
-        std::fclose(g_wav);
+        const bool header_ok = std::fseek(g_wav, 0, SEEK_SET) == 0 &&
+            wav_header(g_wav, static_cast<uint32_t>(g_wav_frames * 4));
+        if (std::fclose(g_wav) != 0 || !header_ok) {
+            std::fprintf(stderr, "gbarecomp capture: WAV finalization failed\n");
+            g_failed = true;
+        }
         g_wav = nullptr;
     }
     std::printf(

@@ -12,7 +12,8 @@ int main(int argc, char** argv) {
 
     namespace capture = gbarecomp::capture;
     const std::filesystem::path output = argv[1];
-    const bool bounded = argc == 3;
+    const bool bounded = argc == 3 && std::string(argv[2]) == "1";
+    const bool invalid = argc == 3 && std::string(argv[2]) == "invalid";
     std::array<std::string, 5> options = {
         "host_capture_tests", "--capture-wav", argv[1], "--capture-to", "1",
     };
@@ -33,13 +34,15 @@ int main(int argc, char** argv) {
         capture::on_audio(stereo.data(), 2, 48000);
     }
     capture::finish();
+    if (invalid)
+        return capture::failed() && capture::should_exit() ? 0 : 1;
 
     std::ifstream wav(output, std::ios::binary);
     std::array<unsigned char, 44> header{};
     wav.read(reinterpret_cast<char*>(header.data()), header.size());
     // Two stereo samples per frame. The bounded range keeps frames 0 and 1.
     const unsigned expected = (bounded ? 2 : 3) * stereo.size() * sizeof(int16_t);
-    const bool valid = wav && header[40] == expected && !header[41] &&
+    const bool valid = !capture::failed() && wav && header[40] == expected && !header[41] &&
                        !header[42] && !header[43] &&
                        std::filesystem::file_size(output) == header.size() + expected;
     wav.close();
