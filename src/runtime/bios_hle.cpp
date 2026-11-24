@@ -26,6 +26,7 @@
 // point in the low bits — another reason LLE stays the oracle.
 
 #include "bios_hle.h"
+#include "gba_bus.h"
 #include "../gba/signed_bits.h"
 
 #include "runtime_arm.h"  // g_cpu, runtime_tick, bus_read_u*/bus_write_u*
@@ -564,6 +565,12 @@ int dispatch(uint32_t swi) {
     return 1;
 }
 
+int dispatch_native(uint32_t swi) {
+    if (!dispatch(swi)) return 0;
+    gbarecomp::active_bus()->latch_bios_prefetch(0x188u, false);
+    return 1;
+}
+
 int dispatch_selected_math(uint32_t swi) {
 #if defined(GBARECOMP_BIOS_MATH_HLE)
     // A sliced link/shadow owner advances devices at instruction boundaries.
@@ -580,8 +587,13 @@ int dispatch_selected_math(uint32_t swi) {
 
 void bios_hle_set_mode(BiosHleMode mode) {
     g_mode = mode;
-    g_bios_hle_hook = (mode == BiosHleMode::On) ? &dispatch :
-        (bios_native_math_enabled() ? &dispatch_selected_math : nullptr);
+    switch (mode) {
+    case BiosHleMode::Off:
+        g_bios_hle_hook = bios_native_math_enabled() ? &dispatch_selected_math : nullptr;
+        break;
+    case BiosHleMode::On: g_bios_hle_hook = &dispatch; break;
+    case BiosHleMode::Native: g_bios_hle_hook = &dispatch_native; break;
+    }
 }
 
 bool bios_native_math_enabled() {
@@ -618,6 +630,8 @@ void bios_hle_boot_skip(uint32_t cart_entry) {
     // multiboot, and POSTFLG marks completed BIOS startup.
     bus_write_u16(0x04000134u, 0x8000u);
     bus_write_u8(0x04000300u, 1u);
+    if (auto* bus = gbarecomp::active_bus(); bus && bus->native_bios())
+        bus->latch_bios_prefetch(0xdcu, false);
 }
 
 BiosHleMode bios_hle_mode() { return g_mode; }
@@ -627,6 +641,7 @@ const char* bios_hle_mode_name(BiosHleMode mode) {
     case BiosHleMode::Off: return bios_native_math_enabled()
         ? "LLE (build-selected native math)" : "LLE (recompiled BIOS)";
     case BiosHleMode::On:  return "HLE (with LLE fallback)";
+    case BiosHleMode::Native: return "HLE (no firmware image)";
     }
     return "unknown";
 }

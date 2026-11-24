@@ -44,6 +44,8 @@ struct AssetSpec {
     bool persist_cache = true;
     // Cartridge ROMs only: decode a bounded archive using expected_sha1.
     bool allow_rom_archives = false;
+    // Optional inputs can resolve their configured or cached path quietly.
+    bool allow_dialog = true;
 };
 
 struct AssetResult {

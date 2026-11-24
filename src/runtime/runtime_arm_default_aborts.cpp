@@ -1232,6 +1232,12 @@ extern "C" void runtime_force_interp_step(void) {
 extern "C" void runtime_dispatch_miss(uint32_t target_pc) {
     const std::uint32_t entry_pc = target_pc & ~1u;
     const bool entry_thumb = (g_cpu.cpsr & CPSR_T_BIT) != 0;
+    if (entry_pc < 0x00004000u) {
+        if (const auto* bus = gbarecomp::active_bus(); bus && bus->native_bios()) {
+            fatal_abort("runtime_arm: native BIOS service is missing at 0x%08X (%s).\n",
+                        entry_pc, entry_thumb ? "Thumb" : "ARM");
+        }
+    }
     static bool miss_ewram_captured = false;
     static bool miss_iwram_captured = false;
     if (!miss_ewram_captured &&

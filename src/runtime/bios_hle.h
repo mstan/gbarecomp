@@ -36,6 +36,7 @@ namespace gba {
 enum class BiosHleMode {
     Off,   // legacy catalog off; independently built native families remain
     On,    // HLE where implemented, LLE fallback otherwise
+    Native // firmware services and protected reads without a BIOS image
 };
 
 // Install the catalog or the fixed build-selected family. Safe to call once at

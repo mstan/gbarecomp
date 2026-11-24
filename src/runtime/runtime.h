@@ -387,4 +387,7 @@ bool resolve_native_save_override(int argc, char** argv, const RunOptions& optio
 
 int run_game(int argc, char** argv, const RunOptions& opts = {});
 
+// The launcher uses this to decide whether an empty BIOS selection can Play.
+bool has_recompiled_bios();
+
 }  // namespace gbarecomp

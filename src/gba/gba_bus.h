@@ -89,6 +89,8 @@ public:
     // nullptr to leave BIOS region unmapped.
     void set_bios(const GbaBios* bios) { bios_ = bios; }
     const GbaBios* bios() const { return bios_; }
+    void enable_native_bios() { native_bios_ = true; }
+    bool native_bios() const { return native_bios_; }
 
     // Real GBA BIOS bytes are protected after the BIOS hands control
     // to cartridge code. Runtime-generated reads update this from the
@@ -347,6 +349,7 @@ private:
     const uint8_t* rom_  = nullptr;
     std::size_t    rom_size_ = 0;
     bool           bios_access_enabled_ = true;
+    bool           native_bios_ = false;
     bool           audio_shadow_request_ = false;
     uint32_t       bios_prefetch_ = 0;   // latched BIOS open-bus value
     uint32_t       open_bus_pc_   = 0;   // live PC for unmapped open-bus

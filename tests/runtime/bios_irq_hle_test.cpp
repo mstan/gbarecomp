@@ -6,6 +6,7 @@
 #include "native_program.h"
 #include "runtime_bus_bridge.h"
 #include "runtime_context.h"
+#include "snapshot.h"
 
 #include <array>
 #include <cstdio>
@@ -183,7 +184,7 @@ void check_halt(gba::GbaBus& bus, bool thumb, bool master_enable, bool irq_maske
         require(g_cpu.R[i] == caller.R[i], "Halt restores every caller register");
     require(g_cpu.cpsr == caller.cpsr &&
                 g_cpu.banked_sp[ARM_BANK_SUPERVISOR] == supervisor_stack &&
-                bus_read_u32(0u) == kSwiReturnLatch,
+                bus_read_u32(0u) == (bus.native_bios() ? 0xE3A02004u : kSwiReturnLatch),
             "Halt returns with the caller CPSR, stack and BIOS prefetch");
     require(bus.read16(kFirmwareFlags) == (disabled | (took_irq ? enabled : 0u)),
             "Halt leaves the firmware wait flags for the cartridge");
@@ -254,6 +255,30 @@ int main() try {
     check_halt(*bus, true, true, false);
     check_halt(*bus, true, false, false);
     check_halt(*bus, false, true, true);
+
+    bus->write8(kIme, 0);
+    bus->write16(kIf, 0xffffu);
+    bus->set_bios(nullptr);
+    bus->enable_native_bios();
+    gba::bios_hle_set_mode(gba::BiosHleMode::Native);
+    gba::bios_hle_boot_skip(kInterrupted);
+    require(bus->read32(0u) == 0xE129F000u, "native boot protected BIOS prefetch");
+    g_cpu.R[0] = 121;
+    runtime_swi(8u << 16);
+    require(g_cpu.R[0] == 11u && bus->read32(0u) == 0xE3A02004u &&
+                bus->read16(2u) == 0xE3A0u && bus->read8(1u) == 0x20u,
+            "software interrupt return produces the cartridge's protected reads");
+
+    gbarecomp::debug::SnapshotWriter saved_bus;
+    bus->serialize(saved_bus);
+    bus->latch_bios_prefetch(0xdcu, false);
+    gbarecomp::debug::SnapshotReader state(saved_bus.buffer().data(), saved_bus.size());
+    bus->deserialize(state);
+    require(state.ok() && bus->read32(0u) == 0xE3A02004u,
+            "save-state restore preserves the native BIOS latch");
+    check_halt(*bus, true, true, false);
+
+    gba::bios_hle_set_mode(gba::BiosHleMode::Off);
     gba::bios_hle_set_interrupts_enabled(false);
     runtime_select_native_program(nullptr);
     runtime_shutdown();
