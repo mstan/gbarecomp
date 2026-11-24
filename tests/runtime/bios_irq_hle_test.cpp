@@ -21,6 +21,7 @@ constexpr uint32_t kUserStack = 0x03007f00u;
 constexpr uint32_t kIrqI = 0x80u;
 constexpr uint32_t kCallbackLatch = 0x4b534951u;
 constexpr uint32_t kResumeLatch = 0x5149524bu;
+constexpr uint32_t kSwiReturnLatch = 0x53574932u;
 constexpr uint32_t kWaitHandler = kHandler + 8u;
 constexpr uint32_t kWaitCaller = kHandler + 16u;
 constexpr uint32_t kFirmwareFlags = 0x03007ff8u;
@@ -28,6 +29,7 @@ constexpr uint32_t kIe = 0x04000200u;
 constexpr uint32_t kIf = 0x04000202u;
 constexpr uint32_t kIme = 0x04000208u;
 unsigned calls;
+unsigned wait_handler_calls;
 bool exercise_nested;
 
 void require(bool condition, const char* message) {
@@ -65,6 +67,7 @@ void handler() {
 }
 
 void wait_handler() {
+    ++wait_handler_calls;
     require((g_cpu.banked_spsr[ARM_BANK_IRQ] & 0x1fu) == 0x1fu,
             "wait interrupt preempts the firmware's System-mode frame");
     const uint16_t acknowledge = bus_read_u16(kIf);
@@ -133,6 +136,59 @@ void check_interrupt_wait(gba::GbaBus& bus) {
             "IntrWait can consume an already latched selected flag immediately");
 }
 
+void check_halt(gba::GbaBus& bus, bool thumb, bool master_enable, bool irq_masked) {
+    constexpr uint16_t enabled = gba::GbaIo::IrqTimer0;
+    constexpr uint16_t disabled = gba::GbaIo::IrqSerial;
+    constexpr uint32_t supervisor_stack = 0x03007fe0u;
+    std::array<uint8_t, 8> rom{};
+    rom[0] = 2;
+    rom[1] = 0xdf;
+    rom[6] = 2;
+    rom[7] = 0xef;
+    bus.set_rom(rom.data(), rom.size());
+    bus.write32(0x03007ffcu, kWaitHandler);
+    bus.write16(kIf, 0xffffu);
+    bus.write16(kIe, enabled);
+    bus.write8(kIme, master_enable);
+    bus.write16(kFirmwareFlags, disabled);
+
+    g_cpu = {};
+    g_cpu.cpsr = 0x4000001fu | (thumb ? 0x20u : 0u) | (irq_masked ? kIrqI : 0u);
+    for (unsigned i = 0; i < 13; ++i) g_cpu.R[i] = i + 0x1234u;
+    g_cpu.R[13] = kUserStack;
+    g_cpu.R[14] = kInterrupted;
+    g_cpu.R[15] = kHandler + (thumb ? 2u : 8u);
+    g_cpu.banked_sp[ARM_BANK_IRQ] = kIrqStack;
+    g_cpu.banked_sp[ARM_BANK_SUPERVISOR] = supervisor_stack;
+    const auto caller = g_cpu;
+    const unsigned before = wait_handler_calls;
+    runtime_swi(thumb ? 2u : 2u << 16);
+    require(bus.io().halted() && g_cpu.R[15] == 0x1b4u &&
+                g_cpu.R[13] == kUserStack - 8u,
+            "Halt parks with its interrupted System-mode frame");
+
+    bus.io().request_irq(disabled);
+    runtime_tick(1);
+    require(bus.io().halted(), "a disabled interrupt does not wake Halt");
+    bus.write16(kIf, disabled);
+    bus.io().request_irq(enabled);
+    runtime_tick(1);
+    require(!bus.io().halted(), "Halt wakes even when IRQ entry is masked");
+    const bool took_irq = master_enable && !irq_masked;
+    require(wait_handler_calls == before + unsigned(took_irq) &&
+                bus.read16(kIf) == (took_irq ? 0u : enabled),
+            "Halt wake preserves the ordinary IRQ mask and acknowledgement rules");
+    runtime_dispatch(g_cpu.R[15]);
+    for (unsigned i = 0; i < 16; ++i)
+        require(g_cpu.R[i] == caller.R[i], "Halt restores every caller register");
+    require(g_cpu.cpsr == caller.cpsr &&
+                g_cpu.banked_sp[ARM_BANK_SUPERVISOR] == supervisor_stack &&
+                bus_read_u32(0u) == kSwiReturnLatch,
+            "Halt returns with the caller CPSR, stack and BIOS prefetch");
+    require(bus.read16(kFirmwareFlags) == (disabled | (took_irq ? enabled : 0u)),
+            "Halt leaves the firmware wait flags for the cartridge");
+}
+
 }  // namespace
 
 int main() try {
@@ -143,6 +199,7 @@ int main() try {
     for (unsigned i = 0; i < 4; ++i) {
         bytes[0x13cu + i] = uint8_t(kCallbackLatch >> (8u * i));
         bytes[0x144u + i] = uint8_t(kResumeLatch >> (8u * i));
+        bytes[0x190u + i] = uint8_t(kSwiReturnLatch >> (8u * i));
     }
     std::string error;
     require(firmware.load_from_bytes(bytes.data(), bytes.size(), "", &error),
@@ -194,6 +251,9 @@ int main() try {
     require(g_bios_hle_dispatch_hook == context.bios_dispatch_hook,
             "BIOS dispatch selection follows the bound CPU context");
     check_interrupt_wait(*bus);
+    check_halt(*bus, true, true, false);
+    check_halt(*bus, true, false, false);
+    check_halt(*bus, false, true, true);
     gba::bios_hle_set_interrupts_enabled(false);
     runtime_select_native_program(nullptr);
     runtime_shutdown();

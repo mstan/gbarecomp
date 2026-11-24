@@ -20,6 +20,7 @@ constexpr uint32_t kSvcMode = 0x13u;
 constexpr uint32_t kSystemMode = 0x1fu;
 constexpr uint32_t kSwiVector = 0x08u;
 constexpr uint32_t kSwiReturn = 0x188u;
+constexpr uint32_t kHaltResume = 0x1b4u;
 constexpr uint32_t kWaitResume = 0x348u;
 constexpr uint32_t kWaitFlags = 0x03fffff8u;
 constexpr uint32_t kIoBase = 0x04000000u;
@@ -124,11 +125,8 @@ void wait_at_interrupt() {
     runtime_tick(2);
 }
 
-void wait_return(GbaBus& bus) {
-    std::array<uint32_t, 2> wait_frame;
+void return_from_swi(GbaBus& bus, uint32_t cycles) {
     std::array<uint32_t, 2> caller_frame;
-    uint32_t cycles = pop_frame(wait_frame) + 3;
-    g_cpu.R[4] = wait_frame[0];
     cycles += pop_frame(caller_frame) + 2;
     g_cpu.R[2] = caller_frame[0];
     g_cpu.R[14] = caller_frame[1];
@@ -148,15 +146,22 @@ void wait_return(GbaBus& bus) {
     runtime_exception_return(next);
 }
 
-bool enter_interrupt_wait(GbaBus& bus) {
+void wait_return(GbaBus& bus) {
+    std::array<uint32_t, 2> wait_frame;
+    const uint32_t cycles = pop_frame(wait_frame) + 3;
+    g_cpu.R[4] = wait_frame[0];
+    return_from_swi(bus, cycles);
+}
+
+bool enter_interrupt_service(GbaBus& bus) {
     const uint32_t caller_status = g_cpu.banked_spsr[ARM_BANK_SUPERVISOR];
     // ARM puts the function in immediate bits 23:16 and Thumb in bits 7:0.
     // In either instruction set the byte two positions before LR holds it.
     const uint32_t swi_address = g_cpu.R[14] - 2u;
     const uint32_t swi = bus.read8(swi_address);
-    if (swi != 4u && swi != 5u) return false;
+    if (swi != 2u && swi != 4u && swi != 5u) return false;
 
-    // Preserve the supervisor return state and run the wait in System mode
+    // Preserve the supervisor return state and run the service in System mode
     // with the caller's IRQ mask. The cartridge IRQ handler sees its ordinary
     // banks and stack rather than a live host frame across the wait.
     uint32_t cycles = 12 + runtime_mem_cycles(swi_address, 1, 0);
@@ -166,6 +171,21 @@ bool enter_interrupt_wait(GbaBus& bus) {
     runtime_tick(cycles);
     runtime_msr_cpsr(g_cpu.R[11], 9);
     cycles = push_frame(std::array{g_cpu.R[2], g_cpu.R[14]}) + 4;
+    if (swi == 2u) {
+        // Standalone Halt preserves all caller registers and never consumes
+        // the software wait latch. Its parked PC and guest frames survive a
+        // save made while the devices are still running.
+        g_cpu.R[14] = 0x170u;
+        g_cpu.R[15] = kHaltResume - 4u;
+        g_cpu.R[2] = 0;
+        g_cpu.R[12] = kIoBase;
+        runtime_tick(cycles + 5);
+        g_cpu.R[15] = kHaltResume;
+        bus.latch_bios_prefetch(kHaltResume, false);
+        bus_write_u8(kHaltControl, 0);
+        runtime_tick(2);
+        return true;
+    }
     cycles += push_frame(std::array{g_cpu.R[4], 0x170u});
     g_cpu.R[3] = 0;
     g_cpu.R[4] = 1;
@@ -189,7 +209,12 @@ int dispatch_firmware(uint32_t pc, int thumb) {
     const uint32_t mode = g_cpu.cpsr & 0x1fu;
     auto* bus = gbarecomp::active_bus();
     if (!bus) return 0;
-    if (pc == kSwiVector && mode == kSvcMode) return enter_interrupt_wait(*bus);
+    if (pc == kSwiVector && mode == kSvcMode) return enter_interrupt_service(*bus);
+    if (pc == kHaltResume && mode == kSystemMode && g_cpu.R[14] == 0x170u &&
+        g_cpu.R[12] == kIoBase) {
+        return_from_swi(*bus, 3);
+        return 1;
+    }
     if (pc == kWaitResume && mode == kSystemMode && g_cpu.R[12] == kIoBase &&
         g_cpu.R[3] == 0 && g_cpu.R[4] == 1) {
         g_cpu.R[14] = kWaitResume + 4u;

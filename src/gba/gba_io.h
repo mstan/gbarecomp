@@ -120,9 +120,14 @@ public:
 
     // Whether the CPU should HALT until the next IRQ. Set when the
     // BIOS writes 0x00 to HALTCNT. The fetch loop checks this and
-    // skips instruction execution until a pending IRQ clears it.
+    // skips instruction execution until an enabled interrupt wakes it.
     bool halted() const { return halted_; }
     void clear_halt() { halted_ = false; }
+
+    // HALT wakes when IE and IF overlap, even when IRQ entry is masked.
+    bool halt_wake_pending() const {
+        return halted_ && (io_[IoReg::HALTCNT] & 0x80u) == 0 && (ie() & if_reg()) != 0;
+    }
 
     // IRQ controller surface. Bit positions per GBATEK § "GBA
     // Interrupt Control" — VBlank=0, HBlank=1, VCount=2, Timer0..3 =
