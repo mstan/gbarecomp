@@ -204,7 +204,10 @@ void on_frame(const uint8_t* rgb, int w, int h) {
 
 void on_audio(const int16_t* stereo, std::size_t frames, uint32_t rate) {
     if (!g_requested || g_wav_path.empty() || !stereo || !frames || rate == 0) return;
-    if (g_present < g_from || g_present > g_to + 1) return;
+    // The audio block follows the present, so the counter is one past the
+    // frame that produced it. An open-ended range has no upper check.
+    if (g_present < g_from || (g_to != UINT64_MAX && g_present > g_to + 1))
+        return;
     if (!g_wav_open_tried) {
         g_wav_open_tried = true;
         g_wav = std::fopen(g_wav_path.c_str(), "wb");
