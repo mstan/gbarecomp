@@ -186,6 +186,7 @@ void GbaMultiplayerSession::run_until(std::uint64_t target) {
                 (!e.ram_dispatch_filter || e.ram_dispatch_filter(e.cpu.R[15],(e.cpu.cpsr&CPSR_T_BIT) ? 1 : 0));
             const bool generated = !e.program_dispatch && (!e.immediate_override || instance.immediate_override_is_observer) && !e.read_override &&
                 !e.force_interp && !e.entry_hook && !e.bios_hook &&
+                !e.bios_dispatch_hook &&
                 !gba::g_rom_read16_override && !gba::g_rom_read32_override;
             if (native_slices_ && generated && !ram_callback) {
                 // No newly started cable transfer can complete within this

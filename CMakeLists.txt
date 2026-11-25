@@ -466,6 +466,7 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/diagnostic_replay.cpp
     src/runtime/save_config.cpp
     src/runtime/bios_hle.cpp
+    src/runtime/bios_interrupt_hle.cpp
     src/runtime/generated_dispatch.cpp
     src/runtime/runtime_bus_bridge.cpp
     src/runtime/arm_cpu_bridge.cpp
@@ -1285,6 +1286,12 @@ add_executable(swi_snapshot_tests tests/armv4t/swi_snapshot_test.cpp
 target_include_directories(swi_snapshot_tests PRIVATE src/armv4t src/debug src/gba)
 target_link_gbarecomp_runtime_stack(swi_snapshot_tests)
 add_test(NAME swi_snapshot_tests COMMAND swi_snapshot_tests)
+
+add_executable(bios_irq_hle_tests tests/runtime/bios_irq_hle_test.cpp
+    tools/bios_smoke/dispatch_stub.cpp)
+target_include_directories(bios_irq_hle_tests PRIVATE src/armv4t src/gba src/runtime)
+target_link_gbarecomp_runtime_stack(bios_irq_hle_tests)
+add_test(NAME bios_irq_hle_tests COMMAND bios_irq_hle_tests)
 
 add_executable(armv4t_tests tests/armv4t/test_main.cpp)
 target_link_libraries(armv4t_tests PRIVATE gbarecomp_armv4t)

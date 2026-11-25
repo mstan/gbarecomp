@@ -873,6 +873,8 @@ extern "C" void runtime_tick(uint32_t cycles) {
             recompute_event_budget(bus, ppu);
         }
         runtime_irq(g_cpu.R[15]);
+    } else if (bus->io().halt_wake_pending()) {
+        bus->io().clear_halt();
     }
 
 #ifdef GBA_COSIM

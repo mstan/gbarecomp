@@ -47,6 +47,7 @@ struct RuntimeArmContext {
     RuntimeForceInterpHook force_interp = nullptr;
     void (*entry_hook)(std::uint32_t) = nullptr;
     int (*bios_hook)(std::uint32_t) = nullptr;
+    int (*bios_dispatch_hook)(std::uint32_t, int) = nullptr;
     // Optional per-program dispatch, required when heterogeneous images are
     // implemented. nullptr uses this executable's shared generated tables.
     int (*program_dispatch)(std::uint32_t, int) = nullptr;

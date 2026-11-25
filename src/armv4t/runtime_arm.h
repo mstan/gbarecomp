@@ -527,6 +527,9 @@ void runtime_irq(uint32_t return_address);
 // remains the verification oracle; HLE never becomes the oracle. This is the
 // PRINCIPLES.md "verified-enhancement HLE" carve-out: opt-in, reverts to LLE.
 extern int (*g_bios_hle_hook)(uint32_t swi_num);
+// A selected host BIOS provider may service an ARM dispatch inside firmware.
+// Returning nonzero transfers or returns the guest with no generated BIOS lookup.
+extern int (*g_bios_hle_dispatch_hook)(uint32_t pc, int thumb);
 
 // ── PSR transfer ───────────────────────────────────────────────────
 // MRS/MSR helpers. Routing through the runtime lets us validate mode
