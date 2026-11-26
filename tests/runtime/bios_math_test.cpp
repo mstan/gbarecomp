@@ -12,6 +12,10 @@
 
 namespace {
 uint32_t charged_cycles = 0;
+bool boot_check = false;
+uint16_t boot_rcnt = 0;
+uint8_t boot_postflg = 0;
+unsigned boot_irq_clear = 0;
 }
 extern "C" {
 ArmCpuState g_cpu{};
@@ -19,13 +23,31 @@ int (*g_bios_hle_hook)(uint32_t) = nullptr;
 uint8_t bus_read_u8(uint32_t) { std::abort(); }
 uint16_t bus_read_u16(uint32_t) { std::abort(); }
 uint32_t bus_read_u32(uint32_t) { std::abort(); }
-void bus_write_u8(uint32_t,uint8_t) { std::abort(); }
-void bus_write_u16(uint32_t,uint16_t) { std::abort(); }
-void bus_write_u32(uint32_t,uint32_t) { std::abort(); }
+void bus_write_u8(uint32_t a,uint8_t v) {
+    if (boot_check && a == 0x04000300u) { boot_postflg = v; return; }
+    std::abort();
+}
+void bus_write_u16(uint32_t a,uint16_t v) {
+    if (boot_check && a == 0x04000134u) { boot_rcnt = v; return; }
+    std::abort();
+}
+void bus_write_u32(uint32_t a,uint32_t v) {
+    if (boot_check && a == 0x03007ffcu && v == 0) { ++boot_irq_clear; return; }
+    std::abort();
+}
 void runtime_tick(uint32_t cycles) { charged_cycles += cycles; }
 }
 
 int main() {
+    boot_check = true;
+    gba::bios_hle_boot_skip(0x08000000u);
+    boot_check = false;
+    if (boot_rcnt != 0x8000u || boot_postflg != 1 || boot_irq_clear != 1 ||
+        g_cpu.R[15] != 0x08000000u || g_cpu.cpsr != 0x1fu ||
+        g_cpu.R[13] != 0x03007f00u) {
+        std::fprintf(stderr, "BIOS native cartridge handoff differs\n");
+        return 4;
+    }
     struct Case { int32_t numerator,denominator;uint32_t quotient,remainder,magnitude; };
     constexpr auto minimum = std::numeric_limits<int32_t>::min();
     constexpr auto maximum = std::numeric_limits<int32_t>::max();

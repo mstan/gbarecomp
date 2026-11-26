@@ -44,10 +44,9 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "replay_writer.h"
 
 namespace gbarecomp {
-
-namespace debug { class ReplayWriter; }
 
 // Every host-originated value that reaches the guest during one frame.
 struct DiagnosticFrameInput {

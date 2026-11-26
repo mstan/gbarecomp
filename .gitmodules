@@ -1,6 +1,6 @@
 [submodule "external/arm-recomp-core"]
 	path = external/arm-recomp-core
-	url = ../arm-recomp-core.git
+	url = https://github.com/mstan/arm-recomp-core-candidate-20261124.git
 [submodule "platform/android/third_party/SDL"]
 	path = platform/android/third_party/SDL
 	url = https://github.com/mstan/SDL.git
@@ -10,3 +10,27 @@
 [submodule "external/rbengine"]
 	path = external/rbengine
 	url = https://github.com/RetroPortingToolKit/rbengine.git
+
+[submodule "external/shared-cores/recomp-mod-core"]
+	path = external/shared-cores/recomp-mod-core
+	url = https://github.com/mstan/recomp-mod-core.git
+
+[submodule "external/shared-cores/recomp-audio-core"]
+	path = external/shared-cores/recomp-audio-core
+	url = https://github.com/mstan/recomp-audio-core.git
+
+[submodule "external/shared-cores/recomp-presentation-core"]
+	path = external/shared-cores/recomp-presentation-core
+	url = https://github.com/mstan/recomp-presentation-core.git
+
+[submodule "external/shared-cores/recomp-persistence-core"]
+	path = external/shared-cores/recomp-persistence-core
+	url = https://github.com/mstan/recomp-persistence-core-candidate-20261124.git
+
+[submodule "external/shared-cores/recomp-input-core"]
+	path = external/shared-cores/recomp-input-core
+	url = https://github.com/mstan/recomp-input-core-candidate-20261124.git
+
+[submodule "external/shared-cores/recomp-diagnostics-core"]
+	path = external/shared-cores/recomp-diagnostics-core
+	url = https://github.com/mstan/recomp-diagnostics-core-candidate-20261124.git

@@ -87,6 +87,9 @@ public:
         // (waits, best-effort). `run_status` reports the live run-state. `step`
         // stays synchronous (signals the game thread and waits) for oracle
         // lockstep. All optional — null in single-threaded / non-TCP harnesses.
+        // Windowed adapters marshal every command to the guest safe point.
+        std::function<std::string(const std::string&)> guest_request;
+        std::function<void()> quit;
         std::function<void()>        resume;       // free-run (continue)
         std::function<void()>        pause;        // park at frame boundary
         std::function<std::string()> run_status;   // JSON: run-state/parked/pc
@@ -96,6 +99,7 @@ public:
         std::function<bool(const std::string& request, std::string& reply)> extension;
     };
 
+    static std::string execute(const Context& ctx, const std::string& request);
     TcpDebugServer();
     ~TcpDebugServer();
 

@@ -1,3 +1,4 @@
+#include <retro_presentation/pacing.h>
 #include "host_platform.h"
 
 #include <cstdio>
@@ -66,12 +67,13 @@ void FramePacer::wait_for_next_frame(uint64_t frames) {
         if (extra > 15u) extra = 15u;
         next_ += period_ * static_cast<std::chrono::nanoseconds::rep>(extra);
     }
-    clock::time_point now = clock::now();
-    // If we've fallen more than one whole frame behind, resync instead
-    // of trying to replay the lost time (avoids a catch-up death spiral
-    // after a hitch or a breakpoint pause).
-    if (now > next_ + period_) {
-        next_ = now + period_;
+    const auto ticks = [](clock::time_point t) {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count());
+    };
+    const clock::time_point now = clock::now();
+    uint64_t deadline = ticks(next_);
+    if (!retro_fixed_deadline_begin(ticks(now), &deadline, period_.count(), 0)) {
+        next_ = clock::time_point(std::chrono::nanoseconds(deadline));
         return;
     }
     // A high-resolution waitable timer is already precise enough on modern
@@ -113,9 +115,8 @@ void FramePacer::wait_for_next_frame(uint64_t frames) {
     // scheduler or present stall above 1.5 ms establishes a fresh full-frame
     // period instead of producing a visibly short recovery frame.
     const clock::time_point woke = clock::now();
-    constexpr auto kLateTolerance = std::chrono::microseconds(1500);
-    next_ = woke > next_ + kLateTolerance ? woke + period_
-                                          : next_ + period_;
+    next_ = clock::time_point(std::chrono::nanoseconds(
+        retro_fixed_deadline_finish(ticks(next_), ticks(woke), period_.count(), 1500000)));
 }
 
 std::vector<unsigned char> read_file(const std::string& path, std::string* error) {

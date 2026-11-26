@@ -614,6 +614,10 @@ void bios_hle_boot_skip(uint32_t cart_entry) {
     // its own during init. Zero = none yet. (IME defaults to 0, so no IRQ can
     // vector before the game programs IE/IME anyway.)
     bus_write_u32(0x03007FFCu, 0);
+    // Cartridge boot handoff: GPIO mode distinguishes a normal boot from
+    // multiboot, and POSTFLG marks completed BIOS startup.
+    bus_write_u16(0x04000134u, 0x8000u);
+    bus_write_u8(0x04000300u, 1u);
 }
 
 BiosHleMode bios_hle_mode() { return g_mode; }
