@@ -1,3 +1,4 @@
+#include <recomp_diagnostics/owner_mailbox.hpp>
 #include <recomp_persistence/atomic_file.h>
 // runtime.cpp - shared BIOS+ROM runner for generated game binaries.
 //
@@ -3316,39 +3317,23 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     uint64_t last_presented_frame = ppu.frame_count();
     // Marshal windowed commands to the frame boundary, including captures
     // and memory mutations. While paused the native event loop keeps serving.
-    struct ObserverRequest {
-        std::string command, reply;
-        bool done = false;
-    };
     std::unique_ptr<debug::TcpDebugServer> observer;
     debug::TcpDebugServer::Context observer_context;
     std::thread observer_thread;
-    std::mutex observer_m;
-    std::condition_variable observer_cv;
-    ObserverRequest* observer_pending = nullptr;
-    bool observer_stopping = false;
+    recomp::diagnostics::OwnerMailbox observer_mailbox(
+        recomp::diagnostics::OwnerMailboxOptions::gba());
     std::atomic<bool> observer_exited{false};
     auto observer_request = [&](const std::string& command) -> std::string {
-        ObserverRequest r;
-        r.command = command;
-        std::unique_lock<std::mutex> lk(observer_m);
-        if (observer_stopping || observer_pending)
-            return "{\"ok\":false,\"error\":\"shutting down or request pending\"}";
-        observer_pending = &r;
-        observer_cv.wait(lk, [&] { return r.done || observer_stopping; });
-        if (!r.done) {
-            observer_pending = nullptr;
-            return "{\"ok\":false,\"error\":\"shutting down\"}";
-        }
-        return r.reply;
+        auto result = observer_mailbox.call(command);
+        if (result.status == recomp::diagnostics::MailboxStatus::completed)
+            return std::move(result.data);
+        return result.status == recomp::diagnostics::MailboxStatus::stopped
+            ? "{\"ok\":false,\"error\":\"shutting down\"}"
+            : "{\"ok\":false,\"error\":\"shutting down or request pending\"}";
     };
     auto stop_observer = [&]() {
         if (!observer) return;
-        {
-            std::lock_guard<std::mutex> lk(observer_m);
-            observer_stopping = true;
-            observer_cv.notify_all();
-        }
+        observer_mailbox.stop();
         observer->stop();
         if (observer_thread.joinable()) observer_thread.join();
         observer.reset();
@@ -4036,14 +4021,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (observer_exited.load()) host_quit = true;
         auto ev = win.pump();
         if (observer) {
-            std::lock_guard<std::mutex> lk(observer_m);
-            if (observer_pending && !observer_pending->done) {
-                ObserverRequest* request = observer_pending;
-                request->reply = debug::TcpDebugServer::execute(observer_context, request->command);
-                request->done = true;
-                observer_pending = nullptr;
-                observer_cv.notify_all();
-            }
+            observer_mailbox.poll([&](const std::string& command,
+                                     recomp::diagnostics::MailboxReply& reply) {
+                reply.assign(debug::TcpDebugServer::execute(observer_context, command));
+            });
         }
         ++assist_script_pump;
         while (assist_script_index < assist_script_events.size() &&
