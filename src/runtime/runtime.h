@@ -76,7 +76,8 @@ struct RunOptions {
     // Optional trusted, offline data-only preparation. Called once after the
     // original cartridge and selected mod assets have been verified, before
     // any guest execution. The buffer is the process-local ROM image; its
-    // header must remain unchanged. Prepared requires all generated code,
+    // original target identity is retained separately. Prepared requires all
+    // generated code,
     // literals and copied routines to remain unchanged. PreparedNativeProgram
     // instead requires an exact compiled profile from mod_native_programs.
     // A prepared image receives its own snapshot/replay/cache identity. The

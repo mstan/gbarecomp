@@ -1714,7 +1714,7 @@ target_link_libraries(gbarecomp_runtime PUBLIC recomp_mod_core recomp_persistenc
     gbarecomp_shared_audio_headers recomp_input_core retro_presentation recomp_diagnostics_core)
 target_link_libraries(gbarecomp_debug PUBLIC recomp_diagnostics_core recomp_persistence_core)
 target_link_libraries(diagnostic_replay_tests PRIVATE recomp_diagnostics_core)
-foreach(mod_test IN ITEMS mod_runtime_tests mod_resource_ui_tests mod_diagnostics_ui_tests)
+foreach(mod_test IN ITEMS mod_rom_data_tests mod_runtime_tests mod_resource_ui_tests mod_diagnostics_ui_tests)
     if(TARGET ${mod_test})
         target_link_libraries(${mod_test} PRIVATE recomp_mod_core)
     endif()
