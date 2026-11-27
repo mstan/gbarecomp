@@ -1,5 +1,47 @@
 # Mixed-cartridge multiplayer: compatibility and implementation plan
 
+## Two separately versioned link models
+
+The implemented replicated-session model runs every linked machine locally.
+Its cartridge and save requirements below apply to that model. They do not
+define the requirements of an independent-console link transport.
+
+`experimental/link-distributed` proposes a second mode: one local cartridge
+and native save per player, with cable or RFU device traffic between machines.
+It reuses the existing lobby/signaling/ICE transport, without the pad rollback
+driver, a remote machine copy, the partner's ROM, or native-save upload.
+This branch is a design draft, not an implemented or tested distributed adapter.
+
+For cable, introduce an explicit remote participant at `GbaLinkHub`, including
+clock/master start, serial mode, completion order and link restart semantics.
+When partner data is late, hold emulated time before guest-visible completion.
+This alone does not prove burst/checksum phase or timed activities correct.
+Do not add per-title guest hooks or assume Gen III framing covers other serial
+users. Split `GbaWirelessDomain::transmit` into a radio-domain seam only after
+cable is proven; remote associations and notification order need their own
+contract.
+
+The transport prerequisite is a bounded reliable ordered bidirectional channel
+with session/association epochs, sequencing, acknowledgments, retransmission
+and backpressure. Neither chat nor a single state transfer establishes that
+contract. It is not supplied by the local-rollback implementation in
+[recomp-net PR 56](https://github.com/RetroPortingToolKit/recomp-net/pull/56).
+
+Use separately versioned compatibility-family and per-seat cartridge admission
+in the existing lobby/client/UI. Keep ordinary rooms' strict game/disc/build
+checks; do not spoof equal cartridge hashes or transfer another player's save.
+Players select their own original supported image through the normal picker;
+the application validates and extracts what it needs.
+
+The deciding proof is two processes, two different cartridges, one local
+machine each: cable-room entry, trade, battle, valid native saves, restart and
+checksum/queue behavior under delay/loss. Then qualify timed activities and
+larger groups, followed by wireless. Guest-visible link errors, untrackable
+phase across restarts, sent/received-word assumptions, or divergent results
+require revising this design. The matrix below remains the replicated model's
+source assessment, not evidence this alternative works.
+
+
 Status: design, tracked by `beads-mc7.24`. Cable and Wireless Adapter support
 are merged, but application admission still requires **two copies of the same
 game/build**. Nothing in this document enables cross-version play or larger
@@ -72,8 +114,9 @@ would scale to about 31 MB for forty machines and 3.7 GB for 120 full snapshots,
 before allocator/ring overhead; CPU cost needs its own measurement. Do not
 promise forty-player performance from the current two-player proof. A future
 service with separate small simulation groups would require a separate design
-for discovery and deterministic migration; it must not tunnel RFU transactions
-over WAN as a shortcut.
+for discovery and deterministic migration. It cannot become an own-cartridge
+mode merely by forwarding RFU transactions. The separately versioned device-level
+proposal above has its own clock, reliability and qualification contract.
 
 ## Code inspected and current blockers
 
