@@ -1,3 +1,4 @@
+#include <recomp_persistence/atomic_file.h>
 // runtime.cpp - shared BIOS+ROM runner for generated game binaries.
 //
 // This translation unit is itself interpreter-free: it initializes the
@@ -253,6 +254,7 @@ struct Args {
     // injection, game extensions and savestates queued to the frame boundary,
     // while the window keeps running normally (device/emulator validation).
     int tcp_observe_port = 0;
+    bool start_paused = false;
 };
 
 #if defined(GBARECOMP_RUNTIME_UI)
@@ -744,17 +746,8 @@ bool write_file(const std::string& path, const std::vector<uint8_t>& bytes,
         }
     }
 
-    std::ofstream f(std::filesystem::u8path(path), std::ios::binary | std::ios::trunc);
-    if (!f) {
-        if (err) *err = "could not open save file for write " + path;
-        return false;
-    }
-    if (!bytes.empty()) {
-        f.write(reinterpret_cast<const char*>(bytes.data()),
-                static_cast<std::streamsize>(bytes.size()));
-    }
-    if (!f) {
-        if (err) *err = "could not write save file " + path;
+    if (!recomp_atomic_file_store(path.c_str(), bytes.data(), bytes.size())) {
+        if (err) *err = "could not publish save file " + path;
         return false;
     }
     return true;
@@ -1094,6 +1087,7 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             args->view_density = true;
             continue;
         }
+        if (s == "--start-paused") { args->start_paused = true; continue; }
         if (s == "--tcp-observe") {
             const char* v = need_value("--tcp-observe");
             if (!v) return false;
@@ -2398,11 +2392,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // Pause hotkey (config.ini [KeyMap] Pause, default Shift+P): while set,
     // the run loop stops stepping the guest but keeps pumping input and
     // re-presenting the last frame.
-    bool host_paused = false;
+    bool host_paused = args.start_paused;
     // Windowed debugger control uses the normal host pause loop, keeping SDL
     // events, rendering and queued snapshots responsive while the guest stops.
-    std::atomic<bool> observer_pause_requested{false};
-    std::atomic<bool> observer_pause_parked{false};
 
     auto pump_idle = [&](uint32_t max_cycles) -> uint32_t {
         uint32_t chunk = ppu.cycles_until_next_event();
@@ -3301,41 +3293,34 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // the Windows timer-resolution bump doesn't apply to headless/TCP
     // batch runs (which intentionally run uncapped).
     std::optional<FramePacer> pacer;
-    // Windowed observe-mode TCP (see Args::tcp_observe_port). Savestate
-    // requests from its thread are executed by the main loop at the next
-    // present, the only point where machine state is consistent.
-    struct ObserverStateRequest {
-        bool save = false;
-        std::string path;
+    uint64_t last_presented_frame = ppu.frame_count();
+    // Marshal windowed commands to the frame boundary, including captures
+    // and memory mutations. While paused the native event loop keeps serving.
+    struct ObserverRequest {
+        std::string command, reply;
         bool done = false;
-        bool ok = false;
-        std::string err;
     };
     std::unique_ptr<debug::TcpDebugServer> observer;
+    debug::TcpDebugServer::Context observer_context;
     std::thread observer_thread;
     std::mutex observer_m;
     std::condition_variable observer_cv;
-    ObserverStateRequest* observer_pending = nullptr;
+    ObserverRequest* observer_pending = nullptr;
     bool observer_stopping = false;
-    auto observer_request = [&](bool save, const std::string& path,
-                                std::string& err) -> bool {
-        ObserverStateRequest r;
-        r.save = save;
-        r.path = path;
+    std::atomic<bool> observer_exited{false};
+    auto observer_request = [&](const std::string& command) -> std::string {
+        ObserverRequest r;
+        r.command = command;
         std::unique_lock<std::mutex> lk(observer_m);
-        if (observer_stopping || observer_pending) {
-            err = observer_stopping ? "shutting down" : "another request pending";
-            return false;
-        }
+        if (observer_stopping || observer_pending)
+            return "{\"ok\":false,\"error\":\"shutting down or request pending\"}";
         observer_pending = &r;
         observer_cv.wait(lk, [&] { return r.done || observer_stopping; });
         if (!r.done) {
             observer_pending = nullptr;
-            err = "shutting down";
-            return false;
+            return "{\"ok\":false,\"error\":\"shutting down\"}";
         }
-        err = r.err;
-        return r.ok;
+        return r.reply;
     };
     auto stop_observer = [&]() {
         if (!observer) return;
@@ -3429,35 +3414,50 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             octx.ppu = &ppu;
             octx.misses_query = []() { return gbarecomp::self_heal_misses_json(); };
             octx.extension = tcp_extension;
-            octx.savestate_save = [&](const std::string& p, std::string& e) {
-                return observer_request(true, p, e);
+            octx.savestate_save = do_savestate_save;
+            octx.savestate_load = [&](const std::string& path, std::string& error) {
+                const bool ok = do_savestate_load(path, error);
+                if (ok) {
+                    runtime_request_present_unwind();
+                    last_presented_frame = ppu.frame_count() - 1;
+                    if (pacer) pacer->reset();
+                }
+                return ok;
             };
-            octx.savestate_load = [&](const std::string& p, std::string& e) {
-                return observer_request(false, p, e);
+            octx.pause = [&]() {
+                host_paused = true;
+                bus.audio().discard_playback();
+                win.reset_audio();
             };
-            octx.pause = [&]() { observer_pause_requested.store(true); };
-            octx.resume = [&]() { observer_pause_requested.store(false); };
+            octx.resume = [&]() {
+                bus.audio().discard_playback();
+                win.reset_audio();
+                host_paused = false;
+                if (pacer) pacer->reset();
+            };
+            octx.quit = []() {}; // Socket thread acknowledges before signaling exit.
             octx.run_status = [&]() -> std::string {
-                char buf[192];
-                const bool parked = observer_pause_parked.load();
+                char buf[256];
                 std::snprintf(buf, sizeof(buf),
                     "{\"ok\":true,\"run\":\"%s\",\"parked\":%s,"
                     "\"pc\":\"0x%08X\",\"frame\":%llu,\"vblank_starts\":%llu}",
-                    parked ? "paused" : "windowed",
-                    parked ? "true" : "false",
+                    host_paused ? "paused" : "running", host_paused ? "true" : "false",
                     static_cast<unsigned>(g_cpu.R[15]),
                     static_cast<unsigned long long>(ppu.frame_count()),
                     static_cast<unsigned long long>(g_runtime_vblank_starts));
                 return std::string(buf);
             };
+            observer_context = octx;
+            octx.guest_request = observer_request;
             const int observe_port = args.tcp_observe_port;
             debug::TcpDebugServer* server_ptr = observer.get();
-            observer_thread = std::thread([server_ptr, octx, observe_port]() {
+            observer_thread = std::thread([&, server_ptr, octx, observe_port]() {
                 server_ptr->run(observe_port, octx);
+                observer_exited.store(true);
             });
             std::fprintf(stderr,
                          "[gbarecomp:runtime] windowed observe TCP on 127.0.0.1:%d "
-                         "(reads, touch_*, game commands, queued savestates, pause/resume; no step)\n",
+                         "(guest-thread commands, pause/resume, captures and savestates)\n",
                          observe_port);
         }
         if (args.fullscreen) win.set_fullscreen(args.fullscreen);
@@ -3760,8 +3760,6 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     };
     bool suspend_on_exit = false;  // OS termination keeps the marker
 
-    uint64_t last_presented_frame = ppu.frame_count();
-
     struct RewindPoint {
         uint64_t frame = 0;
         std::vector<uint8_t> state;
@@ -4015,27 +4013,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     auto pump_host_input = [&]() {
         if (!args.window) return;
         capture_rewind_point();
+        if (observer_exited.load()) host_quit = true;
         auto ev = win.pump();
         if (observer) {
-            // Observe-mode TCP savestate requests run here, at a present
-            // boundary on the guest thread.
             std::lock_guard<std::mutex> lk(observer_m);
             if (observer_pending && !observer_pending->done) {
-                ObserverStateRequest* r = observer_pending;
-                r->ok = r->save ? do_savestate_save(r->path, r->err)
-                                : do_savestate_load(r->path, r->err);
-                // A restore inside the present-in-place hook must not resume
-                // the guest in the pre-restore host call chain.
-                if (!r->save && r->ok) runtime_request_present_unwind();
-                if (!r->save && r->ok) {
-                    last_presented_frame = ppu.frame_count() - 1;
-                    if (pacer) pacer->reset();
-                }
-                std::printf("observer_savestate_%s path=\"%s\" ok=%d\n",
-                            r->save ? "saved" : "loaded", r->path.c_str(),
-                            r->ok ? 1 : 0);
-                std::fflush(stdout);
-                r->done = true;
+                ObserverRequest* request = observer_pending;
+                request->reply = debug::TcpDebugServer::execute(observer_context, request->command);
+                request->done = true;
                 observer_pending = nullptr;
                 observer_cv.notify_all();
             }
@@ -4427,12 +4412,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     };
     auto service_host_pause = [&]() {
         bool waited = false;
-        while (!host_quit && args.window && (host_paused || observer_pause_requested.load()
+        while (!host_quit && args.window && (host_paused
 #if defined(GBARECOMP_WEB_HOST)
                 || win.auto_paused()
 #endif
                 )) {
-            observer_pause_parked.store(true);
 #if defined(GBARECOMP_WEB_HOST)
             win.report_paused(true);
             if (!waited) {
@@ -4456,7 +4440,6 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
 #endif
         }
-        observer_pause_parked.store(false);
         if (waited && pacer) pacer->reset();
 #if defined(GBARECOMP_WEB_HOST)
         win.report_paused(false);

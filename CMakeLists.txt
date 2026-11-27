@@ -306,7 +306,20 @@ function(gbarecomp_stage_mingw_runtime target_name)
     endforeach()
 endfunction()
 
-set(ARM_RECOMP_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/arm-recomp-core")
+set(ARM_RECOMP_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/arm-recomp-core" CACHE PATH
+    "ARM frontend source root")
+set(RECOMP_SHARED_CORE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/external/shared-cores" CACHE PATH
+    "Pinned shared service source root (override for coordinated integration builds)")
+foreach(provider IN ITEMS mod persistence audio input diagnostics presentation)
+    set(provider_root "${RECOMP_SHARED_CORE_ROOT}/recomp-${provider}-core")
+    if(NOT EXISTS "${provider_root}/CMakeLists.txt")
+        message(FATAL_ERROR "Missing shared provider ${provider_root}; initialize recursive submodules or set RECOMP_SHARED_CORE_ROOT")
+    endif()
+    add_subdirectory("${provider_root}" "${CMAKE_CURRENT_BINARY_DIR}/shared-${provider}" EXCLUDE_FROM_ALL)
+endforeach()
+add_library(gbarecomp_shared_audio_headers INTERFACE)
+target_include_directories(gbarecomp_shared_audio_headers INTERFACE
+    "${RECOMP_SHARED_CORE_ROOT}/recomp-audio-core/include")
 include("${ARM_RECOMP_CORE_DIR}/cmake/ArmRecompCore.cmake")
 arm_recomp_core_sources(GBA_ARM_RECOMP_CORE_SOURCES armv4t_gba)
 arm_recomp_core_include_dirs(GBA_ARM_RECOMP_CORE_INCLUDE_DIRS armv4t_gba)
@@ -1694,3 +1707,26 @@ if(GBARECOMP_SDL2_OK AND EXISTS "${GBARECOMP_RUNTIME_UI_ROOT}/src/consoles/gba/g
 endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/hq2x.cmake")
+
+# Console adapters retain serialization, device ownership, policies and guest
+# scheduling; these providers own the repeated host mechanisms.
+target_link_libraries(gbarecomp_runtime PUBLIC recomp_mod_core recomp_persistence_core
+    gbarecomp_shared_audio_headers recomp_input_core retro_presentation recomp_diagnostics_core)
+target_link_libraries(gbarecomp_debug PUBLIC recomp_diagnostics_core recomp_persistence_core)
+target_link_libraries(diagnostic_replay_tests PRIVATE recomp_diagnostics_core)
+foreach(mod_test IN ITEMS mod_runtime_tests mod_resource_ui_tests mod_diagnostics_ui_tests)
+    if(TARGET ${mod_test})
+        target_link_libraries(${mod_test} PRIVATE recomp_mod_core)
+    endif()
+endforeach()
+foreach(platform_test IN ITEMS boot_asset_tests rom_input_tests mod_runtime_tests
+        mod_resource_ui_tests mod_diagnostics_ui_tests pacer_tests)
+    if(TARGET ${platform_test})
+        target_link_libraries(${platform_test} PRIVATE retro_presentation)
+    endif()
+endforeach()
+foreach(audio_test IN ITEMS audio_drc_tests audio_drc_window_corpus web_audio_dsp_tests)
+    if(TARGET ${audio_test})
+        target_link_libraries(${audio_test} PRIVATE gbarecomp_shared_audio_headers)
+    endif()
+endforeach()

@@ -1,3 +1,4 @@
+#include <recomp_persistence/atomic_file.h>
 // snapshot.cpp — save-state container orchestrator. See snapshot.h.
 //
 // Container layout (all little-endian):
@@ -178,28 +179,8 @@ bool save_state(const char* path, const SnapshotContext& ctx, std::string* err) 
     std::vector<uint8_t> blob;
     if (!save_state_bytes(&blob, ctx, err)) return false;
 
-    // Atomic write, same scheme as the runtime battery flush: a crash mid-write
-    // loses only the sibling temp file, never the previous slot contents, and a
-    // browser storage sync can never persist a half-written state.
-    const std::string tmp = std::string(path) + ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) {
-            if (err) *err = "snapshot: cannot open for write: " + tmp;
-            return false;
-        }
-        f.write(reinterpret_cast<const char*>(blob.data()),
-                static_cast<std::streamsize>(blob.size()));
-        f.close();
-        if (!f) {
-            if (err) *err = "snapshot: write failed: " + tmp;
-            std::error_code ec;
-            std::filesystem::remove(tmp, ec);
-            return false;
-        }
-    }
-    if (!replace_file_preserving(tmp, path, err)) {
-        if (err) *err = "snapshot: " + *err;
+    if (!recomp_atomic_file_store(path, blob.data(), blob.size())) {
+        if (err) *err = "snapshot: atomic publication failed: " + std::string(path);
         return false;
     }
     return true;

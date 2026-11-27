@@ -1232,6 +1232,7 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
         return;
     }
     if (contains("\"quit\"")) {
+        if (ctx.quit) ctx.quit();
         out = "{\"ok\":true,\"bye\":true}";
         want_quit = true;
         return;
@@ -1241,6 +1242,13 @@ void dispatch(const TcpDebugServer::Context& ctx, std::string_view req,
 }
 
 }  // namespace
+
+std::string TcpDebugServer::execute(const Context& ctx, const std::string& request) {
+    std::string response;
+    bool quit = false, failed = false;
+    dispatch(ctx, request, response, quit, failed);
+    return response;
+}
 
 TcpDebugServer::TcpDebugServer()  = default;
 TcpDebugServer::~TcpDebugServer() = default;
@@ -1311,13 +1319,21 @@ bool TcpDebugServer::run(int port, const Context& ctx) {
                 if (!line.empty() && line.back() == '\r')
                     line.remove_suffix(1);
                 bool want_quit = false;
-                dispatch(ctx, line, resp, want_quit, step_failed);
-                resp.push_back('\n');
-                if (::send(c, resp.data(),
-                           static_cast<int>(resp.size()), 0) < 0) {
-                    client_done = true;
-                    break;
+                if (ctx.guest_request) {
+                    resp = ctx.guest_request(std::string(line));
+                    want_quit = line.find("\"quit\"") != std::string::npos;
+                } else {
+                    dispatch(ctx, line, resp, want_quit, step_failed);
                 }
+                resp.push_back('\n');
+                size_t sent = 0;
+                while (sent < resp.size()) {
+                    const int count = ::send(c, resp.data() + sent,
+                        static_cast<int>(resp.size() - sent), 0);
+                    if (count <= 0) { client_done = true; break; }
+                    sent += static_cast<size_t>(count);
+                }
+                if (client_done) break;
                 if (want_quit) {
                     client_done = true;
                     quit_server = true;

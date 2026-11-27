@@ -1,3 +1,4 @@
+#include <recomp_input.h>
 // host_window.cpp — SDL2-backed window. Stubs out when SDL2 isn't found.
 
 #include "host_window.h"
@@ -127,22 +128,18 @@ constexpr int assist_pad_axis(int code, bool positive) {
 
 bool assist_pad_down(SDL_GameController* controller, int binding) {
     if (!controller || !SDL_GameControllerGetAttached(controller)) return false;
+    ri_device sample{};
     if (binding > 0 && binding < 100) {
         const int code = binding - 1;
-        return code >= 0 && code < SDL_CONTROLLER_BUTTON_MAX &&
-               SDL_GameControllerGetButton(
-                   controller, static_cast<SDL_GameControllerButton>(code));
+        if (code >= SDL_CONTROLLER_BUTTON_MAX || code >= 32) return false;
+        if (SDL_GameControllerGetButton(controller, static_cast<SDL_GameControllerButton>(code)))
+            sample.buttons = 1u << code;
+    } else if (binding >= 100) {
+        const int axis = (binding - 100) / 2;
+        if (axis >= SDL_CONTROLLER_AXIS_MAX || axis >= RI_MAX_AXES) return false;
+        sample.axes[axis] = SDL_GameControllerGetAxis(controller, static_cast<SDL_GameControllerAxis>(axis));
     }
-    if (binding >= 100) {
-        const int encoded = binding - 100;
-        const int code = encoded / 2;
-        const bool positive = (encoded & 1) != 0;
-        if (code < 0 || code >= SDL_CONTROLLER_AXIS_MAX) return false;
-        const Sint16 value = SDL_GameControllerGetAxis(
-            controller, static_cast<SDL_GameControllerAxis>(code));
-        return positive ? value >= 16000 : value <= -16000;
-    }
-    return false;
+    return ri_binding_held(&sample, static_cast<uint32_t>(binding), 15999) != 0;
 }
 
 // ── MC-WS-002 present-cadence ring ───────────────────────────────────────
@@ -1985,6 +1982,9 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
     if (orientation_policy_ == 2) window_flags |= SDL_WINDOW_RESIZABLE;
     window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_BORDERLESS;
 #endif
+    // Explicit unattended native-front-end override; owner handoffs omit it.
+    if (const char* hidden = std::getenv("GBARECOMP_QA_HIDDEN"); hidden && hidden[0] == '1')
+        window_flags = (window_flags & ~SDL_WINDOW_SHOWN) | SDL_WINDOW_HIDDEN;
     b->window = SDL_CreateWindow(title ? title : "gbarecomp",
                                  SDL_WINDOWPOS_CENTERED,
                                  SDL_WINDOWPOS_CENTERED,
@@ -3771,7 +3771,7 @@ HostWindow::Events HostWindow::pump() {
             {9, SDL_CONTROLLER_BUTTON_LEFTSHOULDER},
         };
         for (const auto& binding : pad_map) {
-            if (SDL_GameControllerGetButton(b->controller, binding.button))
+            if (assist_pad_down(b->controller, 1 + binding.button))
                 keys &= static_cast<uint16_t>(~(1u << binding.bit));
         }
 #endif
