@@ -3,7 +3,7 @@
 
   replay_diagnostic.py list <diagnostics/replays dir>
   replay_diagnostic.py check <segment.replay>
-  replay_diagnostic.py replay <segment.replay> --exe <game exe> --rom <rom> --bios <bios>
+  replay_diagnostic.py replay <segment.replay> --exe <game exe> --rom <rom> [--bios <bios>]
                        [--work DIR] [--window] [--until FRAMES] [--dump-frames A-B]
 
 `replay` stages a private copy of the game directory (so the recorded
@@ -187,8 +187,11 @@ def cmd_replay(args):
         truncate(rec, segments, args.until)
     command = [str(app / exe.name), "--no-launcher", "--replay-diagnostic", str(staged),
                "--rom", str(Path(args.rom).resolve(strict=True)),
-               "--bios", str(Path(args.bios).resolve(strict=True)),
                "--save-path", str(save)]
+    if args.bios:
+        command += ["--bios", str(Path(args.bios).resolve(strict=True))]
+    else:
+        command.append("--bios-hle")
     command += recorded_args(base.with_name(base.name + ".args.txt"))
     game_toml = base.with_name(base.name + ".game.toml")
     if game_toml.is_file():
@@ -250,7 +253,7 @@ def main():
     p.add_argument("segment")
     p.add_argument("--exe", required=True)
     p.add_argument("--rom", required=True)
-    p.add_argument("--bios", required=True)
+    p.add_argument("--bios", help="optional firmware image; native BIOS HLE is the default")
     p.add_argument("--work")
     p.add_argument("--window", action="store_true", help="watch instead of running headless")
     p.add_argument("--until", type=int, help="stop after this many recorded frames")
