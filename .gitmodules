@@ -7,6 +7,7 @@
 [submodule "external/recomp-net"]
 	path = external/recomp-net
 	url = https://github.com/RetroPortingToolKit/recomp-net.git
+	branch = experimental/local-rollback
 [submodule "external/rbengine"]
 	path = external/rbengine
 	url = https://github.com/RetroPortingToolKit/rbengine.git
