@@ -4688,11 +4688,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                  "while GBARECOMP_CHEATS is active\n");
             want = false;
         }
-        if (want && mod_cheats_active) {
-            std::fprintf(stderr, "[gbarecomp:diagnostics] replay capture disabled "
-                                 "while mod cheats are enabled\n");
-            want = false;
-        }
+        // Committed mod programs run at the same frame boundary during
+        // recording and replay; the existing mods-state sidecar retains the
+        // selected catalog settings. Honor the player's recording choice.
         if (want && args.window && args.tcp_port <= 0) {
             if (present_in_place)
                 if (diag.start_recording(diag_config, diag_host))
