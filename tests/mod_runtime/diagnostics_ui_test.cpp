@@ -98,6 +98,89 @@ int main() {
               "presentation Off disabled recording");
 
         const auto config = state_root.parent_path() / "config.ini";
+        const auto saved_state = state_root / "state.toml";
+        struct MigrationCase {
+            const char* package;
+            const char* feature;
+            std::optional<bool> old_choice;
+            bool new_row;
+            std::optional<bool> new_choice;
+            bool config_choice;
+            int read_only;
+            bool expected;
+        };
+        const MigrationCase migrations[] = {
+            {"gba.diagnostics", "recording", false, false, {}, true, 0, false},
+            {"gba.diagnostics", "recording", true, false, {}, false, 1, true},
+            {"gba.diagnostics", "recording", true, true, false, true, 0, false},
+            {"gba.diagnostics", "recording", false, true, true, false, 1, true},
+            {"gba.diagnostics", "recording", false, true, {}, true, 0, false},
+            {"gba.diagnostics", "recording", {}, false, {}, false, -1, false},
+            {"gba.diagnostics", nullptr, {}, false, {}, false, -1, false},
+            {"other.diagnostics", "recording", false, false, {}, true, -1, true},
+            {"gba.diagnostics", "other", false, false, {}, true, -1, true},
+        };
+        for (const auto& migration : migrations) {
+            std::string seed = "format_version = 1\n[[package]]\n"
+                "id = \"test.unrelated\"\nversion = \"2.0.0\"\n"
+                "[[feature]]\npackage_id = \"test.unrelated\"\nid = \"keep\"\n"
+                "enabled = false\n[feature.values]\nmarker = \"unchanged\"\n";
+            seed += "[[package]]\nid = \"" + std::string(migration.package) +
+                "\"\nversion = \"1.0.0\"\n";
+            if (migration.feature) {
+                seed += "[[feature]]\npackage_id = \"" + std::string(migration.package) +
+                    "\"\nid = \"" + migration.feature + "\"\n";
+                if (migration.old_choice.has_value())
+                    seed += std::string("enabled = ") +
+                        (*migration.old_choice ? "true\n" : "false\n");
+            }
+            if (migration.new_row) {
+                seed += "[[package]]\nid = \"" + std::string(package) +
+                    "\"\nversion = \"1.0.0\"\n[[feature]]\npackage_id = \"" +
+                    package + "\"\nid = \"" + feature + "\"\n";
+                if (migration.new_choice.has_value())
+                    seed += std::string("enabled = ") +
+                        (*migration.new_choice ? "true\n" : "false\n");
+            }
+            const std::string old_config = std::string("[Diagnostics]\nreplay_capture=") +
+                (migration.config_choice ? "1\n" : "0\n");
+            write_file(saved_state, seed);
+            write_file(config, old_config);
+            const int before_lookup = presentation_activations;
+            check(gbarecomp::mod_runtime_saved_diagnostic_replay_enabled(state_root) ==
+                      migration.read_only && read_file(saved_state) == seed &&
+                      presentation_activations == before_lookup,
+                  "read-only recording choice lookup changed state or ignored priority");
+            check(initialize() && get(package, feature).enabled == migration.expected,
+                  "legacy package recording choice/default/config priority was lost");
+            if (migration.new_choice.has_value())
+                check(read_file(saved_state) == seed,
+                      "explicit current recording choice was rewritten during import");
+            commit();
+            check(gba_mod_diagnostic_replay_enabled() == migration.expected &&
+                      read_file(config) == old_config,
+                  "recording choice was not applied or legacy config was rewritten");
+            gbarecomp::Runtime reopened;
+            reopened.state_root = state_root;
+            check(gbarecomp::load_state(reopened, &error), "reopen imported selections");
+            const auto& unrelated = reopened.selections.at("test.unrelated");
+            check(unrelated.version == "2.0.0" &&
+                      unrelated.features.at("keep").has_enabled &&
+                      !unrelated.features.at("keep").enabled &&
+                      unrelated.features.at("keep").values.at("marker") == "unchanged",
+                  "recording import damaged an unrelated saved selection");
+            if (migration.old_choice.has_value()) {
+                const auto& retained = reopened.selections.at(migration.package)
+                    .features.at(migration.feature);
+                check(retained.has_enabled && retained.enabled == *migration.old_choice,
+                      "recording import changed the legacy selection");
+            }
+            const std::string imported = read_file(saved_state);
+            check(initialize() && get(package, feature).enabled == migration.expected &&
+                      read_file(saved_state) == imported,
+                  "cold reopen changed an already imported recording choice");
+        }
+        write_file(saved_state, "format_version = 1\n");
         const std::string legacy_off = "[Other]\nkeep=this\n[Diagnostics]\nreplay_capture=0\n";
         write_file(config, legacy_off);
         check(initialize() && !get(package, feature).enabled,
@@ -142,7 +225,7 @@ int main() {
         check(fs::weakly_canonical(sandbox.parent_path()) ==
               fs::weakly_canonical(fs::temp_directory_path()), "fixture containment");
         fs::remove_all(sandbox);
-        std::cout << "diagnostics UI: PASS default On, saved On/Off, legacy preference, "
+        std::cout << "diagnostics UI: PASS default On, saved On/Off, legacy package/config precedence, "
                      "presentation independence, host-only netplay persistence\n";
         return 0;
     } catch (const std::exception& error) {

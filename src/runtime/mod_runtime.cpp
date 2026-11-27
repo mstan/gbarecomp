@@ -30,6 +30,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -1134,15 +1135,27 @@ const Package* diagnostic_replay_package(Runtime& runtime) {
         find_feature(*package, kDiagnosticReplayFeature) ? package : nullptr;
 }
 
+std::optional<bool> legacy_diagnostic_replay_selection(const Runtime& runtime) {
+    const auto package = runtime.selections.find("gba.diagnostics");
+    if (package == runtime.selections.end()) return std::nullopt;
+    const auto feature = package->second.features.find("recording");
+    if (feature == package->second.features.end() || !feature->second.has_enabled)
+        return std::nullopt;
+    return feature->second.enabled;
+}
+
 bool import_legacy_diagnostic_replay(Runtime& runtime, std::string* error) {
     const Package* package = diagnostic_replay_package(runtime);
     if (!package) return true;
     auto& selection = package_selection(runtime, *package)
         .features[kDiagnosticReplayFeature];
     if (selection.has_enabled) return true;
-    const auto legacy = diagnostic_replay_saved_setting(
-        (runtime.state_root.parent_path() / "config.ini").string());
-    if (!legacy) return true;
+    // An explicit package choice takes precedence over the older config fallback.
+    auto legacy = legacy_diagnostic_replay_selection(runtime);
+    if (!legacy.has_value())
+        legacy = diagnostic_replay_saved_setting(
+            (runtime.state_root.parent_path() / "config.ini").string());
+    if (!legacy.has_value()) return true;
     selection.enabled = *legacy;
     selection.has_enabled = true;
     return save_state(runtime, error);
@@ -1929,10 +1942,13 @@ int mod_runtime_saved_diagnostic_replay_enabled(const fs::path& root) {
     saved.state_root = root;
     if (!load_state(saved, nullptr)) return -1;
     const auto package = saved.selections.find(kDiagnosticReplayPackage);
-    if (package == saved.selections.end()) return -1;
-    const auto feature = package->second.features.find(kDiagnosticReplayFeature);
-    return feature != package->second.features.end() && feature->second.has_enabled
-        ? (feature->second.enabled ? 1 : 0) : -1;
+    if (package != saved.selections.end()) {
+        const auto feature = package->second.features.find(kDiagnosticReplayFeature);
+        if (feature != package->second.features.end() && feature->second.has_enabled)
+            return feature->second.enabled ? 1 : 0;
+    }
+    const auto legacy = legacy_diagnostic_replay_selection(saved);
+    return legacy.has_value() ? (*legacy ? 1 : 0) : -1;
 }
 
 void mod_runtime_activate_plugins() {
