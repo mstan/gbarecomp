@@ -2016,6 +2016,15 @@ void mod_runtime_run_cheats(const codebreaker::Memory& memory) {
         codebreaker::run(cheat.program, memory);
 }
 
+std::vector<codebreaker::NamedProgram> mod_runtime_committed_cheat_programs() {
+    std::vector<codebreaker::NamedProgram> programs;
+    for (const auto& cheat : state().committed_cheats) {
+        const auto id = cheat.package_id + "/" + cheat.feature_id;
+        programs.push_back({id, id, cheat.program});
+    }
+    return programs;
+}
+
 const char* mod_runtime_required_asset_path(const std::string& package_id,
                                             const std::string& asset_id) {
     const Runtime& runtime = state();

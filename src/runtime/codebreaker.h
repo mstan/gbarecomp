@@ -32,12 +32,11 @@
 // "The next code" is the next complete code, including all continuation
 // lines of a slide or fill list.
 //
-// Unlike a desktop emulator the parser is strict, because a package is a
-// trust boundary: every address a code reads or writes must lie inside EWRAM
-// (0x02000000-0x0203FFFF) or IWRAM (0x03000000-0x03007FFF), 16-bit accesses
-// must be halfword aligned, multi-line codes must be complete, and a
-// conditional must be followed by a code. Cheats therefore never touch IO,
-// VRAM, ROM, save hardware or generated code.
+// Addresses may name EWRAM, IWRAM, palette, VRAM, OAM and loaded cartridge
+// windows, including their hardware mirrors. Halfwords stay aligned and all
+// continuation lines must be complete. Cartridge programs use a guarded
+// in-memory transaction with native dependency checks and mod-state restore.
+// IO/device commands remain separate; the original image file stays read-only.
 #pragma once
 
 #include <cstddef>
@@ -77,6 +76,12 @@ struct Op {
 
 struct Program {
     std::vector<Op> ops;
+};
+
+struct NamedProgram {
+    std::string id;
+    std::string label;
+    Program program;
 };
 
 // Parse one code per element ("XXXXXXXX YYYY", hex, case-insensitive,

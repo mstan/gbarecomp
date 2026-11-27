@@ -8,9 +8,6 @@ namespace gbarecomp::codebreaker {
 namespace {
 
 constexpr std::uint64_t kEwramBegin = 0x02000000u;
-constexpr std::uint64_t kEwramEnd = 0x02040000u;
-constexpr std::uint64_t kIwramBegin = 0x03000000u;
-constexpr std::uint64_t kIwramEnd = 0x03008000u;
 
 int hex_value(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -45,15 +42,16 @@ bool parse_words(const std::string& text, std::uint32_t* op1,
     return true;
 }
 
-// [begin, end) lies entirely inside one work-RAM region.
-bool in_ram(std::uint64_t begin, std::uint64_t end) {
+// Physical RAM mirrors and the three cartridge windows. IO and save-device
+// commands have separate contracts; ordinary image writes are valid mod data.
+bool in_memory(std::uint64_t begin, std::uint64_t end) {
     if (end <= begin) return false;
-    return (begin >= kEwramBegin && end <= kEwramEnd) ||
-           (begin >= kIwramBegin && end <= kIwramEnd);
+    return (begin >= kEwramBegin && end <= 0x04000000u) ||
+           (begin >= 0x05000000u && end <= 0x0E000000u);
 }
 
 bool halfword_ok(std::uint64_t address) {
-    return (address & 1u) == 0 && in_ram(address, address + 2);
+    return (address & 1u) == 0 && in_memory(address, address + 2);
 }
 
 bool is_conditional(OpKind kind) {
@@ -106,8 +104,8 @@ bool parse(const std::vector<std::string>& lines, Program* out,
             case 0x3:
                 op.kind = OpKind::Write8;
                 op.operand = op2 & 0xFFu;
-                if (!in_ram(address, address + 1u))
-                    return fail(i, "address is outside EWRAM/IWRAM");
+                if (!in_memory(address, address + 1u))
+                    return fail(i, "address is outside supported mod memory");
                 program.ops.push_back(op);
                 continue;
             case 0x4: {
@@ -124,12 +122,12 @@ bool parse(const std::vector<std::string>& lines, Program* out,
                 if (op.count > 1 && (op.address_step & 1u))
                     return fail(i + 1, "slide address step must be even");
                 if (!halfword_ok(address))
-                    return fail(i, "address is outside EWRAM/IWRAM or misaligned");
+                    return fail(i, "address is outside supported mod memory or misaligned");
                 if (op.count > 1) {
                     const std::uint64_t last =
                         address + std::uint64_t{op.count - 1} * op.address_step;
-                    if (!in_ram(address, last + 2u))
-                        return fail(i, "slide leaves its EWRAM/IWRAM region");
+                    if (!in_memory(address, last + 2u))
+                        return fail(i, "slide leaves supported mod memory");
                 }
                 ++i;
                 program.ops.push_back(op);
@@ -140,8 +138,8 @@ bool parse(const std::vector<std::string>& lines, Program* out,
                 const std::uint32_t count = op2;
                 if (count == 0) return fail(i, "fill list has no halfwords");
                 if (!halfword_ok(address) ||
-                    !in_ram(address, address + std::uint64_t{count} * 2u))
-                    return fail(i, "fill list leaves its EWRAM/IWRAM region "
+                    !in_memory(address, address + std::uint64_t{count} * 2u))
+                    return fail(i, "fill list leaves supported mod memory "
                                    "or is misaligned");
                 const std::size_t head = i;
                 while (op.values.size() < count) {
@@ -180,7 +178,7 @@ bool parse(const std::vector<std::string>& lines, Program* out,
             case 0xF: op.kind = OpKind::IfAnd; break;
         }
         if (!halfword_ok(address))
-            return fail(i, "address is outside EWRAM/IWRAM or misaligned");
+            return fail(i, "address is outside supported mod memory or misaligned");
         program.ops.push_back(op);
     }
     if (program.ops.empty())

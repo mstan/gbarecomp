@@ -95,19 +95,18 @@ void test_rejections() {
     CHECK(rejects({""}, "hex words"));
     CHECK(rejects({"9A3B5C7D 1234"}, "encrypted"));
     CHECK(rejects({"D0000010 0001", "83000000 0001"}, "D0000020"));
-    CHECK(rejects({"84000000 0001"}, "outside EWRAM/IWRAM"));   // IO
-    CHECK(rejects({"88000000 0001"}, "outside EWRAM/IWRAM"));   // ROM
-    CHECK(rejects({"86000000 0001"}, "outside EWRAM/IWRAM"));   // VRAM
+    CHECK(rejects({"84000000 0001"}, "outside supported mod memory")); // IO
+    CHECK(rejects({"8E000000 0001"}, "outside supported mod memory")); // save device
     CHECK(rejects({"83000001 0001"}, "misaligned"));
-    CHECK(rejects({"83007FFE 0001", "8303FFFE 0001"}, "line 2"));
-    CHECK(rejects({"32040000 0001"}, "outside EWRAM/IWRAM"));
+    CHECK(rejects({"83007FFE 0001", "84000000 0001"}, "line 2"));
+    CHECK(rejects({"34000000 0001"}, "outside supported mod memory"));
     CHECK(rejects({"73000000 0001"}, "not followed"));
     CHECK(rejects({"43000000 0001"}, "continuation"));
     CHECK(rejects({"43000000 0001", "00000002 0003"}, "even"));
-    CHECK(rejects({"43007FF0 0001", "00000010 0002"}, "leaves"));
+    CHECK(rejects({"43FFFFF0 0001", "00000010 0002"}, "leaves"));
     CHECK(rejects({"53000000 0004", "11223344 5566"}, "missing data"));
     CHECK(rejects({"53000000 0000"}, "no halfwords"));
-    CHECK(rejects({"53007FFE 0002", "11223344 5566"}, "leaves"));
+    CHECK(rejects({"53FFFFFE 0002", "11223344 5566"}, "leaves"));
     CHECK(rejects({"00000000 0001", "10000000 0002"}, "no code has an effect"));
     // A failed parse never hands back a partial program.
     cb::Program program;

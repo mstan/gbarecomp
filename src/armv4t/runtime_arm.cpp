@@ -39,12 +39,22 @@ extern "C" const DispatchEntry kDispatchTable[];
 extern "C" const unsigned kDispatchTableLen;
 namespace {
 const RuntimeNativeProgram* g_selected_native_program = nullptr;
+const RuntimeNativeImageDependencies* g_original_image_dependencies = nullptr;
 const DispatchEntry* cart_dispatch() {
     return g_selected_native_program ? g_selected_native_program->dispatch : kDispatchTable;
 }
 unsigned cart_dispatch_count() {
     return g_selected_native_program ? g_selected_native_program->dispatch_count : kDispatchTableLen;
 }
+}
+
+extern "C" void runtime_register_native_image_dependencies(
+        const RuntimeNativeImageDependencies* dependencies) {
+    g_original_image_dependencies = dependencies;
+}
+extern "C" const RuntimeNativeImageDependencies* runtime_native_image_dependencies() {
+    return g_selected_native_program ? g_selected_native_program->image_dependencies
+                                     : g_original_image_dependencies;
 }
 
 // BIOS dispatch table. Lives in src/runtime/generated_bios/

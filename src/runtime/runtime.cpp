@@ -48,6 +48,8 @@
 #include "codebreaker.h"
 #if defined(GBARECOMP_ENABLE_MODS)
 #include "mod_runtime.h"
+#include "codebreaker_memory.h"
+#include <recomp_mod.h>
 #endif
 #include "../gba/sha1.h"
 #include "mod_rom_data.h"
@@ -1738,6 +1740,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     const ModNativeProgramProfile* selected_native_program = nullptr;
     std::string cartridge_plan_fingerprint;
 #if defined(GBARECOMP_ENABLE_MODS)
+    CartridgeModState::Identity original_image_sha256{};
+    if (!rmod_sha256_bytes(rom.data(), rom.size(), original_image_sha256.data())) {
+        std::fprintf(stderr, "[gbarecomp:mods] cannot identify original image\n");
+        return 1;
+    }
     if (mods_ready) {
         if (!mod_runtime_commit(args.rom, &err)) {
             std::fprintf(stderr,
@@ -2415,6 +2422,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     uint64_t swi_entries = 0;
     int frames_presented = 0;
     bool host_quit = false;
+    bool mod_cheat_failed = false;
     // Pause hotkey (config.ini [KeyMap] Pause, default Shift+P): while set,
     // the run loop stops stepping the guest but keeps pumping input and
     // re-presenting the last frame.
@@ -2480,6 +2488,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     };
 
     auto step_once = [&]() -> bool {
+        if (mod_cheat_failed) return false;
         last_step_cycles = 0;
         // Game-thread-only: fold any worker-finished native overlays into the
         // dispatch table so the next runtime_dispatch can use them. Cheap when
@@ -2512,7 +2521,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
         ++taken;
         sync_frame_counter();
-        return true;
+        return !mod_cheat_failed;
     };
     // Advance until the PPU reaches the next VBlank-start (scanline
     // 159->160), NOT the scanline wrap (227->0). The interpreter oracle
@@ -2713,8 +2722,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         std::fprintf(stderr, "[gbarecomp:runtime] cheats=ENABLED count=%zu "
                              "(validation only)\n", cheats.size());
     }
-    // Mod cheats go through the bus like the game's own stores; the parser
-    // already confined every address to EWRAM/IWRAM.
+    // Ordinary memory uses the bus. Cartridge programs stage all image/RAM
+    // effects together, then publish through the guarded mod transaction.
     codebreaker::Memory mod_cheat_memory;
     mod_cheat_memory.ctx = &bus;
     mod_cheat_memory.read16 = [](void* c, uint32_t a) {
@@ -2728,6 +2737,25 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     };
     std::atomic<uint64_t> mod_cheat_frames{0};
 #if defined(GBARECOMP_ENABLE_MODS)
+    codebreaker::FrameMemory mod_frame_memory;
+    auto mod_programs = mod_runtime_committed_cheat_programs();
+    const bool cartridge_cheats = mod_cheats_active && std::any_of(
+        mod_programs.begin(), mod_programs.end(), [](const auto& p) {
+            return codebreaker::FrameMemory::uses_cartridge(p.program);
+        });
+    if (cartridge_cheats && !mod_frame_memory.initialize(std::move(mod_programs),
+            mod_cheat_memory, rom, runtime_native_image_dependencies(),
+            opts.mod_game_id, original_image_sha256, &err)) {
+        std::fprintf(stderr, "[gbarecomp:mods] cannot bind cheat memory: %s\n", err.c_str());
+        gbarecomp::overlay_loader_shutdown(); runtime_shutdown(); return 1;
+    }
+    if (!mod_frame_memory.bind_snapshots(&err)) {
+        std::fprintf(stderr, "[gbarecomp:mods] cannot bind cheat save/load: %s\n", err.c_str());
+        gbarecomp::overlay_loader_shutdown(); runtime_shutdown(); return 1;
+    }
+    if (cartridge_cheats)
+        std::fprintf(stderr, "[gbarecomp:mods] guarded cheat plan=%s\n",
+                     mod_frame_memory.plan_fingerprint().c_str());
     if (mod_cheats_active) {
         std::string names;
         for (const std::string& name : mod_runtime_committed_cheat_names())
@@ -2740,7 +2768,22 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         runtime_set_frame_start_hook([&]() {
 #if defined(GBARECOMP_ENABLE_MODS)
             if (mod_cheats_active) {
-                mod_runtime_run_cheats(mod_cheat_memory);
+                if (cartridge_cheats) {
+                    std::string e;
+                    bool ok = false;
+                    try { ok = mod_frame_memory.run(&e); }
+                    catch (const std::exception& failure) { e = failure.what(); }
+                    catch (...) { e = "Unexpected mod memory failure"; }
+                    if (!ok) {
+                        std::fprintf(stderr, "[gbarecomp:mods] cheat transaction stopped: %s\n", e.c_str());
+                        mod_cheat_failed = true; host_quit = true;
+                        runtime_request_mod_stop(); return;
+                    }
+                    if (mod_frame_memory.changed()) runtime_notify_mod_memory_changed();
+                } else {
+                    mod_runtime_run_cheats(mod_cheat_memory);
+                    runtime_notify_mod_memory_changed();
+                }
                 mod_cheat_frames.fetch_add(1, std::memory_order_relaxed);
             }
 #endif
@@ -3048,7 +3091,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         emit_exit_diagnostics();
         gbarecomp::overlay_loader_shutdown();
         runtime_shutdown();
-        return (ok && save_ok) ? 0 : 1;
+        return (ok && save_ok && !mod_cheat_failed) ? 0 : 1;
     }
 
     HostWindow win;
@@ -5421,7 +5464,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     gbarecomp::overlay_loader_shutdown();
     runtime_shutdown();
     if (diag_exit) return diag_exit;
-    return save_ok && gpu_dump_ok && !gbarecomp::capture::failed() ? 0 : 1;
+    return save_ok && gpu_dump_ok && !mod_cheat_failed && !gbarecomp::capture::failed() ? 0 : 1;
 }
 
 }  // namespace gbarecomp

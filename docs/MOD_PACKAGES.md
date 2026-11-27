@@ -218,13 +218,26 @@ codes are parsed by the engine's strict interpreter
 implementation) when the manifest is read, and the whole manifest is
 rejected before boot if any line is malformed, encrypted (type `9`), an
 unsupported `D` code, an incomplete slide/fill list, a trailing conditional,
-misaligned, or addresses anything outside EWRAM/IWRAM. A cheat-owning feature
+misaligned, or addresses unsupported device memory. EWRAM, IWRAM, palette,
+VRAM, OAM and loaded cartridge windows accept ordinary memory operations,
+including physical mirrors. IO and save-device commands have separate
+semantics and are not treated as ordinary memory writes. A cheat-owning feature
 must declare `default_enabled = false`.
 
 After **Play/Commit**, the runner re-applies the committed cheats once per
-guest frame at frame start through the normal bus. With no cheat feature
-enabled nothing is armed, so frames and savestates are byte-identical to a
-stock run. Diagnostic replay capture has its own visible Mods control; it
+guest frame at frame start. Programs using cartridge memory evaluate against
+a shadow view, then commit RAM and image changes together through the shared
+mod transaction. The transaction checks expected bytes, target and plan
+identity, conflicting writes and rollback. Cartridge data remains writable;
+changes to bytes used by generated native code require an exact compiled
+native profile. Regenerate older titles to supply the native dependency map.
+The original image file is never a write destination. Sparse cartridge changes
+save and restore through the normal MODS state section; a different resolved
+plan is rejected before any guest state changes. Failed frame transactions
+stop execution and report the error.
+
+With no cheat feature enabled, guest memory and frame behavior remain stock.
+Diagnostic replay capture has its own visible Mods control; it
 defaults on and retains the player's saved choice independently of cheats.
 Committed cheats also run during replay playback; use the same build, original
 ROM and Mods choices as the recording. Netplay never loads the package
@@ -339,14 +352,17 @@ authoritative over stale config, CLI, or environment values.
 A title may set `RunOptions::prepare_mod_rom_data` for a trusted, statically
 linked data-only enhancement. It runs once after original-cartridge validation
 and committed plugin activation, before the bus or CPU receives the process-local
-image. The default is null. The callback must preserve the cartridge header and
-every instruction, folded literal and copied-code byte used by that title's
+image. The default is null. The original cartridge identity and header are
+validated first; the loaded header may then be changed by the mod. The callback
+must preserve every instruction, folded literal and copied-code byte used by that title's
 generated native program; verify the actual generated corpus before using it.
 Executable changes require a separately regenerated native program instead.
 Return `Prepared` to recompute the effective image SHA-1 used by snapshots,
 diagnostic replay and the overlay cache, `Unchanged` when no preparation is
 needed, or `Failed` with a stable error string to reject launch. The runtime
-also rejects header changes and invalid results before guest execution.
+stages the callback's changes and publishes only after disposition, expected-byte
+transaction and native-profile validation succeed. Failure, exceptions and a
+callback that changes bytes while returning `Unchanged` leave the image intact.
 Original cartridge files and native saves are not rewritten by this hook.
 Online launch bypasses mod activation and this callback.
 
