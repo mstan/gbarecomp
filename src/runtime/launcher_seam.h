@@ -94,8 +94,10 @@ inline int verify_retail_gba_bios(const char* path,
     if (!out) return 0;
     std::memset(out, 0, sizeof(*out));
     if (!path || !*path) {
-        std::snprintf(out->detail, sizeof(out->detail),
-                      "Retail Game Boy Advance BIOS required (16 KB).");
+        out->ok = !gbarecomp::has_recompiled_bios();
+        std::snprintf(out->detail, sizeof(out->detail), "%s",
+                      out->ok ? "Using native Game Boy Advance BIOS services."
+                              : "Retail Game Boy Advance BIOS required (16 KB).");
         return 1;
     }
 
@@ -913,7 +915,7 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
             if (seed_rom.empty())
                 seed_rom = config_relative_path(
                     toml_path_value(toml, "rom", "path"));
-            if (seed_bios.empty())
+            if (seed_bios.empty() && gbarecomp::has_recompiled_bios())
                 seed_bios = config_relative_path(
                     toml_path_value(toml, "bios", "path"));
         }
@@ -1142,6 +1144,10 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
 
     // Closing the launcher still commits its settings. Save before returning
     // so a player need not start a game just to retain an audio/display edit.
+    if (!gbarecomp::has_recompiled_bios() && !ls.bios_path[0] && !seed_bios.empty()) {
+        // Clearing an optional BIOS keeps the next launch on native services.
+        std::ofstream clear_bios(bios_cfg, std::ios::trunc);
+    }
     if (rc == 1) return 1;
 
     if (picked_rom[0]) {
@@ -1166,6 +1172,9 @@ inline int gbarecomp_launcher_preboot(std::vector<std::string>& args,
         args.push_back("--bios");
         args.push_back(ls.bios_path);
         write_single_line(bios_cfg, ls.bios_path);
+    } else if (!gbarecomp::has_recompiled_bios()) {
+        args.push_back("--bios");
+        args.emplace_back();
     }
     seam_append_setting_args(args, cfg, opts);
     return 0;

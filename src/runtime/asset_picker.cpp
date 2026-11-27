@@ -212,6 +212,7 @@ AssetResult resolve_asset(const std::string& argv_path,
                 if (spec.persist_cache) write_cache(cache, argv_path);
                 return r;
             }
+            if (!spec.allow_dialog) return r;
             // Wrong size or unreadable. Don't bother the user with a
             // dialog if there isn't one available (non-Windows); they
             // need the diagnostic. On Windows, fall through to dialog.
@@ -233,6 +234,8 @@ AssetResult resolve_asset(const std::string& argv_path,
             }
         }
     }
+
+    if (!spec.allow_dialog) return {};
 
 #if defined(_WIN32) && !defined(GBARECOMP_TEST_NO_ASSET_DIALOGS)
     while (true) {

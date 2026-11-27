@@ -81,6 +81,7 @@ void GbaBus::serialize(gbarecomp::debug::SnapshotWriter& w) const {
     w.u32(memctl_);
     w.u32(waits_->n16[0x2]);
     w.u32(waits_->last_prefetched_pc);
+    w.u32(bios_prefetch_);
 }
 
 void GbaBus::deserialize(gbarecomp::debug::SnapshotReader& r) {
@@ -113,6 +114,7 @@ void GbaBus::deserialize(gbarecomp::debug::SnapshotReader& r) {
             waits_->n16[0x2] = static_cast<uint8_t>(ewram_wait);
         waits_->last_prefetched_pc = r.u32();
     }
+    bios_prefetch_ = r.remaining() ? r.u32() : 0u;
     refresh_waitstates();
 }
 
@@ -215,7 +217,21 @@ bool is_eeprom_addr(uint32_t addr, const GbaSave& save) {
 // fetching from — never recurse through the bus accessors.
 uint32_t GbaBus::prefetch_word(uint32_t pc, bool thumb) const {
     auto code32 = [&](uint32_t a) -> uint32_t {
-        if (a < 0x00004000u) return bios_ ? bios_->read32(a & 0x3FFFu) : 0u;
+        if (a < 0x00004000u) {
+            if (bios_) return bios_->read32(a);
+            if (!native_bios_) return 0u;
+            // ARM pipeline words observable at host-native firmware boundaries.
+            // See GBATEK, Reading from BIOS Memory. These are bus data only.
+            switch (a) {
+            case 0x0E4u: return 0xE129F000u;  // cartridge handoff
+            case 0x13Cu: return 0xE25EF004u;  // IRQ callback entry
+            case 0x144u: return 0xE55EC002u;  // IRQ return
+            case 0x190u: return 0xE3A02004u;  // SWI return
+            case 0x1BCu: return 0x03007FA0u;  // parked Halt
+            case 0x350u: return 0xE8BD4010u;  // parked interrupt wait
+            default: return bios_prefetch_;
+            }
+        }
         if (rom_ && a >= 0x08000000u && a < 0x0E000000u) {
             std::size_t o = (a - 0x08000000u) & 0x01FFFFFFu;
             std::size_t physical = 0;

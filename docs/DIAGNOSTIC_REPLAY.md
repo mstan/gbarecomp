@@ -45,7 +45,7 @@ selection. Older runners without the control retain their configuration fallback
 ```sh
 python tools/replay_diagnostic.py check  <first .replay>
 python tools/replay_diagnostic.py replay <first .replay> \
-    --exe <same build>/Game.exe --rom <rom> --bios <gba_bios.bin> [--window]
+    --exe <same build>/Game.exe --rom <rom> [--window]
 ```
 
 `replay` sets up a private reproduction directory:

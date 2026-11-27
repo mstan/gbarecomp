@@ -155,6 +155,7 @@ struct Args {
     std::string config = GBARECOMP_DEFAULT_GAME_CONFIG;
     std::string game_short_name;
     std::string bios;
+    bool bios_from_cli = false;
     std::string bios_sha1 = gba::GbaBios::kExpectedSha1;
     // SHA-1 is the gate (40 hex chars, way stronger than a 32-bit
     // CRC). CRC32 is left at 0 = "no check" — the asset picker will
@@ -971,6 +972,7 @@ bool parse_cli(int argc, char** argv, Args* args, std::string* err) {
             const char* v = need_value("--bios");
             if (!v) return false;
             args->bios = v;
+            args->bios_from_cli = true;
             continue;
         }
         if (s == "--rom") {
@@ -1428,6 +1430,14 @@ bool resolve_native_save_override(int argc, char** argv, const RunOptions& opts,
     return true;
 }
 
+bool has_recompiled_bios() {
+#if defined(GBARECOMP_HAVE_BIOS_RECOMP)
+    return true;
+#else
+    return false;
+#endif
+}
+
 int run_game(int argc, char** argv, const RunOptions& opts) {
     const auto player_dir = player_config_directory(
         opts, argc > 0 && argv ? argv[0] : nullptr);
@@ -1556,15 +1566,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // Keep each validated byte snapshot through machine construction. Reopening
     // the path would repeat I/O and hashing, and could load different bytes.
     gba::GbaBios bios;
+    const bool require_bios_image = has_recompiled_bios() || netplay;
     std::vector<uint8_t> resolved_rom_bytes;
     std::string resolved_rom_sha1;
 
-    // Resolve BIOS via the picker chain (argv path -> sidecar cache ->
-    // Win32 file dialog). Released binaries don't ship a default path
-    // that exists, so the picker is what makes a fresh install work
-    // without a CLI argument. CRC32 + SHA-1 mismatch is a soft warning
-    // so the user can boot with an uncatalogued region/revision; wrong
-    // size is a hard fail (see asset_picker.cpp).
+    // Netplay and builds with linked firmware still require the dump.
+    // On a standalone native build, prefer the player's configured image
+    // when available. An explicit empty path selects the native mode.
     {
         AssetSpec spec;
         spec.display_name   = "GBA BIOS";
@@ -1579,17 +1587,23 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                 ? gba::GbaBios::kExpectedSha1
                                 : args.bios_sha1.c_str();
         spec.expected_crc32 = args.bios_crc32;
-        auto r = resolve_asset(args.bios, spec, argv[0]);
-        if (!r.ok) {
+        spec.allow_dialog   = require_bios_image;
+        AssetResult r;
+        if (require_bios_image || !args.bios_from_cli) {
+            r = resolve_asset(args.bios, spec, argv[0]);
+        } else if (!args.bios.empty()) {
+            r = validate_asset_path(args.bios, spec);
+        }
+        if (!r.ok && (require_bios_image || !r.error.empty())) {
             std::fprintf(stderr,
                          "[gbarecomp:runtime] BIOS resolution failed: %s\n",
                          r.error.c_str());
             return 1;
         }
         args.bios = r.path;
-        // Preserve the picker policy for noncanonical BIOS dumps: load the
-        // exact validated snapshot without imposing another hash gate.
-        if (!bios.load_from_bytes(r.bytes.data(), r.bytes.size(), std::string{}, &err)) {
+        // Preserve the picker policy for noncanonical BIOS dumps. A native
+        // session with no dump has no image to load or pass to the overlay loader.
+        if (r.ok && !bios.load_from_bytes(r.bytes.data(), r.bytes.size(), std::string{}, &err)) {
             std::fprintf(stderr, "[gbarecomp:runtime] %s\n", err.c_str());
             return 1;
         }
@@ -1708,8 +1722,10 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     }
 
     if (!args.quiet) {
-        std::printf("bios_loaded sha1=%s size=%zu\n",
-                    bios.sha1_hex().c_str(), gba::GbaBios::kSize);
+        if (bios.loaded()) {
+            std::printf("bios_loaded sha1=%s size=%zu\n",
+                        bios.sha1_hex().c_str(), gba::GbaBios::kSize);
+        }
         std::printf("rom_loaded sha1=%s size=%zu title=\"%s\" code=%s "
                     "entry=0x%08x save=%s signature=%s\n",
                     rom_sha1.c_str(), rom.size(), header.game_title.c_str(),
@@ -1763,13 +1779,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             rom_sha1.c_str(), args.save_path.c_str());
     }
     // Declarative mod cheats ([[cheat]] records of enabled features). They
-    // mutate guest RAM, so they run only in a single-player session whose
-    // catalog committed them: netplay never loads the catalog (and returned
-    // above in any case), and a diagnostic replay must reproduce the recorded
-    // session, which capture never records with cheats active.
+    // run in an offline session whose catalog committed them. Playback loads
+    // the recorded catalog state and must execute the same programs at the
+    // same frame boundary. Netplay never loads the catalog and returned above.
 #if defined(GBARECOMP_ENABLE_MODS)
     const bool mod_cheats_active = mods_ready && !netplay &&
-        args.replay_diagnostic.empty() &&
         mod_runtime_committed_cheat_count() > 0;
 #else
     const bool mod_cheats_active = false;
@@ -1785,7 +1799,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         return 1;
     }
     ppu.set_internal_resolution(args.internal_resolution, opts.high_resolution_affine_provider);
-    bus.set_bios(&bios);
+    if (bios.loaded()) bus.set_bios(&bios);
+    else bus.enable_native_bios();
     bus.request_audio_shadow(args.audio_shadow);  // [audio].shadow default; env can override
 
     // BIOS backend select: LLE (recompiled BIOS, the default + oracle) vs HLE
@@ -1819,8 +1834,13 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         }
     }
 #endif
-    gba::bios_hle_set_mode(args.bios_hle ? gba::BiosHleMode::On
-                                         : gba::BiosHleMode::Off);
+    if (bus.native_bios() && args.bios_skip_intro == 0) {
+        std::fprintf(stderr, "[gbarecomp:runtime] The GBA BIOS intro requires a firmware image and linked BIOS code.\n");
+        return 1;
+    }
+    const auto bios_mode = bus.native_bios() ? gba::BiosHleMode::Native :
+        (args.bios_hle ? gba::BiosHleMode::On : gba::BiosHleMode::Off);
+    gba::bios_hle_set_mode(bios_mode);
     gba::bios_hle_set_interrupts_enabled(args.bios_hle);
     if (!args.quiet)
         std::printf("bios_backend=%s\n",
@@ -2357,7 +2377,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     // GBARECOMP_SELFHEAL_RECOMPILE; no-op + a clear banner when off). The cache
     // is keyed by the cart SHA-1 so a different ROM gets a fresh DLL set; the
     // BIOS snapshot is the immutable code image for BIOS-region heals.
-    gbarecomp::overlay_loader_init("recomp_cache", rom_sha1, &bios);
+    gbarecomp::overlay_loader_init("recomp_cache", rom_sha1, bus.bios());
 
     // Widescreen Step B tilemap-provenance probe (debug-only; no-op unless
     // GBARECOMP_WS_PROBE_DRAWMETATILE is set). Installs the function-entry hook
@@ -4666,19 +4686,18 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                                  "while GBARECOMP_CHEATS is active\n");
             want = false;
         }
-        if (want && mod_cheats_active) {
-            std::fprintf(stderr, "[gbarecomp:diagnostics] replay capture disabled "
-                                 "while mod cheats are enabled\n");
-            want = false;
-        }
+        // Committed mod programs run at the same frame boundary during
+        // recording and replay; the existing mods-state sidecar retains the
+        // selected catalog settings. Honor the player's recording choice.
         if (want && args.window && args.tcp_port <= 0) {
-            if (present_in_place)
+            if (present_in_place) {
                 if (diag.start_recording(diag_config, diag_host))
                     gbarecomp::overlay_set_adoption_mode(
                         gbarecomp::OverlayAdoptionMode::Boundary);
-            else
+            } else {
                 std::fprintf(stderr, "[gbarecomp:diagnostics] replay capture needs "
                                      "present-in-place; not recording\n");
+            }
         }
     }
     if (args.window && present_in_place) {

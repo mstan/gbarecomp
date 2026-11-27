@@ -116,11 +116,12 @@ uint32_t consume_interrupt_flags() {
     return accepted ? 15u : 14u;
 }
 
-void wait_at_interrupt() {
+void wait_at_interrupt(GbaBus& bus) {
     // Existing HALT scheduling pumps PPU, audio and timers and performs IRQ
     // delivery with the existing wake latency. A saved PC and the guest's two
     // stack frames carry the suspended service across host steps and snapshots.
     g_cpu.R[15] = kWaitResume;
+    if (bus.native_bios()) bus.latch_bios_prefetch(kWaitResume, false);
     bus_write_u8(kHaltControl, 0);
     runtime_tick(2);
 }
@@ -200,7 +201,7 @@ bool enter_interrupt_service(GbaBus& bus) {
     cycles += 3 + (discard_previous ? 3u : 1u) + consume_interrupt_flags();
     runtime_tick(cycles);
     if (!discard_previous && g_cpu.R[0]) wait_return(bus);
-    else wait_at_interrupt();
+    else wait_at_interrupt(bus);
     return true;
 }
 
@@ -221,7 +222,7 @@ int dispatch_firmware(uint32_t pc, int thumb) {
         const uint32_t check_cost = consume_interrupt_flags();
         runtime_tick(3u + check_cost + (g_cpu.R[0] ? 1u : 3u));
         if (g_cpu.R[0]) wait_return(*bus);
-        else wait_at_interrupt();
+        else wait_at_interrupt(*bus);
         return 1;
     }
     if ((pc != kIrqVector && pc != kIrqReturn) || !g_irq_nest_depth ||
