@@ -1730,3 +1730,9 @@ foreach(audio_test IN ITEMS audio_drc_tests audio_drc_window_corpus web_audio_ds
         target_link_libraries(${audio_test} PRIVATE gbarecomp_shared_audio_headers)
     endif()
 endforeach()
+
+if(GBARECOMP_SDL2_OK AND NOT EMSCRIPTEN)
+    target_sources(gbarecomp_runtime PRIVATE "${RECOMP_SHARED_CORE_ROOT}/recomp-presentation-core/src/sdl2.c")
+endif()
+target_link_libraries(presentation_layout_tests PRIVATE retro_presentation)
+target_link_libraries(ppu_smoke_tests PRIVATE retro_presentation)

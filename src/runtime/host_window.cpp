@@ -39,6 +39,7 @@
 #if defined(GBARECOMP_HAVE_SDL2)
 
 #include <SDL.h>
+#include <retro_presentation/sdl2.h>
 #include "stereo_audio_stream.h"
 
 #if defined(GBARECOMP_RUNTIME_UI)
@@ -354,7 +355,8 @@ struct Backend {
 #endif
     SDL_Window*   window   = nullptr;
     SDL_Renderer* renderer = nullptr;
-    SDL_Texture*  texture  = nullptr;
+    SDL_Texture*  texture  = nullptr; // borrowed from presentation
+    RpSdl2* presentation = nullptr;
     std::unique_ptr<HdGpuRenderer> hd_gpu;
     bool hd_gpu_checked = false;
 #if defined(GBARECOMP_NATIVE_DRAW_JOBS)
@@ -363,12 +365,7 @@ struct Backend {
     SDL_Texture* resident_frame = nullptr;
     Uint32        texture_format = SDL_PIXELFORMAT_RGB24;
     std::vector<uint32_t> packed_upload;
-    unsigned      presentation_source_w = 0, presentation_source_h = 0;
     std::vector<uint8_t> presentation_upload;
-    SDL_Texture*  sharp_texture = nullptr;
-    int           sharp_texture_w = 0;
-    int           sharp_texture_h = 0;
-    bool          sharp_target_failed = false;
     SDL_AudioDeviceID audio_dev = 0;
     SDL_GameController* controller = nullptr;
     SDL_JoystickID      controller_id = -1;
@@ -541,64 +538,6 @@ struct Backend {
     // MC-WS-002: opt-in per-present timing/scanout ring (see above).
     PresentCadence cadence;
 };
-
-void destroy_sharp_texture(Backend* b) {
-    if (!b) return;
-    if (b->sharp_texture) SDL_DestroyTexture(b->sharp_texture);
-    b->sharp_texture = nullptr;
-    b->sharp_texture_w = 0;
-    b->sharp_texture_h = 0;
-}
-
-bool ensure_sharp_texture(Backend* b, int factor) {
-    if (!b || !b->renderer || factor < 2) return false;
-    const int width = b->base_w * factor;
-    const int height = b->base_h * factor;
-    if (b->sharp_texture &&
-        b->sharp_texture_w == width &&
-        b->sharp_texture_h == height) {
-        return true;
-    }
-
-    SDL_RendererInfo info{};
-    if (SDL_GetRendererInfo(b->renderer, &info) == 0 &&
-        ((info.max_texture_width > 0 && width > info.max_texture_width) ||
-         (info.max_texture_height > 0 && height > info.max_texture_height))) {
-        if (!b->sharp_target_failed) {
-            std::fprintf(stderr,
-                         "host_window: sharp scaler target %dx%d exceeds "
-                         "renderer limit %dx%d; using nearest fallback\n",
-                         width, height, info.max_texture_width,
-                         info.max_texture_height);
-            b->sharp_target_failed = true;
-        }
-        destroy_sharp_texture(b);
-        return false;
-    }
-
-    destroy_sharp_texture(b);
-    b->sharp_texture = SDL_CreateTexture(
-        b->renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
-        width, height);
-    if (!b->sharp_texture) {
-        if (!b->sharp_target_failed) {
-            std::fprintf(stderr,
-                         "host_window: sharp scaler target creation failed: "
-                         "%s; using nearest fallback\n",
-                         SDL_GetError());
-            b->sharp_target_failed = true;
-        }
-        return false;
-    }
-    b->sharp_texture_w = width;
-    b->sharp_texture_h = height;
-    b->sharp_target_failed = false;
-    SDL_SetTextureBlendMode(b->sharp_texture, SDL_BLENDMODE_NONE);
-#if SDL_VERSION_ATLEAST(2, 0, 12)
-    SDL_SetTextureScaleMode(b->sharp_texture, SDL_ScaleModeLinear);
-#endif
-    return true;
-}
 
 void close_game_controller(Backend* b) {
     if (!b || !b->controller) return;
@@ -2134,37 +2073,30 @@ bool HostWindow::open(int scale, int base_w, int base_h, const char* title,
         }
     }
 #endif
-    b->texture = SDL_CreateTexture(b->renderer,
-                                   b->texture_format,
-                                   SDL_TEXTUREACCESS_STREAMING,
-                                   base_w, base_h);
-    if (!b->texture && b->texture_format != SDL_PIXELFORMAT_RGB24) {
+    b->presentation = rp_sdl2_create(b->renderer, b->texture_format, base_w, base_h,
+        b->linear_filter && !b->integer_scale);
+    if (!b->presentation && b->texture_format != SDL_PIXELFORMAT_RGB24) {
         b->texture_format = SDL_PIXELFORMAT_RGB24;
-        b->texture = SDL_CreateTexture(b->renderer, b->texture_format,
-            SDL_TEXTUREACCESS_STREAMING, base_w, base_h);
+        b->presentation = rp_sdl2_create(b->renderer, b->texture_format, base_w, base_h,
+            b->linear_filter && !b->integer_scale);
     }
-    if (!b->texture) {
-        std::fprintf(stderr, "host_window: SDL_CreateTexture failed: %s\n",
-                     SDL_GetError());
-        SDL_DestroyRenderer(b->renderer);
-        SDL_DestroyWindow(b->window);
-        delete b;
+    if (!b->presentation) {
+        std::fprintf(stderr, "host_window: presentation texture: %s\n", SDL_GetError());
+        SDL_DestroyRenderer(b->renderer); SDL_DestroyWindow(b->window); delete b;
         return false;
     }
-    SDL_SetTextureBlendMode(b->texture, SDL_BLENDMODE_NONE);
+    b->texture = rp_sdl2_texture(b->presentation);
     std::fprintf(stderr, "host_window: upload_format=%s packing=%u hidden=%u focused=%u\n",
         SDL_GetPixelFormatName(b->texture_format), b->texture_format != SDL_PIXELFORMAT_RGB24 ? 1u : 0u,
         (SDL_GetWindowFlags(b->window) & SDL_WINDOW_HIDDEN) ? 1u : 0u,
         (SDL_GetWindowFlags(b->window) & SDL_WINDOW_INPUT_FOCUS) ? 1u : 0u);
 #if SDL_VERSION_ATLEAST(2, 0, 12)
-    SDL_SetTextureScaleMode(
-        b->texture,
-        b->linear_filter && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+    rp_sdl2_set_linear(b->presentation, b->linear_filter && !b->integer_scale);
 #endif
 
 #if defined(GBARECOMP_RUNTIME_UI)
     if (!runtime_imgui_init(b)) {
-        SDL_DestroyTexture(b->texture);
+        rp_sdl2_destroy(b->presentation);
         SDL_DestroyRenderer(b->renderer);
         SDL_DestroyWindow(b->window);
         delete b;
@@ -2592,9 +2524,9 @@ void HostWindow::close() {
 #if defined(GBARECOMP_RUNTIME_UI)
     runtime_imgui_shutdown(b);
 #endif
-    destroy_sharp_texture(b);
+    rp_sdl2_reset_sharp(b->presentation);
     b->hd_gpu.reset();
-    if (b->texture)   SDL_DestroyTexture(b->texture);
+    if (b->texture)   rp_sdl2_destroy(b->presentation);
     if (b->renderer)  SDL_DestroyRenderer(b->renderer);
     if (b->window)    SDL_DestroyWindow(b->window);
     delete b;
@@ -2616,25 +2548,12 @@ bool HostWindow::set_surface_size(int base_w, int base_h) {
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY,
                 b->linear_filter ? "linear" : "nearest");
-    SDL_Texture* replacement = SDL_CreateTexture(
-        b->renderer, b->texture_format, SDL_TEXTUREACCESS_STREAMING,
-        base_w, base_h);
-    if (!replacement) {
-        std::fprintf(stderr,
-                     "host_window: dynamic SDL_CreateTexture failed: %s\n",
-                     SDL_GetError());
+    if (!rp_sdl2_resize(b->presentation, base_w, base_h)) {
+        std::fprintf(stderr, "host_window: dynamic presentation texture: %s\n", SDL_GetError());
         return false;
     }
-    SDL_SetTextureBlendMode(replacement, SDL_BLENDMODE_NONE);
-#if SDL_VERSION_ATLEAST(2, 0, 12)
-    SDL_SetTextureScaleMode(
-        replacement,
-        b->linear_filter && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
-#endif
-    SDL_DestroyTexture(b->texture);
-    destroy_sharp_texture(b);
-    b->texture = replacement;
-    b->presentation_source_w = b->presentation_source_h = 0;
+    rp_sdl2_reset_sharp(b->presentation);
+    b->texture = rp_sdl2_texture(b->presentation);
     b->base_w = base_w;
     b->base_h = base_h;
     b->expanded_view = base_w != 240 || base_h != 160;
@@ -2769,39 +2688,10 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
 #endif
     if (!frame_texture) {
         int texture_w = 0, texture_h = 0;
-        SDL_QueryTexture(b->texture, nullptr, nullptr, &texture_w, &texture_h);
-        if (b->presentation_source_w != sampled_w || b->presentation_source_h != sampled_h) {
-            unsigned upload_w = sampled_w, upload_h = sampled_h;
-            SDL_RendererInfo info{};
-            SDL_GetRendererInfo(b->renderer, &info);
-            const auto shrink = [&] {
-                upload_w = std::max(1u, upload_w / 2);
-                upload_h = std::max(1u, upload_h / 2);
-            };
-            while ((info.max_texture_width > 0 && upload_w > unsigned(info.max_texture_width)) ||
-                   (info.max_texture_height > 0 && upload_h > unsigned(info.max_texture_height))) shrink();
-            SDL_Texture* replacement = nullptr;
-            while (upload_w != unsigned(texture_w) || upload_h != unsigned(texture_h)) {
-                replacement = SDL_CreateTexture(b->renderer, b->texture_format,
-                    SDL_TEXTUREACCESS_STREAMING, int(upload_w), int(upload_h));
-                if (replacement) break;
-                if (upload_w == 1 && upload_h == 1)
-                    throw std::runtime_error("cannot allocate presentation texture");
-                shrink();
-            }
-            if (replacement) {
-                SDL_SetTextureBlendMode(replacement, SDL_BLENDMODE_NONE);
-#if SDL_VERSION_ATLEAST(2, 0, 12)
-                SDL_SetTextureScaleMode(replacement, b->linear_filter && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
-#endif
-                SDL_DestroyTexture(b->texture); destroy_sharp_texture(b);
-                b->texture = replacement;
-            }
-            texture_w = int(upload_w); texture_h = int(upload_h);
-            b->presentation_source_w = sampled_w; b->presentation_source_h = sampled_h;
-            std::fprintf(stderr, "host_window: render surface logical=%dx%d internal=%ux%u upload=%dx%d\n",
-                         b->base_w, b->base_h, sampled_w, sampled_h, texture_w, texture_h);
-        }
+        if (!rp_sdl2_prepare_source(b->presentation, sampled_w, sampled_h, 1,
+                                    &texture_w, &texture_h))
+            throw std::runtime_error("cannot allocate presentation texture");
+        b->texture = rp_sdl2_texture(b->presentation);
         // Large elective scales can exceed an older GPU's texture limit. Keep the
         // complete CPU raster and reduce only the upload, preserving logical view
         // and guest state. Remember the successful size instead of retrying a
@@ -2825,14 +2715,14 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
             const auto& lut = b->color_lut ? *b->color_lut : raw_lut;
             lut.map_packed8888(rgb888, b->packed_upload.data(), texture_w, texture_h,
                 b->texture_format == SDL_PIXELFORMAT_ABGR8888);
-            SDL_UpdateTexture(b->texture, nullptr, b->packed_upload.data(), texture_w * 4);
+            rp_sdl2_upload(b->presentation, b->packed_upload.data(), texture_w * 4);
         } else {
             if (b->color_lut && !b->color_lut->is_passthrough()) {
                 b->graded_fb.resize(size_t(texture_w) * texture_h * 3);
                 b->color_lut->map_rgb888(rgb888, b->graded_fb.data(), texture_w, texture_h);
                 rgb888 = b->graded_fb.data();
             }
-            SDL_UpdateTexture(b->texture, nullptr, rgb888, texture_w * 3);
+            rp_sdl2_upload(b->presentation, rgb888, texture_w * 3);
         }
         frame_texture = b->texture;
     } else note_present_for_health(b);
@@ -2919,33 +2809,10 @@ void HostWindow::present(const uint8_t* rgb888, unsigned sampled_w, unsigned sam
         if (layout.width > 0 && layout.height > 0) {
             const SDL_Rect destination = {
                 layout.x, layout.y, layout.width, layout.height};
-            bool sharp_presented = false;
             const int sharp_factor = b->sharp_filter && sampled_w == unsigned(b->base_w) && sampled_h == unsigned(b->base_h)
-                ? compute_sharp_prescale_factor(
-                      layout, b->base_w, b->base_h)
-                : 0;
-            if (sharp_factor > 0 &&
-                ensure_sharp_texture(b, sharp_factor) &&
-                SDL_SetRenderTarget(b->renderer, b->sharp_texture) == 0) {
-                const bool prescaled =
-                    SDL_RenderCopy(
-                        b->renderer, frame_texture, nullptr, nullptr) == 0;
-                const bool restored =
-                    SDL_SetRenderTarget(b->renderer, nullptr) == 0;
-                if (prescaled && restored) {
-                    sharp_presented =
-                        SDL_RenderCopy(
-                            b->renderer, b->sharp_texture, nullptr,
-                            &destination) == 0;
-                }
-            }
-            if (!sharp_presented) {
-                // Exact integer scales and unsupported render-target backends
-                // retain the crisp nearest path.
-                SDL_SetRenderTarget(b->renderer, nullptr);
-                SDL_RenderCopy(
-                    b->renderer, frame_texture, nullptr, &destination);
-            }
+                ? compute_sharp_prescale_factor(layout, b->base_w, b->base_h) : 0;
+            rp_sdl2_copy(b->presentation, frame_texture, nullptr, &destination,
+                         b->base_w, b->base_h, sharp_factor);
         }
     }
 #endif
@@ -3165,12 +3032,11 @@ void HostWindow::set_linear_filter(bool enabled) {
     auto* b = static_cast<Backend*>(impl_);
     if (enabled && b->sharp_filter) {
         b->sharp_filter = false;
-        destroy_sharp_texture(b);
+        rp_sdl2_reset_sharp(b->presentation);
     }
     b->linear_filter = enabled;
 #if SDL_VERSION_ATLEAST(2, 0, 12)
-    SDL_SetTextureScaleMode(b->texture,
-        enabled && !b->integer_scale ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+    rp_sdl2_set_linear(b->presentation, enabled && !b->integer_scale);
 #endif
 }
 
@@ -3183,7 +3049,7 @@ void HostWindow::set_integer_scale(bool enabled) {
     auto* b = static_cast<Backend*>(impl_);
     b->integer_scale = enabled;
 #if SDL_VERSION_ATLEAST(2, 0, 12)
-    SDL_SetTextureScaleMode(b->texture, b->linear_filter && !enabled ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+    rp_sdl2_set_linear(b->presentation, b->linear_filter && !enabled);
 #endif
     save_presentation_settings(b->launcher_config_path, b->integer_scale, b->scanlines, b->scanline_strength);
 #if !defined(__ANDROID__)
