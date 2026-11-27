@@ -8,5 +8,6 @@ namespace gbarecomp::mod_rom_data_internal {
 // device. Failure must stop boot; it does not publish a partial image.
 bool prepare(const RunOptions& options, std::vector<std::uint8_t>& image,
              std::string* effective_sha1, std::string* error,
-             const ModNativeProgramProfile** selected = nullptr);
+             const ModNativeProgramProfile** selected = nullptr,
+             std::string* plan_fingerprint = nullptr);
 }

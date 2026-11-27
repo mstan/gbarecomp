@@ -1736,6 +1736,7 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
     }
 
     const ModNativeProgramProfile* selected_native_program = nullptr;
+    std::string cartridge_plan_fingerprint;
 #if defined(GBARECOMP_ENABLE_MODS)
     if (mods_ready) {
         if (!mod_runtime_commit(args.rom, &err)) {
@@ -1748,7 +1749,8 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         if (opts.prepare_mod_rom_data) {
             const std::string source_sha1 = rom_sha1;
             if (!mod_rom_data_internal::prepare(opts, rom, &rom_sha1, &err,
-                                                &selected_native_program)) {
+                                                &selected_native_program,
+                                                &cartridge_plan_fingerprint)) {
                 std::fprintf(stderr,
                     "[gbarecomp:mods] ROM data preparation failed: %s\n",
                     err.c_str());
@@ -1759,6 +1761,9 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
                     "[gbarecomp:mods] prepared ROM data sha1=%s\n",
                     rom_sha1.c_str());
             }
+            if (!cartridge_plan_fingerprint.empty())
+                std::fprintf(stderr, "[gbarecomp:mods] cartridge plan=%s source=%s\n",
+                    cartridge_plan_fingerprint.c_str(), source_sha1.c_str());
         }
         if (!args.internal_resolution_set && gba_mod_internal_resolution() > 0)
             args.internal_resolution = gba_mod_internal_resolution();

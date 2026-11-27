@@ -224,8 +224,10 @@ must declare `default_enabled = false`.
 After **Play/Commit**, the runner re-applies the committed cheats once per
 guest frame at frame start through the normal bus. With no cheat feature
 enabled nothing is armed, so frames and savestates are byte-identical to a
-stock run. Diagnostic replay capture is disabled while cheats are enabled,
-and replay playback never applies them. Netplay never loads the package
+stock run. Diagnostic replay capture has its own visible Mods control; it
+defaults on and retains the player's saved choice independently of cheats.
+Committed cheats also run during replay playback; use the same build, original
+ROM and Mods choices as the recording. Netplay never loads the package
 catalog, so cheats cannot desync a session; they are unavailable there by
 construction. TCP `{"cmd":"mod_cheats"}` reports the active set and the
 always-on count of frames they were applied.
