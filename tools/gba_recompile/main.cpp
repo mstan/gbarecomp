@@ -565,7 +565,7 @@ void write_header(const std::string& dir,
 void write_dispatch_table(const std::string& dir,
                            const std::vector<Function>& funcs,
                            const std::vector<gbarecomp::RamCodeTemplate>& ram_templates,
-    const OutputNames& names) {
+    const OutputNames& names, uint32_t image_base, std::size_t image_size) {
     std::string path = dir + "/" + names.dispatch;
     std::string temp = path + ".tmp";
     std::FILE* f = std::fopen(temp.c_str(), "wb");
@@ -595,6 +595,61 @@ void write_dispatch_table(const std::string& dir,
         "};\n"
         "extern \"C\" const unsigned %s = %zu;\n",
         names.table_len_symbol.c_str(), entries.size());
+    const bool cartridge = names.table_symbol.find("kBiosDispatchTable") == std::string::npos;
+    if (cartridge) {
+        // Mirror every source span scanned by the emitter, including the
+        // predecessor used to recognize split epilogues. Separately owned
+        // switch blocks are dependencies too. Data loads read the live bus.
+        std::vector<std::pair<uint32_t, uint32_t>> ranges;
+        bool complete = true;
+        for (const auto& fn : funcs) {
+            auto blocks = fn.switch_blocks;
+            const auto source = fn.source_addr ? fn.source_addr : fn.addr;
+            const uint32_t step = fn.mode == CpuMode::Thumb ? 2u : 4u;
+            const auto start = source >= image_base && source - image_base >= step
+                && fn.addr >= step ? fn.addr - step : fn.addr;
+            blocks.push_back({start, fn.end_addr});
+            for (const auto& block : blocks) {
+                if (block.end <= block.start) continue;
+                const int64_t start = int64_t(source) + int64_t(block.start) - fn.addr - image_base;
+                const uint64_t size = uint64_t(block.end) - block.start;
+                if (start < 0 || uint64_t(start) > image_size || size > image_size - uint64_t(start)) {
+                    complete = false;
+                    continue;
+                }
+                ranges.emplace_back(uint32_t(start), uint32_t(uint64_t(start) + size));
+            }
+        }
+        // The RAM-template collector can discover additional copied routines
+        // absent from the cartridge dispatch roots. Their source bytes still
+        // determine native code and must participate in the same guard.
+        for (const auto& t : ram_templates) {
+            const auto source = t.function.source_addr;
+            if (source < image_base || uint64_t(source - image_base) > image_size ||
+                    t.bytes.size() > image_size - uint64_t(source - image_base)) {
+                complete = false;
+                continue;
+            }
+            ranges.emplace_back(source - image_base,
+                                uint32_t(source - image_base + t.bytes.size()));
+        }
+        std::sort(ranges.begin(), ranges.end());
+        std::vector<std::pair<uint32_t, uint32_t>> merged;
+        for (auto range : ranges) {
+            if (!merged.empty() && range.first <= merged.back().second)
+                merged.back().second = std::max(merged.back().second, range.second);
+            else merged.push_back(range);
+        }
+        std::fprintf(f, "namespace {\nconst RuntimeNativeImageRange image_ranges[] = {\n");
+        for (auto range : merged)
+            std::fprintf(f, "{%uu, %uu},\n", range.first, range.second - range.first);
+        if (merged.empty()) std::fprintf(f, "{0u, 0u},\n");
+        std::fprintf(f, "};\nconst RuntimeNativeImageDependencies image_dependencies = {image_ranges, %zuu, %s};\n",
+                     merged.size(), complete ? "true" : "false");
+        if (names.table_symbol == "kDispatchTable")
+            std::fprintf(f, "struct RegisterImageDependencies { RegisterImageDependencies() { runtime_register_native_image_dependencies(&image_dependencies); } } register_image_dependencies;\n");
+        std::fprintf(f, "} // namespace\n");
+    }
     if (!ram_templates.empty()) {
         std::fprintf(f, "\n#include \"runtime_arm.h\"\nnamespace {\n");
         struct RamEntry { uint64_t key; uint32_t index, offset; };
@@ -653,7 +708,7 @@ void write_dispatch_table(const std::string& dir,
             std::fprintf(f,
                 "};\n} // namespace\n"
                 "extern \"C\" const RuntimeNativeProgram %skNativeProgram = {\n"
-                "%s, %s, ram_templates, %zuu, ram_entries, %zuu};\n",
+                "%s, %s, ram_templates, %zuu, ram_entries, %zuu, &image_dependencies};\n",
                 prefix.c_str(), names.table_symbol.c_str(),
                 names.table_len_symbol.c_str(), ram_templates.size(), ram_entries.size());
         }
@@ -663,7 +718,7 @@ void write_dispatch_table(const std::string& dir,
         const auto prefix = names.table_symbol.substr(0,
             names.table_symbol.size() - std::string("kDispatchTable").size());
         std::fprintf(f, "extern \"C\" const RuntimeNativeProgram %skNativeProgram = {"
-            "%s, %s, nullptr, 0, nullptr, 0};\n", prefix.c_str(),
+            "%s, %s, nullptr, 0, nullptr, 0, &image_dependencies};\n", prefix.c_str(),
             names.table_symbol.c_str(), names.table_len_symbol.c_str());
     }
     std::fclose(f);
@@ -1616,7 +1671,7 @@ int main(int argc, char** argv) {
                    ? nullptr : &alu_immediate_override_pcs,
                mod_function_hook_keys.empty()
                    ? nullptr : &mod_function_hook_keys,cli.native_regions);
-    write_dispatch_table(cli.out_dir, emit_funcs, ram_templates, names);
+    write_dispatch_table(cli.out_dir, emit_funcs, ram_templates, names, effective_rom_base, rom.size());
     std::printf("==> wrote %s/{%s, %s%s, %s}\n",
                 cli.out_dir.c_str(),
                 names.header.c_str(),

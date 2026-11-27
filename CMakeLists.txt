@@ -476,6 +476,8 @@ add_library(gbarecomp_runtime STATIC
     src/runtime/runtime.cpp
     src/runtime/host_capture.cpp
     src/runtime/mod_rom_data.cpp
+    src/runtime/cartridge_mod_state.cpp
+    src/runtime/codebreaker_memory.cpp
     src/runtime/diagnostic_replay.cpp
     src/runtime/save_config.cpp
     src/runtime/bios_hle.cpp
@@ -521,6 +523,12 @@ if(GBARECOMP_BIOS_MATH_IMPLEMENTATION STREQUAL "HLE")
     target_compile_definitions(gbarecomp_runtime PRIVATE GBARECOMP_BIOS_MATH_HLE=1)
 endif()
 if(GBARECOMP_ENABLE_MODS)
+    add_executable(codebreaker_memory_tests
+        tests/runtime/codebreaker_memory_test.cpp src/runtime/codebreaker.cpp
+        src/runtime/codebreaker_memory.cpp src/runtime/cartridge_mod_state.cpp
+        src/debug/mod_state.cpp)
+    target_include_directories(codebreaker_memory_tests PRIVATE src/runtime src/debug)
+    add_test(NAME codebreaker_memory_tests COMMAND codebreaker_memory_tests)
     target_sources(gbarecomp_runtime PRIVATE src/runtime/mod_runtime.cpp)
     target_compile_definitions(gbarecomp_runtime PUBLIC
         GBARECOMP_ENABLE_MODS=1)
@@ -989,6 +997,11 @@ if(UNIX)
 endif()
 
 if(GBARECOMP_ENABLE_MODS)
+    add_executable(cartridge_mod_state_tests
+        tests/mod_runtime/cartridge_state_test.cpp
+        src/runtime/cartridge_mod_state.cpp src/debug/mod_state.cpp)
+    target_include_directories(cartridge_mod_state_tests PRIVATE src/runtime src/debug)
+    add_test(NAME cartridge_mod_state_tests COMMAND cartridge_mod_state_tests)
     add_executable(mod_rom_data_tests
         tests/mod_runtime/rom_data_test.cpp
         src/runtime/mod_rom_data.cpp src/gba/sha1.cpp)
@@ -1714,7 +1727,7 @@ target_link_libraries(gbarecomp_runtime PUBLIC recomp_mod_core recomp_persistenc
     gbarecomp_shared_audio_headers recomp_input_core retro_presentation recomp_diagnostics_core)
 target_link_libraries(gbarecomp_debug PUBLIC recomp_diagnostics_core recomp_persistence_core)
 target_link_libraries(diagnostic_replay_tests PRIVATE recomp_diagnostics_core)
-foreach(mod_test IN ITEMS mod_rom_data_tests mod_runtime_tests mod_resource_ui_tests mod_diagnostics_ui_tests)
+foreach(mod_test IN ITEMS codebreaker_memory_tests cartridge_mod_state_tests mod_rom_data_tests mod_runtime_tests mod_resource_ui_tests mod_diagnostics_ui_tests)
     if(TARGET ${mod_test})
         target_link_libraries(${mod_test} PRIVATE recomp_mod_core)
     endif()

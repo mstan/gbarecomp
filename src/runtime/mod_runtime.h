@@ -48,6 +48,7 @@ const char* mod_runtime_required_asset_path(const std::string& package_id,
 // non-zero, so a session without enabled cheats is byte-identical to stock.
 std::size_t mod_runtime_committed_cheat_count();
 std::vector<std::string> mod_runtime_committed_cheat_names();
+std::vector<codebreaker::NamedProgram> mod_runtime_committed_cheat_programs();
 void mod_runtime_run_cheats(const codebreaker::Memory& memory);
 
 }  // namespace gbarecomp

@@ -27,6 +27,11 @@ namespace gbarecomp {
 // will delegate to this bus.
 void set_active_bus(gba::GbaBus* bus);
 void set_active_ppu(gba::GbaPpu* ppu);
+// A frame-boundary host memory commit invalidates idle-loop read proofs.
+void runtime_notify_mod_memory_changed();
+// Stop through the existing generated-code quit/unwind path after a failed
+// guarded mod transaction; the runner still performs ordinary cleanup.
+void runtime_request_mod_stop();
 
 // Retrieve the currently-bound bus / ppu, or nullptr if none.
 gba::GbaBus* active_bus();

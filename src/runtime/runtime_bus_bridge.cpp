@@ -184,6 +184,8 @@ RuntimeWaitTable g_runtime_waits = power_on_waits();
 
 namespace gbarecomp {
 
+void runtime_notify_mod_memory_changed() { ++g_idle_disturb_epoch; }
+
 static gba::GbaBus* g_active_bus = nullptr;
 static gba::GbaPpu* g_active_ppu = nullptr;
 
@@ -451,7 +453,8 @@ static inline bool read_touched_vcount(uint32_t addr, uint32_t width) {
 
 // Stage 2: is a load from `addr` safe to treat as side-effect-free and stable
 // inside an idle-candidate loop? Only writable RAM whose every mutation bumps
-// g_idle_disturb_epoch (EWRAM/IWRAM) and immutable memory (ROM, BIOS) qualify.
+// g_idle_disturb_epoch (EWRAM/IWRAM and guarded cartridge mod commits), and
+// immutable BIOS memory qualify.
 // Everything else — MMIO (read side effects / FIFOs), the cartridge GPIO window
 // (RTC etc. clock state out on read), save/flash (0x0E/0x0F, command state
 // machine), palette/VRAM/OAM, open-bus/unmapped — is rejected: a load from such
@@ -463,7 +466,7 @@ static inline bool is_idle_safe_read(uint32_t addr) {
     const uint32_t region = addr >> 24;
     if (region == 0x02u || region == 0x03u) return true;   // EWRAM / IWRAM
     if (addr < 0x00004000u) return true;                   // BIOS (immutable)
-    if (region >= 0x08u && region <= 0x0Du) {              // ROM (immutable) …
+    if (region >= 0x08u && region <= 0x0Du) {              // loaded cartridge …
         const uint32_t off = addr & 0x01FFFFFFu;
         // … except the GPIO window 0x080000C4-0x080000C8 (RTC/sensor reads have
         // side effects). A small guard band covers wide accesses straddling it.
@@ -1020,6 +1023,7 @@ std::function<bool()> g_frame_present_hook;
 // unwind (return true) so the guest's whole host call stack pops back to the
 // runner — one return only frees one frame. Cleared when a hook is (re)set.
 bool g_frame_present_quit = false;
+void gbarecomp::runtime_request_mod_stop() { g_frame_present_quit = true; }
 // One-shot (non-sticky) unwind requested from inside the hook: the guest pops
 // back to the runner once and the runner redispatches the published PC.
 // Diagnostic replay playback uses it after restoring its first checkpoint so

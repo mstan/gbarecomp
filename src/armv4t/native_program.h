@@ -11,6 +11,15 @@ struct DispatchEntry {
 };
 struct RuntimeNativeRamTemplate;
 struct RuntimeNativeRamEntry;
+struct RuntimeNativeImageRange {
+    uint32_t offset;
+    uint32_t size;
+};
+struct RuntimeNativeImageDependencies {
+    const RuntimeNativeImageRange* ranges;
+    uint32_t count;
+    bool complete;
+};
 struct RuntimeNativeProgram {
     const DispatchEntry* dispatch;
     uint32_t dispatch_count;
@@ -18,8 +27,12 @@ struct RuntimeNativeProgram {
     uint32_t ram_template_count;
     const RuntimeNativeRamEntry* ram_entries;
     uint32_t ram_entry_count;
+    const RuntimeNativeImageDependencies* image_dependencies = nullptr;
 };
 
 // Null restores the executable's original cart and RAM-template tables.
 // Called once before publishing the cartridge or constructing machine state.
 extern "C" void runtime_select_native_program(const RuntimeNativeProgram* program);
+extern "C" void runtime_register_native_image_dependencies(
+    const RuntimeNativeImageDependencies* dependencies);
+extern "C" const RuntimeNativeImageDependencies* runtime_native_image_dependencies();
