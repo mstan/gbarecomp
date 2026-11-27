@@ -1779,13 +1779,11 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
             rom_sha1.c_str(), args.save_path.c_str());
     }
     // Declarative mod cheats ([[cheat]] records of enabled features). They
-    // mutate guest RAM, so they run only in a single-player session whose
-    // catalog committed them: netplay never loads the catalog (and returned
-    // above in any case), and a diagnostic replay must reproduce the recorded
-    // session, which capture never records with cheats active.
+    // run in an offline session whose catalog committed them. Playback loads
+    // the recorded catalog state and must execute the same programs at the
+    // same frame boundary. Netplay never loads the catalog and returned above.
 #if defined(GBARECOMP_ENABLE_MODS)
     const bool mod_cheats_active = mods_ready && !netplay &&
-        args.replay_diagnostic.empty() &&
         mod_runtime_committed_cheat_count() > 0;
 #else
     const bool mod_cheats_active = false;
@@ -4692,13 +4690,14 @@ int run_game(int argc, char** argv, const RunOptions& opts) {
         // recording and replay; the existing mods-state sidecar retains the
         // selected catalog settings. Honor the player's recording choice.
         if (want && args.window && args.tcp_port <= 0) {
-            if (present_in_place)
+            if (present_in_place) {
                 if (diag.start_recording(diag_config, diag_host))
                     gbarecomp::overlay_set_adoption_mode(
                         gbarecomp::OverlayAdoptionMode::Boundary);
-            else
+            } else {
                 std::fprintf(stderr, "[gbarecomp:diagnostics] replay capture needs "
                                      "present-in-place; not recording\n");
+            }
         }
     }
     if (args.window && present_in_place) {
