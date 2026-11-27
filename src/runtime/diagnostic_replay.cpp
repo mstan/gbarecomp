@@ -16,8 +16,6 @@
 #include <regex>
 #include <utility>
 #include <system_error>
-#include <thread>
-#include <chrono>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -162,12 +160,6 @@ bool DiagnosticReplay::start_recording(const DiagnosticReplayConfig& config,
                                        DiagnosticReplayHost host) {
     config_ = config;
     host_ = std::move(host);
-    writer_ = ReplayWriter::create();
-    if (!writer_) {
-        std::fprintf(stderr, "[gbarecomp:diagnostics] replay capture unavailable "
-                             "on this host (no worker thread)\n");
-        return false;
-    }
     std::error_code ec;
     fs::path dir = config_.directory.empty() ? fs::path("diagnostics") / "replays"
                                              : fs::path(config_.directory);
@@ -177,7 +169,7 @@ bool DiagnosticReplay::start_recording(const DiagnosticReplayConfig& config,
         if (ec || !probe_directory(dir)) {
             std::fprintf(stderr, "[gbarecomp:diagnostics] replay capture disabled: "
                                  "no writable diagnostics directory\n");
-            writer_.reset();
+            session_.reset();
             return false;
         }
     }
@@ -190,7 +182,18 @@ bool DiagnosticReplay::start_recording(const DiagnosticReplayConfig& config,
     stem_ = (dir / ((config_.tag.empty() ? std::string("gbarecomp") : config_.tag) +
                     "-" + stamp + "-" + std::to_string(diag_pid())))
                 .string();
-    history_sizes_.assign(kSegments, 0);
+    auto options = recomp::diagnostics::DiagnosticSession::gba_profile(
+        dir, fs::path(stem_).filename().string());
+    options.segment_frames = kSegmentFrames;
+    options.history_segments = kSegments;
+    options.history_bytes = config_.history_bytes;
+    options.segment_checkpoint_bytes = kSegmentStateLimit;
+    session_ = std::make_unique<recomp::diagnostics::DiagnosticSession>(std::move(options));
+    if (!session_->recording()) {
+        std::fprintf(stderr, "[gbarecomp:diagnostics] replay capture unavailable: %s\n", session_->error());
+        session_.reset();
+        return false;
+    }
     recording_ = true;
     return true;
 }
@@ -200,85 +203,37 @@ void DiagnosticReplay::stop_recording(const char* why) {
     std::fprintf(stderr, "[gbarecomp:diagnostics] replay capture stopped: %s\n",
                  why ? why : "unknown error");
     recording_ = false;
-    segment_open_ = false;
     pending_end_ = false;
-    if (writer_) writer_->end();
+    if (session_) session_->end();
     if (host_.heal_release) host_.heal_release();
 }
 
 void DiagnosticReplay::note_writer_failure() {
-    if (writer_ && writer_->status() == ReplayWriter::Status::Full) {
-        // Recoverable: abandon this segment and resume with a fresh
-        // checkpoint once the worker has drained half the queue.
-        ++gaps_;
-        if ((gaps_ & (gaps_ - 1)) == 0)
-            std::fprintf(stderr,
-                         "[gbarecomp:diagnostics] storage fell behind at frame %llu; "
-                         "replay resumes with a new checkpoint (gaps=%llu)\n",
-                         static_cast<unsigned long long>(host_.frame()),
-                         static_cast<unsigned long long>(gaps_));
-        gap_ = true;
-        // The abandoned segment stays open in the worker; once the queue
-        // drains it receives a "G" record so playback knows frames are
-        // missing there (rather than a hang or crash).
-        gap_marker_pending_ = gap_marker_pending_ || segment_open_;
-        segment_open_ = false;
+    if (session_ && session_->has_gap()) {
+        const auto gaps = session_->gaps();
+        if ((gaps & (gaps - 1)) == 0)
+            std::fprintf(stderr, "[gbarecomp:diagnostics] storage fell behind at frame %llu; replay resumes with a new checkpoint (gaps=%llu)\n",
+                         static_cast<unsigned long long>(host_.frame()), static_cast<unsigned long long>(gaps));
         pending_end_ = false;
         return;
     }
-    stop_recording(writer_ ? writer_->error() : "no writer");
-}
-
-bool DiagnosticReplay::evict_oldest() {
-    static const char* const kFixed[] = {"", ".state"};
-    const std::string base = segment_path(stem_, oldest_segment_);
-    for (const char* suffix : kFixed)
-        if (!writer_->remove(base + suffix)) { note_writer_failure(); return false; }
-    for (const auto& sidecar : config_.sidecars)
-        if (!writer_->remove(base + sidecar.second)) { note_writer_failure(); return false; }
-    for (const auto& sidecar : config_.inline_sidecars)
-        if (!writer_->remove(base + sidecar.second)) { note_writer_failure(); return false; }
-    history_bytes_ -= history_sizes_[oldest_segment_ % kSegments];
-    history_sizes_[oldest_segment_ % kSegments] = 0;
-    ++oldest_segment_;
-    return true;
+    stop_recording(session_ ? session_->error() : "no storage session");
 }
 
 bool DiagnosticReplay::start_segment() {
-    if (segment_open_ && !writer_->end()) { note_writer_failure(); return false; }
-    segment_open_ = false;
-    ++segment_;
-    while (segment_ - oldest_segment_ >= kSegments)
-        if (!evict_oldest()) return false;
-    segment_state_bytes_ = 0;
-    const std::string path = segment_path(stem_, segment_);
-    std::string header = kMagic;
-    header += "\nBUILD ";
-    header += config_.engine_revision.empty() ? "unknown" : config_.engine_revision;
-    header += ' ';
-    header += config_.executable_hash.empty() ? "unknown" : config_.executable_hash;
-    header += ' ';
-    header += config_.title.empty() ? "unknown" : config_.title;
-    header += "\nROM ";
-    header += config_.rom_sha1.empty() ? "unknown" : config_.rom_sha1;
-    header += "\nSEGMENT " + std::to_string(segment_) + " " +
-              std::to_string(static_cast<long long>(std::time(nullptr))) + "\n";
-    std::vector<ReplayWriter::Sidecar> sidecars;
-    for (const auto& s : config_.sidecars) sidecars.push_back({s.first, path + s.second});
-    std::vector<ReplayWriter::Sidecar> texts;
-    for (const auto& s : config_.inline_sidecars) texts.push_back({s.first, path + s.second});
-    if (!writer_->begin(path, header, sidecars, texts)) {
-        note_writer_failure();
-        return false;
-    }
-    segment_open_ = true;
-    rows_ = 0;
-    if (segment_ == 1)
-        std::fprintf(stderr,
-                     "[gbarecomp:diagnostics] recording %s (background writer; "
-                     "up to one hour, %zu MiB checkpoint budget; attach every "
-                     "file of this session; GBARECOMP_DIAGNOSTICS=0 opts out)\n",
-                     path.c_str(), config_.history_bytes / (1024u * 1024u));
+    std::vector<recomp::diagnostics::DiagnosticSession::Sidecar> sidecars, texts;
+    for (const auto& s : config_.sidecars) sidecars.push_back({s.first, s.second});
+    for (const auto& s : config_.inline_sidecars) texts.push_back({s.first, s.second});
+    auto header = [&](unsigned segment) {
+        std::string text = kMagic;
+        text += "\nBUILD " + (config_.engine_revision.empty() ? "unknown" : config_.engine_revision);
+        text += " " + (config_.executable_hash.empty() ? "unknown" : config_.executable_hash);
+        text += " " + (config_.title.empty() ? "unknown" : config_.title);
+        text += "\nROM " + (config_.rom_sha1.empty() ? "unknown" : config_.rom_sha1);
+        text += "\nSEGMENT " + std::to_string(segment) + " " + std::to_string(static_cast<long long>(std::time(nullptr))) + "\n";
+        return text;
+    };
+    if (!session_->begin_segment(header, sidecars, texts)) { note_writer_failure(); return false; }
     return true;
 }
 
@@ -289,23 +244,14 @@ bool DiagnosticReplay::write_checkpoint(char kind) {
         return false;
     }
     const std::size_t size = snapshot_.size();
-    if (size >= ReplayWriter::kQueueBytes / 2) {
-        stop_recording("machine checkpoint exceeds the replay queue");
-        return false;
-    }
-    while (oldest_segment_ < segment_ && history_bytes_ + size > config_.history_bytes)
-        if (!evict_oldest()) return false;
-    if (!writer_->snapshot(snapshot_.data(), size, kind)) {
+    if (!session_->snapshot(snapshot_.data(), size, kind)) {
         note_writer_failure();
         return false;
     }
-    if (!writer_->line("T " + host_.timing_capture() + "\n")) {
+    if (!session_->line("T " + host_.timing_capture() + "\n")) {
         note_writer_failure();
         return false;
     }
-    segment_state_bytes_ += size;
-    history_bytes_ += size;
-    history_sizes_[segment_ % kSegments] += size;
     full_save_next_ = true;
     return true;
 }
@@ -325,30 +271,17 @@ void DiagnosticReplay::frame_begin(char site) {
         ~Mark() { d.boundary_frame_ = d.host_.frame(); d.have_boundary_ = true; }
     } mark{*this};
     if (!recording_) return;
-    if (writer_->status() == ReplayWriter::Status::Invalid ||
-        writer_->status() == ReplayWriter::Status::Io) {
-        stop_recording(writer_->error());
+    if (session_->status() == ReplayWriter::Status::Invalid ||
+        session_->status() == ReplayWriter::Status::Io) {
+        stop_recording(session_->error());
         return;
     }
     const std::uint64_t frame = host_.frame();
     const std::uint64_t epoch = host_.state_epoch();
-    if (gap_) {
-        if (writer_->free_bytes() < ReplayWriter::kQueueBytes / 2) return;
-        if (gap_marker_pending_) {
-            if (!writer_->line("G\n")) return;
-            gap_marker_pending_ = false;
-        }
-        gap_ = false;
-    }
-    // A restore (savestate, rewind, suspend resume) changes the epoch. Frame
-    // numbers alone are not a discontinuity: one deferred VBlank yield can
-    // legitimately cover two guest frames, identically on replay.
-    const bool discontinuity = segment_open_ && epoch != epoch_;
-    const std::size_t segment_limit =
-        std::min(kSegmentStateLimit, config_.history_bytes);
-    const bool new_segment =
-        !segment_open_ || rows_ >= kSegmentFrames ||
-        (discontinuity && segment_state_bytes_ + snapshot_.size() > segment_limit);
+    if (!session_->ready()) return;
+    // Restore epochs and retention/rollover policy belong to the shared session.
+    const bool discontinuity = session_->discontinuity(epoch);
+    const bool new_segment = session_->needs_segment(epoch, snapshot_.size());
     // Native code finished compiling since the last boundary starts running
     // here, at a point playback reproduces ("O"); every segment also lists
     // the whole native set ("N") so it replays on its own.
@@ -357,21 +290,21 @@ void DiagnosticReplay::frame_begin(char site) {
         if (!start_segment()) return;
         if (!write_checkpoint(discontinuity ? 'R' : 'C')) return;
         if (host_.heal_active &&
-            !writer_->line("N " + host_.heal_active() + "\n")) {
+            !session_->line("N " + host_.heal_active() + "\n")) {
             note_writer_failure();
             return;
         }
     } else {
         if (discontinuity && !write_checkpoint('R')) return;
-        if (!adopted.empty() && !writer_->line("O " + adopted + "\n")) {
+        if (!adopted.empty() && !session_->line("O " + adopted + "\n")) {
             note_writer_failure();
             return;
         }
     }
-    epoch_ = epoch;
+    session_->accept_epoch(epoch);
     DiagnosticFrameInput in;
     host_.capture_input(in);
-    if (!writer_->line(format_input(frame, in, site))) { note_writer_failure(); return; }
+    if (!session_->line(format_input(frame, in, site))) { note_writer_failure(); return; }
     pending_end_ = true;
     next_frame_ = frame + 1;
 }
@@ -415,15 +348,15 @@ void DiagnosticReplay::frame_end() {
     if (playing_) { playback_end(); return; }
     if (!pending_end_) return;
     pending_end_ = false;
-    if (!recording_ || !segment_open_) return;
-    if (host_.state_epoch() != epoch_) {
+    if (!recording_ || !session_->segment_open()) return;
+    if (host_.state_epoch() != session_->epoch()) {
         // A restore landed mid-frame (a host poll between boundaries): this
         // frame's result was replaced, so it has no fingerprint. The next
         // boundary records the restored machine as an R checkpoint.
-        if (!writer_->line("X " + std::to_string(host_.frame()) + "\n"))
+        if (!session_->line("X " + std::to_string(host_.frame()) + "\n"))
             note_writer_failure();
         else
-            ++rows_;
+            session_->completed_frame();
         return;
     }
     std::vector<DiagnosticRegion> regions;
@@ -439,54 +372,32 @@ void DiagnosticReplay::frame_end() {
     if (!reuse) host_.save_memory(save_bytes_);
     parts[count++] = {reuse ? nullptr : save_bytes_.data(),
                       reuse ? 0u : save_bytes_.size(), reuse};
-    if (!writer_->frame(host_.frame(), parts, count)) {
+    if (!session_->frame(host_.frame(), parts, count)) {
         note_writer_failure();
         return;
     }
     save_seq_ = seq;
     full_save_next_ = false;
-    ++rows_;
+    session_->completed_frame();
 }
 
 void DiagnosticReplay::shutdown() {
-    if (writer_) {
-        // A clean exit ends the newest segment with "E", so playback can tell a
-        // normal quit from a hang, crash or kill (no "E" record). Exit may wait
-        // briefly for a slow disk; gameplay never does.
-        if (recording_ && segment_) {
-            auto put = [&](const std::string& text) {
-                for (int i = 0; i < 500; ++i) {
-                    if (writer_->line(text)) return true;
-                    if (writer_->status() != ReplayWriter::Status::Full) return false;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                }
-                return false;
-            };
-            bool ok = !gap_marker_pending_ || put("G\n");
-            gap_marker_pending_ = false;
-            if (ok) put("E " + std::to_string(host_.frame()) + "\n");
-        }
+    if (session_) {
+        const auto final_record = recording_ && session_->segment()
+            ? "E " + std::to_string(host_.frame()) + "\n" : std::string();
         pending_end_ = false;
-        if (segment_open_) writer_->end();
-        segment_open_ = false;
-        if (const char* why = writer_->shutdown()) {
-            if (recording_)
-                std::fprintf(stderr, "[gbarecomp:diagnostics] replay capture "
-                                     "incomplete: %s\n", why);
-        } else if (recording_ && segment_) {
-            std::fprintf(stderr,
-                         "[gbarecomp:diagnostics] replay saved: %s-*.replay "
-                         "(segments %u..%u, gaps=%llu)\n",
-                         stem_.c_str(), oldest_segment_, segment_,
-                         static_cast<unsigned long long>(gaps_));
+        if (const char* why = session_->shutdown(final_record)) {
+            if (recording_) std::fprintf(stderr, "[gbarecomp:diagnostics] replay capture incomplete: %s\n", why);
+        } else if (recording_ && session_->segment()) {
+            std::fprintf(stderr, "[gbarecomp:diagnostics] replay saved: %s-*.replay (segments %u..%u, gaps=%llu)\n",
+                         stem_.c_str(), session_->oldest_segment(), session_->segment(),
+                         static_cast<unsigned long long>(session_->gaps()));
         }
-        writer_.reset();
+        session_.reset();
     }
     recording_ = false;
     if (playback_) playback_->close();
 }
-
-// ── Playback ─────────────────────────────────────────────────────────────
 
 void DiagnosticReplay::fail_playback(const std::string& why) {
     if (failed_) return;

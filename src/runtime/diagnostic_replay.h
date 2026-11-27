@@ -45,6 +45,7 @@
 #include <string>
 #include <vector>
 #include "replay_writer.h"
+#include <recomp_diagnostics/session.hpp>
 
 namespace gbarecomp {
 
@@ -165,7 +166,6 @@ private:
     struct Playback;
     bool start_segment();
     bool write_checkpoint(char kind);
-    bool evict_oldest();
     void note_writer_failure();
     void stop_recording(const char* why);
     void fail_playback(const std::string& why);
@@ -177,35 +177,24 @@ private:
 
     DiagnosticReplayConfig config_;
     DiagnosticReplayHost host_;
-    std::unique_ptr<debug::ReplayWriter> writer_;
+    std::unique_ptr<recomp::diagnostics::DiagnosticSession> session_;
     std::unique_ptr<Playback> playback_;
 
     bool recording_ = false;
     bool playing_ = false;
     bool finished_ = false;
     bool failed_ = false;
-    bool segment_open_ = false;
     bool pending_end_ = false;
-    bool gap_ = false;
-    bool gap_marker_pending_ = false;
     bool full_save_next_ = true;
     bool have_boundary_ = false;
     bool skip_begin_ = false;
     std::uint64_t boundary_frame_ = 0;
     std::string stem_;
     std::string directory_;
-    unsigned segment_ = 0;
-    unsigned oldest_segment_ = 1;
-    unsigned rows_ = 0;
     std::uint64_t next_frame_ = 0;
-    std::uint64_t epoch_ = 0;
     std::uint64_t save_seq_ = 0;
-    std::uint64_t gaps_ = 0;
     std::uint64_t matched_ = 0;
     std::uint64_t advisory_mismatches_ = 0;
-    std::size_t segment_state_bytes_ = 0;
-    std::size_t history_bytes_ = 0;
-    std::vector<std::size_t> history_sizes_;
     std::vector<std::uint8_t> snapshot_;
     std::vector<std::uint8_t> save_bytes_;
 };
