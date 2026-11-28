@@ -20,38 +20,7 @@ set(GBARECOMP_CORE_DIR "@CMAKE_CURRENT_SOURCE_DIR@" CACHE PATH "")
 set(GBARECOMP_CORE_BIN_DIR "@CMAKE_CURRENT_BINARY_DIR@" CACHE PATH "")
 # Browser host selection of the core build; the game project must not guess it.
 set(GBARECOMP_CORE_WEB_HOST "@GBARECOMP_WEB_HOST@")
-set(GBARECOMP_HOST_STACK_RESERVE_BYTES "16777216" CACHE STRING
-    "Host stack reserve for Windows game executables that link gbarecomp_runtime")
-
-function(gbarecomp_compiler_uses_msvc_linker out_var)
-    if(MSVC OR
-       CMAKE_C_SIMULATE_ID STREQUAL "MSVC" OR
-       CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC" OR
-       CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR
-       CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-        set(${out_var} TRUE PARENT_SCOPE)
-    else()
-        set(${out_var} FALSE PARENT_SCOPE)
-    endif()
-endfunction()
-
-function(gbarecomp_target_link_host_stack target_name scope)
-    gbarecomp_compiler_uses_msvc_linker(_gbarecomp_msvc_linker)
-    if(CMAKE_C_COMPILER_ID STREQUAL "MSVC" OR
-       CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-        target_link_options(${target_name} ${scope}
-            "/STACK:${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
-    elseif(CMAKE_EXECUTABLE_SUFFIX STREQUAL ".exe" AND
-           _gbarecomp_msvc_linker)
-        target_link_options(${target_name} ${scope}
-            "LINKER:/STACK:${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
-    elseif(CMAKE_EXECUTABLE_SUFFIX STREQUAL ".exe" AND
-           (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR
-            CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
-        target_link_options(${target_name} ${scope}
-            "LINKER:--stack,${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
-    endif()
-endfunction()
+include("${GBARECOMP_CORE_DIR}/cmake/GbaRuntimeTargets.cmake")
 
 function(gbarecomp_add_runtime_target target_name)
     cmake_parse_arguments(GR
@@ -62,29 +31,9 @@ function(gbarecomp_add_runtime_target target_name)
     )
 
     if(GR_GAME_GENERATED_DIR)
-        if(EXISTS "${GR_GAME_GENERATED_DIR}/recompiled.cpp")
-            message(FATAL_ERROR
-                "gbarecomp_add_runtime_target(${target_name}): stale "
-                "monolithic ${GR_GAME_GENERATED_DIR}/recompiled.cpp found. "
-                "Regenerate with the current gba_recompile; cartridge "
-                "monoliths are no longer supported.")
-        endif()
-        file(GLOB _gbarecomp_shards CONFIGURE_DEPENDS
-            "${GR_GAME_GENERATED_DIR}/recompiled_[0-9][0-9][0-9].cpp")
-        list(LENGTH _gbarecomp_shards _gbarecomp_shard_count)
-        if(_gbarecomp_shard_count LESS 2)
-            message(FATAL_ERROR
-                "gbarecomp_add_runtime_target(${target_name}): expected at "
-                "least two recompiled_NNN.cpp files in "
-                "${GR_GAME_GENERATED_DIR}; regenerate the cartridge.")
-        endif()
-        list(APPEND GR_GAME_GENERATED_C
-            ${_gbarecomp_shards}
-            "${GR_GAME_GENERATED_DIR}/dispatch_table.cpp")
-        if(EXISTS "${GR_GAME_GENERATED_DIR}/symbol_map.cpp")
-            list(APPEND GR_GAME_GENERATED_C
-                "${GR_GAME_GENERATED_DIR}/symbol_map.cpp")
-        endif()
+        gbarecomp_collect_generated_sources(_gbarecomp_generated
+            DIRECTORY "${GR_GAME_GENERATED_DIR}")
+        list(APPEND GR_GAME_GENERATED_C ${_gbarecomp_generated})
     endif()
 
     foreach(_gbarecomp_source IN LISTS GR_GAME_GENERATED_C)
@@ -105,17 +54,7 @@ function(gbarecomp_add_runtime_target target_name)
         ${GR_GAME_GENERATED_C}
     )
 
-    target_include_directories(${target_name} PRIVATE
-        "${GBARECOMP_CORE_DIR}/src/armv4t"
-        "${GBARECOMP_CORE_DIR}/src/gba"
-        "${GBARECOMP_CORE_DIR}/src/runtime"
-        "${GBARECOMP_CORE_DIR}/src/debug"
-    )
-
-    target_link_libraries(${target_name} PRIVATE
-        gbarecomp_runtime
-        gbarecomp_debug
-    )
+    gbarecomp_target_runtime(${target_name})
 
     if(GR_DEBUG_PORT)
         target_compile_definitions(${target_name} PRIVATE

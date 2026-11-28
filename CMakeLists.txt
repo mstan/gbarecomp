@@ -426,41 +426,7 @@ target_include_directories(gbarecomp_heal_gate PUBLIC src/runtime)
 target_link_libraries(gbarecomp_heal_gate PUBLIC gbarecomp_gba)
 set_property(TARGET gbarecomp_heal_gate PROPERTY POSITION_INDEPENDENT_CODE ON)
 
-set(GBARECOMP_HOST_STACK_RESERVE_BYTES "16777216" CACHE STRING
-    "Host stack reserve for Windows game executables that link gbarecomp_runtime")
-
-function(gbarecomp_compiler_uses_msvc_linker out_var)
-    if(MSVC OR
-       CMAKE_C_SIMULATE_ID STREQUAL "MSVC" OR
-       CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC" OR
-       CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" OR
-       CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-        set(${out_var} TRUE PARENT_SCOPE)
-    else()
-        set(${out_var} FALSE PARENT_SCOPE)
-    endif()
-endfunction()
-
-function(gbarecomp_target_link_host_stack target_name scope)
-    gbarecomp_compiler_uses_msvc_linker(_gbarecomp_msvc_linker)
-    if(CMAKE_C_COMPILER_ID STREQUAL "MSVC" OR
-       CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-        target_link_options(${target_name} ${scope}
-            "/STACK:${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
-    elseif(CMAKE_EXECUTABLE_SUFFIX STREQUAL ".exe" AND
-           _gbarecomp_msvc_linker)
-        # MSVC-style Clang/lld-link does not understand GNU --stack. Route
-        # through CMake's linker wrapper so the compiler driver forwards the
-        # Windows /STACK form to the linker.
-        target_link_options(${target_name} ${scope}
-            "LINKER:/STACK:${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
-    elseif(CMAKE_EXECUTABLE_SUFFIX STREQUAL ".exe" AND
-           (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR
-            CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"))
-        target_link_options(${target_name} ${scope}
-            "LINKER:--stack,${GBARECOMP_HOST_STACK_RESERVE_BYTES}")
-    endif()
-endfunction()
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/GbaRuntimeTargets.cmake")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # runtime — what game binaries link against. Dispatch, host glue.
@@ -721,31 +687,6 @@ endif()
 # ─────────────────────────────────────────────────────────────────────────────
 # tools — small CLI utilities. Each is a separate executable.
 # ─────────────────────────────────────────────────────────────────────────────
-function(target_link_gbarecomp_runtime_stack target_name)
-    # The four archives are mutually recursive, so a single-pass linker needs an
-    # explicit group. The gate is the LINKER, not the platform: this used to test
-    # MINGW OR MSYS, which left native Linux -- GNU ld, but neither of those --
-    # taking the plain-list branch and failing to link the test executables:
-    #
-    #   runtime_arm.cpp: undefined reference to `overlay_try_dispatch'
-    #   runtime_arm.cpp: undefined reference to `kBiosDispatchTable'
-    #
-    # Apple's ld64 and MSVC-style linkers resolve archive cycles without help.
-    # ld64 and lld-link reject --start-group outright, so they take the plain
-    # list. GNU-style linkers, including MinGW Clang's GNU frontend, need the
-    # explicit group.
-    gbarecomp_compiler_uses_msvc_linker(_gbarecomp_msvc_linker)
-    if(APPLE OR _gbarecomp_msvc_linker)
-        target_link_libraries(${target_name} PRIVATE
-            ${ARGN} gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug)
-    else()
-        target_link_libraries(${target_name} PRIVATE
-            -Wl,--start-group
-            ${ARGN} gbarecomp_armv4t gbarecomp_gba gbarecomp_runtime gbarecomp_debug
-            -Wl,--end-group)
-    endif()
-endfunction()
-
 function(add_gbarecomp_runtime_stack_test target_name source_file)
     add_executable(${target_name}
         ${source_file}
@@ -968,6 +909,11 @@ if(GBARECOMP_NODE_EXECUTABLE)
 endif()
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME consumer_tools_contract
+        COMMAND ${Python3_EXECUTABLE} -m unittest discover
+            -s ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools -p test_consumer_*.py)
+    add_test(NAME consumer_notice_contract
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/test_collect_licenses.py)
     add_test(NAME web_runtime_config_tests
         COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/packaging/tests/test_web_runtime_config.py)
